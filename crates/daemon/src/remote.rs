@@ -2500,6 +2500,19 @@ async fn reconcile_claims(shared: &Arc<Shared>) {
     displace_viewers(shared).await;
 }
 
+/// How long a connection may be silent before it is reaped.
+///
+/// **A presence connection is not held to a page's cadence.** It asked for `buzz` and carries no
+/// stream, so it is the phone's background link: one beat a minute (`PRESENCE_PING_INTERVAL_MS` on
+/// the phone), and an idle window that fits it. Everything else keeps the window its picture needs.
+fn idle_window(configured_ms: u64, features: Features) -> u64 {
+    if features.buzz {
+        PRESENCE_IDLE_MS
+    } else {
+        configured_ms
+    }
+}
+
 /// Reap connections silent for the idle deadline (the TS `sweep`).
 async fn sweep_once(shared: &Arc<Shared>) {
     let now = std::time::Instant::now();
@@ -2518,14 +2531,7 @@ async fn sweep_once(shared: &Arc<Shared>) {
         if disposed {
             continue;
         }
-        // **A presence connection is not held to a page's cadence.** It asked for `buzz` and no
-        // stream, so it is the phone's background link: one beat a minute, and an idle window that
-        // fits it. Everything else keeps the four-second rule its picture needs.
-        let window = if relock(&c.inner).features.buzz {
-            PRESENCE_IDLE_MS
-        } else {
-            shared.idle_ms
-        };
+        let window = idle_window(shared.idle_ms, relock(&c.inner).features);
         if idle.as_millis() as u64 > window {
             let _ = c.tx.send(Out::Close);
         }
@@ -2770,6 +2776,27 @@ impl RemoveByPtr for HashMap<u64, Arc<ConnShared>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The idle window a connection is reaped by: a presence link beats once a minute and must not
+    /// be reaped at a page's twenty seconds, which would make the phone reconnect for ever.
+    #[test]
+    fn a_presence_connection_gets_a_minute_scale_window() {
+        let page = Features::default();
+        let presence = Features {
+            buzz: true,
+            ..Features::default()
+        };
+        assert_eq!(idle_window(WS_IDLE_MS, page), WS_IDLE_MS);
+        assert_eq!(idle_window(WS_IDLE_MS, presence), PRESENCE_IDLE_MS);
+        // Two beats of a minute, or the second one races the reaper. Compared through `black_box`
+        // because both sides are constants and the lint is right that this is a tautology to the
+        // optimiser - what it pins is a relationship between two separate constants.
+        assert!(
+            std::hint::black_box(PRESENCE_IDLE_MS) >= std::hint::black_box(2 * 60_000),
+            "two beats of a minute, or the second one races the reaper"
+        );
+    }
+
 
     #[test]
     fn parses_a_request_head() {

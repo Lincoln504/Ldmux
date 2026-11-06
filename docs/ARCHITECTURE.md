@@ -415,6 +415,39 @@ Consequences worth knowing:
 Without `LDMUX_MESH_SERIAL` this desktop has no radios; nothing else about the daemon
 changes.
 
+## 11a. Shell marks: how a shell says it is done
+
+`ldmux buzz` marks a shell — `done` when an agent finished a turn, `attention` when it wants a look —
+and the app draws it as a small square beside that shell's row in the shell list. Opening the shell
+clears it, because opening it is reading it. It is **not** a notification and not a write: no claim,
+no pty, no output, and it never carries the shell's contents (a kind, an id, an optional operator
+line of at most 80 bytes).
+
+A phone that is not connected cannot be pushed to, and the offline mode is exactly "no internet at
+all", so delivery is two different answers to the same question:
+
+- **Tailnet: a presence connection.** The launcher's socket says `hello` with the `buzz` feature and
+  beats once a minute instead of every four seconds; the daemon gives such a connection a 150 s idle
+  window (`PRESENCE_IDLE_MS`) so a page's cadence is not imposed on it, and keeps the foreground
+  service up while the phone is paired. A connection that has just said hello is handed the whole
+  mark table (`{"type":"marks"}`), which is how the marks made while it was away arrive; every later
+  one is a `{"type":"buzz"}` push.
+- **Radio: replay on attach and on list.** Keeping a radio session alive to be reachable would cost
+  about twelve records an hour of a budget that is a few hundred, so the host keeps one mark per
+  shell (`MARK_TTL_MS` 10 min, `MARKS_MAX` 64, coalesced per shell for 5 s) and sends the table with
+  the phone's `Sessions` answer and with its `Attach` (`Message::Marks`, version 9). A version-8 phone
+  is never sent the tag; a version-9 phone against an older host simply never sees one, which reads
+  as "no marks".
+
+The daemon holds the table (`crates/daemon/src/buzz.rs`), the claim clears a shell's mark (so both
+routes obey one rule), and the desk hears it too: an attached window asks for `buzz` and writes one
+BEL byte for its own shell, so whatever emulator the operator uses makes the noise they configured.
+
+A notification is the optional second way of being told: a setting, off by default, tailnet only,
+with a sounding and a silent channel (a channel's importance is immutable after creation, so honouring
+a sound toggle on Android 8+ requires two). Tapping one opens that shell: if it is already a page the
+app switches to it, and if it is not it becomes another page, which the header counts.
+
 ## 12. Build and test
 
 - `scripts/test-parallel.py` runs every Rust test binary in a pool. It is the gate.

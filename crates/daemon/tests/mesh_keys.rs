@@ -114,18 +114,54 @@ async fn press_up_through_the_bridge(rig: &Rig) -> (Bridge<DaemonHost, FakeLink>
     (bridge, link)
 }
 
+/// Wait until the **pane** shows [want], by asking the daemon what the keeper's emulator has.
+///
+/// The viewer's own stream is not the thing to read here. The bridge takes the shell over, and a
+/// takeover tells the displaced viewer to stop (`notify_displaced`), so its stream can end at any
+/// moment — the first version of these two tests read it and failed under the test pool with
+/// "never saw ...; tail \"\"" whenever the takeover won a race it is allowed to win. The pane's
+/// content is what the tests are about: which bytes the daemon wrote.
+async fn pane_shows(rig: &Rig, want: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let snap = rig
+            .arc
+            .lock()
+            .await
+            .handle("capture", serde_json::json!({ "id": rig.session }))
+            .await
+            .unwrap();
+        let screen = snap.get("screen").and_then(|s| s.as_str()).unwrap_or("");
+        if screen.contains(want) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the pane never showed {want:?}; it reads {screen:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 #[tokio::test]
 async fn up_is_ss3_when_the_pane_asked_for_application_cursor_keys() {
     let rig = Rig::start().await;
-    let mut ws = pane_in_mode(&rig, true).await;
+    let _ws = pane_in_mode(&rig, true).await;
     let (bridge, _link) = press_up_through_the_bridge(&rig).await;
     assert_eq!(bridge.stats.keys, 1);
-    let mut out = Vec::new();
     // `cat -v` renders ESC as `^[`: `ESC O A` is `^[OA`.
-    ws.until_output(&mut out, "^[OA", Duration::from_millis(300))
-        .await;
+    pane_shows(&rig, "^[OA").await;
+    // ...and the normal-mode form is not what the pane got.
+    let snap = rig
+        .arc
+        .lock()
+        .await
+        .handle("capture", serde_json::json!({ "id": rig.session }))
+        .await
+        .unwrap();
+    let screen = snap.get("screen").and_then(|s| s.as_str()).unwrap_or("");
     assert!(
-        !String::from_utf8_lossy(&out).contains("^[[A"),
+        !screen.contains("^[[A"),
         "the normal-mode arrow must not be sent to a pane in application mode"
     );
 }
@@ -133,11 +169,9 @@ async fn up_is_ss3_when_the_pane_asked_for_application_cursor_keys() {
 #[tokio::test]
 async fn up_is_csi_in_a_pane_that_did_not() {
     let rig = Rig::start().await;
-    let mut ws = pane_in_mode(&rig, false).await;
+    let _ws = pane_in_mode(&rig, false).await;
     let (_bridge, _link) = press_up_through_the_bridge(&rig).await;
-    let mut out = Vec::new();
-    ws.until_output(&mut out, "^[[A", Duration::from_millis(300))
-        .await;
+    pane_shows(&rig, "^[[A").await;
 }
 
 #[tokio::test]

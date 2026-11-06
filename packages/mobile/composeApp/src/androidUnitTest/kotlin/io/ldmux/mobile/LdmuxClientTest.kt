@@ -1,10 +1,13 @@
 package io.ldmux.mobile
 
+import io.ldmux.mobile.mesh.ShellMark
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 
 /**
  * The launcher socket's message handling against hostile and future payloads.
@@ -95,6 +98,27 @@ class LdmuxClientTest {
         c.kill("a")
         // No exception, and nothing observable beyond the link staying where it was.
         assertEquals(LinkState.Connecting, c.link.value)
+    }
+
+    @Test
+    fun `a mark parses to a shell and a word, and an unknown word is not a mark`() {
+        // The daemon's payload: `{"session": "...", "kind": "done"|"attention", "note", "at"}`.
+        val done = parseMark(
+            Json.parseToJsonElement(
+                """{"session":"ab12","kind":"done","note":"","at":1}""",
+            ).jsonObject,
+        )
+        assertEquals("ab12" to ShellMark.Done, done)
+        val attention = parseMark(
+            Json.parseToJsonElement("""{"session":"cd34","kind":"attention"}""").jsonObject,
+        )
+        assertEquals("cd34" to ShellMark.Attention, attention)
+        // A word this app has not learned reads as nothing rather than as a broken list.
+        assertNull(
+            parseMark(Json.parseToJsonElement("""{"session":"ab12","kind":"later"}""").jsonObject),
+        )
+        assertNull(parseMark(Json.parseToJsonElement("""{"kind":"done"}""").jsonObject))
+        assertNull(parseMark(null))
     }
 
     @Test

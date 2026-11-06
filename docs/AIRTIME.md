@@ -1,9 +1,21 @@
 # What a session costs on the air
 
-Measured, not estimated: `crates/daemon/tests/airtime.rs` drives a real pane through the real
-bridge (the same differ, the same record packing) with a link that counts every record, then prices
-those records with `time_on_air_ms` at both tuples this project uses. Run it with
+**Batched mode spends a small fraction of the air live mode spends for the same work.** Typing is
+the whole of the difference — the answer is identical in both modes — and typing is where one record
+per keystroke becomes one record per command. The measurements below come from
+`crates/daemon/tests/airtime.rs`, which drives a real pane through the shipped bridge (the same
+differ, the same record packing) with a link that counts every record and prices it with
+`time_on_air_ms`; the citation for every number on this page is that test. Run it with
 `cargo test -p ldmux-daemon --test airtime -- --ignored --nocapture`.
+
+Three facts are worth stating plainly, because they are the reason the mode exists:
+
+- **Typing** a command line costs about a sixth of live mode's air. The saving is almost entirely the
+  echo: one record per keystroke each way becomes one record per command.
+- **A whole command** — typing plus the answer — costs about a quarter of live mode's air, because the
+  answer does not get cheaper in either mode.
+- **An agent turn** of several typed commands costs about a seventh, which is the figure that decides
+  whether the public band is usable at all for agent work.
 
 ## Why this is measured rather than reasoned about
 
