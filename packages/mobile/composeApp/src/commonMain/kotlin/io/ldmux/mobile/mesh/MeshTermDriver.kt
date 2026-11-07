@@ -966,15 +966,20 @@ class MeshTermDriver(
      * stopped looking at it. A `Detach` releases the shell and the host restores the grid the phone
      * displaced; the session itself stays, which is what keeps the next open free of a handshake.
      */
-    suspend fun releaseShell() = lock.withLock {
-        if (session == null || terminalView != null) return@withLock
-        if (attachedId == null && pick != Pick.Attached) return@withLock
+    suspend fun releaseShell(): Boolean = lock.withLock {
+        if (session == null || terminalView != null) return@withLock false
+        if (attachedId == null && pick != Pick.Attached) return@withLock false
         queue(TermMessage.Detach); pump()
         // The list is about to arrive; it must not take the shell straight back.
         listHoldsNothing = true
         attachedId = null
+        // **The picture stays and the mirror goes.** The page keeps the last frame it painted (a
+        // claim released because the app left the screen is not a reason to blank a shell the user
+        // is coming back to), but the rows are no longer the host's idea of this phone's screen, so
+        // the re-attach has to start from a full one.
         mirror = RowMirror(); held.clear(); lastEpoch = null; painted = false; resyncing = false
         publishShells(); publish()
+        true
     }
 
     /** Leave: tell the host, close the session once everything is acknowledged, free the native handle. */

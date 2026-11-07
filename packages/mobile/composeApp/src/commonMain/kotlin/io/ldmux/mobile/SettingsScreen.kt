@@ -364,7 +364,7 @@ private fun LinkChoice(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
  * changes what "paired" even refers to.
  */
 internal fun routeConsequence(route: MeshRoute): String =
-    if (route == MeshRoute.Mesh) "the phone's LoRa radio" else "over Tailscale"
+    if (route == MeshRoute.Mesh) "phone's LoRa radio" else "over Tailscale"
 
 
 /**
@@ -400,7 +400,7 @@ private fun PanelSide(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
     // (`OrientationPolicy.Portrait` for the launcher and every dialog opened from it), so a press
     // here changes nothing on this screen. Saying so is the difference between "the app ignored
     // me" and "turn the phone".
-    SettingsNote("the key panel's side, in landscape")
+    SettingsNote("key panel side, in landscape")
 }
 
 /**
@@ -421,10 +421,7 @@ private fun Notifications(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
             if (!current.notifyMarks) onSave(current.copy(notifyMarks = true))
         }
     }
-    SettingsNote(
-        "one notification when a shell finishes a turn or needs attention; the square beside the " +
-            "row appears either way, and the tailnet route is the one that can reach a pocketed phone",
-    )
+    SettingsNote("one-off notification when a shell finishes · row square appears either way · tailnet only")
 }
 
 @Composable
@@ -551,8 +548,8 @@ private fun PairingRow(
         // noise on the one screen where the consequence is real.
         if (confirmUnpair && (meshPresent || radioPaired)) {
             SettingsNote(
-                if (current.isPaired) "this also forgets the mesh keys and the LoRa radio"
-                else "this forgets the radio keys and the chosen radio",
+                if (current.isPaired) "also forgets mesh keys and LoRa radio"
+                else "forgets radio keys and chosen radio",
             )
         }
         problem?.let { SettingsNote(it, color = Danger) }
@@ -691,7 +688,7 @@ private fun DiagnosticsLog() {
     if (!open) return
     val shown = logTail(lines, DIAGNOSTIC_LINES)
     if (shown.isEmpty()) {
-        SettingsNote("nothing yet. The log lives in memory and starts empty each launch")
+        SettingsNote("nothing yet · log is in memory, empty each launch")
         return
     }
     Text(
@@ -701,6 +698,6 @@ private fun DiagnosticsLog() {
         fontFamily = MonoFont,
         modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
     )
-    SettingsNote("copy takes every kept line, not only the ones shown")
+    SettingsNote("copy takes every kept line, not just the ones shown")
 }
 

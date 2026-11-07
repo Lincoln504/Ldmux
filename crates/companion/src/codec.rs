@@ -104,6 +104,14 @@ pub fn path_byte(hash_size: u8, hops: u8) -> Result<u8, CodecError> {
 /// into a parse failure rather than a send, so the limit has to be exact here.
 pub const PACKET_MAX: usize = 174;
 
+/// The firmware's own path ceiling, in bytes (`MAX_PATH_SIZE`, `src/MeshCore.h:22`).
+///
+/// `Packet::isValidPathLen` refuses anything longer (`src/Packet.cpp:13-18`), so a packet built
+/// with a longer path is dropped by every receiver while this end believes it was sent. The hop
+/// count alone cannot catch it: 63 one-byte hops fit the encoded byte, and 63 three-byte hops are
+/// 189 bytes.
+pub const MAX_PATH_SIZE: usize = 64;
+
 /// Build a raw direct packet around `record`.
 ///
 /// **Both ends of the path are checked here.** A path whose length is not a multiple of the hash
@@ -121,6 +129,15 @@ pub fn build_raw_direct(hash_size: u8, path: &[u8], record: &[u8]) -> Result<Vec
         return Err(CodecError::RaggedPath {
             len: path.len(),
             hash: hash_size,
+        });
+    }
+    // **A path longer than the firmware can hold is refused here.** 63 three-byte hops fit the
+    // encoded length byte and are 189 bytes, which `isValidPathLen` rejects, so the packet would
+    // be sent, dropped by every receiver, and reported as a link that carries nothing.
+    if path.len() > MAX_PATH_SIZE {
+        return Err(CodecError::TooLong {
+            len: path.len(),
+            max: MAX_PATH_SIZE,
         });
     }
     let total = 2 + path.len() + record.len();
@@ -452,6 +469,22 @@ mod tests {
         assert_eq!(packet[1], 0x41, "one hop of two-byte hashes");
         assert_eq!(&packet[2..4], &path);
         assert_eq!(&packet[4..], &record);
+    }
+
+    #[test]
+    fn a_path_longer_than_the_firmware_holds_is_refused() {
+        // 22 hops at three bytes is 66 bytes: the encoded length byte has room for it, the
+        // firmware's 64-byte path buffer does not (`MAX_PATH_SIZE`, `src/MeshCore.h:22`), and a
+        // packet carrying it is dropped by every receiver while this end believes it was sent.
+        assert_eq!(MAX_PATH_SIZE, 64);
+        let long = vec![0u8; 3 * 22];
+        assert!(matches!(
+            build_raw_direct(3, &long, &[0u8; 8]),
+            Err(CodecError::TooLong { max, .. }) if max == MAX_PATH_SIZE
+        ));
+        // 21 hops at three bytes is 63, inside the ceiling, and still encodable.
+        let fits = vec![0u8; 3 * 21];
+        assert!(build_raw_direct(3, &fits, &[0u8; 8]).is_ok());
     }
 
     #[test]

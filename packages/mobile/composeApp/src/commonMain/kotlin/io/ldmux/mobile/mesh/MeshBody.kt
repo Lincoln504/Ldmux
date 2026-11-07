@@ -31,68 +31,68 @@ fun meshBodyFor(view: MeshTermView): MeshBody? = when (view) {
     is MeshTermView.HeldBy -> null
     is MeshTermView.Live -> null
     is MeshTermView.Choose ->
-        if (view.entries.isEmpty()) MeshBody("the host has no shells") else null
-    MeshTermView.NoShells -> MeshBody("the host has no shells")
+        if (view.entries.isEmpty()) MeshBody("host has no shells") else null
+    MeshTermView.NoShells -> MeshBody("host has no shells")
     is MeshTermView.HostClosed -> MeshBody(
         // One fact, then at most one action. Each of these used to carry its action inside the
         // same sentence, so a reader had to parse a colon to find out whether anything was wrong.
         when (view.reason) {
-            null -> "the host ended the session"
-            MeshTerm.Closed.NOT_FOUND -> "that shell is gone"
-            MeshTerm.Closed.AMBIGUOUS -> "the host runs several shells"
-            MeshTerm.Closed.EXITED -> "the shell exited"
-            MeshTerm.Closed.UNAVAILABLE -> "the host could not read that screen"
-            MeshTerm.Closed.VERSION -> "the two ends speak different terminal versions"
-            else -> "the host closed the terminal (${view.reason})"
+            null -> "host ended the session"
+            MeshTerm.Closed.NOT_FOUND -> "shell gone"
+            MeshTerm.Closed.AMBIGUOUS -> "host runs several shells"
+            MeshTerm.Closed.EXITED -> "shell exited"
+            MeshTerm.Closed.UNAVAILABLE -> "host could not read the screen"
+            MeshTerm.Closed.VERSION -> "host speaks another terminal version"
+            else -> "host closed the terminal (${view.reason})"
         },
         when (view.reason) {
             MeshTerm.Closed.AMBIGUOUS -> "refresh, then choose"
-            MeshTerm.Closed.VERSION -> "update the older one"
-            MeshTerm.Closed.UNAVAILABLE -> "refresh to try again"
+            MeshTerm.Closed.VERSION -> "update the older side"
+            MeshTerm.Closed.UNAVAILABLE -> "refresh, try again"
             else -> "refresh to reconnect"
         },
     )
     is MeshTermView.LinkDown -> when (view.link) {
-        MeshLinkState.NeedsRadio -> MeshBody("choose the LoRa radio in Settings")
-        MeshLinkState.NeedsPermission -> MeshBody("Bluetooth permission is off for LDMUX")
+        MeshLinkState.NeedsRadio -> MeshBody("choose LoRa radio in Settings")
+        MeshLinkState.NeedsPermission -> MeshBody("Bluetooth permission off")
         MeshLinkState.NoPath -> MeshBody(
-            "no usable path to the host",
+            "no usable path to host",
             "refresh, or move closer",
         )
         MeshLinkState.Idle, MeshLinkState.Connecting, MeshLinkState.Bound ->
-            MeshBody("connecting to the LoRa radio")
+            MeshBody("connecting to LoRa radio")
         MeshLinkState.RadioUnavailable -> MeshBody(
-            "the LoRa radio is not connected",
-            "check that it is on and in range",
+            "LoRa radio not connected",
+            "check: on, in range",
         )
         // `Refused` comes from the radio's own error codes (not a contact, unsupported
         // command, busy), none of which is the L3 pin. Saying "check that the host is paired"
         // sent the user to the pairing screen for a radio problem.
         MeshLinkState.Refused -> MeshBody(
-            "the radio refused that record",
-            "busy, or a path still resolving",
+            "radio refused that record",
+            "busy, or path still resolving",
         )
         // **A dropped link is not a diagnosis.** Three causes are possible and only one is
         // distance, so the old line asserted "it is off or out of range" on the first failed
         // record — before the app had retried once. The short line says what happened; the detail
         // says the screen is working on it, and lists what to check only if it never connects.
-        MeshLinkState.SessionFailed -> MeshBody("the link dropped")
-        MeshLinkState.Closed -> MeshBody("the link closed")
+        MeshLinkState.SessionFailed -> MeshBody("link dropped")
+        MeshLinkState.Closed -> MeshBody("link closed")
     }
 }
 
 /** The sentence under the header when the mesh route cannot run at all. */
 fun meshRouteBodyFor(problem: MeshRouteProblem?): MeshBody? = when (problem) {
     null -> null
-    MeshRouteProblem.NeedsSessionKeys -> MeshBody("scan the ldmux code in Settings to pair the mesh route")
+    MeshRouteProblem.NeedsSessionKeys -> MeshBody("scan ldmux code in Settings to pair the radio route")
     // Re-scanning cannot fix this one: the code that was scanned simply has no host radio
     // key in it, so the same scan produces the same state. The cure is on the host.
     MeshRouteProblem.NeedsPeer -> MeshBody(
-        "the pairing code has no host radio key",
+        "pairing code has no host radio key",
         "print a new one: ldmux code --mesh",
     )
-    MeshRouteProblem.SessionNotBuilt -> MeshBody("the session library did not load on this device")
-    MeshRouteProblem.TerminalNotBuilt -> MeshBody("the terminal is unavailable on this device")
+    MeshRouteProblem.SessionNotBuilt -> MeshBody("session library did not load")
+    MeshRouteProblem.TerminalNotBuilt -> MeshBody("terminal unavailable on this device")
 }
 
 @Composable

@@ -766,7 +766,7 @@ where
                             Some("owned") => {
                                 detached = true;
                                 let _ = output
-                                    .write_all(b"\r\n  This shell is open on another device. Press r to take it back.\r\n")
+                                    .write_all(b"\r\n  open on another device\r\n  r  take it back\r\n")
                                     .await;
                                 let _ = output.flush().await;
                             }
@@ -781,7 +781,7 @@ where
                                     // Gone, or no longer running: this shell is over
                                     // (or the daemon does not know it). Ask, and let
                                     // the verdict end the window — `session_dead` and
-                                    // `unknown_session` print "This shell has ended."
+                                    // `unknown_session` print "shell ended"
                                     // and exit.
                                     //
                                     // A displaced window used to sit on its notice
@@ -844,19 +844,19 @@ where
                                     // nothing else says so, so a key that went nowhere had no
                                     // trace at all.
                                     let _ = output
-                                        .write_all(b"\r\n  This shell did not take that input.\r\n")
+                                        .write_all(b"\r\n  input not taken\r\n")
                                         .await;
                                     let _ = output.flush().await;
                                 } else if code == "not_holder" {
                                     let _ = output
                                         .write_all(
-                                            b"\r\n  Only the device holding this shell can close it.\r\n",
+                                            b"\r\n  held by another device\r\n",
                                         )
                                         .await;
                                     let _ = output.flush().await;
                                 } else if code == "unknown_session" || code == "session_dead" {
                                     let _ = output
-                                        .write_all(b"\r\n  This shell has ended.\r\n")
+                                        .write_all(b"\r\n  shell ended\r\n")
                                         .await;
                                     let _ = output.flush().await;
                                     return Ok(Outcome::Ended);

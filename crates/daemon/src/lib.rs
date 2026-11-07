@@ -24,6 +24,7 @@
 
 pub mod auth;
 pub mod buzz;
+pub mod title;
 pub mod clipboard_policy;
 pub mod control_socket;
 pub mod cwd;

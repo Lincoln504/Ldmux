@@ -140,7 +140,7 @@ fun LauncherScreen(
         // reason stays in the RPC for anyone who asks `ldmux desktop`.
         if (desktop?.detail != null) {
             Spacer(Modifier.height(LocalTouch.current.rowPad))
-            Text("the desktop could not be read", color = Dim, fontSize = 10.sp, maxLines = 1)
+            Text("desktop unreadable", color = Dim, fontSize = 10.sp, maxLines = 1)
         }
 
         Spacer(Modifier.height(LocalTouch.current.rowPad * 2))

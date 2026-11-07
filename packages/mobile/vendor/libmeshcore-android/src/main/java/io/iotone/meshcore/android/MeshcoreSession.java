@@ -328,6 +328,26 @@ public final class MeshcoreSession {
     }
 
     /**
+     * Forgets a contact's stored route ({@code CMD_RESET_PATH}, 13).
+     *
+     * <p>Tracked, because the firmware answers {@code OK} or
+     * {@code ERR_CODE_NOT_FOUND} ({@code MyMesh.cpp:1277-1287}) and an untracked
+     * {@code OK} would settle whatever command is in the answer window instead.</p>
+     *
+     * <p>No-op when not {@link SessionState#READY}.</p>
+     *
+     * @param publicKey the peer's full 32-byte public key
+     */
+    public void resetPath(@NonNull byte[] publicKey) {
+        if (state.get() != SessionState.READY) return;
+        try {
+            sendTracked(MeshcoreFrameCodec.resetPath(publicKey));
+        } catch (IllegalArgumentException ignored) {
+            // A key that is not a public key gets no command, not a broken answer window.
+        }
+    }
+
+    /**
      * Requests battery voltage and storage usage
      * ({@code CMD_GET_BATT_AND_STORAGE}, 0x14). The reply arrives as a
      * {@link io.iotone.meshcore.frames.BatteryStorageFrame} on

@@ -21,7 +21,8 @@ import androidx.compose.runtime.setValue
  *
  * **What it is not.** It does not stop the link: the driver keeps polling, the session keeps its
  * acks, and screens keep arriving — they are kept, not drawn. A frozen view is a view, not a
- * disconnected terminal, and the difference is why [updates] is counted and shown.
+ * disconnected terminal. The newest kept screen is what "show" paints, which is why the host's
+ * pushes are not wasted: they are the answer, already in hand.
  *
  * No engine, no link and no clock: [MeshTerminalSource] consults it and the screen reads it, so the
  * rule is tested without either. The fields are Compose state because the bar draws them, and a
@@ -62,10 +63,6 @@ internal class PublicChannelHold {
     var flushing: Boolean by mutableStateOf(false)
         private set
 
-    /** Screens the host sent while the view was frozen. The newest one is what a pull shows. */
-    var updates: Int by mutableStateOf(0)
-        private set
-
     /**
      * When the last press happened, on the caller's clock.
      *
@@ -103,7 +100,6 @@ internal class PublicChannelHold {
         awaiting = false
         flushing = false
         reported = false
-        updates = 0
     }
 
     /**
@@ -121,23 +117,15 @@ internal class PublicChannelHold {
     }
 
     /**
-     * Start again: a different shell's page, so nothing counted here applies.
+     * Start again: a different shell's page, so nothing kept here applies.
      *
-     * `updates` is the count the bar draws, and a shell switch drops the screens it counted
-     * (`MeshTerminalSource.forgetScreen`) — but the count itself survived, so the bar said "view 2
-     * behind" over a source that held nothing, and the button (labelled `show` because no text is
-     * held) hit the "nothing to show" early return and did nothing.
+     * A shell switch drops the screens this mode held (`MeshTerminalSource.forgetScreen`); leaving
+     * the flags set over an empty source made the bar describe a wait nothing could answer.
      */
     fun forget() {
         awaiting = false
         flushing = false
         reported = false
-        updates = 0
-    }
-
-    /** The held screen was drawn without ending the wait: the answer may still be coming. */
-    fun drewHeld() {
-        updates = 0
     }
 
     /**
@@ -158,11 +146,9 @@ internal class PublicChannelHold {
         // review as the reason a two-line command sent only its first line. The answer is only
         // the answer when the send is complete.
         if (flushing) {
-            updates += 1
             return false
         }
         if (awaiting) return true
-        updates += 1
         return false
     }
 
@@ -180,10 +166,9 @@ internal class PublicChannelHold {
         // echoing what was sent; the answer follows in more screens, and ending the wait there held
         // every one of them — so a synced command printed its result into a frozen view and the user
         // pressed `show` to see the outcome of a command already sent. Measured on the device,
-        // 2026-11-06: `echo hi` reached the host (`inputs: 1`) and the phone said "view 1 behind"
-        // over a screen with no output. The wait ends when the shell goes quiet: [settleIfQuiet].
+        // 2026-11-06: `echo hi` reached the host (`inputs: 1`) and the frozen view kept the echo
+        // with no output on it. The wait ends when the shell goes quiet: [settleIfQuiet].
         reported = false
-        updates = 0
     }
 
     /** Quiet that means "the answer has finished arriving": about one round trip. */
@@ -195,7 +180,6 @@ internal class PublicChannelHold {
     /** A screen was drawn now: the quiet timer restarts. */
     fun drawn(nowMs: Long) {
         lastPaintAt = nowMs
-        updates = 0
     }
 
     /**

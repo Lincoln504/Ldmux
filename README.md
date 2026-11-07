@@ -32,7 +32,7 @@ tailnet, or a pair of LoRa radios when there is no internet at all.
 - **A shell can say it is done.** `ldmux buzz` marks a shell in the app's list — finished a turn, or
   waiting for the operator — and the mark is cleared by opening it. A notification is optional and off
   by default, and only the tailnet route can reach a phone that is away;
-  `contrib/skills/ldmux-buzz` ships the agent skill that rings it at the end of a turn.
+  `contrib/skills/ldmux-shell` ships the agent skill that names the shell after its conversation and marks it at the end of a turn.
 
 ## Components
 

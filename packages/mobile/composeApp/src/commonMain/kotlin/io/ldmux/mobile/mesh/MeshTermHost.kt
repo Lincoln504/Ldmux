@@ -27,29 +27,29 @@ fun meshTermLabel(view: MeshTermView): String = when (view) {
     // "Can take minutes" was the old truth (a single msg1 and a five-minute timeout). A handshake
     // is three small records and is now retried every six seconds, so the honest label is the
     // state, not a warning about how long it might take.
-    MeshTermView.Handshaking -> "mesh · securing the link"
-    MeshTermView.ProfileMissing -> "mesh · linked, waiting for the host to describe the terminal"
-    MeshTermView.Listing -> "mesh · asking the host which shells are running"
+    MeshTermView.Handshaking -> "mesh · securing link"
+    MeshTermView.ProfileMissing -> "mesh · linked, no terminal yet"
+    MeshTermView.Listing -> "mesh · listing shells"
     // **The state, not an action.** `open on the desktop` was the label for the button that takes
     // the shell back, printed where the header names where the shell *is*. The overlay under it
     // already says `in use on X`; the header said something else about the same fact.
-    is MeshTermView.HeldBy -> "mesh · in use on the radio link"
+    is MeshTermView.HeldBy -> "mesh · in use on radio link"
     is MeshTermView.Choose -> "mesh · choose a shell"
-    MeshTermView.NoShells -> "mesh · the host is running no shell"
+    MeshTermView.NoShells -> "mesh · host runs no shell"
     is MeshTermView.Live -> when {
-        view.resyncing -> "mesh · resyncing the screen"
+        view.resyncing -> "mesh · resyncing screen"
         !view.painted -> "mesh · attached, no screen yet"
         view.stalled -> "mesh · waiting for send budget"
         else -> "mesh · live (reduced)"
     }
     is MeshTermView.HostClosed -> when (view.reason) {
-        null -> "mesh · the host ended the session"
-        MeshTerm.Closed.NOT_FOUND -> "mesh · no such shell on the host"
-        MeshTerm.Closed.AMBIGUOUS -> "mesh · more than one shell on the host"
-        MeshTerm.Closed.EXITED -> "mesh · the shell exited"
-        MeshTerm.Closed.UNAVAILABLE -> "mesh · the host could not read the screen"
-        MeshTerm.Closed.VERSION -> "mesh · the host speaks another terminal version"
-        else -> "mesh · the host closed the terminal (${view.reason})"
+        null -> "mesh · host ended session"
+        MeshTerm.Closed.NOT_FOUND -> "mesh · no such shell"
+        MeshTerm.Closed.AMBIGUOUS -> "mesh · several shells, pick one"
+        MeshTerm.Closed.EXITED -> "mesh · shell exited"
+        MeshTerm.Closed.UNAVAILABLE -> "mesh · host could not read screen"
+        MeshTerm.Closed.VERSION -> "mesh · host speaks another version"
+        else -> "mesh · host closed terminal (${view.reason})"
     }
 }
 

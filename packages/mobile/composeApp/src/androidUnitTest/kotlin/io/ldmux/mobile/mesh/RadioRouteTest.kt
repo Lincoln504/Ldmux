@@ -7,6 +7,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -118,6 +119,17 @@ class RadioRouteTest {
         assertArrayEquals(key, hint.copyOfRange(4, 36))
         assertNull("a key that is not a public key names nothing", RouteHint.record(ByteArray(31)))
         assertNull(RouteHint.record(ByteArray(33)))
+    }
+
+    @Test
+    fun `a heard route beats a stored contact route, and an empty source never takes one away`() {
+        // A contact's out-path is persisted and a companion can never replace it, so it is never
+        // fresh information; the advert path is a route a packet travelled minutes ago.
+        assertEquals("advert", RadioRoute.preferHeard("contact", "advert"))
+        // The one case the cache cannot answer.
+        assertEquals("contact", RadioRoute.preferHeard("contact", null))
+        assertEquals("advert", RadioRoute.preferHeard(null, "advert"))
+        assertNull(RadioRoute.preferHeard(null, null))
     }
 
     @Test

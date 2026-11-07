@@ -233,7 +233,7 @@ fun NewShellModal(
             FieldValue(path, { path = it }, "~", focusRequester = focus)
         }
         Text(
-            "Opens the host's login shell there. Empty means your home directory.",
+            "Runs the host's login shell there · empty means home directory",
             color = Muted,
             fontSize = 10.sp,
         )
@@ -283,7 +283,7 @@ fun DesktopPickerModal(
 
     ModalCard("send to desktop", onDismiss) {
         if (choosable.isEmpty()) {
-            Text("no desktop is available", color = Muted, fontSize = 12.sp)
+            Text("no desktop available", color = Muted, fontSize = 12.sp)
         } else {
             Column(
                 Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState()),

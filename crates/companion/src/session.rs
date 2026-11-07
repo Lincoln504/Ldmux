@@ -26,6 +26,14 @@ use crate::link::ByteLink;
 /// How long to wait before re-sending a command the radio has not acknowledged.
 pub const RESEND_INTERVAL: Duration = Duration::from_millis(600);
 
+/// How long the periodic route read waits for the radio's cache lookup.
+///
+/// The answer is one round trip on a link that is working, and this call sits on the same thread
+/// that serves typed records, so its timeout is a bound on how long a keystroke can wait behind it.
+/// A radio that does not answer is retried by the caller's own cadence, so nothing is lost by
+/// giving up quickly.
+pub const ROUTE_READ_TIMEOUT: Duration = Duration::from_millis(1500);
+
 /// The most a read is allowed to block before the deadline is checked again.
 const POLL_TIMEOUT_MS: u16 = 20;
 
@@ -183,7 +191,13 @@ impl<L: ByteLink> Companion<L> {
         payload.push(commands::GET_ADVERT_PATH);
         payload.push(0); // reserved
         payload.extend_from_slice(public_key);
-        let reply = self.request(&payload, codes::ADVERT_PATH, Duration::from_secs(5))?;
+        // **A cache lookup, so the answer is one round trip.** The firmware reads a 16-slot RAM
+        // table and answers at once (`MyMesh.cpp:1851-1869`); the five seconds this used to wait
+        // were five seconds of the radio loop not serving a typed record, on the one path the
+        // operator feels as "typing stalls" — and the wedged radio it guarded against is also the
+        // case where the caller repeats the read on its own cadence. A late answer is not lost: it
+        // is left in `pending` and taken by `next_push`.
+        let reply = self.request(&payload, codes::ADVERT_PATH, ROUTE_READ_TIMEOUT)?;
         parse_advert_path(&reply).ok_or(SessionError::Malformed("advert path"))
     }
 

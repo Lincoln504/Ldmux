@@ -172,7 +172,6 @@ class MeshTerminalSource(
     val flushingHeld: Boolean get() = hold.flushing
 
     /** Screens the host sent while the view was frozen; the newest is what a pull shows. */
-    val heldUpdates: Int get() = hold.updates
 
     /**
      * How many syncs have been pressed. The screen keys its answer deadline on this rather than on
@@ -287,7 +286,6 @@ class MeshTerminalSource(
         val held = pendingScreen ?: return false
         pendingScreen = null
         applyScreen(held)
-        hold.drewHeld()
         return true
     }
 
@@ -411,7 +409,6 @@ class MeshTerminalSource(
 
     fun discardHeldScreens() {
         pendingScreen = null
-        hold.drewHeld()
     }
 
     /**

@@ -141,8 +141,8 @@ class AndroidRadioLink(
      * firmware has one, but it is normally empty — a companion never asks for a path return, and an
      * advert does not teach the radio a route. Sharing one variable meant a periodic contact read
      * that answered "no path" wiped a perfectly good advert route every ten minutes, dropping the
-     * link to zero-hop for the retry window. `hostPath` prefers the contact and falls back to the
-     * advert.
+     * link to zero-hop for the retry window. `hostPath` takes whichever of the two spoke most
+     * recently, so a fresh advert can displace a record that no longer describes the world.
      */
     @Volatile
     private var contactPath: RadioPath? = null
@@ -155,7 +155,7 @@ class AndroidRadioLink(
     private var advertNext = true
 
     private val hostPath: RadioPath?
-        get() = contactPath ?: advertPath
+        get() = RadioRoute.preferHeard(contactPath, advertPath)
 
     private val mutex = Mutex()
     private var transport: AndroidBleTransport? = null
@@ -279,7 +279,9 @@ class AndroidRadioLink(
             if (hostKey.isEmpty() || !c.publicKey().contentEquals(hostKey)) return
             if (!c.hasValidPathEncoding()) {
                 // 0xFF is "no known path"; the reserved hash-size code is a
-                // malformed path. Neither is a route.
+                // malformed path. Neither is a route. Said, not just dropped: an empty answer is
+                // also the newest thing this source has said, and it must be able to displace an
+                // older advert route the same way a path does.
                 contactPath = null
             } else {
                 // The firmware's own out-path, already in sending order. Validated by the same rule
@@ -496,6 +498,12 @@ class AndroidRadioLink(
         if (!quiet || now - lastAnnounceAt < ANNOUNCE_EVERY_MS) return
         lastAnnounceAt = now
         runCatching { s.sendSelfAdvert(true) }
+            // **An advert is airtime, and this meter is the one that gates sends.** The firmware's
+            // own figure (what the settings page draws) already includes it; this counter is the
+            // phone's own allowance, and leaving the broadcasts out of it spent the budget on
+            // announces the gate never saw. Charged at the full record size: an advert is smaller
+            // than that at every tuple, so this errs towards spending less, never more.
+            .onSuccess { recordAirtime(MeshRecordLimits.MAX) }
             .onFailure { appLog("mesh advert refused: ${it.message}") }
     }
 
@@ -540,9 +548,15 @@ class AndroidRadioLink(
                 // promises was never sent, and the ARQ spent an attempt on a record that never
                 // reached the air. `startPathRefresh` asks for the route on its own cadence, and the
                 // zero-hop retry reaches the peer whenever it is in earshot.
+                // **Tell the radio too, not just this process.** Its contact record still holds
+                // the path that just failed, and the next contact read would hand it straight back
+                // — the same dead route, learned again. `CMD_RESET_PATH` is the firmware's own
+                // verb for this (`MyMesh.cpp:1277`): it sets `out_path_len` to unknown, so the next
+                // route comes from an advert rather than from a record that is only getting older.
                 contactPath = null
                 advertPath = null
                 appLog("mesh path not found; retrying zero-hop")
+                runCatching { s.resetPath(hostKey) }
                 return send(record)
             }
             if (result == RadioSendResult.Accepted) {
@@ -654,7 +668,12 @@ class AndroidRadioLink(
             spreadingFactor = s.spreadingFactor,
             codingRate = s.codingRate,
             txPowerDbm = s.txPowerDbm,
-            pathHashSize = (deviceInfo.value?.pathHashMode ?: 0) + 1,
+            // **Clamped on the way in, not only on the way out.** The firmware stores
+            // `path_hash_mode` as an unvalidated byte, and mode 3 decodes to a four-byte hash,
+            // which `isValidPathLen` rejects outright. A radio left in that state would make every
+            // send fail with "bad hash size" — including zero-hop ones, which need no width at all —
+            // so a misconfigured radio would read as a dead link instead of a wide one.
+            pathHashSize = ((deviceInfo.value?.pathHashMode ?: 0) + 1).coerceIn(1, 3),
         )
     }
 

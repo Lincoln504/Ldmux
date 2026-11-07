@@ -536,7 +536,15 @@ fn serve_loop<L: ByteLink>(
                 if let Some(every) = advert_every
                     && last_advert.is_none_or(|t| t.elapsed() >= every)
                 {
-                    let _ = companion.send_self_advert(true);
+                    // **An advert is airtime too.** It was unmetered, so the 1 % budget this
+                    // daemon enforces counted only the records it was asked to send and quietly
+                    // spent the rest on broadcasts — twelve an hour at the default interval, on a
+                    // band where the whole allowance is 36 s. One record's worth is charged: an
+                    // advert is smaller than a record at every tuple, so this over-counts rather
+                    // than under-counts, and the operator's usable records move by a dozen an hour.
+                    if companion.send_self_advert(true).is_ok() {
+                        sent = sent.saturating_add(1);
+                    }
                     last_advert = Some(Instant::now());
                 }
             }
@@ -573,7 +581,9 @@ fn serve_loop<L: ByteLink>(
                         if peer_path.is_none()
                             && last_advert.is_none_or(|t| t.elapsed() >= HINT_ADVERT_FLOOR)
                         {
-                            let _ = companion.send_self_advert(true);
+                            if companion.send_self_advert(true).is_ok() {
+                                sent = sent.saturating_add(1);
+                            }
                             last_advert = Some(Instant::now());
                         }
                         if refresh_peer_route(&mut companion, peer_radio.as_ref(), &mut peer_path) {
@@ -616,14 +626,22 @@ struct PeerPath {
 }
 
 impl PeerPath {
-    /// The reverse of a path that arrived, or `None` when there is nothing to reverse (zero hops,
-    /// a malformed length, or a path longer than the firmware's 64-byte limit).
+    /// The reverse of a path that arrived, or `None` when the length is malformed or the path is
+    /// longer than the firmware's 64-byte limit.
+    ///
+    /// **Zero hops is a path, not the absence of one.** "The peer is adjacent" and "no route is
+    /// known yet" are different answers, and collapsing them into `None` made the two mechanisms
+    /// that read it run as if nothing were known: the periodic read stayed on its 15-second retry
+    /// cadence for ever on a bench (instead of settling to its 120-second refresh), and every route
+    /// hint from an adjacent peer looked like a peer with no route and was allowed to trigger an
+    /// advert. A zero-hop `PeerPath` is what a send to that peer uses — an empty path is exactly
+    /// what "direct, no repeaters" means on the wire.
     ///
     /// **Hash size 4 is refused.** The encoded length byte has two bits for the hash width, giving
     /// 1..=4, and the firmware reserves 4 for the future: `Packet::isValidPathLen` rejects it
     /// outright (`src/Packet.cpp:13-18`), so a frame that claims it is malformed, not a wide path.
     fn reversed(hash_size: usize, hops: usize, path: &[u8]) -> Option<Self> {
-        if hops == 0 || !(1..=3).contains(&hash_size) || path.len() != hops * hash_size {
+        if !(1..=3).contains(&hash_size) || path.len() != hops * hash_size {
             return None;
         }
         if path.len() > MAX_PATH_SIZE {
@@ -841,7 +859,15 @@ mod tests {
         // The same phone, back in earshot: its advert arrives with no hops.
         companion.link_mut().push_payload(&advert_path_frame(0x00, &[]));
         assert!(refresh_peer_route(&mut companion, Some(&peer), &mut path), "an answer arrived");
-        assert!(path.is_none(), "no hops means no route, not the stale one");
+        let adjacent = path.clone().expect("no hops is an answer: the peer is adjacent");
+        assert_eq!(adjacent.hops, 0, "the stale repeater chain is gone");
+        assert!(adjacent.bytes.is_empty());
+        // **Adjacent, not "unknown".** A `None` here would keep the periodic read on its retry
+        // cadence for ever and let a route hint from a peer in the same room trigger an advert.
+        assert!(
+            path.is_some(),
+            "zero hops is a route: it is what a direct send with an empty path means"
+        );
 
         // ...and each request carries the whole key, which is the firmware's guard
         // (`len >= PUB_KEY_SIZE + 2`): two commands, each `[0x3C][u16 len][0x2A][0][key]`.

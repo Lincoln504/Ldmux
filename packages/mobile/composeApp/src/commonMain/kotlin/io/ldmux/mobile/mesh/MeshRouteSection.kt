@@ -88,7 +88,7 @@ internal fun MeshRouteSection(
         // keys changes no tailnet fact, so with nothing said here a completed pairing and a
         // refused one looked the same. The row above says `· radio`; this says what is stored.
         if (view.present.size == MeshCredential.entries.size) {
-            SettingsNote("radio keys stored · the host's radio key is pinned")
+            SettingsNote("radio keys stored · host radio key pinned")
         } else if (view.present.isNotEmpty()) {
             SettingsNote(
                 "stored: " + view.present.joinToString { meshCredentialName(it) } +
@@ -194,7 +194,7 @@ internal fun MeshRouteSection(
                         // keystrokes are collected and leave together. The reason the mode is forced is
                         // that a shared channel is somebody else's airtime, so the app reduces how many
                         // transmissions it spends.
-                        SettingsNote("a public channel forces batch: keystrokes and feedback are batched to reduce broadcasts")
+                        SettingsNote("public channel forces batch: keystrokes leave together, fewer broadcasts")
                     }
                 },
             )
@@ -314,7 +314,7 @@ private fun MeshRadioFacts(
                     val ok = runCatching { l.applyPreset(hostPreset.channelOf(mine)) }.getOrElse { false }
                     // A refused write used to vanish: the row stayed on screen with no sentence,
                     // which reads as the press having done nothing.
-                    matchProblem = if (ok) null else "this radio did not take the desktop's tuple. It is still on the one above."
+                    matchProblem = if (ok) null else "radio did not take the desktop's tuple · still on the one above"
                 }
             }) {
                 Text("match", color = Accent, fontSize = 12.sp, maxLines = 1)
@@ -335,9 +335,9 @@ private fun MeshRadioFacts(
             // Not a preference in this band: 869.4-869.65 MHz carries a 10 % duty cycle as a
             // condition of use, so the meter being off here is not a setting a reader should be
             // able to leave without being told.
-            mustMeter && openAirtime -> "off — this band requires a 10 % duty cycle"
-            openAirtime -> "off: no hourly limit"
-            else -> "on: 36 s per hour"
+            mustMeter && openAirtime -> "off · this band requires a 10 % duty cycle"
+            openAirtime -> "off · no hourly limit"
+            else -> "on · 36 s per hour"
         },
         onChange = { metered -> onBudget(if (metered) RadioBudgetMode.Metered else RadioBudgetMode.Open) },
     )
@@ -358,8 +358,8 @@ internal fun airtimeLine(status: MeshStatus?): String {
     val left = status.opsLeftThisHour
     val records = when {
         left == null -> "no hourly cap"
-        left >= 255 -> "255 or more records left"
+        left >= 255 -> "255+ records left"
         else -> "$left records left"
     }
-    return "%.1f s of %.0f s this hour · %s".format(used, budget, records)
+    return "%.1f/%.0f s this hour · %s".format(used, budget, records)
 }

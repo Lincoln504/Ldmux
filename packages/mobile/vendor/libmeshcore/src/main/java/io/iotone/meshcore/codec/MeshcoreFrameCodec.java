@@ -367,6 +367,31 @@ public final class MeshcoreFrameCodec {
     }
 
     /**
+     * {@code CMD_RESET_PATH} (13): drop a contact's stored route.
+     *
+     * <p>The firmware matches on the full 32-byte public key and sets
+     * {@code out_path_len = OUT_PATH_UNKNOWN} ({@code MyMesh.cpp:1277-1287}),
+     * answering {@code OK} or {@code ERR_CODE_NOT_FOUND}. Sent when a direct
+     * send comes back "not found": the route in the radio's contact record is
+     * what a later contact read would hand back, so leaving it there would
+     * relearn the path that just failed.</p>
+     *
+     * @param publicKey the peer's full 32-byte public key
+     * @return the encoded frame
+     * @throws IllegalArgumentException when the key is not 32 bytes
+     */
+    public static byte[] resetPath(byte[] publicKey) {
+        if (publicKey.length != MeshcoreConstants.PUB_KEY_SIZE) {
+            throw new IllegalArgumentException("public key must be exactly "
+                    + MeshcoreConstants.PUB_KEY_SIZE + " bytes");
+        }
+        return new FrameBuilder()
+                .u8(MeshcoreCommand.RESET_PATH.code())
+                .fixed(publicKey, MeshcoreConstants.PUB_KEY_SIZE)
+                .build();
+    }
+
+    /**
      * {@code CMD_SEND_RAW_DATA} (0x19) with an explicit encoded path length.
      *
      * <p>The firmware's {@code path_len} is the encoded byte used by

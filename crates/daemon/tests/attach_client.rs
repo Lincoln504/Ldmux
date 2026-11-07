@@ -414,7 +414,7 @@ async fn the_desk_window_takes_the_shell_back_when_the_holder_lets_go() {
 ///
 /// So the window asks. If the sessions it is told about no longer contain a
 /// running copy of its shell, it re-attaches and takes the daemon's verdict:
-/// `session_dead`, which prints "This shell has ended." and ends the window.
+/// `session_dead`, which prints "shell ended" and ends the window.
 #[tokio::test]
 async fn a_displaced_desk_window_ends_when_its_shell_does() {
     let dir = scratch();
@@ -492,7 +492,7 @@ async fn a_displaced_desk_window_ends_when_its_shell_does() {
     .await;
 
     assert!(
-        wait_for(&mut desk_view, "This shell has ended.").await,
+        wait_for(&mut desk_view, "shell ended").await,
         "a window whose shell is gone must say so rather than keep the notice"
     );
     for _ in 0..100 {

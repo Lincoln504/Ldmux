@@ -315,7 +315,11 @@ by the host radio, by the app before it retunes, and by every budget below.
   route to this radio any other way. An advert is one record of about 130 bytes: roughly 0.1 % of a
   1 % allowance at the deployed tuple. Five minutes rather than half an hour because the interval
   is the worst case for a phone that has moved: a route heard an hour ago belongs to wherever the
-  phone was an hour ago.
+  phone was an hour ago. **An advert is charged to the meter too.** It was unmetered, so the hour's
+  countdown only covered the records the daemon was asked to send and the broadcasts were free on
+  paper while they spent the band; one record's worth is charged per advert, which over-counts
+  (an advert is smaller than a record at every tuple) and keeps the operator's usable records
+  honest.
 - **The host gates on the countdown it computed, not on the firmware's limiter.** MeshCore's
   `Dispatcher` charges measured airtime against a budget, but its factor is 1.0, which is a 50 %
   duty cycle (`getAirtimeBudgetFactor()`, `meshcore/src/Dispatcher.cpp`) — not the 1 % a European
@@ -396,7 +400,11 @@ be transmitted and then ignored by every receiver. Direct means the sender must 
    `PeerPath::reversed`). **This needs no contact on either radio and no decrypted exchange**, so
    it works on firmware as shipped. The route is validated before use: a length byte that
    disagrees with the bytes, or a path wider than the firmware's 64, is refused and treated as no
-   route.
+   route. **The heard route wins over a stored one.** The firmware's contact record (`out_path`)
+   is a snapshot only a path return replaces, and a companion never receives one, so on this
+   transport it is either absent or stale; the advert-path cache is re-read from the radio's own
+   "most recently heard" state. The app therefore sends through the advert path when it has one and
+   falls back to the contact path only when the cache cannot answer (`RadioRoute.preferHeard`).
    The other route — a **path return** from a flooded request (`CMD_SEND_PATH_DISCOVERY_REQ`, 0x34,
    answered by `createPathReturn`) — is not used, because it needs the host in the radio's contact
    table and the host's telemetry permission to allow the request (`telemetry_mode_base` defaults
@@ -418,6 +426,12 @@ be transmitted and then ignored by every receiver. Direct means the sender must 
 4. **Every reply follows the reverse of the path that was learned.** `PeerPath::reversed` flips the
    hop groups (per `hash_size` bytes, not per byte) and the radio thread sends every record along it.
    With no route, records go zero-hop, which reaches only the radios in earshot.
+   **Zero hops is a route, not the absence of one.** "The peer is adjacent" and "no route is known
+   yet" are different answers on the wire — an empty path is exactly what a direct send to a radio
+   in the same room means — and collapsing them made the periodic read stay on its 15 s retry
+   cadence for ever on a bench, and let a route hint from an adjacent peer look like a peer with no
+   route and trigger an advert it did not need. A zero-hop `PeerPath` is kept, and the read settles
+   to its two-minute refresh.
 
 Consequences worth knowing:
 
@@ -444,6 +458,15 @@ Consequences worth knowing:
   path is always empty there, and the advert-path answer on a bench is a zero-hop path. The first
   on-air test — two radios far enough apart that a public repeater is the only way between them —
   is what proves the route-learning step end to end.
+- **The advert-path cache is small, in RAM, and evicts by age.** Sixteen slots
+  (`ADVERT_PATH_TABLE_SIZE`, `MyMesh.h:257`), zeroed at boot, oldest-lost first
+  (`MyMesh.cpp:368-386`). On a crowded channel `ERR_CODE_NOT_FOUND` for a node heard a minute ago
+  is normal, not a fault, so a single failed read never means "the route is wrong": both ends keep
+  the route they have and re-ask on their cadence.
+- **An advert goes out in the radio's default flood scope, when it has one.** A region-scoped radio
+  sends the advert inside that scope (`default_scope_key`, `MyMesh.cpp:489-498`), so two radios on
+  the same tuple but different scopes hear each other only for zero-hop traffic. Nothing to change
+  in ldmux; it is one more thing "the same tuple" means.
 - **A path is not authenticated by MeshCore.** Route integrity is an 8-bit prefix comparison per
   hop (issue #1775 in the firmware tracker), so the session's Noise layer, not the path, is what
   authenticates the peer.
@@ -489,6 +512,33 @@ another page, which the header counts.
 may not run without a notification, so the one that keeps a background link alive exists while the
 app is off screen, on the quietest channel there is, saying what is being kept (`2 shells open`).
 It stops the moment the app comes back on screen.
+
+## 11b. Shell titles: what a shell is working on
+
+A shell is named by its kind, else by its directory's basename, so four agents in four folders read
+as four folders. `ldmux title "Radio paths"` names it after the conversation instead, and every
+surface that draws a row — the phone's list, `ldmux list`, the desk's picker — says that name.
+
+- **One to three words, 24 bytes.** A title is a label, not a description: `Radio paths`, not
+  `Investigating why the radio path goes stale`. Anything longer is refused with a sentence and a
+  non-zero exit, because a row is a thing a thumb aims at.
+- **The daemon owns the name.** It is the `SessionRecord.title`, persisted with the registry, so a
+  rename survives a restart and a client that connects later asks nothing.
+- **The agent's own session name follows, best effort.** A phone row and a `pi --resume` picker
+  disagreeing about the same conversation is one name too many, so the same words are written to
+  the agent's session file when one can be identified: pi appends the `session_info` record its own
+  `appendSessionInfo` writes (`$PI_SESSION_FILE` names the file, and the last such record wins on
+  load), and Claude Code gets the `custom-title` record its `/rename` writes, in the transcript that
+  `~/.claude.json`'s `projects.<cwd>.lastSessionId` points at — and only when that transcript was
+  touched in the last half hour, so an old conversation in the same folder is not renamed. Both
+  files are append-only and both writes are one `O_APPEND` write of one line, refused when the file
+  does not end at a line boundary. Neither can fail the command: the shell's title is the product.
+- **The shell names itself.** Every child of an ldmux shell carries `LDMUX_SESSION_ID`, so the
+  command needs no argument and cannot rename another shell by copying an id; `--session` is for a
+  process outside a shell.
+
+The skill in `contrib/skills/ldmux-shell` is what asks an agent to do it: name the shell once the
+subject is clear, rename it when the subject changes, and `ldmux buzz` when the turn ends.
 
 ## 12. Build and test
 

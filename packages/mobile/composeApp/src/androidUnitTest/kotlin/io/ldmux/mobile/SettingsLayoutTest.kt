@@ -66,7 +66,7 @@ class SettingsLayoutTest {
         // name the same thing. "radio" alone could be Bluetooth, and a line that says one noun
         // under buttons that say another is how the two drift apart.
         assertEquals("over Tailscale", routeConsequence(MeshRoute.Tailnet))
-        assertEquals("the phone's LoRa radio", routeConsequence(MeshRoute.Mesh))
+        assertEquals("phone's LoRa radio", routeConsequence(MeshRoute.Mesh))
         assertTrue(routeConsequence(MeshRoute.Mesh).contains("LoRa radio"))
         assertFalse(routeConsequence(MeshRoute.Tailnet).contains("LoRa"))
     }

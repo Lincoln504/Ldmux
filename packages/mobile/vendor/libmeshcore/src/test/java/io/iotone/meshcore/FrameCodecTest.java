@@ -5,6 +5,7 @@ package io.iotone.meshcore;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.iotone.meshcore.codec.CayenneLpp;
@@ -249,6 +250,24 @@ class FrameCodecTest {
         // Truncated pubkey prefix → DecodeFailure.
         assertInstanceOf(DecodeFailure.class,
                 MeshcoreFrameCodec.decode(TestUtil.hex("8B00AABB")));
+    }
+
+    @Test
+    void resetPathCarriesTheWholeKeyAndNothingElse() {
+        // CMD_RESET_PATH (13). The firmware's guard is `len >= 1 + 32` and it matches on the full
+        // public key (MyMesh.cpp:1277), so a frame with a prefix would be "unsupported command"
+        // and the dead route would stay in the radio's contact record for ever.
+        byte[] key = TestUtil.hex("00112233445566778899AABBCCDDEEFF"
+                + "00112233445566778899AABBCCDDEEFF");
+        byte[] frame = MeshcoreFrameCodec.resetPath(key);
+        assertEquals(1 + 32, frame.length);
+        assertEquals(13, frame[0] & 0xFF);
+        assertArrayEquals(key, java.util.Arrays.copyOfRange(frame, 1, 33));
+
+        // A key that is not 32 bytes is refused here rather than sent as a command the firmware
+        // silently ignores.
+        assertThrows(IllegalArgumentException.class,
+                () -> MeshcoreFrameCodec.resetPath(new byte[31]));
     }
 
     @Test

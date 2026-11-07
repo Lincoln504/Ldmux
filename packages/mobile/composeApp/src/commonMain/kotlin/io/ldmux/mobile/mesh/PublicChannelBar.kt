@@ -64,7 +64,6 @@ internal fun PublicChannelBar(
     reported: Boolean,
     /** The buffer is being drained right now: the button says so and cannot be pressed again. */
     flushing: Boolean,
-    updates: Int,
     onSync: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -80,12 +79,13 @@ internal fun PublicChannelBar(
     // user touching the control that caused it, so a reader would otherwise read it once and
     // never hear that the send finished or that the answer arrived. Polite: it waits for the
     // current utterance rather than interrupting.
+    // **No count of screens.** The bar used to say "view 3 behind": a number nobody can act on,
+    // counting screens the host had already sent and this phone had decided not to draw. What the
+    // operator needs from this line is what the button will do next, which is the four states below.
     val status = when {
         flushing -> "sending…"
-        reported -> "no answer yet: the link may be busy or down"
+        reported -> "no answer yet · link busy or down"
         awaiting -> "waiting for the answer"
-        updates > 0 && summary.isEmpty() -> "view $updates behind"
-        updates > 0 -> "$summary · view $updates behind"
         summary.isEmpty() -> "nothing held"
         else -> summary
     }

@@ -120,7 +120,10 @@ fn command_help(cmd: &str) -> Option<&'static str> {
             "ldmux terminal [--explain] [--exec <command...>]\n  The terminal a desk window opens in, and where the answer came from (--explain). The order: a pin set here, $TERMINAL, xdg-terminal-exec, this desktop session's configured terminal, an emulator already running, the system alternative, then the known list.\n\nldmux terminal set <program>\n  Pin it, for example `ldmux terminal set alacritty`. Kept in $XDG_CONFIG_HOME/ldmux/terminal, which the daemon reads.\n\nldmux terminal clear\n  Forget the pin.\n\nldmux terminal --exec <command...>\n  Run <command> in that terminal (the emulator's own flags applied)."
         }
         "buzz" => {
-            "ldmux buzz [--kind attention|done] [--note <text>] [--session <id>]\n  Mark a shell in the phone's list: `done` when an agent finished a turn, `attention` when it needs a look. Run inside a shell and the shell names itself ($LDMUX_SESSION_ID); from outside, pass --session. Silent on failure, never retried: it is a notification, not a control."
+            "ldmux buzz [--kind attention|done] [--note <text>] [--session <id>]\n  Mark a shell in the phone's list: `done` when an agent finished a turn, `attention` when it needs a look. Run inside a shell and the shell names itself ($LDMUX_SESSION_ID); from outside, pass --session. Refused with one sentence and a non-zero exit for a shell that is not running, a bad kind, or a repeat inside 5 s; never retried, because it is a mark, not a control."
+        }
+        "title" => {
+            "ldmux title <words...>\n  Name this shell after the conversation in it: one to three words, 24 bytes at most. The phone's row and `ldmux list` show that name instead of the folder. The shell names itself ($LDMUX_SESSION_ID); from outside, pass --session <id>. Naming a pi or Claude Code session also sets that agent's own session name, when the shell is running one."
         }
         "send" => "ldmux send <id> <text...>\n  Type text into a session.",
         "key" => "ldmux key <id> <Key...>\n  Send named keys (Enter, Up, C-c, ...) to a session.",
@@ -339,7 +342,7 @@ fn print_mesh_session(v: &serde_json::Value) {
 /// Print the usage line.
 fn print_usage() {
     eprintln!(
-        "usage: ldmux <ping|list|new|shell|attach|terminal|send|key|capture|buzz|kill|close|forget|adopt|mesh|code|pair|clipboard-write> [args]"
+        "usage: ldmux <ping|list|new|shell|attach|terminal|send|key|capture|buzz|title|kill|close|forget|adopt|mesh|code|pair|clipboard-write> [args]"
     );
     eprintln!("       ldmux --version    which build this is");
 }
@@ -740,6 +743,54 @@ async fn main() {
                 }
                 Err(e) => {
                     eprintln!("ldmux buzz: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "title" => {
+            // **The shell names itself**, exactly as `buzz` does: an agent at the end of a turn
+            // runs `ldmux title "Radio paths"` and cannot rename another shell by copying an id.
+            // `--session` is for a process outside a shell.
+            let session = flag_value(rest, "--session")
+                .map(str::to_owned)
+                .or_else(|| std::env::var("LDMUX_SESSION_ID").ok())
+                .filter(|v| !v.is_empty());
+            let Some(session) = session else {
+                eprintln!("ldmux title: run this inside an ldmux shell, or pass --session <id>");
+                std::process::exit(2);
+            };
+            let words: Vec<&str> = positional(rest, &["--session"])
+                .into_iter()
+                .filter(|w| !w.starts_with("--"))
+                .collect();
+            let title = words.join(" ");
+            let r: Result<serde_json::Value, CallError> = daemon_call(
+                &sock,
+                method::TITLE,
+                &serde_json::json!({ "session": session, "title": title }),
+            )
+            .await;
+            // **A refusal is printed and exits non-zero.** A title is a label, not a control, so
+            // nothing downstream retries it; but a typo'd id or a fourth word has to be visible.
+            match r {
+                Ok(v) if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) => {
+                    let named = v.get("title").and_then(|t| t.as_str()).unwrap_or("");
+                    match v.get("agent").and_then(|a| a.as_str()) {
+                        Some("named") => println!("{named} · agent session named"),
+                        Some("failed") => println!("{named} · agent session not renamed"),
+                        _ => println!("{named}"),
+                    }
+                }
+                Ok(v) => {
+                    let detail = v
+                        .get("detail")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("the daemon refused it");
+                    eprintln!("ldmux title: {detail}");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("ldmux title: {e}");
                     std::process::exit(1);
                 }
             }

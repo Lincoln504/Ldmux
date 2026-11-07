@@ -158,27 +158,33 @@ class LdmuxService : Service() {
      * support library is needed for it.
      */
     private fun createChannel() {
-        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
         runCatching { nm.deleteNotificationChannel(CHANNEL_ID_OLD) }
-        if (nm.getNotificationChannel(CHANNEL_ID) != null) return
-        nm.createNotificationChannel(
-            NotificationChannel(
-                CHANNEL_ID,
-                "Keeping the link open",
-                // **The quietest channel there is.** This notification exists because the platform
-                // requires one for a foreground service, not because the operator asked to be told
-                // anything: it is posted only while the app is off screen, it makes no sound, shows
-                // no icon in the status bar and no badge, and says what is being kept ("2 shells
-                // open"). An app that announces itself is an app that gets uninstalled.
-                NotificationManager.IMPORTANCE_MIN,
-            ).apply {
-                description = "Shown only while a link is kept open in the background"
-                setShowBadge(false)
-                setSound(null, null)
-                enableVibration(false)
-                enableLights(false)
-            },
-        )
+        // **A channel's name is set once, at creation.** The platform keeps the old text for as
+        // long as the id exists, so a rename in the code never reaches the operator's settings
+        // screen. Comparing what is there with what this build says, and recreating on a
+        // difference, is the only way a name change ships. Recreating resets that channel's user
+        // choices, which is why it happens only when the text actually differs.
+        val want = NotificationChannel(
+            CHANNEL_ID,
+            "Connected",
+            // **The quietest channel there is.** This notification exists because the platform
+            // requires one for a foreground service, not because the operator asked to be told
+            // anything: it is posted only while the app is off screen, it makes no sound, shows
+            // no icon in the status bar and no badge, and says what is being kept ("2 shells
+            // open"). An app that announces itself is an app that gets uninstalled.
+            NotificationManager.IMPORTANCE_MIN,
+        ).apply {
+            description = "While the app keeps a link open in the background"
+            setShowBadge(false)
+            setSound(null, null)
+            enableVibration(false)
+            enableLights(false)
+        }
+        val have = nm.getNotificationChannel(CHANNEL_ID)
+        if (have != null && have.name == want.name && have.description == want.description) return
+        if (have != null) runCatching { nm.deleteNotificationChannel(CHANNEL_ID) }
+        nm.createNotificationChannel(want)
     }
 
     private fun notification(text: String): Notification {
@@ -436,20 +442,21 @@ actual object BackgroundSession {
     }
 
     private fun ensureMarkChannel(nm: NotificationManager) {
-        if (nm.getNotificationChannel(MARK_CHANNEL) != null) return
-        nm.createNotificationChannel(
-            NotificationChannel(
-                MARK_CHANNEL,
-                "Shell finished",
-                // Default, because this one is the whole point of the switch: the operator asked to
-                // be told that a shell finished a turn, and a notification nobody notices answers a
-                // question nobody asked. Turning the switch off is the way to want silence.
-                NotificationManager.IMPORTANCE_DEFAULT,
-            ).apply {
-                description = "A shell finished a turn or needs attention"
-                setShowBadge(true)
-            },
-        )
+        // Default, because this one is the whole point of the switch: the operator asked to be
+        // told that a shell finished a turn, and a notification nobody notices answers a question
+        // nobody asked. Turning the switch off is the way to want silence.
+        val want = NotificationChannel(
+            MARK_CHANNEL,
+            "Shell finished or waiting",
+            NotificationManager.IMPORTANCE_DEFAULT,
+        ).apply {
+            description = "A shell finished a turn, or is waiting on you"
+            setShowBadge(true)
+        }
+        val have = nm.getNotificationChannel(MARK_CHANNEL)
+        if (have != null && have.name == want.name && have.description == want.description) return
+        if (have != null) runCatching { nm.deleteNotificationChannel(MARK_CHANNEL) }
+        nm.createNotificationChannel(want)
     }
 
     actual fun stopWatchingNetwork() {

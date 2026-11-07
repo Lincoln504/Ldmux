@@ -31,7 +31,7 @@ internal fun ConfirmPairing(p: Pairing, onDismiss: () -> Unit, onConfirm: () -> 
     // code say "work laptop" and point anywhere on the tailnet. See [pairingPrompt].
     val prompt = pairingPrompt(p)
     ModalCard(
-        if (p.isMeshOnly) "use this computer over mesh?" else "pair with this computer?",
+        if (p.isMeshOnly) "pair over radio?" else "pair with this host?",
         onDismiss,
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -40,10 +40,9 @@ internal fun ConfirmPairing(p: Pairing, onDismiss: () -> Unit, onConfirm: () -> 
             PairingFact(if (p.isMeshOnly) "key" else "token", prompt.fingerprint)
             Text(
                 if (p.isMeshOnly) {
-                    "Everything you type will be sent over the LoRa radio link to this computer. " +
-                        "Your tailnet pairing is not changed."
+                    "Typing goes over the LoRa radio to this host. Tailnet pairing stays as it is."
                 } else {
-                    "Everything you type will be sent to this address."
+                    "Typing goes to this address."
                 },
                 color = Muted,
                 fontSize = 11.sp,
@@ -83,10 +82,10 @@ internal fun PastePairingLink(onDismiss: () -> Unit, onPair: (Pairing) -> Unit) 
     // pressed. Eight lines of `ldmux code` output is easy to truncate when copying.
     val pairing = remember(text) { parseScannedPairing(text) }
     val prompt = pairing?.let(::pairingPrompt)
-    ModalCard("paste a pairing link", onDismiss) {
+    ModalCard("paste pairing link", onDismiss) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(
-                "on the host, run `ldmux code` and copy the whole link",
+                "on the host: `ldmux code`, then copy the whole link",
                 color = Muted,
                 fontSize = 11.sp,
             )
@@ -125,7 +124,7 @@ internal fun NotACode(onDismiss: () -> Unit) {
 
 @Composable
 fun ConfirmKill(target: Session, onDismiss: () -> Unit, onConfirm: () -> Unit) {
-    ModalCard("close this shell?", onDismiss) {
+    ModalCard("close shell?", onDismiss) {
         Text(target.label, color = Muted, fontSize = 12.sp)
         ModalActions {
             OutlinedBtn("cancel", Modifier.weight(1f), onClick = onDismiss)

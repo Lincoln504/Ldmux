@@ -14,8 +14,8 @@ import kotlin.test.assertEquals
 class HolderLabelTest {
     @Test
     fun theKindWordsReadAsEnglish() {
-        assertEquals("the radio link", holderLabel("mesh"))
-        assertEquals("the desktop", holderLabel("desktop"))
+        assertEquals("radio link", holderLabel("mesh"))
+        assertEquals("desktop", holderLabel("desktop"))
         assertEquals("another phone", holderLabel("phone"))
         assertEquals("this machine", holderLabel("local"))
     }

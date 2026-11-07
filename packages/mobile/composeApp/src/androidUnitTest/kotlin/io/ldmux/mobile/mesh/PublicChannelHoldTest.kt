@@ -16,7 +16,6 @@ class PublicChannelHoldTest {
         val h = PublicChannelHold()
         assertTrue(h.acceptScreen(painted = true))
         assertTrue(h.acceptScreen(painted = false))
-        assertEquals(0, h.updates)
         assertFalse(h.sync(pending = true), "the sync button only means something in the mode")
         assertFalse(h.awaiting)
     }
@@ -31,8 +30,7 @@ class PublicChannelHoldTest {
         h.painted()
         // After that, screens are kept rather than drawn.
         assertFalse(h.acceptScreen(painted = true))
-        assertFalse(h.acceptScreen(painted = true))
-        assertEquals(2, h.updates, "the bar says how far behind the view is")
+        assertFalse(h.acceptScreen(painted = true), "kept again: the newest one is what show paints")
     }
 
     @Test
@@ -54,7 +52,6 @@ class PublicChannelHoldTest {
         h.set(true)
         assertTrue(h.sync(pending = true))
         assertFalse(h.acceptScreen(painted = true), "mid-drain: kept, not drawn")
-        assertEquals(1, h.updates)
         assertTrue(h.drained(), "the buffer emptied")
         assertFalse(h.flushing)
         assertTrue(h.awaiting, "the answer is still owed")
@@ -65,7 +62,6 @@ class PublicChannelHoldTest {
         // and the answer follows in more; ending the wait on the echo held the answer behind a
         // `show` press. The wait ends when the shell goes quiet.
         assertTrue(h.awaiting, "one screen is not the end of an answer")
-        assertEquals(0, h.updates)
         assertFalse(h.settleIfQuiet(2_500), "not quiet yet")
         assertTrue(h.settleIfQuiet(2_000 + PublicChannelHold.QUIET_MS), "quiet now")
         assertFalse(h.awaiting)
@@ -88,7 +84,6 @@ class PublicChannelHoldTest {
         assertTrue(h.acceptScreen(painted = true))
         h.drawn(9_000)
         h.painted()
-        assertEquals(0, h.updates)
         assertFalse(h.reported, "the report is spent once the answer arrives")
         assertTrue(h.awaiting, "the wait outlives a single screen")
         assertTrue(h.settleIfQuiet(9_000 + PublicChannelHold.QUIET_MS), "quiet ends it")
@@ -180,16 +175,13 @@ class PublicChannelHoldTest {
 
     @Test
     fun `a held screen drawn while waiting does not end the wait`() {
-        // `drewHeld` is the paint a drain or a deadline makes: the count resets because the newest
-        // screen is now on the glass, but the wait stays because the answer has not arrived.
+        // Drawing the newest kept screen is what `show` does: the view is up to date, and the wait
+        // stays because the answer has not arrived.
         val h = PublicChannelHold()
         h.set(true)
         h.sync(pending = true)
         assertFalse(h.acceptScreen(painted = true))
-        assertEquals(1, h.updates)
-        h.drewHeld()
-        assertEquals(0, h.updates, "the newest held screen is drawn, so nothing is behind")
-        assertTrue(h.awaiting, "but the answer is still owed")
+        assertTrue(h.awaiting, "the answer is still owed after the kept screen is drawn")
     }
 
     @Test
@@ -203,14 +195,13 @@ class PublicChannelHoldTest {
     }
 
     @Test
-    fun `turning the mode off clears the wait and the count`() {
+    fun `turning the mode off clears the wait`() {
         val h = PublicChannelHold()
         h.set(true)
         h.sync(pending = true)
         h.set(false)
         assertFalse(h.on)
         assertFalse(h.awaiting)
-        assertEquals(0, h.updates)
         assertTrue(h.acceptScreen(painted = true), "off means the view follows the host again")
     }
 

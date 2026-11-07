@@ -61,6 +61,8 @@ pub mod method {
     /// The shell names itself, so a process inside one sends it with no argument at all
     /// (`$LDMUX_SESSION_ID`, set by `session_spawn_env`).
     pub const BUZZ: &str = "buzz";
+    /// Name a shell after the conversation in it (`ldmux title`), 1-3 words.
+    pub const TITLE: &str = "title";
 }
 
 /// A device identity, so two devices can be told apart in a message about a

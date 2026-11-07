@@ -57,8 +57,8 @@ internal fun BoxScope.LinkNotice(text: String) {
  * "in use on Pixel 9" is already a sentence.
  */
 internal fun holderLabel(holder: String): String = when (holder) {
-    "mesh" -> "the radio link"
-    "desktop" -> "the desktop"
+    "mesh" -> "radio link"
+    "desktop" -> "desktop"
     "phone" -> "another phone"
     "local" -> "this machine"
     else -> holder

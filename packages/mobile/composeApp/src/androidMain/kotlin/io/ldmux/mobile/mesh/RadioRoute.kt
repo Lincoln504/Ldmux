@@ -62,4 +62,26 @@ internal object RadioRoute {
         if (want > MAX_PATH_BYTES) return null
         return Path(outPathLen, outPath.copyOf(want))
     }
+
+    /**
+     * Which of the two route sources to send through: **the one heard on the air, when there is one.**
+     *
+     * The two describe the same peer and are refreshed by different events, so they can disagree:
+     *
+     *  - the **advert path** is read from the radio's own "most recently heard advert" cache, and it
+     *    is a route a packet actually travelled, minutes ago. It tracks a phone that has moved;
+     *  - the **contact path** is a snapshot the firmware persists in its flash. A companion radio
+     *    never asks for a path return, and that is the only thing that replaces it, so on this
+     *    transport a contact path can only be absent or stale — it is never fresh information.
+     *
+     * So an advert path wins whenever it exists, and the contact path is the fallback for the case
+     * the cache cannot answer (a node heard only across a path return). Timestamps would not help:
+     * a contact *read* is new every polling tick even though its content is old, so "newest read"
+     * lets a persisted snapshot outrank a measured route every other tick — which on a phone that
+     * has moved is a dead route sent down half the time, seen as a link that dies for no reason and
+     * recovers after a refresh.
+     *
+     * A null source means only "this source has nothing to say". It never takes the other one away.
+     */
+    fun <T : Any> preferHeard(contact: T?, advert: T?): T? = advert ?: contact
 }

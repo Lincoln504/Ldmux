@@ -2336,6 +2336,63 @@ impl LdmuxDaemon {
                     })),
                 }
             }
+            // **A shell is named after the conversation, not the folder.** `ldmux title "Radio
+            // paths"` sets the row every client draws, and best-effort renames the agent's own
+            // session (`crate::title`) so a phone row and a `pi --resume` picker agree. The CLI
+            // names its own shell from `$LDMUX_SESSION_ID`, so an agent needs no argument and
+            // cannot rename someone else's shell by copying an id.
+            "title" => {
+                let session = params.get("session").and_then(|v| v.as_str()).unwrap_or("");
+                let words: Vec<&str> = params
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(|t| t.split_whitespace().collect())
+                    .unwrap_or_default();
+                let Some(record) = self.registry.get(session) else {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "detail": "no such shell",
+                    }));
+                };
+                if record.status != "running" {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "detail": "that shell has ended",
+                    }));
+                }
+                let cwd = record.cwd.clone();
+                let title = match crate::title::sanitize(&words) {
+                    Ok(t) => t,
+                    Err(refused) => {
+                        return Ok(serde_json::json!({
+                            "ok": false,
+                            "detail": refused.sentence(),
+                        }));
+                    }
+                };
+                // The daemon's title is the product; the agent's own name is a courtesy that
+                // never fails the command.
+                if let Some(mut r) = self.registry.get(session).cloned() {
+                    r.title = title.clone();
+                    r.updated_at = now_ms();
+                    self.registry.upsert(r);
+                    let _ = self.registry.save();
+                }
+                self.sessions_dirty = true;
+                let agent = crate::title::name_agent_session(&title, &cwd, &|k| {
+                    std::env::var(k).ok()
+                });
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "session": session,
+                    "title": title,
+                    "agent": match agent {
+                        crate::title::AgentName::None => "none",
+                        crate::title::AgentName::Named => "named",
+                        crate::title::AgentName::Failed => "failed",
+                    },
+                }))
+            }
             // **Claim, refusing only a holder that is in use.** The radio route asks this instead
             // of deciding for itself: the engagement rule lives in the claim table, and two
             // copies of it would drift. A drifting copy is exactly how nine idle desk windows

@@ -45,6 +45,18 @@ public enum MeshcoreCommand {
     /** {@code CMD_SET_DEVICE_TIME} — source-only. */
     SET_DEVICE_TIME(0x06),
 
+    /**
+     * {@code CMD_RESET_PATH} (13) — forget a contact's stored route.
+     *
+     * <p>Body is the peer's full 32-byte public key. The firmware sets that
+     * contact's {@code out_path_len} to "unknown" and answers {@code OK}, or
+     * {@code ERR_CODE_NOT_FOUND} for a key it does not hold
+     * ({@code MyMesh.cpp:1277}). It is the radio's own way to say "this route
+     * is not true any more", and the only one that stops a dead path being
+     * handed back on the next contact read.</p>
+     */
+    RESET_PATH(0x0D),
+
     /** {@code CMD_SEND_SELF_ADVERT} — emit our advert (flood/zero-hop). */
     SEND_SELF_ADVERT(0x07),
 

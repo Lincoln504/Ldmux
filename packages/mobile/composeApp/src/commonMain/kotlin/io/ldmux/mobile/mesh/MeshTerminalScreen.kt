@@ -108,6 +108,23 @@ internal const val LAUNCHER_TRIES = 300
 internal const val LAUNCHER_RETRY_MS = 400L
 
 /**
+ * How long the app may be off screen before this phone lets go of the shell it is showing.
+ *
+ * **A claim means "this screen is showing that shell"**, and the desktop window that was displaced
+ * sits on "press r to take back" for as long as the claim lives. The tailnet route drops the page
+ * (and the claim) the moment the app leaves the screen, because its re-attach costs nothing. On
+ * this route a detach is a record and coming back is an attach plus a full screen, so an immediate
+ * release would make every glance at another app cost the airtime of a session — and a phone is
+ * glanced at constantly.
+ *
+ * Ten seconds is a glance and not a use: past it, the shell is nobody's here, and the desk gets it
+ * back without a keystroke. The long absence is a different mechanism ([AppLifecycle]'s release
+ * grace closes the whole connection), so this only decides who the shell belongs to, never whether
+ * the link is up.
+ */
+internal const val CLAIM_RELEASE_MS = 10_000L
+
+/**
  * How long the measured grid must stop moving before it is sent to the host.
  *
  * Long enough to outlast the keyboard animation (about 200 ms on the devices measured) and short
@@ -285,6 +302,31 @@ fun MeshTerminalScreen(
             attempt += 1
         } else ended = true
     }
+    // **The claim follows the screen, on this route too.**
+    //
+    // The desk window that this phone displaced is told to wait for `r`; it comes back by itself
+    // only when the shell has no holder left. Nothing here released one, so a phone left in a
+    // pocket kept the shell until the whole connection was torn down minutes later — the operator's
+    // report was a desktop that stayed on "press r to take back" after the phone had stopped
+    // looking at it. `claimGivenUp` is what tells the return to take it again: arriving is the
+    // consent (ADR-0010), the same rule the tailnet route applies.
+    var claimGivenUp by remember(conn) { mutableStateOf(false) }
+    LaunchedEffect(AppLifecycle.foreground) {
+        if (!AppLifecycle.foreground) {
+            delay(CLAIM_RELEASE_MS)
+            // Still away: this phone is not using the shell, so the desk may.
+            if (!AppLifecycle.foreground) {
+                claimGivenUp = conn.driver.releaseShell()
+            }
+        } else if (claimGivenUp) {
+            claimGivenUp = false
+            // The page keeps its picture while the claim is gone, so a return re-attaches rather
+            // than landing on the list. A desk window that took the shell meanwhile answers
+            // `held`, and the screen's own take-back is then the choice it has always been.
+            val id = resumeShell
+            if (!showList && id.isNotEmpty()) conn.driver.open(id)
+        }
+    }
     DisposableEffect(conn) {
         // **A long stay off screen is not a pause the link survives.** The tailnet route lets go of
         // its shells after the platform's grace and reconnects on return; this route now does the
@@ -336,11 +378,6 @@ fun MeshTerminalScreen(
     // The marks the host replayed with this attach: drawn beside the rows, gone once the shell is
     // opened. An empty map is "nothing to say", which is what a host below version 9 always means.
     val marks by conn.driver.marks.collectAsState()
-    // Learned from the driver, not from the tap: a shell the host chose for us (the one-shell attach)
-    // resumes exactly as reliably as one the user picked.
-    LaunchedEffect(shells.current) { shells.current?.let { resumeShell = it } }
-
-
     val origin = remember { TimeSource.Monotonic.markNow() }
     val clock: () -> Long = { origin.elapsedNow().inWholeMilliseconds }
     // **The input queue belongs to the connection, the picture does not.** Carrying a batcher across a
@@ -642,13 +679,6 @@ fun MeshTerminalScreen(
     // commit: keyed on it, a launcher shown over a live shell would send a `ListRequest` per screen
     // update, which on the radio is a record each time. The attempt moves when the link is rebuilt,
     // which is the change that actually invalidates the list.
-    LaunchedEffect(showList, AppLifecycle.foreground, attemptNo) {
-        if (!showList || !AppLifecycle.foreground) return@LaunchedEffect
-        repeat(LAUNCHER_TRIES) {
-            if (conn.driver.launcher()) return@LaunchedEffect
-            delay(LAUNCHER_RETRY_MS)
-        }
-    }
     // **Opening a shell draws its first screen, once.** In batch mode the view is frozen, so a
     // shell that was just opened sat blank while the bar counted screens behind it: opening a shell
     // is the request to see it, and the freeze exists for typing, of which a new shell has none. It
@@ -775,6 +805,23 @@ fun MeshTerminalScreen(
     val holding = !terminalLive && !showList && resumeShell.isNotEmpty() && heldScreen != null &&
         (view is MeshTermView.LinkDown || view is MeshTermView.Handshaking || view is MeshTermView.Idle)
 
+    // **A screen with nothing on it asks for the list, whether or not it was opened from one.**
+    //
+    // This used to require `showList`, and the state it left behind was reachable by leaving the
+    // app for longer than the release grace: the connection is closed, the rebuild starts from
+    // nothing, and the shell the page was on is no longer attached to anything — so the screen is
+    // not on the list, is not live either, and never asked, which drew the launcher's header over
+    // an empty body for ever (measured on the device 2026-11-07). `NeedList` is the honest
+    // condition: nothing is live and nothing is holding a picture, so what the user should see is
+    // the host's own list.
+    val needList = !terminalLive && !holding
+    LaunchedEffect(needList, AppLifecycle.foreground, attemptNo) {
+        if (!needList || !AppLifecycle.foreground) return@LaunchedEffect
+        repeat(LAUNCHER_TRIES) {
+            if (conn.driver.launcher()) return@LaunchedEffect
+            delay(LAUNCHER_RETRY_MS)
+        }
+    }
     // **A link that stays down returns to the shell list.** The held screen above is the right
     // answer to a two-second rebuild; it is the wrong answer to a host that has stopped
     // answering, which is a state the user must be able to leave and retry. The shell is not
@@ -810,7 +857,6 @@ fun MeshTerminalScreen(
                 awaiting = source.awaitingSync,
                 reported = source.answerOverdue,
                 flushing = source.flushingHeld,
-                updates = source.heldUpdates,
                 onSync = { source.sync() },
                 modifier = m,
             )
