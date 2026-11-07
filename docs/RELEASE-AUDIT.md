@@ -98,8 +98,8 @@ implements are in `docs/adr/`.
 | 7.12 | `heartbeat_ms` is 0, so an idle session cannot tell a dead peer from an idle one | OK by decision — a heartbeat is a record, and 3 s heartbeats cost 1200 records an hour to say nothing (`arq.rs` config note). Silence is reported where it matters: while something is owed, the pane says `link quiet · N s, nothing heard`; an idle shell is silent by design and stays quiet |
 | 7.13 | A `Close` is suppressed while the budget is spent, so an ended session lingers until the peer times out | FIXED — the close is not budget-gated, only slot-gated (`arq.rs` "4. The close, last, once"); a close is control traffic like an ack, and gating it meant it was never sent and counted a stall on every poll for the rest of the hour |
 | 7.7 | A resync never answered is never re-asked | FIXED `8fd09b6` |
-| 7.8 | `seq 1 100`-class output batched into more messages than the budget | OK — pacer is open defect 22 |
-| 7.9 | No pacer: a screen update leaves as a burst of up to eight records | OPEN — defect 22 |
+| 7.8 | `seq 1 100`-class output batched into more messages than the budget | OK — `BURST_GAP` (1 s) coalesces continuous output to one update a second, and `PENDING_LIMIT` (8) stops the bridge looking at the screen while that many records are unacked, so the queue cannot grow past the session's window |
+| 7.9 | No pacer: a screen update leaves as a burst of up to eight records | FIXED — the bridge paces bursts to one update per `BURST_GAP`, coalesced (`mesh_bridge.rs` "a burst is coalesced to one update a second"), while the first change after quiet and the echo of input are immediate (`input_echo_is_never_paced`). `PENDING_LIMIT` bounds the queue to the session's own window |
 
 ## 8. The shell, keeper and host
 
