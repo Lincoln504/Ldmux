@@ -195,7 +195,7 @@ Audited 2026-11-05. The picture is better than expected: almost everything is bo
 | 14.2 | A stale install keeps presenting a fixed bug | FIXED 2026-11-06 — a build id in every binary, `--version`, the startup line and an additive `build` field on `ping`, so "which build is running" is one command |
 | 14.3 | The heavy test suite fails under load | MITIGATED — heavy tests serialised, workloads right-sized; still load-sensitive |
 | 14.4 | No tag, ever | OPEN |
-| 14.5 | `main` 296 commits behind the work | OPEN — a merge is its own review |
+| 14.5 | `main` 296 commits behind the work | FIXED — every commit of this pass is on `main`, which is the only branch, and `origin/main` matches it. The row described a merge that had been waiting; there is nothing to merge |
 
 ## 15. The 2026-11-06 audit pass
 
