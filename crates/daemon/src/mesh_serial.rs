@@ -94,6 +94,14 @@ const HOUR: Duration = Duration::from_secs(3_600);
 /// short enough that a walk is felt as a pause rather than as a dead link.
 const PEER_ROUTE_REFRESH: Duration = Duration::from_secs(120);
 
+/// How soon to ask again while no route is known.
+///
+/// A phone that has just arrived announces itself, and that advert takes a moment to cross the
+/// repeaters, so the first lookup legitimately answers "not heard". Fifteen seconds is short enough
+/// that arriving somewhere new is felt as a pause, and the read is a serial command with no airtime
+/// at all.
+const PEER_ROUTE_RETRY: Duration = Duration::from_secs(15);
+
 /// The four bytes that mark a record as a **route hint** rather than a session message.
 const ROUTE_HINT_MAGIC: &[u8; 4] = b"LDRH";
 
@@ -111,6 +119,39 @@ fn route_hint(record: &[u8]) -> Option<[u8; 32]> {
         return None;
     }
     record.get(4..).and_then(|k| k.try_into().ok())
+}
+
+/// Ask the radio for the route to `peer_radio`, and keep it when the answer has one.
+///
+/// **This is a serial command, not a transmission**, so it can be asked as often as is useful; what
+/// it must not do is ask while another command's answer window is open, which is why every caller is
+/// on the idle path. A `Rejected` answer means the radio has not heard that node's advert yet — the
+/// phone may be announcing right now and the flood may still be crossing the repeaters — so the
+/// caller retries sooner than the calm refresh.
+fn refresh_peer_route<L: ByteLink>(
+    companion: &mut Companion<L>,
+    peer_radio: Option<&[u8; 32]>,
+    peer_path: &mut Option<PeerPath>,
+) -> bool {
+    let Some(prefix) = peer_radio.and_then(|k| k.get(..6)) else {
+        return false;
+    };
+    let Ok(prefix) = <[u8; 6]>::try_from(prefix) else {
+        return false;
+    };
+    match companion.get_advert_path(&prefix) {
+        Ok(path) => {
+            if let Some(reversed) = PeerPath::reversed(
+                usize::from(path.hash_size),
+                usize::from(path.hops),
+                &path.bytes,
+            ) {
+                *peer_path = Some(reversed);
+            }
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 /// The self-imposed airtime policy, in milliseconds per hour: one percent.
@@ -455,23 +496,22 @@ fn serve_loop<L: ByteLink>(
                 // itself and then every `PEER_ROUTE_REFRESH` while the link is quiet, because a
                 // phone that moved has a new route and the old one silently carries nothing. This
                 // is one serial command: it costs no airtime.
+                let due = last_route_ask.is_none_or(|t| {
+                    // While there is no route, ask again quickly: the phone may be mid-announce and
+                    // the flood still crossing the repeaters. Once one is in hand, ask calmly.
+                    let interval = if peer_path.is_some() {
+                        PEER_ROUTE_REFRESH
+                    } else {
+                        PEER_ROUTE_RETRY
+                    };
+                    t.elapsed() >= interval
+                });
                 if peer_radio.is_some()
-                    && last_route_ask.is_none_or(|t| t.elapsed() >= PEER_ROUTE_REFRESH)
-                    && last_peer_rx.is_none_or(|t| t.elapsed() >= PEER_ROUTE_REFRESH)
+                    && due
+                    && last_peer_rx.is_none_or(|t| t.elapsed() >= PEER_ROUTE_RETRY)
                 {
                     last_route_ask = Some(Instant::now());
-                    if let Some(prefix) = peer_radio.as_ref().and_then(|k| k.get(..6)) {
-                        let prefix: [u8; 6] = prefix.try_into().unwrap_or([0; 6]);
-                        if let Ok(path) = companion.get_advert_path(&prefix)
-                            && let Some(reversed) = PeerPath::reversed(
-                                usize::from(path.hash_size),
-                                usize::from(path.hops),
-                                &path.bytes,
-                            )
-                        {
-                            peer_path = Some(reversed);
-                        }
-                    }
+                    refresh_peer_route(&mut companion, peer_radio.as_ref(), &mut peer_path);
                 }
                 // The countdown, refreshed while the link is idle. Not a transmission: it is a
                 // message to this process only, and it is what lets the session see the hour roll
@@ -514,8 +554,18 @@ fn serve_loop<L: ByteLink>(
                 } else if let Some(incoming) = incoming_record(&frame) {
                     // The peer announcing which radio it is, so the route above can be looked up.
                     if let Some(key) = route_hint(&incoming.record) {
+                        // **The phone has just said hello, so answer in kind.** Its route to us is
+                        // the advert it heard; ours to it is the advert it is about to hear, so one
+                        // is flooded now rather than at the next scheduled interval. Then the
+                        // cache is asked straight away, because the handshake's own record is the
+                        // next thing to send and it needs a route.
                         peer_radio = Some(key);
                         last_peer_rx = Some(Instant::now());
+                        let _ = companion.send_self_advert(true);
+                        last_advert = Some(Instant::now());
+                        if refresh_peer_route(&mut companion, peer_radio.as_ref(), &mut peer_path) {
+                            last_route_ask = Some(Instant::now());
+                        }
                     } else {
                         last_peer_rx = Some(Instant::now());
                         if events

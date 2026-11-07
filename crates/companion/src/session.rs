@@ -353,6 +353,31 @@ mod tests {
         v
     }
 
+    /// **The one route a stock radio can give.** The request is the command, a reserved byte and the
+    /// six-byte prefix; the answer carries the firmware's encoded path length, which is hop groups,
+    /// not a byte count.
+    #[test]
+    fn an_advert_path_round_trips() {
+        let mut link = MemoryLink::new();
+        let mut reply = vec![codes::ADVERT_PATH];
+        reply.extend(0x11_22_33_44u32.to_le_bytes());
+        reply.push(0x42); // two-byte hashes, two hops
+        reply.extend([0xA1, 0xA2, 0xB1, 0xB2]);
+        link.push_payload(&reply);
+        let mut companion = Companion::new(link);
+        let path = companion.get_advert_path(&[1, 2, 3, 4, 5, 6]).expect("advert path");
+        assert_eq!(path.hash_size, 2);
+        assert_eq!(path.hops, 2);
+        assert_eq!(path.bytes, vec![0xA1, 0xA2, 0xB1, 0xB2]);
+        assert_eq!(path.received_at, 0x1122_3344);
+        // What went out: the command, a zero, then the prefix.
+        let written = &companion.link_mut().written;
+        let body = &written[3..];
+        assert_eq!(body[0], commands::GET_ADVERT_PATH);
+        assert_eq!(body[1], 0);
+        assert_eq!(&body[2..8], &[1, 2, 3, 4, 5, 6]);
+    }
+
     #[test]
     fn app_start_reads_the_radios_identity() {
         let mut link = MemoryLink::new();

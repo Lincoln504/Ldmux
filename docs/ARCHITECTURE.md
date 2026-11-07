@@ -406,8 +406,10 @@ be transmitted and then ignored by every receiver. Direct means the sender must 
    only while the host has been silent for two), and tells the host which radio it is with a
    **route hint** — a 36-byte record, `LDRH` and the phone's public key, sent before the session
    handshake because the handshake's own answer is the first thing that needs a route. The host then
-   reads the phone's advert path out of its own radio's cache (the same `CMD_GET_ADVERT_PATH`), about
-   once every two minutes while the link is quiet.
+   reads the phone's advert path out of its own radio's cache (the same `CMD_GET_ADVERT_PATH`) — at
+   once on the hint, every 15 s while no route is known, and about once every two minutes once one
+   is — and floods one advert of its own when the hint arrives, so the phone's next read finds a fresh
+   path instead of waiting out the scheduled interval.
 4. **Every reply follows the reverse of the path that was learned.** `PeerPath::reversed` flips the
    hop groups (per `hash_size` bytes, not per byte) and the radio thread sends every record along it.
    With no route, records go zero-hop, which reaches only the radios in earshot.
