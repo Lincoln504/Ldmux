@@ -38,6 +38,13 @@ What each route protects, what it does not, and where the secrets live. The desi
 - **Accepted trade-offs**: an unauthenticated flood costs one HMAC before any Diffie-Hellman
   (the 16-byte filter tag, a WireGuard-like addition on top of Noise); and records are not padded,
   because padding spends the same airtime as text and the medium already reveals volume.
+- **The phone's radio advertises while it is trying to reach the host.** A route back cannot be
+  learned any other way (`docs/ARCHITECTURE.md` §11), so the phone floods a MeshCore advert — its
+  node name, its radio public key, and the route the advert took — while nothing has been heard from
+  the host for two minutes. Every node in range, and every repeater, learns that this radio exists;
+  the terminal's contents stay sealed, and the advert stops as soon as the link is carrying records.
+  The one lever is the host's own `LDMUX_MESH_ADVERT_SECS=0`, which turns the whole route off: without
+  an advert from the host there is no route to learn, so the phone has nothing to answer.
 
 ## Secrets
 
