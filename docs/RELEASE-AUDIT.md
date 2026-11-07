@@ -408,10 +408,13 @@ Identity is `io.ldmux.mobile`, settled when the project took `ldmux.io`. Play do
 the domain, but the id can never change after the first upload, so the reverse-domain id follows
 the domain the project owns. Namespace, manifest and applicationId agree.
 
-What the console needs that does not exist yet: a hosted privacy policy URL (the project owns
-`ldmux.io`, so `https://ldmux.io/privacy` is the natural home), a feature graphic at 1024 by
-500, phone screenshots, and a 512 by 512 icon. The launcher icon in `res/` is an in-app icon,
-not a store asset.
+What the console needs: a hosted privacy policy URL (the project owns `ldmux.io`, so
+`https://ldmux.io/privacy` is the natural home) and the assets in `store/`. The text is
+[`PRIVACY.md`](PRIVACY.md), ready to publish as that page. `store/` holds the 512 by 512 icon, the
+1024 by 500 feature graphic and the four phone screenshots, each checked against Play's limits: an
+icon and feature graphic with no alpha, and screenshots whose sides are padded to Play's 2:1 ceiling
+(the app's own `#0A0A0A` background, so the pad is invisible). The launcher icon in `res/` is an
+in-app icon, not a store asset.
 
 ### Privacy policy text
 
