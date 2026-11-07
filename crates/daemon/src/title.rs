@@ -105,23 +105,60 @@ pub enum AgentName {
     Failed,
 }
 
-/// Rename whichever agent session this shell is running, if one can be identified.
+/// What the *caller* knows about the agent it is running inside.
 ///
-/// `cwd` is the shell's own directory, used for Claude Code's project folder; `env` is read for
-/// pi's session file. Nothing here is authoritative: a shell with no agent, an agent whose format
-/// changed, and a read-only home directory all end in [`AgentName::None`] or
-/// [`AgentName::Failed`] and the shell's title still changed.
-pub fn name_agent_session(title: &str, cwd: &str, env: &dyn Fn(&str) -> Option<String>) -> AgentName {
-    if let Some(file) = env("PI_SESSION_FILE") {
-        let path = PathBuf::from(file);
+/// **The caller has the evidence, the daemon does not.** `ldmux title` runs inside the shell, so it
+/// inherits the agent's own environment; the daemon is a systemd unit, whose environment has none
+/// of it. Building this from the daemon's own `std::env` made the pi half unreachable in the
+/// deployed daemon (its unit has no `PI_SESSION_FILE`), so every rename fell through to the
+/// folder heuristic and could rename a Claude transcript the operator was not in.
+///
+/// Nothing here is authoritative: an empty hint renames nothing, which is the right answer when
+/// the caller cannot say which agent it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentHint {
+    /// `$PI_SESSION_FILE`, when the caller is a pi session.
+    pub pi_session_file: Option<PathBuf>,
+    /// The caller is Claude Code, which has no session-file variable: its transcript is found by
+    /// directory and recency ([`claude_session_file`]).
+    pub claude_code: bool,
+}
+
+impl AgentHint {
+    /// Read the hint from an environment lookup, which the CLI passes through from its own.
+    #[must_use]
+    pub fn from_env(env: &dyn Fn(&str) -> Option<String>) -> Self {
+        let pi = env("PI_SESSION_FILE")
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from);
+        // Claude Code sets `CLAUDE_CODE_ENTRYPOINT` in every process it starts; `CLAUDECODE` is the
+        // older marker, kept because it costs one lookup.
+        let claude = env("CLAUDE_CODE_ENTRYPOINT").is_some() || env("CLAUDECODE").is_some();
+        Self {
+            pi_session_file: pi,
+            claude_code: claude,
+        }
+    }
+}
+
+/// Rename whichever agent session this shell is running, when the caller said which agent it is.
+///
+/// `cwd` is the shell's own directory, used for Claude Code's project folder. A hint that names no
+/// agent renames nothing: guessing from the directory would rename a transcript the operator may
+/// not be in, and the shell's own title is the product either way.
+pub fn name_agent_session(title: &str, cwd: &str, hint: &AgentHint, env: &dyn Fn(&str) -> Option<String>) -> AgentName {
+    if let Some(path) = &hint.pi_session_file {
         return if path.is_file() {
-            match append_pi_name(&path, title) {
+            match append_pi_name(path, title) {
                 Ok(()) => AgentName::Named,
                 Err(_) => AgentName::Failed,
             }
         } else {
             AgentName::None
         };
+    }
+    if !hint.claude_code {
+        return AgentName::None;
     }
     match claude_session_file(cwd, env) {
         Some(path) => match append_claude_title(&path, title) {
@@ -227,9 +264,15 @@ fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
             "file does not end at a line boundary",
         ));
     }
+    // **One write, because the newline is part of the record.** Writing the line and then its
+    // newline is two appends, and the agent writes to this file too: its record landing between
+    // them leaves our JSON and its JSON on one line, corrupting both — in the transcript of the
+    // conversation that asked for the rename.
+    let mut record = Vec::with_capacity(line.len() + 1);
+    record.extend_from_slice(line.as_bytes());
+    record.push(b'\n');
     let mut f = OpenOptions::new().append(true).open(path)?;
-    f.write_all(line.as_bytes())?;
-    f.write_all(b"\n")?;
+    f.write_all(&record)?;
     f.sync_data()
 }
 
@@ -413,10 +456,33 @@ mod tests {
 
     #[test]
     fn a_shell_with_no_agent_names_nothing() {
+        // **No hint, no rename.** A directory that happens to hold a recent Claude transcript is
+        // not evidence that *this* shell is that conversation.
         let env = |_: &str| None;
         assert_eq!(
-            name_agent_session("Radio paths", "/nowhere", &env),
+            name_agent_session("Radio paths", "/nowhere", &AgentHint::default(), &env),
             AgentName::None
         );
+    }
+
+    #[test]
+    fn the_hint_comes_from_the_callers_environment() {
+        let pi = AgentHint::from_env(&|k| match k {
+            "PI_SESSION_FILE" => Some("/tmp/x.jsonl".to_string()),
+            _ => None,
+        });
+        assert_eq!(pi.pi_session_file, Some(PathBuf::from("/tmp/x.jsonl")));
+        assert!(!pi.claude_code);
+
+        let claude = AgentHint::from_env(&|k| match k {
+            "CLAUDE_CODE_ENTRYPOINT" => Some("cli".to_string()),
+            _ => None,
+        });
+        assert_eq!(claude.pi_session_file, None);
+        assert!(claude.claude_code);
+
+        // An empty value is not a hint: pi exports the variable only when it has a session.
+        let empty = AgentHint::from_env(&|k| (k == "PI_SESSION_FILE").then(String::new));
+        assert_eq!(empty, AgentHint::default());
     }
 }

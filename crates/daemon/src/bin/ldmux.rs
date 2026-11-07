@@ -764,10 +764,29 @@ async fn main() {
                 .filter(|w| !w.starts_with("--"))
                 .collect();
             let title = words.join(" ");
+            // **What only this process knows.** The agent's environment is inherited by the shell's
+            // children, not by the daemon: pass the pi session file and the Claude Code marker
+            // along, so the daemon renames the conversation that actually asked instead of
+            // guessing from the folder.
+            let hint = ldmux_daemon::title::AgentHint::from_env(&|k| std::env::var(k).ok());
+            let mut agent = serde_json::Map::new();
+            if let Some(file) = &hint.pi_session_file {
+                agent.insert(
+                    "piSessionFile".into(),
+                    serde_json::Value::String(file.to_string_lossy().into_owned()),
+                );
+            }
+            if hint.claude_code {
+                agent.insert("claudeCode".into(), serde_json::Value::Bool(true));
+            }
             let r: Result<serde_json::Value, CallError> = daemon_call(
                 &sock,
                 method::TITLE,
-                &serde_json::json!({ "session": session, "title": title }),
+                &serde_json::json!({
+                    "session": session,
+                    "title": title,
+                    "agent": serde_json::Value::Object(agent),
+                }),
             )
             .await;
             // **A refusal is printed and exits non-zero.** A title is a label, not a control, so

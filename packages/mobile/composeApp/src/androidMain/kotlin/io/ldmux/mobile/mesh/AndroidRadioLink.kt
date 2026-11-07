@@ -420,6 +420,23 @@ class AndroidRadioLink(
             // radio has - asked here, after the tracked contact query has settled, so it cannot
             // race the one answer window the companion has.
             if (s.isIdle()) s.requestBatteryStorage()
+            // **Two bytes per path hop, unless this radio was deliberately set otherwise.** The
+            // firmware ships at mode 0 (one byte), indistinguishable from "never configured": 254
+            // usable values collide at around 20 co-channel repeaters, and a collision makes two
+            // repeaters forward a direct message meant for one of them. Two bytes still allows 32
+            // hops, above every observed regional path length. Only mode 0 is upgraded, once per
+            // bind; a radio an operator set to three bytes keeps it.
+            //
+            // This is the radio's *own* advert width — it forwards whatever width arrives either
+            // way — and it is the same rule the daemon applies to the host's radio.
+            val info = deviceInfo.value
+            if (info != null && info.pathHashMode == 0 && s.isIdle()) {
+                s.setPathHashMode(DEFAULT_PATH_HASH_MODE)
+                withTimeoutOrNull(PATH_MODE_SETTLE_MS) { while (!s.isIdle()) delay(10) }
+                // A refusal is not a failure: `currentPreset` still reports two bytes for ldmux's
+                // own sends, and the radio's advert keeps its old width.
+                appLog("mesh radio was on one-byte paths; asked for two")
+            }
             // **Announce now, because the host needs this before it can answer anything.** Its route
             // back to us exists only in its own radio's advert-path cache, and that cache is filled
             // by our advert arriving through the repeaters. Waiting for the maintenance loop's first
@@ -548,16 +565,25 @@ class AndroidRadioLink(
                 // promises was never sent, and the ARQ spent an attempt on a record that never
                 // reached the air. `startPathRefresh` asks for the route on its own cadence, and the
                 // zero-hop retry reaches the peer whenever it is in earshot.
-                // **Tell the radio too, not just this process.** Its contact record still holds
-                // the path that just failed, and the next contact read would hand it straight back
-                // — the same dead route, learned again. `CMD_RESET_PATH` is the firmware's own
-                // verb for this (`MyMesh.cpp:1277`): it sets `out_path_len` to unknown, so the next
-                // route comes from an advert rather than from a record that is only getting older.
                 contactPath = null
                 advertPath = null
                 appLog("mesh path not found; retrying zero-hop")
-                runCatching { s.resetPath(hostKey) }
-                return send(record)
+                val retried = send(record)
+                // **Tell the radio too, not just this process — and only once the retry has left.**
+                // Its contact record still holds the path that just failed, so the next contact read
+                // would hand the same dead route straight back. `CMD_RESET_PATH` is the firmware's
+                // own verb for this (`MyMesh.cpp:1277`): it sets `out_path_len` to unknown, so the
+                // next route comes from an advert instead of from a record that is only getting
+                // older. Sent after the retry because it is a *tracked* command: issued first it
+                // would hold the one answer window, and the retry's own `isIdle` gate would refuse
+                // the record — the "retrying zero-hop" line above would then be a lie.
+                //
+                // It only fires if the radio ever answers a raw send with `NOT_FOUND`, which
+                // firmware 1.17 does not (`MyMesh.cpp:2003-2016` answers OK, ILLEGAL_ARG or
+                // TABLE_FULL), so this is the defensive half: the send above has already done the
+                // work, and the reset keeps the radio's own cache from disagreeing with it.
+                if (retried != RadioSendResult.Failed) runCatching { s.resetPath(hostKey) }
+                return retried
             }
             if (result == RadioSendResult.Accepted) {
                 recordAirtime(record.size + 2 + path.bytes.size + 1)
@@ -659,6 +685,14 @@ class AndroidRadioLink(
         s.deviceQuery(3)
         return withTimeoutOrNull(DEVICE_INFO_WAIT_MS) { gate.await() } ?: _deviceInfo.value
     }
+
+    /**
+     * The path-hash width ldmux puts a radio on when it has never been configured: two bytes.
+     *
+     * One byte is the firmware's factory default and the legacy width, and the 2026 MeshCore
+     * guidance is explicit that new deployments should not use it. Two bytes is still 32 hops.
+     */
+    private val DEFAULT_PATH_HASH_MODE = 1
 
     private fun currentPreset(): RadioPreset {
         val s = selfInfo.value ?: return RadioPreset.BENCH
@@ -882,6 +916,12 @@ class AndroidRadioLink(
          */
         const val BOND_CONNECT_TIMEOUT_MS = 75_000L
         const val CONTACT_WAIT_MS = 3_000L
+
+        /// How long the one-off path-mode write waits for its `OK` before carrying on.
+        ///
+        /// It is a preferences write on the radio, so it answers at once; waiting longer only
+        /// delays the first record of a fresh link.
+        const val PATH_MODE_SETTLE_MS = 1_500L
         /** Nothing heard from the peer for this long means the route back may be stale or unknown. */
         const val ANNOUNCE_QUIET_MS = 120_000L
         /** At most one advert per this interval, because each one is a broadcast on a shared band. */

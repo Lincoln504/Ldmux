@@ -14,10 +14,10 @@ import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
-import kotlin.test.assertTrue
 import kotlin.test.assertTrue
 
 /** The driver against fakes: no socket, no native library. Every rule it owns has a case. */
@@ -402,6 +402,19 @@ class MeshTermDriverTest {
         assertEquals(TermMessage.Attach(MeshTerm.VERSION, "ab"), sess.messages().single())
         deliver(d, TermMessage.Closed(MeshTerm.Closed.AMBIGUOUS))
         assertEquals(MeshTermView.HostClosed(MeshTerm.Closed.AMBIGUOUS), d.view.value)
+    }
+
+    /// **A resume in flight is not "nothing is happening", and asking for the list kills it.**
+    /// The screen's list retry keys on "not live and nothing holding a picture", which a resume is
+    /// until its `Profile` arrives; the retry's `launcher()` queues a `Detach` beside the attach and
+    /// the host drops the shell, leaving a page that paints but cannot be typed into.
+    @Test
+    fun `a named attach in flight reports attaching, and stops once painted`() = runBlocking<Unit> {
+        val d = MeshTermDriver(gw, { hs }, selector = "aa11", clock = { now })
+        probed(d)
+        assertTrue(d.attaching, "the resume attach is on the wire")
+        deliver(d, profile, rows(1, true, 0 to "$ "), TermMessage.Commit(1, 2, 0, 0))
+        assertFalse(d.attaching, "described: it is a page now, not an attach")
     }
 
     // ── the header's shell list, and moving between shells ─────────────────────────────

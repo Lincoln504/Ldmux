@@ -969,6 +969,21 @@ class MeshTermDriver(
     }
 
     /**
+     * Whether a named attach is on the wire and its answer has not arrived.
+     *
+     * **The screen must not ask for the list in this state.** A resume after a rebuild is a named
+     * attach, and until the host's `Profile` arrives nothing is painted, so the screen looks "not
+     * live" — which is exactly the condition its own list retry keys on. That retry's `launcher()`
+     * queues a `Detach` in the same tick, the host drops the attach, and the `Profile` that then
+     * arrives is still accepted: the page paints, looks live, and every keystroke afterwards is
+     * dropped by a host that no longer holds the shell, silently (`Input` for an unattached shell
+     * is not answered). A drop has to cost a pause, not the user's typing.
+     */
+    val attaching: Boolean
+        get() = (pick == Pick.Attached || pick == Pick.Probing) && mirror.profile == null &&
+            terminalView == null && session != null
+
+    /**
      * Let the shell go while keeping the session.
      *
      * The tailnet launcher lets a shell go when its page closes, and the host then gives the shell

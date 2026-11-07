@@ -161,6 +161,15 @@ fn refresh_peer_route<L: ByteLink>(
     }
 }
 
+/// The path-hash width ldmux configures a radio for, as the firmware's mode index: 1 = two bytes.
+///
+/// Two bytes is the 2026 community default for companions and the maintainer's stated minimum for
+/// new presets; one byte collides at about 20 co-channel repeaters, and the cost of the wider hash
+/// (32 hops instead of 63) is above every observed regional path length. Named here rather than
+/// written as a literal because three places have to agree on it: this default, the phone's presets,
+/// and the app's own "path N B" readout.
+pub const DEFAULT_PATH_HASH_MODE: u8 = 1;
+
 /// The self-imposed airtime policy, in milliseconds per hour: one percent.
 const AIRTIME_BUDGET_MS: f64 = 36_000.0;
 
@@ -342,7 +351,38 @@ fn prepare(device: &str) -> Result<(Companion<SerialLink>, Bound, Settings), Mes
     // The version this sends is what the firmware latches to decide whether it
     // emits its V3 frames (MyMesh.cpp:1028-1031); `crates/companion` sends 3.
     let device_info = companion.device_query().map_err(session_error)?;
-    let hash_size = device_info.path_hash_mode.map_or(1, |m| m.saturating_add(1)).clamp(1, 3);
+    // **Two bytes per hop, the community default, unless this radio already says otherwise.**
+    // The firmware ships at mode 0 (one byte), which the 2026 MeshCore guidance is explicit about
+    // not recommending for new deployments: 254 usable one-byte IDs collide at around 20 co-channel
+    // repeaters (a coin flip), 65 536 two-byte IDs at around 300, and a collision is not cosmetic —
+    // two repeaters with one prefix both forward a direct message meant for one of them. Two bytes
+    // also still allows 32 hops, against observed regional paths in the mid-teens.
+    //
+    // **The radio's own preference wins when it has one**, because an operator who set three bytes
+    // for map disambiguation meant it. Mode 0 is indistinguishable from "never configured", so that
+    // is the one value ldmux upgrades, once, at bind. The write is safe against a stock radio: it
+    // answers OK or ILLEGAL_ARG and the mode is a preference about this node's own adverts, not
+    // about what it forwards.
+    let reported_mode = device_info.path_hash_mode;
+    // Said out loud, because the width is a fact about this radio that decides how many neighbours
+    // it can name without ambiguity, and nothing else in the system reports it.
+    eprintln!(
+        "ldmuxd: host radio path hashes: {} byte(s){}",
+        match reported_mode {
+            Some(0) | None => DEFAULT_PATH_HASH_MODE + 1,
+            Some(m) => m.saturating_add(1).clamp(1, 3),
+        },
+        if reported_mode == Some(0) { " (was 1: raised to the default)" } else { "" },
+    );
+    if reported_mode == Some(0) {
+        // A refusal is not a failure: the radio keeps its mode and ldmux still sends two-byte
+        // paths, which is what our own packets carry.
+        let _ = companion.set_path_hash_mode(DEFAULT_PATH_HASH_MODE);
+    }
+    let hash_size = match reported_mode {
+        Some(0) | None => DEFAULT_PATH_HASH_MODE + 1,
+        Some(m) => m.saturating_add(1).clamp(1, 3),
+    };
     let airtime_ms = self_info.time_on_air_ms(RECORD_MAX);
     let bound = Bound {
         uplink_record_max: u8::try_from(RECORD_MAX).unwrap_or(172),

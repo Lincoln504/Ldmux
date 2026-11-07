@@ -21,6 +21,7 @@ import androidx.compose.material3.Text
 import io.ldmux.mobile.voice.VoiceState
 import io.ldmux.mobile.voice.VoiceBanner
 import io.ldmux.mobile.voice.Dictation
+import io.ldmux.mobile.DisconnectRequests
 import io.ldmux.mobile.NewShellRow
 import io.ldmux.mobile.shellRowTitle
 import io.ldmux.mobile.SidePanel
@@ -356,13 +357,21 @@ fun MeshTerminalScreen(
         }
     }
     val view by conn.driver.view.collectAsState()
+    // **Disconnect means disconnect on this route too.** The action runs the same request the
+    // tailnet surface collects, and nothing here collected it: the service stopped itself, the
+    // next view change called `setActive` again, and the notification and the foreground service
+    // were back inside a second. Worse, the unanswered request stayed in the one-slot replay cache
+    // and fired when the operator switched to the tailnet route, which dropped *that* link for a
+    // press nobody made there. Collected here, answered once, and cleared by opening a shell —
+    // which is a fresh request, exactly as on the tailnet.
+    var disconnected by remember(conn) { mutableStateOf(false) }
     // The mesh link is a foreground service while it is up, exactly like the tailnet
     // link. Without this Android freezes the process before the release grace and the
     // BLE link is not actually kept alive while the user looks at another app.
-    LaunchedEffect(view) {
+    LaunchedEffect(view, disconnected) {
         val up = when (view) {
             MeshTermView.Idle, is MeshTermView.LinkDown, is MeshTermView.HostClosed -> false
-            else -> true
+            else -> !disconnected
         }
         // The same wording as the tailnet surface: what is being kept, never that the app is
         // running. "Mesh session open" named the app's own state, which is the line the operator
@@ -738,6 +747,16 @@ fun MeshTerminalScreen(
         chosen = emptyList(); showList = true; resumeShell = ""
         Unit
     }
+    // The notification's Disconnect, answered here as the launcher button is: let go of the shell
+    // and stop keeping the link. `disconnected` is what holds the service down; opening a shell is
+    // a fresh request and clears it.
+    LaunchedEffect(Unit) {
+        DisconnectRequests.requests.collect {
+            DisconnectRequests.handled()
+            disconnected = true
+            openList()
+        }
+    }
     // The list's one action. The first ticked shell becomes the page on screen, and the rest are
     // pages the header's arrows walk. The driver is asked to `open` it whatever the screen was
     // showing: choosing between `choose` and `selectShell` from here meant that a launcher opened
@@ -814,7 +833,10 @@ fun MeshTerminalScreen(
     // an empty body for ever (measured on the device 2026-11-07). `NeedList` is the honest
     // condition: nothing is live and nothing is holding a picture, so what the user should see is
     // the host's own list.
-    val needList = !terminalLive && !holding
+    // **Not while a resume is in flight.** See `MeshTermDriver.attaching`: asking for the list then
+    // queues a `Detach` beside the attach, and the page comes back looking live while the host has
+    // already let it go — keystrokes vanish with no message.
+    val needList = !terminalLive && !holding && !conn.driver.attaching
     LaunchedEffect(needList, AppLifecycle.foreground, attemptNo) {
         if (!needList || !AppLifecycle.foreground) return@LaunchedEffect
         repeat(LAUNCHER_TRIES) {

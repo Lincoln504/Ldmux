@@ -77,27 +77,37 @@ data class RadioPreset(
     val spreadingFactor: Int,
     val codingRate: Int,
     val txPowerDbm: Int,
-    /** Path-hash width in bytes: 1, 2 or 3. The firmware mode is this minus one. */
-    val pathHashSize: Int = 1,
+    /**
+     * Path-hash width in bytes: 1, 2 or 3. The firmware mode is this minus one.
+     *
+     * **Two is the default**, not the firmware's one. A one-byte hash has 254 usable values and
+     * collides at about 20 co-channel repeaters (a coin flip); two bytes have 65 536 and hold to a
+     * few hundred. The cost is the hop ceiling, 32 instead of 63, which is above every regional path
+     * length measured — and a collision is not cosmetic: two repeaters sharing a prefix both forward
+     * a direct message meant for one of them.
+     */
+    val pathHashSize: Int = 2,
 ) {
     companion object {
-        /** The bench preset: 910.525 MHz, 500 kHz, SF7, CR5, 22 dBm, 1-byte paths. */
+        /** The bench preset: 910.525 MHz, 500 kHz, SF7, CR5, 22 dBm, two-byte paths. */
         val BENCH = RadioPreset(
             frequencyMhz = 910.525,
             bandwidthKhz = 500.0,
             spreadingFactor = 7,
             codingRate = 5,
             txPowerDbm = 22,
-            pathHashSize = 1,
+            pathHashSize = 2,
         )
 
         /**
-         * The public USA preset: same frequency, 62.5 kHz, 1-byte paths.
+         * The public USA preset: same frequency, 62.5 kHz, two-byte paths.
          *
-         * The path width is **the firmware's default**, not a value the feed states: the MeshCore
-         * preset feed carries `path_hash_size: null` for USA (fetched 2026-10-28), which means
-         * "whatever the radio was built with". It is written as 1 because that is that default,
-         * and a radio whose build differs would report its own value back through `SELF_INFO`.
+         * The path width is **not stated by the feed**: the MeshCore preset feed carries
+         * `path_hash_size: null` for USA (fetched 2026-10-28), which means "whatever the radio was
+         * built with" — and that is one byte, which the project now departs from deliberately. The
+         * app writes the wider width at bind when the radio reports the legacy value, so this field
+         * is the width ldmux uses, and a radio whose build differs still reports its own value back
+         * through `SELF_INFO`.
          */
         val USA = RadioPreset(
             frequencyMhz = 910.525,
@@ -105,7 +115,7 @@ data class RadioPreset(
             spreadingFactor = 7,
             codingRate = 5,
             txPowerDbm = 22,
-            pathHashSize = 1,
+            pathHashSize = 2,
         )
 
         /** The Canadian variant defaults to 3-byte path hashes. */
@@ -283,7 +293,9 @@ fun privatePreset(region: RadioRegion, random: Random = Random.Default): RadioPr
         spreadingFactor = env.spreadingFactors.random(random),
         codingRate = env.codingRate,
         txPowerDbm = env.txPowerDbm,
-        pathHashSize = 1,
+        // The same default as every other preset; a randomiser should not put a node on the
+        // legacy width either.
+        pathHashSize = 2,
     )
 }
 

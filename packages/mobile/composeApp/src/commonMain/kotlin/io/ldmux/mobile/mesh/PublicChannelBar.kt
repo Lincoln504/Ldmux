@@ -86,7 +86,10 @@ internal fun PublicChannelBar(
         flushing -> "sending…"
         reported -> "no answer yet · link busy or down"
         awaiting -> "waiting for the answer"
-        summary.isEmpty() -> "nothing held"
+        // **"Nothing typed", not "nothing held".** The line sits beside a button that says `show`,
+        // and the mode may still be holding a screen the host sent: what is empty here is the
+        // typed buffer, which is the only thing this summary counts.
+        summary.isEmpty() -> "nothing typed"
         else -> summary
     }
     val statusColor = if (awaiting || flushing) Warn else Muted

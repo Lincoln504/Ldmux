@@ -215,6 +215,17 @@ impl<L: ByteLink> Companion<L> {
         Ok(())
     }
 
+    /// Set the path-hash width this radio's own adverts use.
+    ///
+    /// `mode` is the firmware's index: 0 = one byte, 1 = two, 2 = three (`MyMesh.cpp:1466-1473`).
+    /// The radio treats this as a preference about its *own* origin packets; it forwards whatever
+    /// width arrives either way.
+    pub fn set_path_hash_mode(&mut self, mode: u8) -> Result<(), SessionError> {
+        let payload = vec![commands::SET_PATH_HASH_MODE, 0, mode];
+        self.request(&payload, codes::OK, Duration::from_secs(5))?;
+        Ok(())
+    }
+
     /// Tune the radio to a tuple, and confirm the firmware took it.
     ///
     /// Frequencies are in kHz and bandwidths in Hz, which is what the command carries; the

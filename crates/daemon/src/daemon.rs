@@ -2379,9 +2379,25 @@ impl LdmuxDaemon {
                     let _ = self.registry.save();
                 }
                 self.sessions_dirty = true;
-                let agent = crate::title::name_agent_session(&title, &cwd, &|k| {
-                    std::env::var(k).ok()
+                // **The caller says which agent it is, because only the caller knows.** This
+                // process is a systemd unit with none of the agent's environment; the CLI runs
+                // inside the shell and passes `PI_SESSION_FILE` and the Claude Code marker along.
+                // An empty hint renames nothing — a folder is not evidence that its newest
+                // transcript is the conversation this shell is running.
+                let hint = params.get("agent").map(|a| crate::title::AgentHint {
+                    pi_session_file: a
+                        .get("piSessionFile")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(std::path::PathBuf::from),
+                    claude_code: a.get("claudeCode").and_then(|v| v.as_bool()).unwrap_or(false),
                 });
+                let agent = match hint {
+                    Some(hint) => crate::title::name_agent_session(&title, &cwd, &hint, &|k| {
+                        std::env::var(k).ok()
+                    }),
+                    None => crate::title::AgentName::None,
+                };
                 Ok(serde_json::json!({
                     "ok": true,
                     "session": session,

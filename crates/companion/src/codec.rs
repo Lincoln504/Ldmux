@@ -66,6 +66,14 @@ pub mod commands {
     /// produces a reply, which needs a contact entry and a telemetry permission that defaults to
     /// deny; the advert-path cache needs neither.
     pub const GET_ADVERT_PATH: u8 = 0x2A;
+    /// Set the width of the path hashes **this radio's own packets** carry:
+    /// `reserved u8`, then the mode (`MyMesh.cpp:1466-1473`). Mode 0 is one byte (the firmware's
+    /// factory default), 1 is two, 2 is three; 3 or more is `ERR_CODE_ILLEGAL_ARG`.
+    ///
+    /// **It does not change what the radio forwards.** A repeater appends at the width the packet
+    /// arrives with, whatever its own mode says, so this decides adverts only — and ldmux's adverts
+    /// are the only way a peer learns a route here.
+    pub const SET_PATH_HASH_MODE: u8 = 0x3D;
 }
 
 /// The protocol version this client claims. The firmware latches it from

@@ -458,6 +458,21 @@ Consequences worth knowing:
   path is always empty there, and the advert-path answer on a bench is a zero-hop path. The first
   on-air test — two radios far enough apart that a public repeater is the only way between them —
   is what proves the route-learning step end to end.
+- **Two bytes per path hop, and that is ldmux's default.** The firmware ships at mode 0, one byte:
+  254 usable hashes, and 0x00 and 0xFF are reserved. At about twenty co-channel repeaters a one-byte
+  prefix collides with coin-flip probability, and a collision is not cosmetic — two repeaters with
+  the same prefix both forward a direct message meant for one of them. Two bytes gives 65 536 and
+  holds to a few hundred; the price is the hop ceiling, 32 instead of 63, which is above every
+  measured regional path length. Both ends therefore put a radio reporting mode 0 onto mode 1 at
+  bind (`DEFAULT_PATH_HASH_MODE`, `set_path_hash_mode`), once, and never touch a radio an operator
+  set to three bytes. The width is a preference about the node's *own* adverts only: a repeater
+  forwards whatever width arrives (`MyMesh.cpp:491`), so this changes what peers hear from us, not
+  what we relay.
+- **ldmux keeps no contacts.**
+  A route here comes from the advert-path cache keyed by the peer's public key (`onDiscoveredContact`
+  → `advert_paths[]`), which needs no contact entry on either radio: no auto-add policy, no contact
+  cap to hit, and no per-contact record to grow stale or leak. What the operator's MeshCore app keeps
+  for messaging is that app's business, not the terminal's.
 - **The advert-path cache is small, in RAM, and evicts by age.** Sixteen slots
   (`ADVERT_PATH_TABLE_SIZE`, `MyMesh.h:257`), zeroed at boot, oldest-lost first
   (`MyMesh.cpp:368-386`). On a crowded channel `ERR_CODE_NOT_FOUND` for a node heard a minute ago
