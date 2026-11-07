@@ -39,14 +39,12 @@ fun meshBodyFor(view: MeshTermView): MeshBody? = when (view) {
         when (view.reason) {
             null -> "host ended the session"
             MeshTerm.Closed.NOT_FOUND -> "shell gone"
-            MeshTerm.Closed.AMBIGUOUS -> "host runs several shells"
             MeshTerm.Closed.EXITED -> "shell exited"
             MeshTerm.Closed.UNAVAILABLE -> "host could not read the screen"
             MeshTerm.Closed.VERSION -> "host speaks another terminal version"
             else -> "host closed the terminal (${view.reason})"
         },
         when (view.reason) {
-            MeshTerm.Closed.AMBIGUOUS -> "refresh, then choose"
             MeshTerm.Closed.VERSION -> "update the older side"
             MeshTerm.Closed.UNAVAILABLE -> "refresh, try again"
             else -> "refresh to reconnect"

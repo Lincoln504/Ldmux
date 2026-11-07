@@ -45,7 +45,6 @@ fun meshTermLabel(view: MeshTermView): String = when (view) {
     is MeshTermView.HostClosed -> when (view.reason) {
         null -> "mesh · host ended session"
         MeshTerm.Closed.NOT_FOUND -> "mesh · no such shell"
-        MeshTerm.Closed.AMBIGUOUS -> "mesh · several shells, pick one"
         MeshTerm.Closed.EXITED -> "mesh · shell exited"
         MeshTerm.Closed.UNAVAILABLE -> "mesh · host could not read screen"
         MeshTerm.Closed.VERSION -> "mesh · host speaks another version"

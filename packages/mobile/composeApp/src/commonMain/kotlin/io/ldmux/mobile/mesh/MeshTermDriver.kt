@@ -350,6 +350,16 @@ class MeshTermDriver(
     private var attempted: String? = null
 
     /**
+     * Whether the attach on the wire named a shell, or asked the host to pick.
+     *
+     * The two read a refusal differently: `HELD` names a shell only for a named attach, and
+     * `AMBIGUOUS` is the *answer* to an unnamed one ("you have several, name one") rather than an
+     * ending. Kept as a flag because `pick` moves on — the launcher's own list request sets it to
+     * `Listing` one tick later — and the refusal then looked like a closed page.
+     */
+    private var namedAttach = false
+
+    /**
      * Set while the list is showing a shell this phone deliberately let go.
      *
      * The list's one-shell convenience — "exactly one shell and we did not know which we took: it
@@ -554,6 +564,7 @@ class MeshTermDriver(
             // about 58 an hour), answers Closed(NOT_FOUND) for none and Closed(AMBIGUOUS) for
             // several, and only then does the driver ask which (below). It never guesses an id.
             pick = if (selector.isEmpty()) Pick.Probing else Pick.Attached
+            namedAttach = selector.isNotEmpty()
             // **Remembered before the answer arrives.** A refusal that names the shell (`HELD`)
             // has to name it to the screen, and the screen needs it to offer `take it back`; the
             // empty-selector case learns its id from `Profile`, this one already has it.
@@ -1085,9 +1096,15 @@ class MeshTermDriver(
             // last updates arriving after a switch, and must not be answered with a Resync.
             is TermMessage.Rows, is TermMessage.Commit -> if (mirror.profile != null) handleScreen(m)
             is TermMessage.Closed -> when {
-                // The answer to an empty-selector attach: not an ending, a question for the user.
-                pick == Pick.Probing && m.reason == MeshTerm.Closed.AMBIGUOUS -> {
-                    pick = Pick.Listing; pages = ArrayList(); queue(TermMessage.ListRequest)
+                // **"Several shells" is the answer to an unnamed attach, not an ending.** It means
+                // "name one", so the screen goes to the list it should have been on. It is keyed on
+                // whether the attach named a shell rather than on `Pick.Probing`, because the pick
+                // moves on: the launcher's own list request sets it to `Listing` one tick later, and
+                // the refusal was then read as a closed page — "the host runs several shells" over a
+                // live host, with the refresh square as the only way forward.
+                m.reason == MeshTerm.Closed.AMBIGUOUS && !namedAttach -> {
+                    listHoldsNothing = true
+                    backToList()
                 }
                 pick == Pick.Probing && m.reason == MeshTerm.Closed.NOT_FOUND -> pick = Pick.None
                 // **A shell that ended is not a link that ended.** The session is alive and this host
