@@ -469,12 +469,15 @@ None of these are defects. Each is a decision that changes what ships.
   reads the host's advert path, the host reads the phone's after a 36-byte route hint, and each
   replies along the reverse. `ARCHITECTURE.md` section 11 says what is proven and what is not: the
   first on-air run with a repeater between two radios out of earshot is what would prove it.
-- **Airtime on the host is neither enforced nor observable as a limit.** `Budget::RadioGoverned`
-  returns `u8::MAX`, so the session loop never gates a record, on the argument that the radio's
-  firmware runs the transmitter duty cycle. That argument is not evidenced in this tree.
-  `ldmux mesh status` no longer presents the radio's count as a gate ("up to 255 left this
-  hour (the field's ceiling)"), which is honest but leaves the duty cycle unattributed: either
-  the firmware meters (say so, with evidence) or the host must.
+- **Airtime: the host enforces 1 % itself, with the firmware's own limiter as the backstop.** The
+  serial carrier computes the hour's allowance from the tuple (`budget_per_hour`,
+  `mesh_serial.rs:714`) and publishes it as `Status.ops_left_this_hour`; the mesh loop takes that
+  upward only (`mesh.rs:821`) and hands it to `Arq::poll` as `records_left`, which caps **new data**
+  and never gates an ack, a retransmission or a close (`arq.rs` "4. The close, last, once"). The
+  firmware's limiter is real but is not the 1 % a European band requires: `Dispatcher` refills a
+  duty-cycle budget of `1/(1 + getAirtimeBudgetFactor())` and `getAirtimeBudgetFactor()` returns 1.0
+  (`Dispatcher.cpp:26,34-36`), which is a **50 %** duty cycle. So the host's own meter is the one that
+  matches the band, and the firmware's is a ceiling far above it.
 - A spawned window is scoped, but its **workspace placement** (i3/sway/hyprland) is only
   exercised by `desktop_e2e`; nothing asks for a workspace from a phone today, so the adapter
   is carried, not used.
