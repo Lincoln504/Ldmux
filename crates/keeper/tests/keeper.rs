@@ -2169,6 +2169,60 @@ async fn a_bounded_peek_is_chunked_compact_and_lossless_and_the_old_peek_still_w
             break;
         }
     }
+    // **A waiting peek is answered by the output, not by the deadline.** A viewer that asks
+    // "tell me when there is something" must get the bytes the moment they exist: the wait is
+    // there to remove round trips, never to add latency.
+    let id_wait = "wait1";
+    keeper_call(
+        &s,
+        &spawn_req(
+            id_wait,
+            80,
+            24,
+            None,
+            Some(&["/bin/sh", "-c", "sleep 0.2; printf WAITED; sleep 30"]),
+        ),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    let started = std::time::Instant::now();
+    let KeeperMessage::PeekResult(pr) = keeper_call(
+        &s,
+        &KeeperMessage::Peek(Peek::waiting(id_wait, 64 * 1024, 5_000)),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap() else {
+        panic!("not a peekresult")
+    };
+    let waited = started.elapsed();
+    assert_eq!(pr.into_bytes().unwrap(), b"WAITED");
+    assert!(
+        waited < std::time::Duration::from_millis(1_500),
+        "the wait must end when output arrives, not at the deadline: {waited:?}"
+    );
+
+    // **And an empty pane is not held for ever.** Nothing is written, so the answer is empty
+    // and it comes at the deadline: the wait is bounded by the request.
+    let started = std::time::Instant::now();
+    let KeeperMessage::PeekResult(pr) = keeper_call(
+        &s,
+        &KeeperMessage::Peek(Peek::waiting(id_wait, 64 * 1024, 150)),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap() else {
+        panic!("not a peekresult")
+    };
+    let waited = started.elapsed();
+    assert!(pr.into_bytes().unwrap().is_empty());
+    assert!(
+        waited >= std::time::Duration::from_millis(150),
+        "a request that asked for 150 ms waits at least that: {waited:?}"
+    );
+    assert!(waited < std::time::Duration::from_millis(1_500), "{waited:?}");
+
     // The original contract on the same session.
     let KeeperMessage::PeekResult(pr) =
         keeper_call(&s, &KeeperMessage::Peek(Peek::all(id)), DEFAULT_TIMEOUT_MS)

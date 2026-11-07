@@ -98,8 +98,12 @@ pub struct StreamSubscriber {
     pub on_reset: Box<dyn Fn(&str) + Send + Sync>,
 }
 
-/// How often the poll thread asks the keeper while someone is watching.
-pub const WATCHED_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+/// How long the watched poll holds a keeper call open waiting for output.
+///
+/// Half of what the old 10 ms poll could add to an echo, so a wait never makes a keystroke
+/// slower, and a tenth of the calls. Not longer: the gate is held for the wait, and a snapshot
+/// waits for the gate.
+pub const PEEK_WAIT_MS: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// How often it asks while **nobody** is watching.
 ///
@@ -306,12 +310,17 @@ impl PaneStream {
         id
     }
 
-    /// How long the poll thread should sleep before its next pass.
+    /// How long a pass may wait: **inside the keeper** for output, and then for its next turn.
+    ///
+    /// The same value does both jobs, which is what keeps the cadence honest: a pass that waited
+    /// and found nothing sleeps this long again, and one the keeper answered the moment a byte
+    /// arrived goes straight back to waiting. A keeper too old to wait answers at once, and this
+    /// is then the whole interval — the old cadence rather than a hot loop.
     pub fn poll_interval(&self) -> std::time::Duration {
         if self.subscriber_count() == 0 {
             UNWATCHED_POLL
         } else {
-            WATCHED_POLL
+            PEEK_WAIT_MS
         }
     }
 
@@ -523,16 +532,42 @@ impl PaneStream {
     /// Returns whether the keeper still holds more output (the bounded peek said
     /// so), so the poll loop asks again at once instead of sleeping.
     pub fn poll_once(&self) -> Result<bool, String> {
+        self.poll_once_waiting(std::time::Duration::ZERO)
+    }
+
+    /// One poll iteration that **waits up to [wait] for output** instead of asking again.
+    ///
+    /// This is the same pass with one difference: an empty buffer is not the answer, it is the
+    /// reason to hold the call open. The keeper returns the moment a byte arrives, so a
+    /// keystroke's echo is as quick as it was when this polled ten times a second to find out —
+    /// and the ninety-nine calls that found nothing are gone (8.2 % of a core in the daemon and
+    /// 4.7 % in the keeper with nine watched shells, measured 2026-11-06).
+    ///
+    /// The wait happens **inside the gate**, which a snapshot also takes. That is deliberate: a
+    /// snapshot must not slot between "bytes taken from the keeper" and "bytes delivered", and
+    /// the alternative — releasing the gate to wait, then taking — would deliver bytes older than
+    /// a snapshot painted after them. The price is that an attach waits out the remainder of one
+    /// wait, which is bounded by [`PEEK_WAIT_MS`].
+    pub fn poll_once_waiting(&self, wait: std::time::Duration) -> Result<bool, String> {
         if self.closed.load(Ordering::Relaxed) || self.poll_stop.load(Ordering::Relaxed) {
             return Ok(false);
         }
         // Held across the keeper call and the fanout: a snapshot must not slot
         // between "bytes taken from the keeper" and "bytes delivered".
         let _gate = self.gate.lock().unwrap_or_else(|e| e.into_inner());
-        let req = KeeperMessage::Peek(ldmux_protocol::keeper::Peek::bounded(
-            self.session_id.clone(),
-            ldmux_protocol::keeper::PEEK_CHUNK_BYTES,
-        ));
+        let wait_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
+        let req = KeeperMessage::Peek(if wait_ms == 0 {
+            ldmux_protocol::keeper::Peek::bounded(
+                self.session_id.clone(),
+                ldmux_protocol::keeper::PEEK_CHUNK_BYTES,
+            )
+        } else {
+            ldmux_protocol::keeper::Peek::waiting(
+                self.session_id.clone(),
+                ldmux_protocol::keeper::PEEK_CHUNK_BYTES,
+                wait_ms,
+            )
+        });
         let resp = self.keeper.call(&req)?;
         match resp {
             KeeperMessage::PeekResult(pr) => {
@@ -1206,7 +1241,7 @@ mod tests {
 
     /// A stream nobody is watching is polled slowly, and a subscriber cuts that wait short.
     ///
-    /// Without this, every shell ever viewed kept a keeper round trip every 10 ms for the
+    /// Without this, every shell ever viewed kept a keeper round trip at the live rate for the
     /// daemon's whole life (measured: ~0.8 % of a core per idle session on each side). The wake
     /// is part of the fix: the attach must not wait out the slow interval.
     #[test]
@@ -1238,8 +1273,8 @@ mod tests {
         );
         assert_eq!(
             stream.poll_interval(),
-            WATCHED_POLL,
-            "with a subscriber the live rate applies"
+            PEEK_WAIT_MS,
+            "with a subscriber a pass waits for output, and returns the moment there is some"
         );
     }
 
@@ -1293,19 +1328,24 @@ mod tests {
     struct BufKeeper {
         out: Mutex<Vec<u8>>,
         lost: AtomicBool,
+        /// What each `Peek` asked to wait for, in order.
+        waits: Mutex<Vec<Option<u64>>>,
     }
     impl KeeperConn for BufKeeper {
         fn call(&self, req: &KeeperMessage) -> Result<KeeperMessage, String> {
             match req {
-                KeeperMessage::Peek(p) => Ok(KeeperMessage::PeekResult(
-                    ldmux_protocol::keeper::PeekResult {
-                        session_id: p.session_id.clone(),
-                        data: std::mem::take(&mut *self.out.lock().unwrap()),
-                        data64: None,
-                        more: false,
-                        lost: self.lost.swap(false, Ordering::SeqCst),
-                    },
-                )),
+                KeeperMessage::Peek(p) => {
+                    self.waits.lock().unwrap().push(p.wait_ms);
+                    Ok(KeeperMessage::PeekResult(
+                        ldmux_protocol::keeper::PeekResult {
+                            session_id: p.session_id.clone(),
+                            data: std::mem::take(&mut *self.out.lock().unwrap()),
+                            data64: None,
+                            more: false,
+                            lost: self.lost.swap(false, Ordering::SeqCst),
+                        },
+                    ))
+                }
                 KeeperMessage::Snapshot(s) => {
                     let KeeperMessage::SnapshotResult(mut sr) = TestKeeper.call(req)? else {
                         unreachable!()
@@ -1378,6 +1418,7 @@ mod tests {
         let keeper = Arc::new(BufKeeper {
             out: Mutex::new(Vec::new()),
             lost: AtomicBool::new(false),
+            waits: Mutex::new(Vec::new()),
         });
         struct Shared(Arc<BufKeeper>);
         impl KeeperConn for Shared {
@@ -1485,6 +1526,41 @@ mod tests {
         assert_eq!(resets.load(Ordering::SeqCst), 0);
     }
 
+    /// **A watched pass asks the keeper to wait; an unwatched one does not.**
+    ///
+    /// This is the whole of the idle-cost fix: the keeper answering "nothing" a hundred times a
+    /// second per watched shell was 8.2 % of a core in the daemon and 4.7 % in the keeper. The
+    /// wait is only safe if the call carries it, so that is what this pins.
+    #[test]
+    fn a_watched_pass_asks_the_keeper_to_wait_for_output() {
+        let keeper = Arc::new(BufKeeper {
+            out: Mutex::new(Vec::new()),
+            lost: AtomicBool::new(false),
+            waits: Mutex::new(Vec::new()),
+        });
+        struct Shared(Arc<BufKeeper>);
+        impl KeeperConn for Shared {
+            fn call(&self, r: &KeeperMessage) -> Result<KeeperMessage, String> {
+                self.0.call(r)
+            }
+        }
+        let s = PaneStream::new("s1".into(), Box::new(Shared(keeper.clone())));
+        let (sub, _got, _resets) = collecting();
+        let (_id, _u) = s.subscribe(sub);
+
+        s.poll_once_waiting(s.poll_interval()).unwrap();
+        s.poll_once().unwrap();
+        let waits = keeper.waits.lock().unwrap().clone();
+        assert_eq!(
+            waits,
+            vec![
+                Some(u64::try_from(PEEK_WAIT_MS.as_millis()).unwrap()),
+                None
+            ],
+            "a watched pass waits, and a pass that asked for nothing does not"
+        );
+    }
+
     /// With nobody subscribed, polled output is backlog from before anyone was
     /// watching: dropped, not queued for the next subscriber.
     #[test]
@@ -1492,6 +1568,7 @@ mod tests {
         let keeper = Arc::new(BufKeeper {
             out: Mutex::new(b"old".to_vec()),
             lost: AtomicBool::new(true),
+            waits: Mutex::new(Vec::new()),
         });
         struct Shared(Arc<BufKeeper>);
         impl KeeperConn for Shared {
@@ -1518,6 +1595,7 @@ mod tests {
         let keeper = Arc::new(BufKeeper {
             out: Mutex::new(Vec::new()),
             lost: AtomicBool::new(false),
+            waits: Mutex::new(Vec::new()),
         });
         struct Shared(Arc<BufKeeper>);
         impl KeeperConn for Shared {

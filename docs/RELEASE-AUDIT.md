@@ -69,7 +69,7 @@ implements are in `docs/adr/`.
 | 5.3 | `connected` disagreed with the link label | FIXED `8fd09b6` |
 | 5.4 | Network change not detected | OK — probe on wake, 4 s heartbeat |
 | 5.5 | Auth refused: retried forever | OK — `Rejected` is terminal until re-pair |
-| 5.6 | Reconnect storms cost the host CPU | PARTLY — an unwatched session now polls at 4 Hz instead of 100 Hz and an attach wakes it; there is still no per-peer rate limit |
+| 5.6 | Reconnect storms cost the host CPU | PARTLY — an unwatched session now waits on the keeper instead of polling at 100 Hz and an attach wakes it; there is still no per-peer rate limit |
 
 ## 6. Radio connection
 
@@ -213,7 +213,7 @@ what closed it.
 | 15.3 | The receive side is skipped while output is queued, so `SEND_RESULT`s wait and 75 s later the link blames the carriage | FIXED — one biased `select!`, receiving unconditional |
 | 15.4 | A desk takeover does not stop the phone writing into the same pty, and neither side is told | FIXED — `Input`/`Key` ask the in-memory claim table and refuse a non-holder with `Closed { HELD }` |
 | 15.5 | A wedged keeper is never replaced under systemd: `last_pid` is 0 in unit mode, so "replacing it" replaced nothing | FIXED — restart the unit, fall back, certify with a `List` |
-| 15.6 | Every session ever viewed keeps a 100 Hz poller until the shell exits (~0.8 % of a core each, both sides) | FIXED — 250 ms unwatched, 10 ms watched, and `register` wakes the waiter |
+| 15.6 | Every session ever viewed keeps a 100 Hz poller until the shell exits (~0.8 % of a core each, both sides) | FIXED — the poll waits inside the keeper (`Peek { wait_ms }`) instead of sleeping and asking again: 250 ms while nobody is watching, 100 ms while someone is, and `register` wakes the waiter |
 | 15.7 | No binary can say which build it is; the daemon and eight desk windows ran different installs invisibly | FIXED — build id, `--version`, startup line, additive `ping.build` |
 | 15.8 | The bearer token is accepted in the query string, which travels further than a header | FIXED — header only; `scripts/measure_latency.ts` used the query form and is deleted |
 | 15.9 | The first-run scanner throws its outcome away: a wrong code does nothing and a mesh-only code leaves the screen identical | FIXED — every outcome has a sentence and a verb |
@@ -258,13 +258,13 @@ the medium, and the only thing worth changing is one measurable inefficiency.**
 |---|---|
 | Encoding | JSON control messages and binary output frames. **Protobuf would be a net loss**: the hot path (terminal output) already crosses as a raw binary frame with an 8-byte header, control messages are low-rate and small (an `input` message is ~60 B), and end-to-end `permessage-deflate` at level 3 is already negotiated on both ends (7.1x on repetitive output, ADR-0019). A binary control encoding would save tens of bytes per keystroke — below RTT noise on a tailnet — and cost the additive-wire property and the ability to read the protocol in a log |
 | Snapshot payload | A JSON envelope around the pane text, measured 45.5 % larger than the raw text (4.2 KB → 6.2 KB on a live `RCNT` shell) because of escaping, and sent once per attach or resync, not per frame. Deflate absorbs most of it. Correct as it is |
-| Latency | `TCP_NODELAY` set at accept, and keepalive probes at 15 s idle / 5 s interval / 3 misses. Keystroke echo is one message; the daemon drains the keeper at 10 ms while watched, and the phone paces frames at RTT/2 bounded to 33-150 ms |
+| Latency | `TCP_NODELAY` set at accept, and keepalive probes at 15 s idle / 5 s interval / 3 misses. Keystroke echo is one message; the daemon holds a waiting `Peek` on the keeper (answered the moment a byte arrives, so the wait adds no latency), and the phone paces frames at RTT/2 bounded to 33-150 ms |
 | Auth | Bearer token from the `Authorization` header only (verified live: no token 401, query token 401, header without upgrade 400, unknown path 404), constant-time comparison, tailnet-or-loopback peer check before the token, 64-connection cap enforced **pre-auth** with 503 |
 | Frame limits | Frame, message and inflate expansion all capped; an unknown-length deflate cannot expand past the message cap; a bad upgrade is a 400, not a dropped connection |
 | Flow control | One bounded queue per subscriber; overflow drops the subscriber and forces a resync rather than growing memory; snapshot fencing stops the tail being painted twice |
 | Resync | `inplaceResync` when the client advertises it, full snapshot otherwise; epoch ordering keeps a stale frame from landing after a newer screen |
 | Reconnect | Shared backoff with full jitter, capped at 256 s; `Rejected` is terminal until re-pair |
-| **Open** | A **watched** session still asks the keeper 100 times a second (`WATCHED_POLL`), one socket call each. Measured now with nine desk windows open and no tailnet client: **82 ticks / 10 s in the daemon (8.2 % of a core) and 47 in the keeper (4.7 %)**. The unwatched case is fixed (4 Hz). The real fix is an additive `Peek { wait_ms }` long-poll in the keeper so a poll blocks on data instead of asking, but it has to be arranged so a 500 ms wait cannot delay an attach's snapshot (the daemon holds the stream gate across a poll, and a snapshot drains the same tail), which is a keeper-protocol change with terminal correctness at stake. Costed, not done |
+| **Watched poll** | A **watched** session asked the keeper 100 times a second, one socket call each: 8.2 % of a core in the daemon and 4.7 % in the keeper with nine desk windows open (measured 2026-11-06). | FIXED — `Peek { wait_ms }`, so a poll holds the call open and the keeper answers the moment a byte arrives: no added latency, because the wait ends on data, and the round trips fall from ~100 a second to ~10. Measured on this host with the same nine to ten desk windows: **9.7 % of a core before, 2.9 % after**, on a new daemon against the keeper that was already running (it ignores the field and answers at once, which is why the cadence is 10 a second rather than 5 — the keeper half lands when the keeper is next restarted, and both directions are compatible). The gate is still held across the wait, bounded by 100 ms, so an attach's snapshot can wait that long at worst; the keeper returns on data, so a keystroke's echo is unaffected |
 
 ## 17. The surface pass (2026-11-06)
 

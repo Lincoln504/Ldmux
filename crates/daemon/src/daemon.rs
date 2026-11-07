@@ -1734,8 +1734,12 @@ impl LdmuxDaemon {
                     // this shell's output to every viewer, and when it ended the
                     // stream stayed in the map with nobody polling it (a frozen
                     // terminal on every device, with the link looking healthy).
+                    // A waiting peek, so an idle shell costs one keeper call per
+                    // [`crate::stream::PEEK_WAIT_MS`] instead of one per 10 ms: the keeper answers the
+                    // moment a byte arrives, so the wait costs no latency, only round trips.
+                    let wait = poll_stream.poll_interval();
                     let more = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        poll_stream.poll_once()
+                        poll_stream.poll_once_waiting(wait)
                     }))
                     .unwrap_or_else(|_| {
                         crate::stream::note_panic("a stream poll pass");

@@ -224,6 +224,12 @@ fn locked_write(lock: &Mutex<()>, fd: std::os::fd::RawFd, bytes: &[u8]) -> std::
 /// session nobody is watching can reach it.
 pub const OUT_CAP: usize = 4 * 1024 * 1024;
 
+/// How often a waiting `Peek` looks at the buffer.
+///
+/// Half the interval the daemon used to poll a watched shell at, so a wait never delays output
+/// more than the old polling did, and a thousand times cheaper than asking over the socket.
+const PEEK_TICK: std::time::Duration = std::time::Duration::from_millis(5);
+
 /// A session's buffered, not-yet-peeked output.
 #[derive(Default)]
 pub struct OutBuf {
@@ -891,38 +897,50 @@ impl Keeper {
             }
             km::KeeperMessage::Read(rd) => self.state_of(&rd.session_id).await,
             km::KeeperMessage::Peek(p) => {
-                let g = self.sessions.relock();
-                match g.get(&p.session_id) {
-                    Some(s) => {
-                        // The attach's stream pull. The reader task holds only the
-                        // `out` lock, never the sessions lock, so this cannot
-                        // deadlock with it.
-                        match p.max_bytes {
-                            // The original contract, kept for a daemon that
-                            // predates the field: everything, as a byte array.
-                            None => {
-                                let (data, lost) = s.out.relock().take();
-                                Ok(KeeperMessage::PeekResult(PeekResult {
-                                    session_id: p.session_id.clone(),
-                                    data,
-                                    data64: None,
-                                    more: false,
-                                    lost,
-                                }))
-                            }
-                            Some(max) => {
-                                let max = max.clamp(1, km::PEEK_MAX_BYTES) as usize;
-                                let (data, lost, more) = s.out.relock().take_up_to(max);
-                                Ok(KeeperMessage::PeekResult(PeekResult::compact(
-                                    p.session_id.clone(),
-                                    &data,
-                                    more,
-                                    lost,
-                                )))
-                            }
-                        }
+                // **The buffer is taken out of the sessions map first, and the map released.**
+                // A waiting peek must not hold the lock every other session's List, Snapshot and
+                // Peek needs: one viewer waiting for output would otherwise stop the keeper
+                // answering anything at all. The reader task holds only the `out` lock, never the
+                // sessions lock, so this cannot deadlock with it either.
+                let out = {
+                    let g = self.sessions.relock();
+                    match g.get(&p.session_id) {
+                        Some(s) => s.out.clone(),
+                        None => return Err(format!("no such session: {}", p.session_id)),
                     }
-                    None => Err(format!("no such session: {}", p.session_id)),
+                };
+                // The original contract, kept for a daemon that predates the field: everything,
+                // as a byte array, answered at once.
+                let Some(max) = p.max_bytes else {
+                    let (data, lost) = out.relock().take();
+                    return Ok(KeeperMessage::PeekResult(PeekResult {
+                        session_id: p.session_id.clone(),
+                        data,
+                        data64: None,
+                        more: false,
+                        lost,
+                    }));
+                };
+                let max = max.clamp(1, km::PEEK_MAX_BYTES) as usize;
+                let wait = p.wait_ms.unwrap_or(0).min(km::PEEK_MAX_WAIT_MS);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait);
+                // **Wait in short ticks, not on a condition variable.** The pair (mutex,
+                // condvar) the buffer would need lives inside a value everything else reaches
+                // through the sessions map, and the two seconds of plumbing to notify a waiter
+                // are worth less than a tick that costs a lock and a comparison. Five
+                // milliseconds is half the interval the daemon used to poll at, so the wait is
+                // never the reason a keystroke's echo is late.
+                loop {
+                    let (data, lost, more) = out.relock().take_up_to(max);
+                    if !data.is_empty() || lost || std::time::Instant::now() >= deadline {
+                        return Ok(KeeperMessage::PeekResult(PeekResult::compact(
+                            p.session_id.clone(),
+                            &data,
+                            more,
+                            lost,
+                        )));
+                    }
+                    tokio::time::sleep(PEEK_TICK).await;
                 }
             }
             // The full snapshot: hand the render to the session's emulator
