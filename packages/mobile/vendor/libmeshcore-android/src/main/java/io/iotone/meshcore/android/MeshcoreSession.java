@@ -216,11 +216,17 @@ public final class MeshcoreSession {
      * Emits a self-advert into the mesh. No-op when not
      * {@link SessionState#READY}.
      *
+     * <p><strong>Tracked, because the firmware answers it with an `OK`.</strong> The companion has
+     * one answer window and no sequence number, so an untracked command that is also answered lets
+     * its `OK` be taken for the reply to whatever was really in flight — a raw send metered as
+     * accepted when the radio had refused it. Any command the firmware answers with `OK` or `ERR`
+     * belongs in this queue.</p>
+     *
      * @param flood {@code true} = flood, {@code false} = zero-hop
      */
     public void sendSelfAdvert(boolean flood) {
         if (state.get() != SessionState.READY) return;
-        send(MeshcoreFrameCodec.sendSelfAdvert(flood));
+        sendTracked(MeshcoreFrameCodec.sendSelfAdvert(flood));
     }
 
     /**
@@ -331,7 +337,7 @@ public final class MeshcoreSession {
      */
     public void requestBatteryStorage() {
         if (state.get() != SessionState.READY) return;
-        send(MeshcoreFrameCodec.getBatteryStorage());
+        sendTracked(MeshcoreFrameCodec.getBatteryStorage());
     }
 
     /**
@@ -350,7 +356,7 @@ public final class MeshcoreSession {
      */
     public void requestChannel(int channelIdx) {
         if (state.get() != SessionState.READY) return;
-        send(MeshcoreFrameCodec.getChannel(channelIdx));
+        sendTracked(MeshcoreFrameCodec.getChannel(channelIdx));
     }
 
     /**
@@ -382,7 +388,7 @@ public final class MeshcoreSession {
      */
     public void setChannel(int channelIdx, String name, byte[] psk) {
         if (state.get() != SessionState.READY) return;
-        send(MeshcoreFrameCodec.setChannel(channelIdx, name, psk));
+        sendTracked(MeshcoreFrameCodec.setChannel(channelIdx, name, psk));
     }
 
     /**
@@ -402,7 +408,7 @@ public final class MeshcoreSession {
      */
     public void setAdvertPosition(double latitude, double longitude) {
         if (state.get() != SessionState.READY) return;
-        send(MeshcoreFrameCodec.setAdvertLatLon(
+        sendTracked(MeshcoreFrameCodec.setAdvertLatLon(
                 (int) Math.round(latitude * 1_000_000d),
                 (int) Math.round(longitude * 1_000_000d)));
     }
@@ -464,7 +470,7 @@ public final class MeshcoreSession {
      */
     public void setAdvertName(String name) {
         if (state.get() != SessionState.READY) return;
-        send(MeshcoreFrameCodec.setAdvertName(name));
+        sendTracked(MeshcoreFrameCodec.setAdvertName(name));
     }
 
     /**
@@ -491,7 +497,7 @@ public final class MeshcoreSession {
     public void setTelemetryPermissions(int packed) {
         SelfInfo s = selfInfo();
         if (state.get() != SessionState.READY || s == null) return;
-        send(MeshcoreFrameCodec.setOtherParams(
+        sendTracked(MeshcoreFrameCodec.setOtherParams(
                 s.manualAddContacts() ? 1 : 0, packed,
                 s.advertLocPolicy(), s.multiAcks()));
     }
@@ -499,7 +505,7 @@ public final class MeshcoreSession {
     public void setAdvertLocPolicy(int policy) {
         SelfInfo s = selfInfo();
         if (state.get() != SessionState.READY || s == null) return;
-        send(MeshcoreFrameCodec.setOtherParams(
+        sendTracked(MeshcoreFrameCodec.setOtherParams(
                 s.manualAddContacts() ? 1 : 0, s.telemetryModeRaw(), policy, s.multiAcks()));
     }
 
@@ -544,7 +550,7 @@ public final class MeshcoreSession {
      */
     public void removeContact(@NonNull byte[] publicKey) {
         if (state.get() != SessionState.READY) return;
-        send(MeshcoreFrameCodec.removeContact(publicKey));
+        sendTracked(MeshcoreFrameCodec.removeContact(publicKey));
     }
 
     /**
@@ -908,7 +914,15 @@ public final class MeshcoreSession {
             listener.onDecodeFailure(f);
             return;
         }
-        // Everything else (BatteryStorageFrame, TelemetryResponse…).
+        // **Every frame that answers a tracked command settles it.** These are the ones with a
+        // dedicated type rather than an `OK`: the battery/storage read and a channel slot. Left out,
+        // the command stayed "in flight" until the answer window expired, so `isIdle()` lied and raw
+        // sends were refused for seconds after an answer had already arrived.
+        if (frame instanceof io.iotone.meshcore.frames.BatteryStorageFrame
+                || frame instanceof io.iotone.meshcore.frames.ChannelInfoFrame) {
+            trackedAnswered();
+        }
+        // Everything else (TelemetryResponse…).
         listener.onOtherFrame(frame);
         continueDrain();
     }

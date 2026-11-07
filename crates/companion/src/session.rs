@@ -359,7 +359,8 @@ mod tests {
     }
 
     /// **The one route a stock radio can give.** The request is the command, a reserved byte and the
-    /// six-byte prefix; the answer carries the firmware's encoded path length, which is hop groups,
+    /// **whole 32-byte key** (the firmware's guard is `len >= PUB_KEY_SIZE + 2` and it compares seven
+    /// bytes of that key); the answer carries the firmware's encoded path length, which is hop groups,
     /// not a byte count.
     #[test]
     fn an_advert_path_round_trips() {

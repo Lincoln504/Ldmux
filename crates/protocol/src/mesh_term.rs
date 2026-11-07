@@ -360,7 +360,15 @@ pub enum Message {
     /// list already says, so the host sends this table when the phone attaches and the app draws it
     /// beside the rows. Version 9 and later only; the note a `ldmux buzz` may carry is not sent,
     /// because the radio's budget is records and a row label is enough.
+    ///
+    /// **Paged, and the phone merges the pages.** A message body is capped at
+    /// [`MAX_ROWS_BODY`] and an entry is its id plus two bytes, so a dozen marked shells need more
+    /// than one message. `first` opens a run and `last` closes it: a page that is not `last` is
+    /// appended to what has arrived, and the page that is `last` replaces the table. Without the
+    /// flags the phone would replace the table per page and show only the last one.
     Marks {
+        first: bool,
+        last: bool,
         entries: Vec<MarkEntry>,
     },
     /// Phone asks the host to start a shell in `cwd` (empty = the host's default directory).
@@ -586,7 +594,12 @@ impl Message {
                 body.extend_from_slice(id.as_bytes());
                 T_CREATED
             }
-            Self::Marks { entries } => {
+            Self::Marks {
+                first,
+                last,
+                entries,
+            } => {
+                body.push(u8::from(*first) | if *last { 2 } else { 0 });
                 for e in entries {
                     if e.id.len() > MAX_SELECTOR {
                         return Err(EncodeError::TooLong);
@@ -798,7 +811,11 @@ impl Message {
                 }
             }
             T_MARKS => {
-                let mut rest = body;
+                // The flags byte opens the body: `first` starts a run of pages, `last` ends it.
+                let (&flags, rest) = body.split_first().ok_or_else(|| bad.clone())?;
+                let first = flags & 1 != 0;
+                let last = flags & 2 != 0;
+                let mut rest = rest;
                 let mut entries = Vec::new();
                 while !rest.is_empty() {
                     let (&kind, tail) = rest.split_first().ok_or(bad.clone())?;
@@ -813,7 +830,11 @@ impl Message {
                     rest = &tail[n..];
                     entries.push(MarkEntry { id, kind });
                 }
-                Message::Marks { entries }
+                Message::Marks {
+                    first,
+                    last,
+                    entries,
+                }
             }
             T_SESSIONS => {
                 let (&flags, mut rest) = body.split_first().ok_or(bad.clone())?;
@@ -2726,8 +2747,8 @@ mod tests {
             Message::Sessions { last, cwd, origin, owner, entries } => json!({
                 "kind":"sessions","last":last,"cwd":cwd,"origin":origin,"owner":owner,
                 "entries": entries.iter().map(|e| json!({"id":e.id,"label":e.label,"cwd":e.cwd,"origin":e.origin,"owner":e.owner})).collect::<Vec<_>>()}),
-            Message::Marks { entries } => json!({
-                "kind":"marks",
+            Message::Marks { first, last, entries } => json!({
+                "kind":"marks","first":first,"last":last,
                 "entries": entries.iter().map(|e| json!({"id":e.id,"kind":e.kind})).collect::<Vec<_>>()}),
             Message::Create { version, cwd } => json!({"kind":"create","version":version,"cwd":cwd}),
             Message::Close { selector } => json!({"kind":"close","selector":selector}),
@@ -2749,6 +2770,8 @@ mod tests {
                 selector: String::new(),
             },
             Message::Marks {
+                first: true,
+                last: false,
                 entries: vec![
                     MarkEntry {
                         id: "ab12".into(),
@@ -2760,7 +2783,19 @@ mod tests {
                     },
                 ],
             },
-            Message::Marks { entries: vec![] },
+            Message::Marks {
+                first: false,
+                last: true,
+                entries: vec![MarkEntry {
+                    id: "ef56".into(),
+                    kind: 0,
+                }],
+            },
+            Message::Marks {
+                first: true,
+                last: true,
+                entries: vec![],
+            },
             Message::Input(b"\x03".to_vec()),
             Message::Input(b"ls -la\r".to_vec()),
             Message::Resync,

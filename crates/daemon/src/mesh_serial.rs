@@ -146,13 +146,15 @@ fn refresh_peer_route<L: ByteLink>(
     };
     match companion.get_advert_path(key) {
         Ok(path) => {
-            if let Some(reversed) = PeerPath::reversed(
+            // **A zero-hop answer clears the route.** The phone coming back into earshot advertises
+            // with no path, and keeping the last repeater route would send every reply into a chain
+            // that no longer reaches it: the phone would work at range, come home, and go deaf until
+            // the daemon restarted.
+            *peer_path = PeerPath::reversed(
                 usize::from(path.hash_size),
                 usize::from(path.hops),
                 &path.bytes,
-            ) {
-                *peer_path = Some(reversed);
-            }
+            );
             true
         }
         Err(_) => false,
@@ -340,7 +342,7 @@ fn prepare(device: &str) -> Result<(Companion<SerialLink>, Bound, Settings), Mes
     // The version this sends is what the firmware latches to decide whether it
     // emits its V3 frames (MyMesh.cpp:1028-1031); `crates/companion` sends 3.
     let device_info = companion.device_query().map_err(session_error)?;
-    let hash_size = device_info.path_hash_mode.map_or(1, |m| m.saturating_add(1)).clamp(1, 4);
+    let hash_size = device_info.path_hash_mode.map_or(1, |m| m.saturating_add(1)).clamp(1, 3);
     let airtime_ms = self_info.time_on_air_ms(RECORD_MAX);
     let bound = Bound {
         uplink_record_max: u8::try_from(RECORD_MAX).unwrap_or(172),
@@ -395,8 +397,6 @@ fn serve_loop<L: ByteLink>(
     let mut peer_radio: Option<[u8; 32]> = None;
     // When the peer's route was last asked for, so a quiet link does not ask on every tick.
     let mut last_route_ask: Option<Instant> = None;
-    // When a record or a hint last arrived from the peer.
-    let mut last_peer_rx: Option<Instant> = None;
     // When the last advert went out; `None` means none yet, so the first idle moment sends one.
     let mut last_advert: Option<Instant> = None;
     let advert_every = advert_interval();
@@ -511,10 +511,10 @@ fn serve_loop<L: ByteLink>(
                     };
                     t.elapsed() >= interval
                 });
-                if peer_radio.is_some()
-                    && due
-                    && last_peer_rx.is_none_or(|t| t.elapsed() >= PEER_ROUTE_RETRY)
-                {
+                // **Not gated on hearing the peer.** The failure this covers is "we hear them, they
+                // cannot hear us": a phone that moved still reaches us, so a gate on inbound
+                // silence would never let the route be re-read.
+                if peer_radio.is_some() && due {
                     last_route_ask = Some(Instant::now());
                     refresh_peer_route(&mut companion, peer_radio.as_ref(), &mut peer_path);
                 }
@@ -565,7 +565,6 @@ fn serve_loop<L: ByteLink>(
                         // cache is asked straight away, because the handshake's own record is the
                         // next thing to send and it needs a route.
                         peer_radio = Some(key);
-                        last_peer_rx = Some(Instant::now());
                         // One advert per three minutes, and only while there is no route to the
                         // peer: a phone whose session keeps failing sends a hint on every attempt,
                         // and each advert is a broadcast on a band other people are using. Once a
@@ -580,7 +579,6 @@ fn serve_loop<L: ByteLink>(
                             last_route_ask = Some(Instant::now());
                         }
                     } else {
-                        last_peer_rx = Some(Instant::now());
                         if events
                             .blocking_send(Ok(Event::Recv(incoming.record)))
                             .is_err()
@@ -683,7 +681,7 @@ fn incoming_record(frame: &[u8]) -> Option<Incoming> {
     }
     let path_byte = *packet.get(offset)?;
     offset += 1;
-    let hash = usize::from((path_byte >> 6) + 1); // the two bits encode 1..=4
+    let hash = usize::from((path_byte >> 6) + 1); // the two bits can name 4; reserved, so unused
     let hops = usize::from(path_byte & 0x3F);
     let body = offset.checked_add(hops.saturating_mul(hash))?;
     if body > packet.len() {
@@ -811,6 +809,50 @@ mod tests {
     /// **The route that is learned is the reverse of what an advert carries.** Flooded packets
     /// append a hash per repeater, so the path read out of the advert cache is in travel order and
     /// the reply needs the hop groups the other way round.
+    /// A `RESP_CODE_ADVERT_PATH` frame as the firmware writes it: the code, the advert's timestamp,
+    /// the encoded path byte, then the hops in travel order.
+    fn advert_path_frame(encoded: u8, hops: &[u8]) -> Vec<u8> {
+        let mut v = vec![ldmux_companion::codes::ADVERT_PATH];
+        v.extend(0u32.to_le_bytes());
+        v.push(encoded);
+        v.extend_from_slice(hops);
+        v
+    }
+
+    /// **The route is learned from the radio, and a zero-hop answer clears it.**
+    ///
+    /// Driven through [`refresh_peer_route`] and a real [`Companion`] over [`MemoryLink`], not
+    /// through `PeerPath::reversed` alone: the bug this covers was in the caller — a `None` from the
+    /// reverse was ignored, so a phone that came home kept a repeater chain that no longer reached
+    /// it and went deaf until the daemon restarted. A test of the helper alone could not see that.
+    #[test]
+    fn the_route_is_learned_and_a_zero_hop_answer_clears_it() {
+        let peer = [7u8; 32];
+        let mut link = MemoryLink::new();
+        link.push_payload(&advert_path_frame(0x02, &[0x11, 0x22]));
+        let mut companion = Companion::new(link);
+        let mut path: Option<PeerPath> = None;
+        assert!(refresh_peer_route(&mut companion, Some(&peer), &mut path), "an answer arrived");
+        let learned = path.clone().expect("two hops is a route");
+        assert_eq!(learned.bytes, vec![0x22, 0x11], "reversed into sending order");
+        assert_eq!((learned.hash_size, learned.hops), (1, 2));
+
+        // The same phone, back in earshot: its advert arrives with no hops.
+        companion.link_mut().push_payload(&advert_path_frame(0x00, &[]));
+        assert!(refresh_peer_route(&mut companion, Some(&peer), &mut path), "an answer arrived");
+        assert!(path.is_none(), "no hops means no route, not the stale one");
+
+        // ...and each request carries the whole key, which is the firmware's guard
+        // (`len >= PUB_KEY_SIZE + 2`): two commands, each `[0x3C][u16 len][0x2A][0][key]`.
+        let written = &companion.link_mut().written;
+        assert_eq!(written.len(), 2 * (3 + 2 + 32), "two 34-byte command frames");
+        for frame in written.chunks(3 + 2 + 32) {
+            assert_eq!(frame[3], ldmux_companion::commands::GET_ADVERT_PATH);
+            assert_eq!(frame[4], 0, "reserved");
+            assert_eq!(&frame[5..], &peer, "the key, not a six-byte prefix");
+        }
+    }
+
     #[test]
     fn the_advert_path_is_reversed_by_hop_for_the_reply() {
         // One-byte hashes, two hops.

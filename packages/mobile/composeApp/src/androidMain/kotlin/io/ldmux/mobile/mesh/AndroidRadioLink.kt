@@ -150,6 +150,10 @@ class AndroidRadioLink(
     @Volatile
     private var advertPath: RadioPath? = null
 
+    /** Which of the two route sources the maintenance loop asks for on its next tick. */
+    @Volatile
+    private var advertNext = true
+
     private val hostPath: RadioPath?
         get() = contactPath ?: advertPath
 
@@ -290,7 +294,7 @@ class AndroidRadioLink(
             when (frame) {
                 is EndOfContactsFrame -> contactDone?.complete(Unit)
                 // **A route heard on the air.** The advert-path cache is filled by every advert the
-                // radio hears; this is its answer for the host's six-byte prefix. The hops arrive in
+                // radio hears; this is its answer for the host's key. The hops arrive in
                 // travel order, so they are reversed into sending order here (see `RadioRoute`).
                 is AdvertPathFrame -> {
                     val path = RadioRoute.reversed(frame.pathLength(), frame.path())
@@ -463,6 +467,11 @@ class AndroidRadioLink(
      * route out of its own advert-path cache, and that cache is filled by our advert arriving through
      * the repeaters. An advert is a broadcast — a few hundred milliseconds of air — so it is spent
      * only while the peer is silent, and at most every [ANNOUNCE_EVERY_MS].
+     *
+     * **Called from the maintenance loop, never from `send`.** The advert is a *tracked* command
+     * (the firmware answers it with an `OK`), so issuing it while a record is being written would
+     * occupy the one answer window and the record's own answer would be taken for the advert's.
+     * The maintenance loop runs only when the session is idle, which is the ordering this needs.
      */
     private fun announceIfQuiet(s: MeshcoreSession) {
         val now = System.currentTimeMillis()
@@ -488,8 +497,6 @@ class AndroidRadioLink(
         }
         // The companion has one uncorrelated answer window. A tracked command
         // still outstanding means a raw send would race it.
-        if (!s.isIdle()) return RadioSendResult.Failed
-        announceIfQuiet(s)
         if (!s.isIdle()) return RadioSendResult.Failed
         // One immutable path read for this send, including the packet build.
         val path = hostPath ?: RadioPath(0, ByteArray(0))
@@ -723,12 +730,23 @@ class AndroidRadioLink(
                 val wait = if (advertPath == null) PATH_RETRY_MS else PATH_REFRESH_MS
                 delay(wait)
                 if (closing || !s.isIdle()) continue
+                // **Announce from here, not from a send.** A flooded advert is what teaches the
+                // peer its route back to us; it is a tracked command, so it may only be issued when
+                // the answer window is free. This loop is the one place that is always true.
+                announceIfQuiet(s)
+                if (closing || !s.isIdle()) continue
                 // One command per tick: the companion has one answer window, and a second request
                 // inside it makes both answers ambiguous.
-                when {
-                    key == null -> Unit
-                    contactPath == null -> runCatching { s.getAdvertPath(key) }
-                    else -> runCatching { s.getContact(hostKey) }
+                //
+                // **Both sources are read, alternately.** The contact's out-path is preferred when
+                // the firmware has one, but a contact learned where the phone used to be does not
+                // expire, so refreshing only the contact froze the advert route at whatever it was
+                // when the contact first appeared. Alternating means neither source can starve the
+                // other, and one tick is still one command.
+                if (key != null) {
+                    if (advertNext) runCatching { s.getAdvertPath(key) }
+                    else runCatching { s.getContact(hostKey) }
+                    advertNext = !advertNext
                 }
             }
         }

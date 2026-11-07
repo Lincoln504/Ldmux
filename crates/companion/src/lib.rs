@@ -31,7 +31,8 @@ pub mod link;
 pub mod session;
 
 pub use codec::{
-    APP_TARGET_VERSION, DeviceInfo, RAW_CUSTOM_DIRECT_HEADER, SelfInfo, build_raw_direct, commands,
+    APP_TARGET_VERSION, AdvertPath, DeviceInfo, RAW_CUSTOM_DIRECT_HEADER, SelfInfo, build_raw_direct,
+    codes, commands, parse_advert_path,
 };
 pub use framing::{FrameReader, MAX_PAYLOAD, encode};
 pub use link::{ByteLink, MemoryLink, SerialLink};

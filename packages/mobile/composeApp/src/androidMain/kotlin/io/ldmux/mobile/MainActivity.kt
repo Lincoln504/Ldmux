@@ -86,10 +86,20 @@ class MainActivity : ComponentActivity() {
         super.onPause()
     }
 
-    /** Back on screen: the service stops, and with it the notification nobody needs to read. */
+    /**
+     * Back on screen: the service stops, and with it the notification nobody needs to read.
+     *
+     * **This is also where the notification permission is asked**, not in `onPause` where the
+     * foreground service starts. `onPause` is the last moment a foreground service may be started on
+     * Android 12+, but it is the wrong moment to put a system dialog in front of the operator: the
+     * first time they leave the app they would be asked from a screen that is already closing, and a
+     * `requestPermissions` from a pausing activity is not a reliable place to get an answer. Asking
+     * on resume means the dialog appears the first time the app is actually in front of them.
+     */
     override fun onResume() {
         super.onResume()
         BackgroundSession.screenResumed()
+        LdmuxService.activity?.requestNotificationPermissionIfNeeded()
     }
 
     /**

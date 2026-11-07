@@ -695,6 +695,10 @@ class LdmuxClient(private var config: LdmuxConfig) {
                 // the whole map.
                 if (_marks.value.isNotEmpty() && _sessions.value.isNotEmpty()) {
                     val live = _sessions.value.map { it.id }.toSet()
+                    // The notification for a shell that has ended goes with the mark. Without this
+                    // the shade kept a line about a shell that no longer exists, and tapping it did
+                    // nothing the operator could act on.
+                    for (id in _marks.value.keys - live) BackgroundSession.clearMark(id)
                     _marks.value = _marks.value.filterKeys { it in live }
                 }
                 appLog("sessions parsed=${_sessions.value.size} attachable=${_sessions.value.count { it.attachable }}")

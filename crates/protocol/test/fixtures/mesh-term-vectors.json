@@ -45,7 +45,7 @@
       }
     },
     {
-      "hex": "870c000461623132010463643334",
+      "hex": "870d01000461623132010463643334",
       "message": {
         "entries": [
           {
@@ -57,14 +57,32 @@
             "kind": 1
           }
         ],
-        "kind": "marks"
+        "first": true,
+        "kind": "marks",
+        "last": false
       }
     },
     {
-      "hex": "8700",
+      "hex": "870702000465663536",
+      "message": {
+        "entries": [
+          {
+            "id": "ef56",
+            "kind": 0
+          }
+        ],
+        "first": false,
+        "kind": "marks",
+        "last": true
+      }
+    },
+    {
+      "hex": "870103",
       "message": {
         "entries": [],
-        "kind": "marks"
+        "first": true,
+        "kind": "marks",
+        "last": true
       }
     },
     {

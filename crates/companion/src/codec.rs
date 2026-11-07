@@ -82,7 +82,8 @@ pub const RAW_CUSTOM_DIRECT_HEADER: u8 = 0x3E;
 pub const PATH_FLOOD: u8 = 0xFF;
 
 /// Build the path byte for a direct packet: hash width in the top two bits, hop
-/// count in the low six. `hash_size` is 1..=4, matching the firmware's encoding.
+/// count in the low six. `hash_size` is 1..=3: the two bits can name 4, and the firmware reserves
+/// that width for the future (`Packet::isValidPathLen`, `src/Packet.cpp:13-18`).
 pub fn path_byte(hash_size: u8, hops: u8) -> Result<u8, CodecError> {
     // 4 is reserved for the future (`Packet::isValidPathLen`, `src/Packet.cpp:13-18`).
     if !(1..=3).contains(&hash_size) {
@@ -140,7 +141,7 @@ pub fn build_raw_direct(hash_size: u8, path: &[u8], record: &[u8]) -> Result<Vec
 pub struct AdvertPath {
     /// The advert's own timestamp, as the firmware stored it.
     pub received_at: u32,
-    /// Bytes per hop the path was heard with (1..=4).
+    /// Bytes per hop the path was heard with (1..=3; 4 is reserved and never parsed).
     pub hash_size: u8,
     /// Hops, in travel order towards us.
     pub hops: u8,
@@ -160,7 +161,7 @@ pub fn parse_advert_path(frame: &[u8]) -> Option<AdvertPath> {
     let received_at = u32::from_le_bytes(frame.get(1..5)?.try_into().ok()?);
     let path_byte = *frame.get(5)?;
     let hash_size = (path_byte >> 6) + 1;
-    // The two width bits encode 1..=4 and the firmware reserves 4 for the future
+    // The two width bits can name 4, and the firmware reserves that width for the future
     // (`Packet::isValidPathLen`, `src/Packet.cpp:13-18`), so a frame claiming it is malformed.
     if hash_size == 4 {
         return None;
@@ -193,7 +194,7 @@ pub enum CodecError {
 impl std::fmt::Display for CodecError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CodecError::BadHashSize(n) => write!(f, "path hash size {n} is not 1..=4"),
+            CodecError::BadHashSize(n) => write!(f, "path hash size {n} is not 1..=3"),
             CodecError::TooManyHops(n) => write!(f, "{n} hops exceeds the 6-bit path length"),
             CodecError::RaggedPath { len, hash } => {
                 write!(f, "a {len}-byte path is not a whole number of {hash}-byte hashes")

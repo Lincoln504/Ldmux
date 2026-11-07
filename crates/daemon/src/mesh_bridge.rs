@@ -309,9 +309,11 @@ pub struct Bridge<H, L> {
 /// several messages cost the records they already cost and nothing more.
 fn marks_pages(marks: Vec<(String, u8)>) -> Vec<Message> {
     use ldmux_protocol::mesh_term::{MAX_ROWS_BODY, MAX_SELECTOR};
+    // The flags byte is part of the body, so a page carries one byte less than the ceiling.
+    let ceiling = MAX_ROWS_BODY - 1;
     let mut pages: Vec<Message> = Vec::new();
     let mut page: Vec<MarkEntry> = Vec::new();
-    let mut bytes = 0usize;
+    let mut used = 0usize;
     for (id, kind) in marks {
         // An id the wire cannot carry is not silently shortened into a mark for another shell: it is
         // dropped, and only a bug could produce one (session ids are ten characters).
@@ -319,18 +321,22 @@ fn marks_pages(marks: Vec<(String, u8)>) -> Vec<Message> {
             continue;
         }
         let cost = 2 + id.len();
-        if !page.is_empty() && bytes + cost > MAX_ROWS_BODY {
+        if !page.is_empty() && used + cost > ceiling {
             pages.push(Message::Marks {
+                first: pages.is_empty(),
+                last: false,
                 entries: std::mem::take(&mut page),
             });
-            bytes = 0;
+            used = 0;
         }
-        bytes += cost;
+        used += cost;
         page.push(MarkEntry { id, kind });
     }
-    if !page.is_empty() {
-        pages.push(Message::Marks { entries: page });
-    }
+    pages.push(Message::Marks {
+        first: pages.is_empty(),
+        last: true,
+        entries: page,
+    });
     pages
 }
 
@@ -1984,7 +1990,7 @@ mod tests {
         assert!(
             sent(&link, 1).iter().any(|m| matches!(
                 m,
-                Message::Marks { entries } if entries.len() == 1 && entries[0].id == "abcd-1"
+                Message::Marks { entries, .. } if entries.len() == 1 && entries[0].id == "abcd-1"
             )),
             "the table rides with the list: {:?}",
             sent(&link, 1)
@@ -1994,23 +2000,51 @@ mod tests {
     /// **The table is paged, because a message has a body ceiling the table does not.** A dozen
     /// marked shells already overflow `MAX_ROWS_BODY`, and `reply` drops a message it cannot encode,
     /// which would have been "no marks at all" exactly when there were many.
+    ///
+    /// The page order is asserted here too: `first` opens the run and `last` closes it, which is what
+    /// lets the phone append the pages and replace its table once. Without them it replaced the table
+    /// per page and showed only the last one.
     #[test]
     fn a_large_mark_table_is_paged_into_messages_that_fit() {
         let marks: Vec<(String, u8)> = (0..40).map(|i| (format!("s{i:09}"), (i % 2) as u8)).collect();
         let pages = marks_pages(marks.clone());
         assert!(pages.len() >= 2, "forty marks do not fit one message");
         let mut seen = 0;
-        for p in &pages {
+        for (i, p) in pages.iter().enumerate() {
             let bytes = p.encode().expect("every page encodes");
             assert!(
                 bytes.len() <= ldmux_protocol::mesh_term::MAX_MESSAGE,
                 "a page is one message"
             );
-            if let Message::Marks { entries } = p {
-                seen += entries.len();
+            match p {
+                Message::Marks {
+                    first,
+                    last,
+                    entries,
+                } => {
+                    assert_eq!(*first, i == 0, "exactly the first page opens the run");
+                    assert_eq!(*last, i + 1 == pages.len(), "only the last page closes it");
+                    seen += entries.len();
+                }
+                other => panic!("a mark page is a Marks message: {other:?}"),
             }
         }
         assert_eq!(seen, marks.len(), "no mark is lost in the paging");
+    }
+
+    /// An empty table is still a complete run: the phone must be told to clear what it had.
+    #[test]
+    fn an_empty_mark_table_is_one_page_that_opens_and_closes() {
+        let pages = marks_pages(Vec::new());
+        assert_eq!(pages.len(), 1);
+        assert!(matches!(
+            &pages[0],
+            Message::Marks {
+                first: true,
+                last: true,
+                entries
+            } if entries.is_empty()
+        ));
     }
 
     /// **The marks a phone missed go out with the attach.** The radio cannot reach a phone that is
@@ -2032,7 +2066,7 @@ mod tests {
         assert!(
             sent(&link, 1).iter().any(|m| matches!(
                 m,
-                Message::Marks { entries }
+                Message::Marks { entries, .. }
                     if entries.len() == 2 && entries[0].id == "abcd-1" && entries[0].kind == 1
             )),
             "the table goes with the attach: {:?}",

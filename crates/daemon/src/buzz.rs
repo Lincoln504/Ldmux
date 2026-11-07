@@ -10,7 +10,7 @@
 //!   offline mode is exactly "no internet at all", so the marks live on the host as a table and are
 //!   delivered when a device connects. That is the whole delivery model, and it is why a mark
 //!   survives the app being closed for an hour.
-//! - **A row mark costs nothing and reads better than a banner.** A banner for a shell the operator
+//! - **A row mark costs nothing and reads better than a notification.** A notification for a shell the operator
 //!   is already looking at is noise, and a stack of them says less than the grid of rows that says
 //!   which shells are waiting.
 //! - The tailnet route can promote a mark to a real notification (opt-in); the radio route cannot,
@@ -60,7 +60,7 @@ impl Kind {
         }
     }
 
-    /// The wire byte, for the radio route (`mesh_term::Message::Mark`).
+    /// The wire byte, for the radio route (`mesh_term::Message::Marks`).
     #[must_use]
     pub fn as_byte(self) -> u8 {
         match self {
@@ -168,7 +168,12 @@ impl Marks {
         self.by_session.remove(session);
     }
 
-    /// The current table, oldest entry first, for a device that has just connected.
+    /// The current table, in session-id order, for a device that has just connected.
+    ///
+    /// **Session-id order, not age.** `by_session` is a `BTreeMap` keyed by the id, so this is
+    /// deterministic and stable between calls — which is what the radio's paging needs, since it
+    /// cuts this list into pages. Age would be nicer to read and would let the same table page
+    /// differently on two consecutive reads.
     #[must_use]
     pub fn snapshot(&self, now: u64) -> Vec<Mark> {
         self.by_session

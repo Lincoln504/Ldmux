@@ -162,6 +162,8 @@ internal fun AppContent(
     // The launcher comes first: a terminal is somewhere you go, and which shell
     // you are going to is a question worth asking before you are in one.
     var showLauncher by remember { mutableStateOf(true) }
+    // Set by the notification's Disconnect, cleared by opening a shell: see `reachable`.
+    var disconnected by remember { mutableStateOf(false) }
     // Which shells the pager pages through: the ones the user chose, and nothing
     // else. It used to start as `null`, meaning "every shell", so the first
     // `+ shell` after launch opened a pager over *all* of them, attached page 0 —
@@ -347,7 +349,12 @@ internal fun AppContent(
     //
     // The radio route does not do this: staying reachable there means keeping a radio session and a
     // BLE link alive, and the marks are replayed on the next attach instead.
-    val reachable = config.route == MeshRoute.Tailnet && link != LinkState.Unpaired
+    //
+    // **Disconnect means disconnect.** The notification's Disconnect sets `disconnected`, and the
+    // presence link would otherwise re-arm the service on the very next background transition —
+    // the pages are gone, `reachable` is still true, and the operator's decision lasted until they
+    // switched apps. Opening a shell is what re-arms it, because that is a fresh request.
+    val reachable = config.route == MeshRoute.Tailnet && link != LinkState.Unpaired && !disconnected
     // **This states the intent, not the service.** `setActive` records what the link needs; the
     // platform decides when that becomes a foreground service, which is only while the app is off
     // screen. A visible app needs no notification to say it is open.
@@ -472,9 +479,15 @@ internal fun AppContent(
     LaunchedEffect(Unit) {
         DisconnectRequests.requests.collect {
             DisconnectRequests.handled()
+            disconnected = true
             pageOrder = emptyList()
             showLauncher = true
         }
+    }
+
+    // Opening a shell is a new request for the link, so it clears the Disconnect.
+    LaunchedEffect(terminalOpen) {
+        if (terminalOpen) disconnected = false
     }
 
     // Back means the same thing as the launcher button: it leaves the terminal

@@ -163,10 +163,6 @@ object MeshTerm {
 }
 
 /**
- * One running shell in a `Sessions` reply. [id] is usable as an `Attach` selector, [cwd] is where
- * the shell is (version 6; empty from a version-5 host, which does not send the field at all).
- */
-/**
  * One row of [TermMessage.Marks]: a shell and the word about it.
  *
  * [kind] is [MeshTerm.DONE] when an agent finished a turn and [MeshTerm.ATTENTION] when a shell
@@ -189,6 +185,10 @@ enum class ShellMark(val wire: Int) {
     }
 }
 
+/**
+ * One running shell in a `Sessions` reply. [id] is usable as an `Attach` selector, [cwd] is where
+ * the shell is (version 6; empty from a version-5 host, which does not send the field at all).
+ */
 data class SessionEntry(
     val id: String,
     val label: String,
@@ -296,7 +296,19 @@ sealed interface TermMessage {
      * list already says. Sent on attach, drawn beside the rows, forgotten when the shell is opened.
      * A host below version 9 never sends it, which reads as "no marks".
      */
-    data class Marks(val entries: List<MarkEntry>) : TermMessage
+    /**
+     * A page of the mark table.
+     *
+     * [first] opens a run of pages and [last] closes it: a page that is not [last] is appended to
+     * what has arrived, and the page that is [last] replaces the table. A body is capped at 134
+     * bytes and an entry is its id plus two, so a dozen marked shells need more than one message —
+     * and replacing the table per page would show only the last page.
+     */
+    data class Marks(
+        val first: Boolean,
+        val last: Boolean,
+        val entries: List<MarkEntry>,
+    ) : TermMessage
 
     /** Phone asks to attach to a shell somebody else holds, displacing them (version 8). */
     data class Takeover(val selector: String) : TermMessage
@@ -455,6 +467,7 @@ fun TermMessage.encode(): ByteArray {
             MeshTerm.T_CREATED
         }
         is TermMessage.Marks -> {
+            body.add(((if (first) 1 else 0) or (if (last) 2 else 0)).toByte())
             for (e in entries) {
                 val i = e.id.encodeToByteArray()
                 if (i.size > MeshTerm.MAX_SELECTOR) throw TermEncodeException("mark id too long")
@@ -662,8 +675,10 @@ class TermDecoder {
                 ok(TermMessage.Created(id))
             }
             MeshTerm.T_MARKS -> {
+                if (body.isEmpty()) return Parsed.Bad
+                val flags = body[0].toInt()
                 val entries = ArrayList<MarkEntry>()
-                var p = 0
+                var p = 1
                 while (p < body.size) {
                     if (body.size - p < 2) return Parsed.Bad
                     val kind = b(body, p)
@@ -673,7 +688,7 @@ class TermDecoder {
                     entries += MarkEntry(id, kind)
                     p += 2 + n
                 }
-                ok(TermMessage.Marks(entries))
+                ok(TermMessage.Marks(first = flags and 1 != 0, last = flags and 2 != 0, entries = entries))
             }
             MeshTerm.T_SESSIONS -> {
                 if (body.isEmpty()) return Parsed.Bad

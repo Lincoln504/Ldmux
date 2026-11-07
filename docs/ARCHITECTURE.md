@@ -410,7 +410,8 @@ be transmitted and then ignored by every receiver. Direct means the sender must 
    handshake because the handshake's own answer is the first thing that needs a route. The host then
    reads the phone's advert path out of its own radio's cache (the same `CMD_GET_ADVERT_PATH`) — at
    once on the hint, every 15 s while no route is known, and about once every two minutes once one
-   is — and floods one advert of its own when the hint arrives **while it has no route to the phone**,
+   is (not gated on hearing the phone: the case this covers is "we hear them, they cannot hear us") —
+   and floods one advert of its own when the hint arrives **while it has no route to the phone**,
    at most every three minutes, so the phone's next read finds a fresh path instead of waiting out the
    scheduled interval. A hint is 36 bytes and an advert is a broadcast, so that floor is what keeps a
    peer that repeats hints from using the host as an amplifier.
@@ -425,12 +426,14 @@ Consequences worth knowing:
   `max(2 s, 6 x airtime)` (`Config::with_airtime`), handed to the session by the carrier
   (`Bound::airtime_ms`) and by the app (`ldmux_session_set_airtime`). A fixed two-second retry
   would duplicate records the peer already has and spend the hour's allowance doing it.
-- **Paths move.** The phone asks its radio for the advert path every 45 s while it has no route and
-  re-reads it every 10 minutes once it has one, so a host that becomes reachable mid-session becomes
-  reachable without a reconnect. A route that turns out to be stale is dropped by the app (the radio
-  refuses the direct send), which retries zero-hop and asks for a fresh route at once instead of
-  waiting out the retry window. The same rule on the host side: a route is re-read from the cache
-  whenever nothing has arrived from the phone for two minutes.
+- **Paths move.** The phone asks its radio for a route every 45 s while it has none and every 10
+  minutes once it has one, alternating between the advert path and the contact so neither source can
+  starve the other, so a host that becomes reachable mid-session becomes reachable without a
+  reconnect. A route that turns out to be stale is dropped by the app (the radio refuses the direct
+  send), which retries zero-hop and asks for a fresh route at once instead of waiting out the retry
+  window. On the host side a route is re-read from the cache on the same cadence whatever is arriving,
+  and **a zero-hop answer clears it**: the phone back in earshot advertises with no path, and keeping
+  the last repeater chain would send every reply into a route that no longer reaches it.
 - **What is proven and what is not.** The reverse-path reply, the zero-hop fallback, the
   per-`hash_size` hop reversal (both directions: `PeerPath::reversed` and `RadioRoute.reversed`),
   the advert-path decoding and the airtime-scaled timers are unit-tested. Nothing in this tree has

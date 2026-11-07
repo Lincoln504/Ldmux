@@ -385,6 +385,15 @@ class MeshTermDriver(
     private val _marks = MutableStateFlow<Map<String, ShellMark>>(emptyMap())
     val marks: StateFlow<Map<String, ShellMark>> = _marks.asStateFlow()
 
+    /**
+     * The pages of a mark table that has not finished arriving, or null between runs.
+     *
+     * A table of a dozen shells does not fit one message, so the host pages it and only the page that
+     * says `last` is committed to [marks]. This is the other half of that rule; a page that opens a
+     * run (`first`) replaces it, so a lost tail cannot merge next week's table into this one.
+     */
+    private var markPage: Map<String, ShellMark>? = null
+
     /** Records that failed a session check (tag, replay, decode). Evidence of noise or an attacker, not a failure. */
     var rejectedRecords = 0
         private set
@@ -1078,10 +1087,17 @@ class MeshTermDriver(
                 m.reason == MeshTerm.Closed.EXITED -> backToList()
                 else -> terminalView = MeshTermView.HostClosed(m.reason)
             }
+            // **The table is paged, and the phone assembles it.** A page that does not say `last`
+            // is appended to what has arrived; the page that says `last` replaces the table, which
+            // is also how the host clears a mark it no longer holds. Replacing per page would show
+            // only the last page of a table that needs several.
             is TermMessage.Marks -> {
-                _marks.value = m.entries.mapNotNull { e ->
-                    ShellMark.of(e.kind)?.let { e.id to it }
-                }.toMap()
+                val page = m.entries.mapNotNull { e -> ShellMark.of(e.kind)?.let { e.id to it } }.toMap()
+                markPage = if (m.first || markPage == null) page else markPage!! + page
+                if (m.last) {
+                    _marks.value = markPage ?: emptyMap()
+                    markPage = null
+                }
             }
             is TermMessage.Sessions -> onSessions(m)
             // **The host has started a shell for us.** Attach to exactly that id: the list is not

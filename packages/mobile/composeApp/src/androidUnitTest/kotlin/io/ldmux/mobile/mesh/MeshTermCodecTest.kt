@@ -54,6 +54,8 @@ class MeshTermCodecTest {
                 },
             )
             "marks" -> TermMessage.Marks(
+                o["first"]!!.jsonPrimitive.boolean,
+                o["last"]!!.jsonPrimitive.boolean,
                 o["entries"]!!.jsonArray.map {
                     MarkEntry(
                         it.jsonObject["id"]!!.jsonPrimitive.content,

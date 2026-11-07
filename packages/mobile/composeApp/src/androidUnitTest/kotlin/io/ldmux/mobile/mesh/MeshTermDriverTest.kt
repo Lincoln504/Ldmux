@@ -229,6 +229,50 @@ class MeshTermDriverTest {
     private fun ent(id: String, label: String = "") = SessionEntry(id, label)
     private suspend fun probed(d: MeshTermDriver) { d.start(); d.onRecord(byteArrayOf(2)) }
 
+    /** Reads one mark off the wire as the host would page it. */
+    private fun mark(id: String, kind: ShellMark) = MarkEntry(id, kind.wire)
+
+    /**
+     * **A page is not the table.** A dozen marked shells do not fit one message, so the host pages
+     * them: a page that is not `last` is appended and the page that is `last` replaces the table. A
+     * driver that replaced the table per page showed only the last page, which is exactly the case
+     * the paging was added for.
+     */
+    @Test
+    fun `mark pages are assembled into one table`() = runBlocking<Unit> {
+        val d = driver(); probed(d)
+        deliver(
+            d,
+            TermMessage.Marks(false, true, listOf(mark("aa11", ShellMark.Done))),
+        )
+        assertEquals(mapOf("aa11" to ShellMark.Done), d.marks.value)
+
+        // A run of two pages: the first appends to nothing, the second closes the run.
+        deliver(
+            d,
+            TermMessage.Marks(true, false, listOf(mark("aa11", ShellMark.Done), mark("bb22", ShellMark.Attention))),
+            TermMessage.Marks(false, true, listOf(mark("cc33", ShellMark.Done))),
+        )
+        assertEquals(
+            mapOf("aa11" to ShellMark.Done, "bb22" to ShellMark.Attention, "cc33" to ShellMark.Done),
+            d.marks.value,
+        )
+
+        // A new run replaces the table, and an empty closed page clears it.
+        deliver(d, TermMessage.Marks(true, true, emptyList()))
+        assertEquals(emptyMap<String, ShellMark>(), d.marks.value)
+    }
+
+    /** A half-arrived run must not leak into the next one. */
+    @Test
+    fun `a lost last page does not merge into the next run`() = runBlocking<Unit> {
+        val d = driver(); probed(d)
+        deliver(d, TermMessage.Marks(true, false, listOf(mark("aa11", ShellMark.Done))))
+        // The tail never arrives; the next run starts fresh.
+        deliver(d, TermMessage.Marks(true, true, listOf(mark("bb22", ShellMark.Attention))))
+        assertEquals(mapOf("bb22" to ShellMark.Attention), d.marks.value)
+    }
+
     @Test
     fun `an ambiguous host is a question, not an ending, and nothing is attached until the user chooses`() = runBlocking<Unit> {
         val d = driver(); probed(d)

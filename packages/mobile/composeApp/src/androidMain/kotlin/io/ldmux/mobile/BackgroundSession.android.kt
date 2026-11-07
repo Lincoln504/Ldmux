@@ -300,10 +300,10 @@ actual object BackgroundSession {
             runCatching { ctx.stopService(intent) }.onFailure { Log.w(TAG, "stopService", it) }
             return
         }
-        // Ask for the notification permission first: on Android 13+ a foreground
-        // service without it still runs, but silently, and a service the user
-        // cannot see is a service the user cannot stop.
-        LdmuxService.activity?.requestNotificationPermissionIfNeeded()
+        // The permission ask is not here: `MainActivity.onResume` owns it, because this runs from
+        // `onPause` and a system dialog raised from an activity that is leaving is answered by
+        // nobody. On Android 13+ a foreground service without the permission still runs, silently,
+        // which is the accepted outcome of a denial.
         runCatching {
             // Always the foreground form: minSdk is 28, where it exists.
             ctx.startForegroundService(intent)
