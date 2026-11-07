@@ -48,6 +48,11 @@ class LinkTest {
             "the engine's wrapper is not the one that knows",
         )
         assertFalse(probeFailureIsRefused(java.net.SocketTimeoutException("timeout")))
+        // A route that does not exist is not a closed port: the daemon may be running perfectly
+        // well on a network this phone cannot reach.
+        assertFalse(
+            probeFailureIsRefused(java.net.ConnectException("Failed to connect: Network is unreachable")),
+        )
         assertFalse(probeFailureIsRefused(java.net.UnknownHostException("nothing there")))
         assertFalse(probeFailureIsRefused(RuntimeException("some other failure")))
     }

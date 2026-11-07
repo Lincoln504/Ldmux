@@ -64,7 +64,7 @@ implements are in `docs/adr/`.
 
 | # | Failure | Status |
 |---|---|---|
-| 5.1 | Tailscale absent or down: "unreachable" cannot say why | FIXED — the probe keeps its three answers apart (`ProbeAnswer.Answer`/`Refused`/`NoAnswer`), and a host that is up with nothing listening reads `debian · daemon not running` instead of `unreachable` — the one of the three the operator can fix on the other machine |
+| 5.1 | Tailscale absent or down: "unreachable" cannot say why | FIXED — the probe keeps its three answers apart (`ProbeAnswer.Answer`/`Refused`/`NoAnswer`), and a host that is up with nothing listening reads `debian · daemon not running` instead of `unreachable` — the one of the three the operator can fix on the other machine. A `ConnectException` carrying "unreachable" or "no route" is not that case (`ENETUNREACH` arrives as the same type), so a network with no route to the host keeps the generic sentence |
 | 5.2 | Silent link (NAT expiry, hung daemon) reported and never retried | FIXED `8fd09b6` |
 | 5.3 | `connected` disagreed with the link label | FIXED `8fd09b6` |
 | 5.4 | Network change not detected | OK — probe on wake, 4 s heartbeat |

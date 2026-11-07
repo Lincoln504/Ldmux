@@ -272,6 +272,12 @@ struct Attached {
 ///
 /// `CRLF` is folded to `LF` first: a paste copied on a system that writes both would otherwise
 /// arrive as a carriage return followed by a newline, i.e. a blank line after every line.
+///
+/// **A newline is the paste marker, and a carriage return is not.** Typed Enter arrives as `\r`,
+/// so treating `\r` as a paste would wrap the person's own Enter in the markers — the shell would
+/// insert a newline into the line instead of running it. A clipboard whose lines end in bare `\r`
+/// therefore still types itself line by line, which is what a terminal does when the markers are
+/// absent; anything that ends lines the ordinary way is a paste and is inserted.
 #[must_use]
 pub fn paste_bytes(bytes: &[u8], bracketed_paste: bool) -> Vec<u8> {
     if !bytes.contains(&b'\n') {
