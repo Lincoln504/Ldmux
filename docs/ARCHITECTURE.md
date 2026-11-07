@@ -406,9 +406,8 @@ be transmitted and then ignored by every receiver. Direct means the sender must 
    number of them arrives with an **empty** path: the receiver never learns a route from traffic it
    receives. The phone therefore announces itself (a flooded advert, once when the link binds and then
    at most every three minutes while the host has been silent for two), and tells the host which radio
-   it is with a
-   **route hint** — a 36-byte record, `LDRH` and the phone's public key, sent before the session
-   handshake because the handshake's own answer is the first thing that needs a route. The host then
+   it is with a **route hint** — a 36-byte record, `LDRH` and the phone's public key, sent before the
+   session handshake because the handshake's own answer is the first thing that needs a route. The host then
    reads the phone's advert path out of its own radio's cache (the same `CMD_GET_ADVERT_PATH`) — at
    once on the hint, every 15 s while no route is known, and about once every two minutes once one
    is (not gated on hearing the phone: the case this covers is "we hear them, they cannot hear us") —
