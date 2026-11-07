@@ -14,9 +14,42 @@ class LinkTest {
 
     @Test
     fun `a refused token is rejected, and everything else is unreachable`() {
-        assertEquals(LinkState.Rejected, linkStateFromProbe(401))
+        assertEquals(LinkState.Rejected, linkStateFromProbe(ProbeAnswer.Answer(401)))
         // 400 is the daemon saying "that was not an upgrade" to an accepted token.
-        for (s in listOf(400, 403, 404, 500, null)) assertEquals(LinkState.Unreachable, linkStateFromProbe(s))
+        for (s in listOf(400, 403, 404, 500)) {
+            assertEquals(LinkState.Unreachable, linkStateFromProbe(ProbeAnswer.Answer(s)))
+        }
+        assertEquals(LinkState.Unreachable, linkStateFromProbe(ProbeAnswer.NoAnswer))
+        assertEquals(LinkState.Unreachable, linkStateFromProbe(ProbeAnswer.Refused))
+    }
+
+    @Test
+    fun `a host with nothing listening says the daemon is not running, not that it is unreachable`() {
+        // The one failure the person can fix on the other machine, and it read as a network
+        // problem: the host answered the connection and refused it, so the network is fine.
+        assertEquals("daemon not running", linkReasonLabel(ProbeAnswer.Refused))
+        assertEquals(
+            "debian · daemon not running",
+            linkLabel(LinkState.Unreachable, paired, reason = linkReasonLabel(ProbeAnswer.Refused)),
+        )
+        // Silence, a timeout and a token refusal get no such sentence: nothing is known to fix.
+        assertNull(linkReasonLabel(ProbeAnswer.NoAnswer))
+        assertNull(linkReasonLabel(ProbeAnswer.Answer(401)))
+        assertEquals("debian · unreachable", linkLabel(LinkState.Unreachable, paired, reason = null))
+    }
+
+    @Test
+    fun `a refused connection is told apart from a timeout, per platform`() {
+        // Android's engine refuses with `ConnectException`; a timeout is not that, and neither is
+        // a wrapped one that carries no such cause.
+        assertTrue(probeFailureIsRefused(java.net.ConnectException("Connection refused")))
+        assertTrue(
+            probeFailureIsRefused(RuntimeException("wrapped", java.net.ConnectException("refused"))),
+            "the engine's wrapper is not the one that knows",
+        )
+        assertFalse(probeFailureIsRefused(java.net.SocketTimeoutException("timeout")))
+        assertFalse(probeFailureIsRefused(java.net.UnknownHostException("nothing there")))
+        assertFalse(probeFailureIsRefused(RuntimeException("some other failure")))
     }
 
     @Test

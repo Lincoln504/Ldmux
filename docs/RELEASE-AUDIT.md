@@ -64,7 +64,7 @@ implements are in `docs/adr/`.
 
 | # | Failure | Status |
 |---|---|---|
-| 5.1 | Tailscale absent or down: "unreachable" cannot say why | PARTLY — the link's own failure sentence is now shown on the radios and the tailnet probe still collapses refused/timeout/no-route into one word |
+| 5.1 | Tailscale absent or down: "unreachable" cannot say why | FIXED — the probe keeps its three answers apart (`ProbeAnswer.Answer`/`Refused`/`NoAnswer`), and a host that is up with nothing listening reads `debian · daemon not running` instead of `unreachable` — the one of the three the operator can fix on the other machine |
 | 5.2 | Silent link (NAT expiry, hung daemon) reported and never retried | FIXED `8fd09b6` |
 | 5.3 | `connected` disagreed with the link label | FIXED `8fd09b6` |
 | 5.4 | Network change not detected | OK — probe on wake, 4 s heartbeat |
@@ -76,8 +76,8 @@ implements are in `docs/adr/`.
 | # | Failure | Status |
 |---|---|---|
 | 6.1 | No radio selected | OK — `NeedsRadio`, named |
-| 6.2 | Radio held by another app (MeshMore) | PARTLY — the picker's empty state names this cause and the link's failure sentence is shown, but there is still no state that detects it |
-| 6.3 | Radio stops advertising while connected, so a scan finds nothing | PARTLY — the empty state names the two causes (powered off, held by another app or phone); a bonded-device fallback still does not exist |
+| 6.2 | Radio held by another app (MeshMore) | FIXED for the dead end: a held radio stops advertising, so the picker now offers the radios this phone is already bonded to under `saved`, and trying one either works or says why — an attempt and an answer instead of an empty list |
+| 6.3 | Radio stops advertising while connected, so a scan finds nothing | FIXED — `RadioScanner.bonded()`, offered in the picker as `saved`, with the same name rule the scan uses so a bonded headset is not offered as a radio; the empty state says `no LoRa radio advertising` and, when there are saved ones, `saved radios below` |
 | 6.4 | The host had no radio at all, so the phone handshook forever | FIXED 2026-11-05 — `LDMUX_MESH_SERIAL`, host owns the Heltec |
 | 6.5 | Preset mismatch between the two ends | FIXED 2026-11-06 — the pairing code carries the host radio's tuple (`mp=`), the app shows a `desktop's radio` row when it differs and one press matches it, applying only the four channel fields so power and path width stay local |
 | 6.6 | L3 handshake retried with fresh keys, bounded at 3 tries | OK |

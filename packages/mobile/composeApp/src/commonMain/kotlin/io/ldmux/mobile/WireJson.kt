@@ -97,18 +97,45 @@ internal val PAGE_FEATURES: List<String> = listOf("inplaceResync")
 internal const val FEATURE_BUZZ = "buzz"
 
 /**
- * The daemon's HTTP status for a plain `GET /ws`, or null when nothing answered.
- * Bounded, because a machine that is not there does not say so quickly. Shared so a
- * terminal page can tell a refused token from a machine that is off, the same way
- * the launcher socket does (see [linkStateFromProbe]).
+ * What the daemon said to a plain `GET /ws`, or why it said nothing.
+ *
+ * Bounded, because a machine that is not there does not say so quickly. Shared so a terminal page
+ * can tell a refused token from a machine that is off, the same way the launcher socket does (see
+ * [linkStateFromProbe]).
+ *
+ * **"Nothing answered" was one answer for three different problems**, and they have three
+ * different fixes: a host that is up with nothing listening (the daemon is not running), a host
+ * that never answered (the address is wrong, or the tailnet is not connected), and a reply that was
+ * not a status at all. The first is the one worth naming, because it is the one the person can fix
+ * on the machine they are pairing with.
  */
-internal suspend fun probeLinkStatus(http: HttpClient, endpoint: Endpoint): Int? =
+internal sealed interface ProbeAnswer {
+    /** A status, so the daemon answered. */
+    data class Answer(val status: Int) : ProbeAnswer
+    /** The host refused the connection: it is reachable and nothing is listening on that port. */
+    data object Refused : ProbeAnswer
+    /** No answer in time, or no route to ask on. */
+    data object NoAnswer : ProbeAnswer
+}
+
+internal suspend fun probeLink(http: HttpClient, endpoint: Endpoint): ProbeAnswer =
     withTimeoutOrNull(PROBE_TIMEOUT_MS) {
         try {
-            http.get(endpoint.probeUrl) { header(HttpHeaders.Authorization, endpoint.authorization) }.status.value
+            ProbeAnswer.Answer(
+                http.get(endpoint.probeUrl) { header(HttpHeaders.Authorization, endpoint.authorization) }.status.value,
+            )
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
-        } catch (_: Exception) {
-            null
+        } catch (e: Exception) {
+            if (probeFailureIsRefused(e)) ProbeAnswer.Refused else ProbeAnswer.NoAnswer
         }
-    }
+    } ?: ProbeAnswer.NoAnswer
+
+/**
+ * Whether [e] is the host refusing the connection rather than failing to answer.
+ *
+ * Per-platform because the answer is a socket errno and every platform spells it differently:
+ * Android's refuses with `java.net.ConnectException` ("Failed to connect to …: Connection
+ * refused"), and a timeout is `SocketTimeoutException` or Ktor's own timeout type.
+ */
+internal expect fun probeFailureIsRefused(e: Throwable): Boolean

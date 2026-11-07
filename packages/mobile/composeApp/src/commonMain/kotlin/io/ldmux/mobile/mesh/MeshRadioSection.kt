@@ -87,13 +87,17 @@ internal fun RadioPickerPanel(
                     }
                 }
             }
+            // **A radio that is held advertises nothing**, which is the state a scan cannot tell
+            // from "powered off". So the list is not the only way in: the radios this phone is
+            // already bonded to are offered below, and trying one either works or says why.
+            val saved = remember(r) { RadioScanner.bonded().filter { d -> r?.devices?.none { it.address == d.address } != false } }
             if (r != null && r.devices.isEmpty() && r.ok) {
                 // The two causes a scan cannot tell apart, said instead of "no radio found":
                 // a radio that is off advertises nothing, and one another app (or another phone)
                 // already holds advertises but never answers the companion handshake.
-                Text("no LoRa radio", color = Muted, fontSize = 12.sp)
+                Text("no LoRa radio advertising", color = Muted, fontSize = 12.sp)
                 Text(
-                    "check: on, not connected elsewhere",
+                    if (saved.isEmpty()) "check: on, not connected elsewhere" else "saved radios below",
                     color = Muted,
                     fontSize = 11.sp,
                 )
@@ -109,6 +113,20 @@ internal fun RadioPickerPanel(
                         fontFamily = MonoFont,
                         maxLines = 1,
                     )
+                }
+            }
+            if (saved.isNotEmpty()) {
+                Text("saved", color = Dim, fontSize = 11.sp)
+                saved.forEach { d ->
+                    MiniTextButton(onClick = { onPick(d); onDismiss() }) {
+                        Text(
+                            "${d.name}  ${d.address}",
+                            color = Dim,
+                            fontSize = 12.sp,
+                            fontFamily = MonoFont,
+                            maxLines = 1,
+                        )
+                    }
                 }
             }
         }

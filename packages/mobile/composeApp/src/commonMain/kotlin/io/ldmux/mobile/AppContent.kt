@@ -110,6 +110,8 @@ internal fun AppContent(
     val desktop by client.desktop.collectAsState()
     val connected by client.connected.collectAsState()
     val link by client.link.collectAsState()
+    // Why the last attempt failed, when the probe could say (see `LdmuxClient.linkReason`).
+    val linkReason by client.linkReason.collectAsState()
     // Read here, not inside the launcher branch: a refusal releases a pending
     // shell request, and that request is made from a screen the branch does not own.
     val errorTick by client.errorTick.collectAsState()
@@ -932,7 +934,10 @@ internal fun AppContent(
             // silence on this screen once the terminal had gone, and the user had no way to tell
             // a slow list from a link that was not there.
             linkText = if (link != LinkState.Online && link != LinkState.Unpaired) {
-                linkLabel(link, config)
+                // The sentence, when the probe could say one: `daemon not running` is a fix on
+                // the other machine, and `unreachable` was sending people to check a network
+                // that was working.
+                linkLabel(link, config, reason = linkReason)
             } else {
                 null
             },

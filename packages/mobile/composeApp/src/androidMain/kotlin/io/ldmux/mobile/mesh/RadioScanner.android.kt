@@ -190,6 +190,36 @@ actual object RadioScanner {
         seen[address] = RadioDevice(address, shown, result.rssi)
     }
 
+    /**
+     * What this phone is already bonded to, filtered to radios.
+     *
+     * A bonded device keeps its name, which is the only field a bonded list carries: there is no
+     * scan record, so no service UUIDs and no RSSI. The name rule is the same one `record` uses for
+     * a device that advertises without the service UUID, and it is deliberately the only rule —
+     * offering every bonded accessory as a "radio" would be a list of wrong answers.
+     */
+    actual fun bonded(): List<RadioDevice> {
+        val context = AndroidApp.context
+        if (!context.packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE)) {
+            return emptyList()
+        }
+        val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        val adapter = manager?.adapter ?: return emptyList()
+        if (!adapter.isEnabled) return emptyList()
+        // The bonded list is a permission-gated read on Android 12+; a denial is an empty list,
+        // which the picker already draws a reason for.
+        if (!hasScanPermissions(context)) return emptyList()
+        val bonded = runCatching { adapter.bondedDevices }.getOrNull() ?: return emptyList()
+        return bonded
+            .mapNotNull { d ->
+                val address = d.address ?: return@mapNotNull null
+                val name = runCatching { d.name }.getOrNull()
+                if (name?.startsWith("MeshCore") != true) return@mapNotNull null
+                RadioDevice(address, name, null)
+            }
+            .sortedBy { it.name }
+    }
+
     private fun stopScan() {
         val le = scanner
         val cb = callback

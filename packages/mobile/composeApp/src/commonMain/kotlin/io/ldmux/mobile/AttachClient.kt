@@ -542,7 +542,7 @@ class AttachClient(private val config: LdmuxConfig, private val sessionId: Strin
                 // daemon the way the launcher does: a refused token is not a link
                 // problem and retrying it on a timer cannot fix it.
                 if (!connectedThisRound) {
-                    rejected = linkStateFromProbe(probeLinkStatus(httpClient(), endpoint)) == LinkState.Rejected
+                    rejected = linkStateFromProbe(probeLink(httpClient(), endpoint)) == LinkState.Rejected
                 }
             }
             appLog("page $sessionId: disconnected")

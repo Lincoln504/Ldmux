@@ -46,12 +46,24 @@ enum class LinkState {
  * library's sentence about a status code. The daemon answers the same path without
  * upgrading, with the same checks, so one request tells the cases apart by status
  * alone: 401 is a refused token. 400 means the token was accepted (and the upgrade
- * failed for some other reason, which is transient), and no answer at all is a
- * machine that is not there.
+ * failed for some other reason, which is transient).
+ *
+ * **A connection with nothing listening is its own sentence**, and the only one of these the
+ * person can fix on the other machine: the daemon is not running. It was `unreachable`, which
+ * sent them checking a network that was working ([`probeLink`]).
  */
-fun linkStateFromProbe(status: Int?): LinkState = when (status) {
-    401 -> LinkState.Rejected
-    else -> LinkState.Unreachable
+internal fun linkStateFromProbe(answer: ProbeAnswer): LinkState = when (answer) {
+    is ProbeAnswer.Answer -> if (answer.status == 401) LinkState.Rejected else LinkState.Unreachable
+    // Both are "down, retry": the reason is the line's business ([linkReasonLabel]), not the
+    // state's, because the retry ladder and the walk home are the same for either.
+    ProbeAnswer.Refused -> LinkState.Unreachable
+    ProbeAnswer.NoAnswer -> LinkState.Unreachable
+}
+
+/** The one line under a link that is down, from the probe's own answer. */
+internal fun linkReasonLabel(answer: ProbeAnswer?): String? = when (answer) {
+    ProbeAnswer.Refused -> "daemon not running"
+    else -> null
 }
 
 /** The launcher's line under the title: what it is paired with, and how that is going. */
@@ -60,11 +72,13 @@ fun linkLabel(
     config: LdmuxConfig,
     /** Why the saved route cannot run, when the caller has read the real credentials. */
     problem: MeshRouteProblem? = config.routeProblem(),
+    /** Why the last attempt failed, when the probe could say: [`linkReasonLabel`]. */
+    reason: String? = null,
 ): String = when (state) {
     LinkState.Unpaired -> "unpaired"
     LinkState.Online -> config.pairedName
     LinkState.Connecting -> "${config.pairedName} · connecting"
-    LinkState.Unreachable -> "${config.pairedName} · unreachable"
+    LinkState.Unreachable -> reason?.let { "${config.pairedName} · $it" } ?: "${config.pairedName} · unreachable"
     LinkState.Rejected -> "${config.pairedName} · rejected"
     LinkState.RouteUnavailable ->
         "${config.pairedName} · ${problem?.let(::meshProblemLabel) ?: "mesh route unavailable"}"

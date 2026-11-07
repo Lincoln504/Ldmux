@@ -185,6 +185,17 @@ class LdmuxClient(private var config: LdmuxConfig) {
     val link: StateFlow<LinkState> = _link
 
     /**
+     * Why the last failed attempt failed, when the probe could say.
+     *
+     * Separate from [link] because the *state* is the same for every failure — down, retry — and
+     * only the sentence differs. `daemon not running` is the one the person can fix on the other
+     * machine, and before this it read as `unreachable`, which sent them checking a network that
+     * was working.
+     */
+    private val _linkReason = MutableStateFlow<String?>(null)
+    val linkReason: StateFlow<String?> = _linkReason
+
+    /**
      * Which run of [loop] is current. A cancelled loop still runs its cleanup, and
      * without this it cleared the *new* loop's socket and marked it disconnected.
      */
@@ -449,6 +460,7 @@ class LdmuxClient(private var config: LdmuxConfig) {
         _sessions.value = emptyList()
         _desktop.value = null
         _connected.value = false
+        _linkReason.value = null
         _link.value = initialLink(config)
         scope?.let { s -> if (config.endpoint != null) job = s.launch { loop() } }
     }
@@ -508,6 +520,7 @@ class LdmuxClient(private var config: LdmuxConfig) {
                     for (queued in pending) runCatching { send(Frame.Text(queued)) }
                     pending.clear()
                     _connected.value = true
+                    _linkReason.value = null
                     _link.value = LinkState.Online
                     appLog("connected")
                     // Who we are, before anything else (ADR-0010). Ownership is
@@ -608,8 +621,12 @@ class LdmuxClient(private var config: LdmuxConfig) {
                 // exception cannot tell them apart. The daemon can (see
                 // [probeLinkStatus]).
                 appLog("connect failed: ${e::class.simpleName}")
-                val state = linkStateFromProbe(probeLinkStatus(http, endpoint))
-                if (current()) _link.value = state
+                val answer = probeLink(http, endpoint)
+                val state = linkStateFromProbe(answer)
+                if (current()) {
+                    _linkReason.value = linkReasonLabel(answer)
+                    _link.value = state
+                }
             }
             if (!current()) return
             _connected.value = false
