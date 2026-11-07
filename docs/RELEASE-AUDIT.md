@@ -124,7 +124,7 @@ implements are in `docs/adr/`.
 | 9.4 | The radio's failure reason is discarded | FIXED 2026-11-06 — `RadioLink.lastProblem` carries the sentence the link built to the picker and to `LinkDown`; `match` also reports a refused write |
 | 9.5 | A refused action's message vanishes after 4 s, not a live region | FIXED — `NoticeLine` is a polite live region, so the refusal is announced when it arrives rather than only drawn for four seconds |
 | 9.6 | The shell list survives a dead link with `open` armed | FIXED `b44a8de` |
-| 9.7 | Settings opens as a screen and ends the session | OPEN — a decision, expensive on radio |
+| 9.7 | Settings opens as a screen and ends the session | FIXED — Settings overlays the live surface instead of replacing it, on both routes. On the radio it used to dispose the mesh session, so returning began a fresh handshake (minutes); on the tailnet it dropped the socket, the pages and the claims, so returning landed on the launcher and every shell had to be opened again. The back handler ordering is what makes the overlay safe: settings is composed after the surface, so it takes back first |
 | 9.8 | Settings sub-flows opened at the end of the list, under `code` rather than under their own row | FIXED `ac87947`, **verified on the device 2026-11-05**: the picker renders at y 1080–1228 under the `radio` row at 949–1005, and pushes `code` from 1092 to 1468 |
 | 9.12 | The scroll pad stepped three rows, so a page turn moved a seventh of a screen | FIXED `aca7220` — a page is the measured pane less two rows; measured 184→165→146 on a 21-row pane |
 | 9.13 | A page-up clamped at the oldest *loaded* row and read as "jumped to the beginning" | FIXED `aca7220` — the tap pages history in first, then lands one page above the live bottom |
