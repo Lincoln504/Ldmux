@@ -245,6 +245,49 @@ struct Attached {
     /// attached to `meshmore-sns` and detached). The bridge records the size the host had before
     /// the first `Resize` and restores it on detach.
     original: Option<(u8, u8)>,
+    /// Whether the pane asks for bracketed paste (`CSI ? 2004 h`), read from the last screen.
+    ///
+    /// **Only the host can answer this, and it decides what a paste means.** A phone sends the
+    /// text of a paste with its newlines intact; a pane that negotiated bracketed paste is owed
+    /// the `CSI 200 ~` / `CSI 201 ~` markers so every line lands at the prompt as text, and one
+    /// that did not is owed carriage returns, because a newline is the only way to give it a line
+    /// and a newline is Enter. The phone cannot make this call — the mode lives in the pane — and
+    /// without it every pasted line ran as a command (reported 2026-11-07: a multi-line paste
+    /// executed its first line and the rest went to whatever that line started).
+    bracketed_paste: bool,
+}
+
+/// What the pane is owed for one `Input` record: a paste, encoded for its own paste mode.
+///
+/// Typed text passes through unchanged. Text carrying a newline is a paste, and there are only
+/// two honest answers for it:
+///
+///  - **the pane negotiated bracketed paste** — wrap it in `CSI 200 ~` … `CSI 201 ~`, and the
+///    program inserts every line at the prompt instead of running them. ESC is stripped first:
+///    a clipboard that contains `ESC [ 2 0 1 ~` would otherwise end the paste early and the rest
+///    would run as commands (the classic paste injection);
+///  - **it did not** — give it carriage returns. There is no way to hand such a program a
+///    newline without its being Enter, so the paste is typed, line by line, which is what every
+///    terminal does when a program has not asked for the markers.
+///
+/// `CRLF` is folded to `LF` first: a paste copied on a system that writes both would otherwise
+/// arrive as a carriage return followed by a newline, i.e. a blank line after every line.
+#[must_use]
+pub fn paste_bytes(bytes: &[u8], bracketed_paste: bool) -> Vec<u8> {
+    if !bytes.contains(&b'\n') {
+        return bytes.to_vec();
+    }
+    let text = String::from_utf8_lossy(bytes);
+    let text = text.replace("\r\n", "\n");
+    if bracketed_paste {
+        let mut out = Vec::with_capacity(text.len() + 12);
+        out.extend_from_slice(b"\x1b[200~");
+        out.extend(text.bytes().filter(|b| *b != 0x1b));
+        out.extend_from_slice(b"\x1b[201~");
+        out
+    } else {
+        text.replace('\n', "\r").into_bytes()
+    }
 }
 
 impl Attached {
@@ -551,6 +594,12 @@ impl<H: Host, L: Link> Bridge<H, L> {
                     continue;
                 }
             };
+            // The pane's paste mode, refreshed with the screen it arrived on: a program turns
+            // bracketed paste on when it starts and off when it exits, so this changes under the
+            // phone and a value read once at attach would be the shell's, not the program's.
+            if let Some(a) = self.shells.get_mut(&shell) {
+                a.bracketed_paste = screen.bracketed_paste;
+            }
             // Before this phone has fitted anything, the pty's size is whatever the desk left it
             // at: that is the size to put back. Recorded once, and only before our own `Resize`
             // has been applied, so a later screen cannot overwrite it with the phone's grid.
@@ -780,12 +829,12 @@ impl<H: Host, L: Link> Bridge<H, L> {
                         // phone's own size or (when the fit had set `geometry`) was skipped
                         // entirely — measured 2026-11-05: a desk shell left at 46x35 after the
                         // phone returned to its list.
-                        let original = self
-                            .host
-                            .screen(one)
-                            .await
-                            .ok()
-                            .map(|s| (s.cols, s.rows));
+                        let original = self.host.screen(one).await.ok();
+                        // The pane's own paste mode rides the same read: the first keystroke can
+                        // beat the next tick, and a paste that arrived before it would execute
+                        // every line.
+                        let bracketed_paste = original.as_ref().is_some_and(|s| s.bracketed_paste);
+                        let original = original.map(|s| (s.cols, s.rows));
                         self.shells.insert(
                             shell,
                             Attached {
@@ -801,6 +850,7 @@ impl<H: Host, L: Link> Bridge<H, L> {
                                 changed_last_tick: false,
                                 echo: false,
                                 original,
+                                bracketed_paste,
                             },
                         );
                         // **What this phone missed, sent once.** The marks that are true now go
@@ -998,6 +1048,14 @@ impl<H: Host, L: Link> Bridge<H, L> {
                         stamp()
                     );
                 }
+                // **A newline in `Input` is a paste, and the pane decides what to do with it.**
+                // Typed text never carries one (Enter crosses as a `Key` name, so the host's own
+                // key table encodes it for the pane's mode); pasted text does, because the phone
+                // sends it verbatim. Wrapping happens here rather than on the phone for one
+                // reason: whether the pane asked for bracketed paste is a fact only the host can
+                // read, and a phone that guessed "no" turned every pasted line into a command.
+                let bracketed = self.shells.get(&shell).is_some_and(|a| a.bracketed_paste);
+                let bytes = paste_bytes(&bytes, bracketed);
                 let _ = self.host.input(&session, &bytes).await;
             }
             Message::Key(names) => {
@@ -1242,7 +1300,9 @@ impl Host for DaemonHost {
             // The keeper numbers its lines: history first, then the live screen. A keeper too
             // old to say reports nothing, and a phone treats that as "no line identity".
             s.total_rows.saturating_sub(s.rows).min(u64::from(u32::MAX)) as u32,
-        ))
+        )
+        // The pane's own answer to "may a paste be given newlines": see [`Screen`].
+        .with_paste_mode(s.bracketed_paste))
     }
 
     async fn input(&mut self, id: &str, bytes: &[u8]) -> Result<(), String> {
@@ -1688,6 +1748,7 @@ mod tests {
             cursor_y: 0,
             alternate: false,
             dead: false,
+            bracketed_paste: false,
             first_line: 0,
             lines: lines.iter().map(|s| (*s).to_owned()).collect(),
         }
@@ -1777,6 +1838,77 @@ mod tests {
                 ("release", "abcd-1".to_string())
             ],
             "the detached shell went back to whoever held it"
+        );
+    }
+
+    // ── a paste is not a keystroke ────────────────────────────────────────────
+
+    #[test]
+    fn a_paste_is_wrapped_only_where_the_pane_asked_for_bracketed_paste() {
+        // What the pane negotiated decides, and only the host can read it.
+        assert_eq!(paste_bytes(b"one\ntwo", true), b"\x1b[200~one\ntwo\x1b[201~");
+        assert_eq!(paste_bytes(b"one\ntwo", false), b"one\rtwo");
+        // Typed text has no newline and is owed nothing: a keystroke is not a paste.
+        assert_eq!(paste_bytes(b"ls", true), b"ls");
+        assert_eq!(paste_bytes(b"ls", false), b"ls");
+        // CRLF folded first, or every pasted line gains a blank line after it.
+        assert_eq!(paste_bytes(b"one\r\ntwo", true), b"\x1b[200~one\ntwo\x1b[201~");
+        assert_eq!(paste_bytes(b"one\r\ntwo", false), b"one\rtwo");
+        // A clipboard holding the closing marker must not end the paste early: ESC goes with it,
+        // and only where a wrap happened — there is nothing to close early in a typed record.
+        assert_eq!(
+            paste_bytes(b"a\x1b[201~\nrm -rf /", true),
+            b"\x1b[200~a[201~\nrm -rf /\x1b[201~"
+        );
+        assert_eq!(paste_bytes(b"a\x1b[201~", true), b"a\x1b[201~");
+    }
+
+    #[tokio::test]
+    async fn a_multiline_paste_arrives_as_text_where_the_pane_asked_for_it() {
+        let (mut b, host, link) = setup();
+        host.0.lock().unwrap().screens.insert(
+            "abcd-1".into(),
+            Screen {
+                bracketed_paste: true,
+                ..screen(&["$", ""])
+            },
+        );
+        phone_says(
+            &link,
+            3,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+            },
+        );
+        b.tick().await;
+        phone_says(&link, 3, &Message::Input(b"one\ntwo\n".to_vec()));
+        b.tick().await;
+        assert_eq!(
+            host.0.lock().unwrap().typed,
+            vec![("abcd-1".to_owned(), b"\x1b[200~one\ntwo\n\x1b[201~".to_vec())],
+            "every pasted line must be inserted, not run"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_multiline_paste_is_carriage_returns_where_it_did_not() {
+        let (mut b, host, link) = setup();
+        phone_says(
+            &link,
+            3,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+            },
+        );
+        b.tick().await;
+        phone_says(&link, 3, &Message::Input(b"one\ntwo\n".to_vec()));
+        b.tick().await;
+        assert_eq!(
+            host.0.lock().unwrap().typed,
+            vec![("abcd-1".to_owned(), b"one\rtwo\r".to_vec())],
+            "a pane with no bracketed paste can only be given lines, which is what every terminal does"
         );
     }
 

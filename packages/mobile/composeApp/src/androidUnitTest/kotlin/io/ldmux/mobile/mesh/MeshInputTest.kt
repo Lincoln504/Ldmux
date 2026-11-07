@@ -200,14 +200,32 @@ class MeshInputTest {
     }
 
     @Test
-    fun `a paste that does not fit is refused and says so, a newline is a carriage return`() {
+    fun `a paste that does not fit is refused and says so`() {
         val b = MeshInputBatcher(capacity = 4)
         val h = MeshTerminalHandle(b, { 0L })
         assertFalse(h.paste("too long"))
         assertTrue(h.overflow)
         assertTrue(h.paste("a\nb"))
-        assertEquals(listOf<MeshOut>(text("a\rb")), b.pending)
         assertFalse(h.overflow)
+    }
+
+    @Test
+    fun `a paste keeps its newlines and folds CRLF, and only typing becomes carriage returns`() {
+        // **The pane decides what a newline means**, and only the host can read its paste mode:
+        // a phone that turned every newline into a carriage return ran each pasted line as a
+        // command and the rest went to whatever the first one started (reported 2026-11-07).
+        val b = MeshInputBatcher()
+        val h = MeshTerminalHandle(b, { 0L })
+        assertTrue(h.paste("one\ntwo\n"))
+        assertEquals(listOf<MeshOut>(text("one\ntwo\n")), b.pending)
+        h.discardHeld()
+        // A paste copied where lines end CRLF must not arrive with a blank line after each.
+        assertTrue(h.paste("one\r\ntwo"))
+        assertEquals(listOf<MeshOut>(text("one\ntwo")), b.pending)
+        h.discardHeld()
+        // Typed text is not a paste: a newline from the keyboard or from dictation is Enter.
+        h.sendText("ls\n")
+        assertEquals(listOf<MeshOut>(text("ls\r")), b.pending)
     }
 
     @Test

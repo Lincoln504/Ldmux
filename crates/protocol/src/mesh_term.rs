@@ -1028,6 +1028,15 @@ pub struct Screen {
     pub cursor_y: u8,
     pub alternate: bool,
     pub dead: bool,
+    /// Whether the programs in the pane asked for **bracketed paste** (`CSI ? 2004 h`).
+    ///
+    /// Only the host can see this, and it is the whole answer to "did that multi-line paste run
+    /// each line or arrive as text". A pane that asked for it gets the paste wrapped in
+    /// `CSI 200 ~` / `CSI 201 ~` and inserts every line at the prompt; one that did not is owed
+    /// carriage returns, because there is no way to give it a newline without executing the line.
+    /// Internal to the daemon (it never crosses the mesh wire: the phone has no use for it, since
+    /// the host does the wrapping), so it costs no protocol version.
+    pub bracketed_paste: bool,
     /// The absolute line number of row 0, from the keeper's own line numbering. Zero when the
     /// source cannot say, which a phone treats as "no line identity": it accumulates nothing
     /// rather than guessing at a scroll.
@@ -1063,9 +1072,20 @@ impl Screen {
             cursor_y: cursor.1.min(255) as u8,
             alternate,
             dead,
+            bracketed_paste: false,
             first_line,
             lines,
         }
+    }
+
+    /// The pane's paste mode, from the same keeper answer this screen was built from.
+    ///
+    /// A separate call rather than an eighth argument: `from_keeper` already carries the seven
+    /// values every caller has, and this one is only meaningful on the host side.
+    #[must_use]
+    pub fn with_paste_mode(mut self, bracketed_paste: bool) -> Self {
+        self.bracketed_paste = bracketed_paste;
+        self
     }
 }
 
@@ -1612,6 +1632,7 @@ mod tests {
             cursor_y: 0,
             alternate: false,
             dead: false,
+            bracketed_paste: false,
             first_line: 0,
             lines: lines.iter().map(|s| (*s).to_owned()).collect(),
         }

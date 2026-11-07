@@ -325,10 +325,19 @@ class MeshTerminalHandle(
         }
     }
 
-    /** A paste is text that must fit what can wait; a refusal is returned, never half-sent. */
+    /**
+     * A paste is text that must fit what can wait; a refusal is returned, never half-sent.
+     *
+     * **Newlines are kept.** They used to be turned into carriage returns here, which made every
+     * pasted line a command: the first ran, and the rest went to whatever that command started.
+     * Whether a pane may be given a newline without running the line is the pane's own answer
+     * (bracketed paste), which only the host can read, so the host decides — see `paste_bytes` in
+     * `crates/daemon/src/mesh_bridge.rs`. `CRLF` is folded to `LF` so a paste from a system that
+     * writes both does not arrive with a blank line after every line.
+     */
     override fun paste(text: String): Boolean {
         if (text.isEmpty()) return true
-        return pushText(text.replace("\r\n", "\r").replace('\n', '\r'))
+        return pushText(text.replace("\r\n", "\n"))
     }
 
     /** What is armed *now*: [ModifierLatch] has already let go of expired ones. */
