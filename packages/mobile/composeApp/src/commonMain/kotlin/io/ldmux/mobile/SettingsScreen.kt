@@ -2,6 +2,8 @@ package io.ldmux.mobile
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -22,6 +24,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
@@ -121,14 +124,16 @@ internal fun SettingsScreen(
             // `display`, so one screen carried two capitalisation rules.
             Text("settings", color = Fg, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
         }
-        Column(
-            Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = LocalTouch.current.rowPad * 3),
-            verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad * 2),
-        ) {
+        val scroll = rememberScrollState()
+        Column(Modifier.weight(1f).fillMaxWidth()) {
+            Column(
+                Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .verticalScroll(scroll)
+                    .padding(horizontal = LocalTouch.current.rowPad * 3),
+                verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad * 2),
+            ) {
             // The order lives in [settingsGroups], not here: it was `host`, `link`,
             // `display`, so a person reading top-down met the machine before the choice of
             // how to reach it — and then found the mesh route's pairing in a different
@@ -218,7 +223,10 @@ internal fun SettingsScreen(
                     Spacer(Modifier.height(SettingsSectionGap))
                 }
             }
-            Spacer(Modifier.height(SettingsSectionGap))
+                Spacer(Modifier.height(SettingsSectionGap))
+            }
+            // Says the list continues, and how far down it the reader is: see [ScrollProgress].
+            ScrollProgress(scroll)
         }
     }
     // **A sibling of the screen, not a child of it.** `ModalCard` is a full-screen overlay; a
@@ -231,6 +239,39 @@ internal fun SettingsScreen(
                 pasteOpen = false
                 acceptPairing(p)
             },
+        )
+    }
+}
+
+/**
+ * How far down the list the reader is, as a hairline along the bottom edge.
+ *
+ * Settings is taller than a phone and had no edge affordance at all, so `display` — the last
+ * section, and the one with the text size in it — sat below a fold that looked like the end of the
+ * screen. A progress line is the smallest honest answer: it says both "there is more" and "this is
+ * how much", it needs no layout measurement, and it cannot be tapped by mistake.
+ *
+ * Nothing is drawn while the list fits, because a line about nothing is worse than no line.
+ */
+@Composable
+private fun ScrollProgress(state: androidx.compose.foundation.ScrollState) {
+    val max = state.maxValue
+    // Nothing at all while the list fits: a line about nothing is worse than no line.
+    if (max <= 0) return
+    val fraction = (state.value.toFloat() / max).coerceIn(0f, 1f)
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(2.dp)
+            // The track is the whole width, dim: its presence is the message "there is more". The
+            // filled part says how far down the reader is, and reaches the end with the list.
+            .background(Line.copy(alpha = 0.6f)),
+    ) {
+        Box(
+            Modifier
+                .fillMaxWidth(fraction.coerceAtLeast(0.02f))
+                .fillMaxHeight()
+                .background(Accent.copy(alpha = 0.55f)),
         )
     }
 }
