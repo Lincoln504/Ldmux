@@ -287,7 +287,11 @@ internal fun MiniTextButton(
         // beside a label (`change`, `scan`, `unpair`, `edit`) and read as links inside a list of
         // statements; the hairline is what makes them look like something to press.
         modifier = modifier
-            .height(LocalTouch.current.min)
+            // **A minimum, not a height.** A fixed height clipped its own label once the system
+            // font scale grew — the button stayed 48 dp while the glyph inside it needed more, and
+            // the label was cut in half. `heightIn` keeps the touch target and lets the row grow
+            // with the text, which is the whole point of a font-scale setting.
+            .heightIn(min = LocalTouch.current.min)
             .widthIn(min = LocalTouch.current.min)
             .then(
                 if (bordered) {

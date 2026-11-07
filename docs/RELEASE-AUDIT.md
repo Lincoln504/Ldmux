@@ -46,7 +46,7 @@ implements are in `docs/adr/`.
 | 3.3 | `ACCESS_FINE_LOCATION` needed on API 28-30 for BLE scanning | OK — `maxSdkVersion=30`, declared |
 | 3.4 | Denying notifications leaves a foreground service with no notification | UNKNOWN — check the service's behaviour on denial |
 | 3.5 | The `specialUse` sub-type is read by a reviewer | OK — text present in the manifest |
-| 3.6 | Font scale, RTL, dark mode, split screen break the layout | UNKNOWN |
+| 3.6 | Font scale, RTL, dark mode, split screen break the layout | PARTLY CHECKED — dark mode is not a question (the app is dark-only and `SystemBarStyle.dark` keeps the bar icons light whichever way the phone is set, 2026-11-03). Font scale: every control now uses `heightIn(min = …)` rather than a fixed `height`, so a label that grows with the system font scale is no longer clipped inside its own button. RTL and split screen are untested; the layout is a single column, no absolute positions, and the grid comes from a measured viewport, so both are expected to hold — expected is not verified |
 
 ## 4. Pairing and identity
 
