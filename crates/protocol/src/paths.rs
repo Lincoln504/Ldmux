@@ -134,12 +134,6 @@ pub fn try_resolve_persist_dir() -> Result<String, String> {
     Ok(dir)
 }
 
-/// The resolved persist dir, from the process environment. An unusable directory is
-/// reported and ends the process: every caller is about to write a credential.
-pub fn resolve_persist_dir() -> String {
-    try_resolve_persist_dir().unwrap_or_else(|e| exit_with(&e))
-}
-
 /// The resolved state dir, from the process environment, or why it cannot be
 /// used. When the per-uid `/tmp` fallback is in play the directory is created
 /// and its owner and mode are verified.

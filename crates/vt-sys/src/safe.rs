@@ -179,10 +179,6 @@ impl Terminal {
         self.get_u16(ffi::DATA_CURSOR_Y)
     }
 
-    /// Whether the cursor has a pending soft-wrap.
-    pub fn cursor_pending_wrap(&self) -> bool {
-        self.get_bool(ffi::DATA_CURSOR_PENDING_WRAP)
-    }
 
     /// Whether the cursor is visible (DEC mode 25).
     pub fn cursor_visible(&self) -> bool {
@@ -298,10 +294,6 @@ impl Terminal {
         self.get_bool(ffi::DATA_VT_GROUND)
     }
 
-    /// Whether the cursor is at a semantic prompt.
-    pub fn cursor_at_prompt(&self) -> bool {
-        self.get_bool(ffi::DATA_CURSOR_AT_PROMPT)
-    }
 
     /// Total rows in the active screen including scrollback.
     pub fn total_rows(&self) -> usize {

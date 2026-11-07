@@ -543,13 +543,6 @@ impl LdmuxDaemon {
         self
     }
 
-    /// Shorten how long a restored claim waits for its device. A test hook; the
-    /// production value is a minute.
-    pub fn with_restore_grace_ms(mut self, ms: u64) -> Self {
-        self.restore_grace_ms = ms.max(1);
-        self
-    }
-
     /// Shorten the sweep's cadence. A test hook: a grace shorter than the tick is
     /// only visible after a tick, so a test that shortens one has to shorten this.
     pub fn with_claim_tick_ms(mut self, ms: u64) -> Self {
@@ -2997,11 +2990,6 @@ impl LdmuxDaemon {
 
     pub fn take_buzzes(&mut self) -> Vec<crate::buzz::Mark> {
         self.buzz.drain_out()
-    }
-
-    /// The operator opened the shell, so its mark has been read.
-    pub fn clear_mark(&mut self, session_id: &str) {
-        self.buzz.clear(session_id);
     }
 
     /// Drop expired marks. Called from the maintenance tick, which is the daemon's clock.

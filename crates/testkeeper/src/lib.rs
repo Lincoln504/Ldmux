@@ -395,13 +395,6 @@ impl FakeKeeper {
         *self.last_history_request.lock().unwrap()
     }
 
-    /// Set the shell pid the fake reports (a test that needs an ancestry walk).
-    pub fn set_pid(&self, session_id: &str, pid: i32) {
-        if let Some(s) = self.sessions.lock().unwrap().get_mut(session_id) {
-            s.pid = pid;
-        }
-    }
-
     pub fn set_snapshot(&self, session_id: &str, text: &str) {
         let mut sessions = self.sessions.lock().unwrap();
         if let Some(s) = sessions.get_mut(session_id) {

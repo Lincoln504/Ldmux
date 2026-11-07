@@ -871,21 +871,6 @@ fn visit(node: &serde_json::Value, class_name: &str) -> Option<String> {
     None
 }
 
-/// Quote an argument for a POSIX shell. Used only to embed the attach command in
-/// a single word of an `LDMUX_TERMINAL_CMD` (`sh -c "…{cmd}"`); the default path
-/// spawns with argv and no shell at all.
-pub fn shell_quote(a: &str) -> String {
-    let safe = !a.is_empty()
-        && a.chars().all(|c| {
-            c.is_ascii_alphanumeric()
-                || matches!(c, '_' | '@' | '%' | '+' | '=' | ':' | '.' | '/' | '-')
-        });
-    if safe {
-        return a.to_string();
-    }
-    format!("'{}'", a.replace('\'', "'\\''"))
-}
-
 /// The result of a live-window operation.
 pub struct LiveResult {
     pub ok: bool,
@@ -1537,24 +1522,6 @@ async fn open_window_in(
         window_id: placed.1.clone(),
         detail: placed.2.clone(),
     })
-}
-
-/// Place a session's live window on a chosen workspace.
-pub async fn place_live(
-    session_id: &str,
-    workspace: &str,
-    timeout_ms: u64,
-) -> (bool, Option<String>, Option<String>) {
-    place_class(&live_window_class(session_id), workspace, timeout_ms).await
-}
-
-async fn place_class(
-    class: &str,
-    workspace: &str,
-    timeout_ms: u64,
-) -> (bool, Option<String>, Option<String>) {
-    let (env, wm) = context().await;
-    place_with(&env, wm, class, workspace, timeout_ms).await
 }
 
 /// Place a window on a chosen workspace, found by its class.

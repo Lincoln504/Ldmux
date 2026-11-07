@@ -292,12 +292,6 @@ impl RemoteConfig {
         }
     }
 
-    /// The send deadline for tests: a real value, shortened.
-    pub fn with_send_timeout_ms(mut self, ms: u64) -> Self {
-        self.send_timeout_ms = ms.max(1);
-        self
-    }
-
     /// The idle deadline for tests: a real value, shortened.
     pub fn with_idle_ms(mut self, idle_ms: u64) -> Self {
         self.idle_ms = idle_ms.max(1);
@@ -650,11 +644,6 @@ impl RemoteServer {
     /// The port this server is listening on.
     pub fn port(&self) -> u16 {
         self.bound_port
-    }
-
-    /// The remote's live state, for tests.
-    pub fn is_listening(&self) -> bool {
-        self.shared.is_some()
     }
 
     pub fn stop(&mut self) {

@@ -7,7 +7,7 @@
 //! hardware pass.
 
 use std::collections::VecDeque;
-use std::io::{self, Read, Write};
+use std::io;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::time::{Duration, Instant};
 
@@ -223,16 +223,6 @@ impl ByteLink for MemoryLink {
         }
         Ok(n)
     }
-}
-
-/// Read a whole file-less stream, for the tests that want a `Read` above a link.
-pub fn read_some<R: Read>(reader: &mut R, buf: &mut [u8]) -> io::Result<usize> {
-    reader.read(buf)
-}
-
-/// Write a slice, for tests that want a `Write` above a link.
-pub fn write_some<W: Write>(writer: &mut W, bytes: &[u8]) -> io::Result<()> {
-    writer.write_all(bytes)
 }
 
 #[cfg(test)]
