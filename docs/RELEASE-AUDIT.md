@@ -22,7 +22,7 @@ implements are in `docs/adr/`.
 | 1.5 | `applicationId` asserts a domain the project does not own | FIXED `4639f0c` (`io.ldmux.mobile`) |
 | 1.6 | The bundle has never actually been built, so "it will build" is an assumption | FIXED 2026-11-05: a signed AAB was produced with a throwaway 4096-bit key, with the licence texts inside it, and the key was then deleted. The real upload key is the operator's to supply |
 | 1.7 | No CI job builds the Android artifact or runs the Kotlin suite | CLOSED: there is no CI (`.github/workflows` removed at the operator's instruction, 2026-11-06), so the Kotlin suite and the release build are local commands |
-| 1.8 | R8 is off; a release carries unused code | OK for 0.1, decide later |
+| 1.8 | R8 is off; a release carries unused code | FIXED 2026-11-06 — R8 on with `proguard-rules.pro` holding one rule per boundary (the JNI `@Keep` surface, the Compose and serialization entry points). `minifyReleaseWithR8` is part of the release build and passes |
 | 1.9 | The native session library is rebuilt by a Gradle task, so a stale `.so` is possible | OK — `buildSessionAndroid` runs before packaging |
 | 1.10 | The bundle shipped `armeabi-v7a` and `x86` splits from a dependency while our own libraries are 64-bit only, so a 32-bit device installs and dies with `UnsatisfiedLinkError` | FIXED 2026-11-06: `ndk { abiFilters }` declares `arm64-v8a` and `x86_64`, and `bundleRelease` now opens the produced bundle and refuses any other ABI or any missing library. The old guard read `jniLibs`, which cannot see what a dependency merged |
 
@@ -465,9 +465,10 @@ None of these are defects. Each is a decision that changes what ships.
   actions across an app restart because of it. There is no test that asserts that round trip.
 - Dictation depends on the device's speech recogniser, which may be cloud-based. The app says
   so, and nothing here can change it.
-- Multi-hop is one direction only: the phone looks up a route, the host always sends zero-hop,
-  so a phone one relay away attaches and never hears a reply (`ARCHITECTURE.md` section 11 says
-  so now). Implementing the host-side lookup is a feature, not a fix.
+- Multi-hop is implemented in both directions and unit-tested, and has never run on air. The phone
+  reads the host's advert path, the host reads the phone's after a 36-byte route hint, and each
+  replies along the reverse. `ARCHITECTURE.md` section 11 says what is proven and what is not: the
+  first on-air run with a repeater between two radios out of earshot is what would prove it.
 - **Airtime on the host is neither enforced nor observable as a limit.** `Budget::RadioGoverned`
   returns `u8::MAX`, so the session loop never gates a record, on the argument that the radio's
   firmware runs the transmitter duty cycle. That argument is not evidenced in this tree.
@@ -477,6 +478,6 @@ None of these are defects. Each is a decision that changes what ships.
 - A spawned window is scoped, but its **workspace placement** (i3/sway/hyprland) is only
   exercised by `desktop_e2e`; nothing asks for a workspace from a phone today, so the adapter
   is carried, not used.
-- Font scale, RTL, dark mode and split screen are still unverified (3.6).
-- R8 is off, so a release carries unused code (1.8), and nothing outside this machine builds the Android
-  artifact (1.7).
+- RTL and split screen are unverified (3.6). Dark mode is not a question (dark-only, with the bar
+  icons pinned light) and font scale is handled (`heightIn`, not a fixed height).
+- Nothing outside this machine builds the Android artifact (1.7).
