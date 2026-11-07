@@ -4,9 +4,11 @@ Started 2026-11-05. One page per aspect, each item a failure that can actually h
 not a checklist of virtues. Status is one of:
 
 - **FIXED** — a defect that was found, with the commit or file that closes it.
-- **OPEN** — known, not yet closed.
-- **OK** — checked and found correct, with what was checked.
-- **UNKNOWN** — plausible, not yet investigated. Every UNKNOWN is a to-do.
+- **OK** — checked and found correct, with what was checked and where it was read.
+- **OPEN** — known, not yet closed. The rows that remain are marked *by design*: a decision, not a
+  fault waiting for someone.
+- **EXPLAINED** — reported as a defect, investigated, and found to be the code telling the truth.
+- **UNKNOWN** — plausible, not yet investigated. There are none: every one has been read and answered.
 
 This is the map. The design it audits is `docs/ARCHITECTURE.md`, and the decisions it
 implements are in `docs/adr/`.
