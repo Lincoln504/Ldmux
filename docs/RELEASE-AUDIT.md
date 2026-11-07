@@ -350,7 +350,7 @@ suite (574 cases) green.
 | 17.72 | A mark had two channels (sounding/silent) and a second settings row for a sound toggle, which is one concept too many for "tell me when a shell finishes" | SIMPLIFIED — one channel, one row, one notification per mark; the only persistent notification is the foreground service's, which exists because Android requires one |
 | 17.73 | The reply route was learned from an arriving record, and a direct packet's path is **consumed** by the repeaters that carry it (`Mesh::removeSelfFromPath`), so the receiver saw an empty path and replied zero-hop: the phone could send at range and never hear an answer | FIXED — routes come from **flooded adverts** in both directions: the phone reads the host's advert path (0x2A), the host reads the phone's after a 36-byte route hint (`LDRH` + the phone's key) says which prefix to look up, and the phone floods its own advert while the host is silent |
 | 17.74 | A route learned through a repeater could never be cleared: `refresh_peer_route` assigned only a `Some`, and zero hops is a `None`, so a phone that worked at range and then came home kept the stale chain and heard nothing from the host until the daemon restarted | FIXED — the assignment is unconditional, and the test drives `refresh_peer_route` through a real `Companion` rather than the helper alone, because the bug was in the caller |
-| 17.75 | An advert's `OK` stole a raw send's answer: `sendSelfAdvert` was untracked, and announcing from inside `send()` put the advert's reply in front of the record's, so a refused record was metered as accepted and its `NotFound` recovery never ran | FIXED — every command the firmware answers `OK`/`ERR` is tracked, `BatteryStorageFrame`/`ChannelInfoFrame` settle their own, and the announcement moved to the maintenance loop where the answer window is known free |
+| 17.75 | An advert's `OK` stole a raw send's answer: `sendSelfAdvert` was untracked, and announcing from inside `send()` put the advert's reply in front of the record's, so a refused record was metered as accepted and its `NotFound` recovery never ran | FIXED — every command the firmware answers `OK`/`ERR` is tracked, `BatteryStorageFrame`/`ChannelInfoFrame` settle their own, and the announce moved out of `send()` (to `connect()` and the maintenance loop, both of which run when the answer window is free). `requestBatteryStorage` stays untracked on purpose: the firmware answers it only with `RESP_CODE_BATT_AND_STORAGE`, and tracking it cost the connect-time route read |
 | 17.76 | A mark table was shown one page at a time: `Marks` carried no page flags, so the phone replaced its map per message and a dozen marked shells showed only the last page | FIXED — `Marks` carries `first`/`last`, `marks_pages` sets them, and the driver assembles a run and commits on `last` |
 | 17.77 | The host re-read its route only when it had heard nothing from the phone, so "we hear them, they cannot hear us" — exactly a phone that moved — was never re-read | FIXED — the cadence is the only limit |
 | 17.78 | The phone never re-read the advert path while a contact path was in hand, freezing the working route at whatever it was when the contact first appeared | FIXED — the maintenance loop alternates between the two sources |
@@ -360,9 +360,14 @@ suite (574 cases) green.
 
 ## How to use this
 
-Work top-down by status: **OPEN** and **UNKNOWN** are the release's actual to-do list. A
-section with every row FIXED or OK is done and should not be re-litigated without new
-evidence.
+Every row that is not FIXED, OK or EXPLAINED is either *by design* or in Appendix C, so the to-do
+list is the appendix and the decisions are the rows that say so. A section with every row FIXED or OK
+is done and should not be re-litigated without new evidence.
+
+**The one thing this document cannot tell you** is whether multi-hop works on air. Every part of it is
+unit-tested and each step has been checked against the firmware, but the two radios on this desk hear
+each other directly, so the path is always empty and the route-learning code has never had to find one.
+An on-air run with a repeater between two radios out of earshot is the test that would settle it.
 
 ## Appendix A: store submission
 
