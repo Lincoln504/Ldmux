@@ -404,8 +404,9 @@ be transmitted and then ignored by every receiver. Direct means the sender must 
 3. **The host needs the phone's route the same way, and cannot read it off a record.** A direct
    packet loses one hash per repeater (`Mesh::removeSelfFromPath`), so a record that crossed any
    number of them arrives with an **empty** path: the receiver never learns a route from traffic it
-   receives. The phone therefore announces itself (a flooded advert, at most every three minutes and
-   only while the host has been silent for two), and tells the host which radio it is with a
+   receives. The phone therefore announces itself (a flooded advert, once when the link binds and then
+   at most every three minutes while the host has been silent for two), and tells the host which radio
+   it is with a
    **route hint** — a 36-byte record, `LDRH` and the phone's public key, sent before the session
    handshake because the handshake's own answer is the first thing that needs a route. The host then
    reads the phone's advert path out of its own radio's cache (the same `CMD_GET_ADVERT_PATH`) — at
