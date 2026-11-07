@@ -81,7 +81,7 @@ implements are in `docs/adr/`.
 | 6.6 | L3 handshake retried with fresh keys, bounded at 3 tries | OK |
 | 6.7 | Radio unplugged mid-session | OK — transport state drives the loop |
 | 6.8 | Public channel forces batch mode | OK — ADR-0026 |
-| 6.9 | Multi-hop paths unimplemented; a relayed peer is unreachable | OPEN — named, not hidden |
+| 6.9 | Multi-hop paths unimplemented; a relayed peer is unreachable | FIXED 2026-11-07 — both ends learn from **flooded adverts** (`CMD_GET_ADVERT_PATH` 0x2A), because a direct packet's path is consumed in transit; the phone reads the host's advert path, the host reads the phone's after a 36-byte route hint. Proven in unit tests only: the first on-air proof needs two radios out of earshot of each other and a repeater between |
 
 ## 7. The session and terminal data path
 
@@ -95,8 +95,8 @@ implements are in `docs/adr/`.
 | 7.6 | Record larger than the carrier floor: silently truncated | OK — sends are all-or-nothing, no truncation exists |
 | 7.10 | Two 1024-record inbound queues dropped the oldest **silently**, after the ARQ had acknowledged it | FIXED `9ceea6d` — counted, logged at powers of two |
 | 7.11 | A record more than 7 ahead of a gap is refused as `out_of_window` | OK — not loss; it stays unacked and is retransmitted, costing one round trip per gap record |
-| 7.12 | `heartbeat_ms` is 0, so an idle session cannot tell a dead peer from an idle one | OPEN — the UI should say when nothing has been heard for N minutes |
-| 7.13 | A `Close` is suppressed while the budget is spent, so an ended session lingers until the peer times out | OPEN — a close should ignore the budget, as a retransmission does |
+| 7.12 | `heartbeat_ms` is 0, so an idle session cannot tell a dead peer from an idle one | OK by decision — a heartbeat is a record, and 3 s heartbeats cost 1200 records an hour to say nothing (`arq.rs` config note). Silence is reported where it matters: while something is owed, the pane says `link quiet · N s, nothing heard`; an idle shell is silent by design and stays quiet |
+| 7.13 | A `Close` is suppressed while the budget is spent, so an ended session lingers until the peer times out | FIXED — the close is not budget-gated, only slot-gated (`arq.rs` "4. The close, last, once"); a close is control traffic like an ack, and gating it meant it was never sent and counted a stall on every poll for the rest of the hour |
 | 7.7 | A resync never answered is never re-asked | FIXED `8fd09b6` |
 | 7.8 | `seq 1 100`-class output batched into more messages than the budget | OK — pacer is open defect 22 |
 | 7.9 | No pacer: a screen update leaves as a burst of up to eight records | OPEN — defect 22 |
@@ -144,7 +144,7 @@ implements are in `docs/adr/`.
 | 10.1 | Token at rest on the phone, in plain preferences, while the mesh keys beside it were Keystore-encrypted | FIXED `6d4e8d2` — same `KeystoreBlob`, one-time migration |
 | 10.7 | Token embedded in `connectionKey` and used as a Compose rebuild key | NOT A DEFECT — it is only a `remember` key; nothing logs it and `Endpoint.toString()` omits it. Recorded so the row is not re-opened |
 | 10.8 | Token accepted in the query string as well as the header | FIXED 2026-11-06 — the query string is no longer a credential; the header is the only path, and the probe and the upgrade read the same one |
-| 10.9 | The handshake's filter tag is bespoke crypto that its own comment says wants review | OPEN — the only custom crypto in the tree |
+| 10.9 | The handshake's filter tag is bespoke crypto that its own comment says wants review | REVIEWED 2026-11-07, no finding — checked against the Noise spec: the tag is HMAC-SHA-256 over `kind ‖ msg1` keyed by `HMAC(psk, "ldmux-mesh filter v1")` (domain-separated, the PSK never used raw outside Noise), verified with `verify_truncated_left` in constant time before any Diffie-Hellman, the prologue binds the suite name so mismatched peers fail the handshake rather than derive different keys, the 16-byte tag is never truncated further, and the replay window advances only after it verifies. One accepted judgement: the loop stops at the first matching pairing, so its timing names which pairing matched, which with a handful of pairings on a half-duplex radio is not a practical channel |
 | 10.10 | The Keystore path has never run on a device | FIXED — verified on the device 2026-11-06: the stored token is `IV(12) + 64-byte token + tag(16)` in `shared_prefs`, no plaintext key remains, and the app is connected |
 | 10.11 | The JNI entry points still carried the old package, so every native call failed | FIXED `6d4e8d2` — caught by `MeshSessionAbiTest`, 11 tests |
 | 10.2 | Cleartext permitted where the config says it is not | OK — restricted to tailnet/loopback by code |
