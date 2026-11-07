@@ -414,8 +414,13 @@ class AndroidRadioLink(
             // above may have carried an out-path; when it did not, the advert-path cache is the only
             // place a route can come from, and asking before the first send means one record goes
             // out once instead of a zero-hop attempt that only reaches earshot.
+            //
+            // Asked on **every** connect attempt, not only when there is no route: a route learned
+            // in the last place the phone was is still a well-formed route, so nothing refuses it
+            // and nothing notices it is wrong. Re-reading it per attempt is what turns "walked
+            // outside, the link died" into "walked outside, the next attempt used the new path".
             val prefix = RadioRoute.prefix(hostKey)
-            if (hostPath == null && prefix != null && s.isIdle()) {
+            if (prefix != null && s.isIdle()) {
                 val done = CompletableDeferred<Unit>()
                 routeDone = done
                 s.getAdvertPath(prefix)

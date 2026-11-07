@@ -102,6 +102,9 @@ const PEER_ROUTE_REFRESH: Duration = Duration::from_secs(120);
 /// at all.
 const PEER_ROUTE_RETRY: Duration = Duration::from_secs(15);
 
+/// The least time between two adverts triggered by a route hint.
+const HINT_ADVERT_FLOOR: Duration = Duration::from_secs(60);
+
 /// The four bytes that mark a record as a **route hint** rather than a session message.
 const ROUTE_HINT_MAGIC: &[u8; 4] = b"LDRH";
 
@@ -561,8 +564,15 @@ fn serve_loop<L: ByteLink>(
                         // next thing to send and it needs a route.
                         peer_radio = Some(key);
                         last_peer_rx = Some(Instant::now());
-                        let _ = companion.send_self_advert(true);
-                        last_advert = Some(Instant::now());
+                        // One advert per minute at most: a phone whose session keeps failing sends
+                        // a hint on every attempt, and each advert is a broadcast on a band other
+                        // people are using. A minute is short enough to make a fresh path appear
+                        // during the retry ladder and long enough that a stuck phone cannot spend
+                        // the hour's allowance announcing.
+                        if last_advert.is_none_or(|t| t.elapsed() >= HINT_ADVERT_FLOOR) {
+                            let _ = companion.send_self_advert(true);
+                            last_advert = Some(Instant::now());
+                        }
                         if refresh_peer_route(&mut companion, peer_radio.as_ref(), &mut peer_path) {
                             last_route_ask = Some(Instant::now());
                         }
