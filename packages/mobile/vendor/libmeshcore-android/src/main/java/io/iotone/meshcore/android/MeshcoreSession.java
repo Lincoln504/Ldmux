@@ -956,7 +956,12 @@ public final class MeshcoreSession {
 
     private void trackedAnswered() {
         synchronized (trackedLock) {
-            if (pendingTracked == 0) return;
+            // **Only the answer to a tracked command settles one.** Some commands are sent
+            // untracked — `CMD_SEND_SELF_ADVERT`, the battery request — and the firmware still
+            // answers them with an `OK`. Without this guard that `OK` decremented the counter for a
+            // *different*, still-awaited command, so the queue pumped the next one into an answer
+            // window the firmware was still filling and both answers became ambiguous.
+            if (pendingTracked == 0 || !trackedInFlight) return;
             pendingTracked--;
             trackedInFlight = false;
             trackedSentAtNanos = 0;
