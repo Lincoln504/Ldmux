@@ -285,6 +285,8 @@ data class LauncherEntry(
     val sessionId: String,
     /** `bash`, `vim`, `pi` — what the row *is*, not only where it is. */
     val process: String,
+    /** The shell's name from the daemon: the conversation's title, else its folder. */
+    val title: String,
     val cwd: String,
     /**
      * A phone is using it right now. Shown as a shade, not as words: the rows used
@@ -304,7 +306,16 @@ data class LauncherEntry(
      */
     val state: String = "",
 ) {
-    val label: String get() = process.ifEmpty { "shell" }
+    /**
+     * What the row is called.
+     *
+     * **The title, not the process.** A row used to be named after the program in the pane, so
+     * every agent-run shell read as `pi` and the folder underneath was the only way to tell them
+     * apart — which is the thing the operator asked to stop. The daemon's title is already the
+     * conversation's name with the folder as its fallback (`session_title`), so this is the same
+     * word the CLI prints.
+     */
+    val label: String get() = title
 }
 
 /**
@@ -326,6 +337,7 @@ internal fun launcherEntries(openShells: List<Session>): List<LauncherEntry> =
             key = shell.id,
             sessionId = shell.id,
             process = shell.process,
+            title = shell.title,
             cwd = shell.cwd,
             inUseOnPhone = shell.ownerKind == "phone",
             openedByPhone = shell.openedByPhone,

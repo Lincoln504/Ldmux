@@ -429,7 +429,11 @@ class AndroidRadioLink(
             //
             // This is the radio's *own* advert width — it forwards whatever width arrives either
             // way — and it is the same rule the daemon applies to the host's radio.
-            val info = deviceInfo.value
+            // **Asked here, not only from the settings panel.** `deviceInfo` used to be filled by
+            // the radio page, so on a fresh start this check saw nothing and the upgrade never ran.
+            // One `DEVICE_QUERY` per connect is the price of knowing a fact about the radio that
+            // decides how many neighbours it can name.
+            val info = deviceInfo.value ?: readDeviceInfo()
             if (info != null && info.pathHashMode == 0 && s.isIdle()) {
                 s.setPathHashMode(DEFAULT_PATH_HASH_MODE)
                 withTimeoutOrNull(PATH_MODE_SETTLE_MS) { while (!s.isIdle()) delay(10) }

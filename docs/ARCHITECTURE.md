@@ -468,11 +468,13 @@ Consequences worth knowing:
   set to three bytes. The width is a preference about the node's *own* adverts only: a repeater
   forwards whatever width arrives (`MyMesh.cpp:491`), so this changes what peers hear from us, not
   what we relay.
-- **ldmux keeps no contacts.**
-  A route here comes from the advert-path cache keyed by the peer's public key (`onDiscoveredContact`
-  → `advert_paths[]`), which needs no contact entry on either radio: no auto-add policy, no contact
-  cap to hit, and no per-contact record to grow stale or leak. What the operator's MeshCore app keeps
-  for messaging is that app's business, not the terminal's.
+- **ldmux keeps no contacts** (ADR-0030). A route comes from the advert-path cache, keyed by the
+  peer's public key (`onDiscoveredContact` → `advert_paths[]`), which needs no contact entry on
+  either radio: no auto-add policy, no contact cap to hit, and no per-contact record to grow stale
+  or leak. The only contact-dependent route — `CMD_SEND_PATH_DISCOVERY_REQ` — needs the peer in the
+  sender's contact table *and* the responder's BASE telemetry permission, which defaults to deny
+  (`NodePrefs.h:24`), so a stock radio answers nothing. What the operator's MeshCore app keeps for
+  messaging is that app's business, not the terminal's.
 - **The advert-path cache is small, in RAM, and evicts by age.** Sixteen slots
   (`ADVERT_PATH_TABLE_SIZE`, `MyMesh.h:257`), zeroed at boot, oldest-lost first
   (`MyMesh.cpp:368-386`). On a crowded channel `ERR_CODE_NOT_FOUND` for a node heard a minute ago

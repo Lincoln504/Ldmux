@@ -22,28 +22,36 @@ class LauncherTest {
     @Test
     fun `desk pi processes are not rows, only shells that can be opened are`() {
         // A pi outside ldmux cannot be opened, and a row for it used to start a new
-        // phone shell instead (2026-09-20). A pi inside a desk window is that
-        // window's shell row, named by its process.
-        val rows = launcherEntries(listOf(shell("abc", "/home/u/proj").copy(process = "pi")))
+        // phone shell instead (2026-09-20). A pi inside a desk window is that window's shell
+        // row, and it is named by its title (the folder, when nothing has named it) — not by the
+        // program in the pane.
+        val rows = launcherEntries(
+            listOf(shell("abc", "/home/u/proj").copy(process = "pi", title = "proj")),
+        )
         assertEquals(listOf("abc"), rows.map { it.sessionId })
-        assertEquals("pi", rows[0].label)
+        assertEquals("proj", rows[0].label)
     }
 
     @Test
-    fun `an open shell is named by its process and located by its folder`() {
-        // The row has to answer "which of these is my editor", and a directory
-        // alone cannot: two shells in one folder would otherwise be the same row.
-        val rows = launcherEntries(listOf(shell("abc", "/home/u/proj").copy(process = "vim")),
+    fun `an open shell is named by its title and located by its folder`() {
+        // The daemon's title is the conversation's name with the folder as its fallback, so the
+        // row and `ldmux list` say the same word. The program in the pane is not the name: every
+        // agent-run shell would read `pi`.
+        val rows = launcherEntries(
+            listOf(shell("abc", "/home/u/proj").copy(process = "vim", title = "Radio paths")),
         )
-        assertEquals("vim", rows[0].label)
+        assertEquals("Radio paths", rows[0].label)
         assertEquals("/home/u/proj", rows[0].cwd)
         assertEquals("abc", rows[0].sessionId)
     }
 
     @Test
-    fun `a shell with an unknown process still has a name`() {
-        val rows = launcherEntries(listOf(shell("abc", "/x")))
-        assertEquals("shell", rows[0].label)
+    fun `a shell with no title still has a name`() {
+        // No title and no folder: the daemon falls back to the id, and an empty one here still
+        // reaches the row's last resort rather than a blank line.
+        val rows = launcherEntries(listOf(shell("abc", "/x").copy(title = "")))
+        assertEquals("", rows[0].label)
+        assertEquals("x", shellRowTitle(rows[0].label, rows[0].cwd))
     }
 
     @Test
@@ -188,7 +196,14 @@ class LauncherTest {
     // The word now follows what was actually chosen.
 
     private fun row(key: String, session: String) =
-        LauncherEntry(key = key, sessionId = session, process = "pi", cwd = "/tmp/$key")
+        LauncherEntry(
+            key = key,
+            sessionId = session,
+            process = "pi",
+            // A named conversation: the row is called that, not after the program in the pane.
+            title = "Radio paths",
+            cwd = "/tmp/$key",
+        )
 
     @Test
     fun `an empty selection says open`() {
