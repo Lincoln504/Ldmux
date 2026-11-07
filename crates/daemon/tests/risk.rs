@@ -10,21 +10,16 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+mod common;
+
 use ldmux_testkeeper::FakeKeeper;
 use ldmux_daemon::stream::KeeperConn;
 use ldmux_daemon::stream::PaneStream;
 use ldmux_daemon::stream::StreamSubscriber;
 use ldmux_protocol::keeper::KeeperMessage;
 
-fn scratch_dir() -> std::path::PathBuf {
-    let mut p = std::env::temp_dir();
-    p.push(format!(
-        "ldmux-risk-{}-{}",
-        std::process::id(),
-        rand::random::<u64>()
-    ));
-    std::fs::create_dir_all(&p).unwrap();
-    p
+fn scratch_dir() -> common::Scratch {
+    common::Scratch::dir("ldmux-risk")
 }
 
 async fn wait_socket(path: &std::path::Path) {
@@ -209,7 +204,7 @@ async fn spawn_race_two_concurrent_stream_for_one_wins() {
 
     // Two concurrent stream_for calls for the same session.
     let daemon =
-        ldmux_daemon::daemon::LdmuxDaemon::new(dir, std::path::PathBuf::from("/nonexistent"));
+        ldmux_daemon::daemon::LdmuxDaemon::new(dir.to_path_buf(), std::path::PathBuf::from("/nonexistent"));
     let daemon = Arc::new(std::sync::Mutex::new(daemon));
 
     let d1 = daemon.clone();

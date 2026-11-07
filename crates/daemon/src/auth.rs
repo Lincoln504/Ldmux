@@ -151,8 +151,8 @@ pub fn token_matches(expected: &str, provided: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn temp_dir() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("ldmux-auth-{}", uuid::Uuid::new_v4()))
+    fn temp_dir() -> crate::testutil::Scratch {
+        crate::testutil::Scratch::dir("ldmux-auth")
     }
 
     fn new_state_dir(root: &std::path::Path) -> String {

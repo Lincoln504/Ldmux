@@ -1,6 +1,8 @@
 //! CLI integration test: the CLI binary talks to the daemon over the control
 //! socket.
 
+mod common;
+
 use std::path::PathBuf;
 
 use ldmux_daemon::daemon::LdmuxDaemon;
@@ -18,11 +20,8 @@ fn fake_terminal(dir: &std::path::Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
-fn scratch() -> PathBuf {
-    let mut p = std::env::temp_dir();
-    p.push(format!("ldmux-cli-int-{}", rand::random::<u64>()));
-    std::fs::create_dir_all(&p).unwrap();
-    p
+fn scratch() -> common::Scratch {
+    common::Scratch::dir("ldmux-cli-int")
 }
 
 async fn wait_socket(path: &std::path::Path) {
@@ -107,7 +106,7 @@ async fn cli_ping_over_the_control_socket() {
     // SAFETY: test setup, before any daemon thread reads the environment.
     unsafe { std::env::set_var("TERMINAL", fake_terminal(&dir)) };
 
-    let d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+    let d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
     let arc: std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(d));
     {
@@ -154,7 +153,7 @@ async fn cli_full_lifecycle_over_the_control_socket() {
     // SAFETY: test setup, before any daemon thread reads the environment.
     unsafe { std::env::set_var("TERMINAL", fake_terminal(&dir)) };
 
-    let d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+    let d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
     let arc: std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(d));
     {
@@ -241,7 +240,7 @@ async fn cli_code_and_pair_refuse_a_daemon_a_phone_cannot_reach() {
 
     // Loopback, which is exactly the case a phone cannot use. Port 0 lets the OS
     // pick: the address is what the refusal is about.
-    let d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent")).with_remote(
+    let d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent")).with_remote(
         "127.0.0.1".to_string(),
         0,
         "0123456789abcdef".repeat(4),
@@ -285,7 +284,7 @@ async fn cli_list_json_is_json() {
     wait_socket(&keeper_sock).await;
 
     ensure_cli_built();
-    let d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+    let d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
     let arc: std::sync::Arc<tokio::sync::Mutex<LdmuxDaemon>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(d));
     {
@@ -328,7 +327,7 @@ fn cli_output_into_a_closed_pipe_does_not_panic() {
     for args in [vec!["--help"], vec!["list", "--help"]] {
         let mut child = std::process::Command::new(cli_binary())
             .args(&args)
-            .env("LDMUX_STATE_DIR", &dir)
+            .env("LDMUX_STATE_DIR", dir.to_path_buf())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()

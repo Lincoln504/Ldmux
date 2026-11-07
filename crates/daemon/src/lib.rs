@@ -47,4 +47,6 @@ pub mod remote;
 pub mod sanitize;
 pub mod scope;
 pub mod stream;
+#[cfg(test)]
+mod testutil;
 pub mod ws;

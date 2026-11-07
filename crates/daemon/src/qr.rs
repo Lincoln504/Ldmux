@@ -621,6 +621,10 @@ mod tests {
     use super::*;
     use crate::exec::{ExecOpts, run};
 
+    fn scratch() -> crate::testutil::Scratch {
+        crate::testutil::Scratch::dir("ldmux-qr")
+    }
+
     /// Printable ASCII, varied, so no two codes share a payload.
     fn payload(len: usize, seed: u32) -> String {
         const ALPHABET: &[u8] =
@@ -688,8 +692,7 @@ mod tests {
     async fn decode_versions(vers: &[u32]) {
         // One zbar run for all of them; it reports in file order. Filled to
         // capacity, so each code must land on exactly this version and level.
-        let dir = std::env::temp_dir().join(format!("ldmux-qr-{}", uuid::Uuid::new_v4()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = scratch();
         let mut cases: Vec<(String, String)> = vec![];
         for &ver in vers {
             for (ei, &ecc) in ECC_ORDER.iter().enumerate() {
@@ -722,7 +725,6 @@ mod tests {
         )
         .await;
         if skip_without_zbar(&res, "every version and error correction level") {
-            let _ = std::fs::remove_dir_all(&dir);
             return;
         }
         assert_eq!(res.code, 0);
@@ -734,7 +736,6 @@ mod tests {
             .collect();
         let expected: Vec<String> = cases.into_iter().map(|(_, t)| t).collect();
         assert_eq!(decoded, expected);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -862,8 +863,7 @@ mod tests {
                 px.push(s.clone());
             }
         }
-        let dir = std::env::temp_dir().join(format!("ldmux-qrterm-{}", uuid::Uuid::new_v4()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = scratch();
         let file = dir.join("term.pbm");
         std::fs::write(
             &file,
@@ -891,10 +891,8 @@ mod tests {
         )
         .await;
         if skip_without_zbar(&res, "the pairing link round trip") {
-            let _ = std::fs::remove_dir_all(&dir);
             return;
         }
         assert_eq!(res.out.trim(), link);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

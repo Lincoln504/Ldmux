@@ -461,14 +461,8 @@ mod tests {
         bin
     }
 
-    fn scratch_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "ldmux-keeper-supervisor-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch_dir() -> crate::testutil::Scratch {
+        crate::testutil::Scratch::dir("ldmux-keeper-supervisor")
     }
 
     /// Stop a detached keeper by pid (it is a single process, not a group).
@@ -494,7 +488,7 @@ mod tests {
     #[tokio::test]
     async fn a_stopped_keeper_is_replaced_and_the_new_one_answers() {
         let state_dir = scratch_dir();
-        let sup = KeeperSupervisor::new(state_dir, keeper_bin());
+        let sup = KeeperSupervisor::new(state_dir.to_path_buf(), keeper_bin());
         sup.ensure().await.unwrap();
         let pid = sup.last_pid();
         assert_ne!(pid, 0);
@@ -525,7 +519,7 @@ mod tests {
     #[tokio::test]
     async fn auto_spawns_and_re_spawns_the_keeper() {
         let state_dir = scratch_dir();
-        let sup = KeeperSupervisor::new(state_dir.clone(), keeper_bin());
+        let sup = KeeperSupervisor::new(state_dir.to_path_buf(), keeper_bin());
 
         // Initially dead.
         assert!(!sup.is_alive().await);
@@ -553,7 +547,7 @@ mod tests {
     #[tokio::test]
     async fn ensure_is_idempotent_on_a_live_keeper() {
         let state_dir = scratch_dir();
-        let sup = KeeperSupervisor::new(state_dir.clone(), keeper_bin());
+        let sup = KeeperSupervisor::new(state_dir.to_path_buf(), keeper_bin());
 
         sup.ensure().await.unwrap();
         assert!(sup.is_alive().await);
@@ -605,7 +599,7 @@ mod tests {
         );
         let systemctl = stub_systemctl(&state_dir, &mark, &body);
         let sup =
-            KeeperSupervisor::new(state_dir.clone(), keeper_bin()).with_unit(Some(KeeperUnit {
+            KeeperSupervisor::new(state_dir.to_path_buf(), keeper_bin()).with_unit(Some(KeeperUnit {
                 name: "ldmux-keeper.service".into(),
                 systemctl,
             }));
@@ -640,7 +634,7 @@ mod tests {
         let mark = state_dir.join("mark");
         let systemctl = stub_systemctl(&state_dir, &mark, "echo no such unit >&2; exit 5");
         let sup =
-            KeeperSupervisor::new(state_dir.clone(), keeper_bin()).with_unit(Some(KeeperUnit {
+            KeeperSupervisor::new(state_dir.to_path_buf(), keeper_bin()).with_unit(Some(KeeperUnit {
                 name: "ldmux-keeper.service".into(),
                 systemctl,
             }));
@@ -673,7 +667,7 @@ mod tests {
         );
         let systemctl = stub_unit(&state_dir, &body);
         let sup =
-            KeeperSupervisor::new(state_dir.clone(), keeper_bin()).with_unit(Some(KeeperUnit {
+            KeeperSupervisor::new(state_dir.to_path_buf(), keeper_bin()).with_unit(Some(KeeperUnit {
                 name: "ldmux-keeper.service".into(),
                 systemctl,
             }));
@@ -717,7 +711,7 @@ mod tests {
         );
         let systemctl = stub_unit(&state_dir, &body);
         let sup =
-            KeeperSupervisor::new(state_dir.clone(), keeper_bin()).with_unit(Some(KeeperUnit {
+            KeeperSupervisor::new(state_dir.to_path_buf(), keeper_bin()).with_unit(Some(KeeperUnit {
                 name: "ldmux-keeper.service".into(),
                 systemctl,
             }));
