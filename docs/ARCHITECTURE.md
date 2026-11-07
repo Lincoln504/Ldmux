@@ -149,6 +149,15 @@ mark table: one entry per marked shell, paged because a message's body is capped
 dozen marks overflow one, and sent with the `Sessions` answer and with an `Attach` rather than
 pushed, because the radio cannot reach a phone that is not connected.
 
+**A newline in `Input` is a paste, and the host decides what it means.** The pane is the only place
+that knows whether it negotiated bracketed paste (`CSI ? 2004 h`), so `Profile` carries that flag
+(refreshed from every screen read, because programs toggle it at runtime) and the host encodes each
+`Input` record for it: text with no newline passes through, pasted text is wrapped in `CSI 200 ~` …
+`CSI 201 ~` with ESC stripped so a clipboard cannot end the paste early, or typed line by line with
+carriage returns where the pane never asked for the markers. Typed Enter arrives as a carriage
+return, which is why the newline is the marker and a carriage return is not: a phone that turned
+every pasted newline into a carriage return ran each pasted line as a command.
+
 A `sessions` entry carries who started the shell and who holds it now, each as one byte from a
 fixed vocabulary, because two length-prefixed words made the worst case one byte wider than a record
 has to carry.
