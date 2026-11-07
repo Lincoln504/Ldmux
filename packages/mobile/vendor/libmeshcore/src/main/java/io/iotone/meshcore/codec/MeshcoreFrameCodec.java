@@ -6,6 +6,7 @@ import io.iotone.meshcore.MeshcoreCommand;
 import io.iotone.meshcore.MeshcoreConstants;
 import io.iotone.meshcore.frames.AckFrame;
 import io.iotone.meshcore.frames.AdvertFrame;
+import io.iotone.meshcore.frames.AdvertPathFrame;
 import io.iotone.meshcore.frames.BatteryStorageFrame;
 import io.iotone.meshcore.frames.ChannelInfoFrame;
 import io.iotone.meshcore.frames.ChannelMessageFrame;
@@ -333,6 +334,35 @@ public final class MeshcoreFrameCodec {
         return new FrameBuilder()
                 .u8(MeshcoreCommand.GET_CONTACT_BY_KEY.code())
                 .fixed(publicKey, MeshcoreConstants.PUB_KEY_SIZE)
+                .build();
+    }
+
+    /**
+     * {@code CMD_GET_ADVERT_PATH} (0x2A): the route a recently heard advert took.
+     *
+     * <p>Body is {@code [reserved][6-byte public-key prefix]}. The firmware looks
+     * the prefix up in its advert-path cache and answers
+     * {@code RESP_CODE_ADVERT_PATH} (0x16), or {@code ERR_CODE_NOT_FOUND} when it
+     * has not heard that node recently.</p>
+     *
+     * <p>The prefix is the <em>advert's</em> originator, so a caller passes the
+     * first six bytes of the peer's public key. Six is the firmware's own
+     * {@code AdvertPath::pubkey_prefix} width and is not the configurable path
+     * hash size.</p>
+     *
+     * @param publicKeyPrefix first 6 bytes of the peer's public key
+     * @return the encoded frame
+     * @throws IllegalArgumentException when the prefix is not 6 bytes
+     */
+    public static byte[] getAdvertPath(byte[] publicKeyPrefix) {
+        if (publicKeyPrefix.length != MeshcoreConstants.PUB_KEY_PREFIX_SIZE) {
+            throw new IllegalArgumentException("public key prefix must be exactly "
+                    + MeshcoreConstants.PUB_KEY_PREFIX_SIZE + " bytes");
+        }
+        return new FrameBuilder()
+                .u8(MeshcoreCommand.GET_ADVERT_PATH.code())
+                .u8(0) // reserved
+                .fixed(publicKeyPrefix, MeshcoreConstants.PUB_KEY_PREFIX_SIZE)
                 .build();
     }
 
@@ -811,6 +841,22 @@ public final class MeshcoreFrameCodec {
                             c.bytes(MeshcoreConstants.CHANNEL_PSK_SIZE,
                                     "channelInfo.psk")));
 
+                case 0x16: { // RESP_CODE_ADVERT_PATH
+                    int receivedAt = (int) c.u32("advertPath.receivedAt");
+                    int pathLen = c.u8("advertPath.pathLen");
+                    int hashSize = ((pathLen >> 6) & 0x03) + 1;
+                    int want = (pathLen & 0x3F) * hashSize;
+                    if (c.remaining() < want) {
+                        return new DecodeFailure(MeshcoreDecodeError.of(
+                                DecodeErrorKind.TRUNCATED,
+                                "advertPath needs " + want + " bytes, has " + c.remaining(),
+                                0x16));
+                    }
+                    byte[] path = want == 0
+                            ? new byte[0]
+                            : c.bytes(want, "advertPath.path");
+                    return new AdvertPathFrame(receivedAt, pathLen, path);
+                }
                 case 0x15: // RESP_CODE_CUSTOM_VARS
                     return new CustomVarsFrame(decodeCustomVars(c));
 

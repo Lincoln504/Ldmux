@@ -298,6 +298,30 @@ public final class MeshcoreSession {
     }
 
     /**
+     * Reads the path a recently heard advert took
+     * ({@code CMD_GET_ADVERT_PATH}, 0x2A).
+     *
+     * <p>The reply is an {@link io.iotone.meshcore.frames.AdvertPathFrame} on
+     * {@link SessionListener#onOtherFrame}, or an {@code ErrorFrame} with
+     * {@code ERR_CODE_NOT_FOUND} when the radio has not heard that node
+     * recently. This is the only route a companion can learn with no contact
+     * and no decrypted path return: fill it, reverse the hop groups, and a
+     * direct send crosses repeaters.</p>
+     *
+     * <p>No-op when not {@link SessionState#READY}.</p>
+     *
+     * @param publicKeyPrefix first 6 bytes of the peer's public key
+     */
+    public void getAdvertPath(@NonNull byte[] publicKeyPrefix) {
+        if (state.get() != SessionState.READY) return;
+        try {
+            sendTracked(MeshcoreFrameCodec.getAdvertPath(publicKeyPrefix));
+        } catch (IllegalArgumentException ignored) {
+            // A malformed prefix gets no command, not a broken answer window.
+        }
+    }
+
+    /**
      * Requests battery voltage and storage usage
      * ({@code CMD_GET_BATT_AND_STORAGE}, 0x14). The reply arrives as a
      * {@link io.iotone.meshcore.frames.BatteryStorageFrame} on

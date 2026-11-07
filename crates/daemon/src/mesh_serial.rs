@@ -53,18 +53,23 @@ const MAX_PATH_SIZE: usize = 64;
 
 /// How often this radio floods an advert, or `None` when adverts are off.
 ///
-/// **An advert is how a peer learns a path to us.** The phone cannot reach this radio behind a
-/// repeater until it holds a contact whose out-path was built from an advert that arrived through
-/// those repeaters, because a raw record is a direct packet and a direct packet with no path
-/// reaches only as far as the sender's antenna. MeshCore treats adverts as unacknowledged
-/// broadcasts, so the only lever is how often to spend one, and one record every half hour is
-/// about a hundredth of a percent of a 1 % allowance. `LDMUX_MESH_ADVERT_SECS=0` turns them off
-/// for an operator who does not want the node visible on the mesh at all.
+/// **An advert is how a peer learns a path to us.** A raw record is a direct packet, and a direct
+/// packet with no path reaches only as far as the sender's antenna. The phone's radio learns the
+/// route from the advert's accumulated path (`CMD_GET_ADVERT_PATH`), so this interval is the
+/// worst case for "arrived somewhere new, opened the app": five minutes.
+///
+/// **Why minutes and not half an hour.** The interval was 1800 s, which is fine for a peer that
+/// stays in one place and wrong for a phone: a route heard an hour ago belongs to wherever the
+/// phone was an hour ago, and the first thing a moved phone does is fail on it. One advert is
+/// about 0.3 s of air at 62.5 kHz SF7, so five minutes costs roughly a tenth of a percent of a
+/// 1 % allowance, and MeshCore treats adverts as unacknowledged broadcasts, so this is the only
+/// lever there is. `LDMUX_MESH_ADVERT_SECS=0` turns them off for an operator who does not want the
+/// node visible on the mesh at all.
 fn advert_interval() -> Option<Duration> {
     let secs = std::env::var("LDMUX_MESH_ADVERT_SECS")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(1_800);
+        .unwrap_or(300);
     (secs > 0).then(|| Duration::from_secs(secs))
 }
 
@@ -742,7 +747,7 @@ mod tests {
         // SAFETY: this key is read only by `advert_interval`, and this test is the only place in
         // the binary that writes it, so there is nothing to race with.
         unsafe { std::env::remove_var("LDMUX_MESH_ADVERT_SECS") };
-        assert_eq!(advert_interval(), Some(Duration::from_secs(1_800)), "the default");
+        assert_eq!(advert_interval(), Some(Duration::from_secs(300)), "the default");
         // SAFETY: as above; this test owns the key for its whole body.
         unsafe { std::env::set_var("LDMUX_MESH_ADVERT_SECS", "0") };
         assert_eq!(advert_interval(), None, "off means off");
@@ -752,7 +757,7 @@ mod tests {
         // SAFETY: as above. A malformed value falls back to the default rather than turning
         // adverts off, because "off" is a decision the operator makes on purpose.
         unsafe { std::env::set_var("LDMUX_MESH_ADVERT_SECS", "often") };
-        assert_eq!(advert_interval(), Some(Duration::from_secs(1_800)));
+        assert_eq!(advert_interval(), Some(Duration::from_secs(300)));
         // SAFETY: as above.
         unsafe { std::env::remove_var("LDMUX_MESH_ADVERT_SECS") };
     }

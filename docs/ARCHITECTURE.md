@@ -311,9 +311,11 @@ by the host radio, by the app before it retunes, and by every budget below.
 - Batch mode exists because a public channel turns every keystroke into a broadcast.
 - The bridge coalesces screen updates and lets input echo through ahead of them.
 - **The host advertises what it is.** A flooded self-advert goes out when the link opens and every
-  `LDMUX_MESH_ADVERT_SECS` (default half an hour), because a peer behind a repeater cannot learn a
-  route to this radio any other way. An advert is one record of about 130 bytes: roughly 0.05 % of
-  a 1 % allowance at the deployed tuple.
+  `LDMUX_MESH_ADVERT_SECS` (default five minutes), because a peer behind a repeater cannot learn a
+  route to this radio any other way. An advert is one record of about 130 bytes: roughly 0.1 % of a
+  1 % allowance at the deployed tuple. Five minutes rather than half an hour because the interval
+  is the worst case for a phone that has moved: a route heard an hour ago belongs to wherever the
+  phone was an hour ago.
 - **The host gates on the countdown it computed, not on the firmware's limiter.** MeshCore's
   `Dispatcher` charges measured airtime against a budget, but its factor is 1.0, which is a 50 %
   duty cycle (`getAirtimeBudgetFactor()`, `meshcore/src/Dispatcher.cpp`) — not the 1 % a European
@@ -380,18 +382,24 @@ when its route is direct (`Mesh.cpp`, `case PAYLOAD_TYPE_RAW_CUSTOM`: it checks
 `pkt->isRouteDirect()` and the flood branch is commented out), so a flooded raw record would
 be transmitted and then ignored by every receiver. Direct means the sender must know a path.
 
-1. **The host makes itself known, and the peer must then ask for a route.** A companion does not
-   advertise by itself, so the daemon floods a self-advert (`CMD_SEND_SELF_ADVERT` with mode 1)
-   when the link opens and every `LDMUX_MESH_ADVERT_SECS` (default 1800; `0` turns adverts off).
-   Repeaters forward it and its path accumulates, so the phone's radio learns a contact.
-   **An advert does not teach a route on its own**: `BaseChatMesh::onAdvertRecv` never touches
-   `out_path`. A route is learned from a path return, which MeshCore sends when a node receives a
-   **flooded request**: `onPeerDataRecv` answers a flood `PAYLOAD_TYPE_REQ` with
-   `createPathReturn(...)` sent flooded, and `onContactPathRecv` stores the reversed path as the
-   contact's `out_path`. The companion command for that is `CMD_SEND_PATH_DISCOVERY_REQ` (0x34,
-   which is a telemetry request forced to flood), and it needs the host in the radio's contact
-   list first (`CMD_ADD_UPDATE_CONTACT`, 0x09). See the audit for the state of that step.
-2. **The host replies along the path the request arrived by.** Each record that crosses
+1. **The host makes itself known.** A companion does not advertise by itself, so the daemon floods
+   a self-advert (`CMD_SEND_SELF_ADVERT` with mode 1) when the link opens and every
+   `LDMUX_MESH_ADVERT_SECS` (default 300; `0` turns adverts off). Repeaters forward it and its path
+   accumulates.
+2. **The phone reads the route off the advert.** An advert does not teach the *radio* a route
+   (`BaseChatMesh::onAdvertRecv` never touches `out_path`), but the firmware keeps every advert's
+   accumulated path in an advert-path cache, keyed by the originator's six-byte key prefix
+   (`onDiscoveredContact` → `advert_paths[]`). `CMD_GET_ADVERT_PATH` (0x2A) reads it back, and the
+   app reverses the hop groups into sending order (`RadioRoute.reversed`, mirroring the desktop's
+   `PeerPath::reversed`). **This needs no contact on either radio and no decrypted exchange**, so
+   it works on firmware as shipped. The route is validated before use: a length byte that
+   disagrees with the bytes, or a path wider than the firmware's 64, is refused and treated as no
+   route.
+   The other route — a **path return** from a flooded request (`CMD_SEND_PATH_DISCOVERY_REQ`, 0x34,
+   answered by `createPathReturn`) — is not used, because it needs the host in the radio's contact
+   table and the host's telemetry permission to allow the request (`telemetry_mode_base` defaults
+   to deny), so a stock radio would answer nothing.
+3. **The host replies along the path the request arrived by.** Each record that crosses
    repeaters arrives with its hops in travel order; `PeerPath::reversed` turns that into a
    usable out-path (per `hash_size` bytes, not per byte) and the radio thread sends every
    record along it. Until one arrives, records go zero-hop, which reaches only the radios in
@@ -404,15 +412,18 @@ Consequences worth knowing:
   `max(2 s, 6 x airtime)` (`Config::with_airtime`), handed to the session by the carrier
   (`Bound::airtime_ms`) and by the app (`ldmux_session_set_airtime`). A fixed two-second retry
   would duplicate records the peer already has and spend the hour's allowance doing it.
-- **Paths move.** The phone re-asks for its contact every 45 s while it has no route and every
-  10 minutes once it has one, so a host that becomes reachable mid-session becomes reachable
-  without a reconnect — provided the radio's contact carries an out-path, which is what the
-  step above has to establish.
+- **Paths move.** The phone asks its radio for the advert path every 45 s while it has no route
+  and reads the contact every 10 minutes once it has one, so a host that becomes reachable
+  mid-session becomes reachable without a reconnect. A route that turns out to be stale is dropped
+  by the app (the radio refuses the direct send), which retries zero-hop and asks for a fresh route
+  at once instead of waiting out the retry window.
 - **What is proven and what is not.** The reverse-path reply, the zero-hop fallback, the
-  per-`hash_size` hop reversal and the airtime-scaled timers are unit-tested. Nothing in this
-  tree has yet run through a real repeater: the two radios on the bench hear each other directly,
-  so the path is always empty there. The first three-radio test is what proves the route-learning
-  step end to end.
+  per-`hash_size` hop reversal (both directions: `PeerPath::reversed` and `RadioRoute.reversed`),
+  the advert-path decoding and the airtime-scaled timers are unit-tested. Nothing in this tree has
+  yet run through a real repeater: the two radios on the bench hear each other directly, so the
+  path is always empty there, and the advert-path answer on a bench is a zero-hop path. The first
+  on-air test — two radios far enough apart that a public repeater is the only way between them —
+  is what proves the route-learning step end to end.
 - **A path is not authenticated by MeshCore.** Route integrity is an 8-bit prefix comparison per
   hop (issue #1775 in the firmware tracker), so the session's Noise layer, not the path, is what
   authenticates the peer.
@@ -448,10 +459,16 @@ The daemon holds the table (`crates/daemon/src/buzz.rs`), the claim clears a she
 routes obey one rule), and the desk hears it too: an attached window asks for `buzz` and writes one
 BEL byte for its own shell, so whatever emulator the operator uses makes the noise they configured.
 
-A notification is the optional second way of being told: a setting, off by default, tailnet only,
-with a sounding and a silent channel (a channel's importance is immutable after creation, so honouring
-a sound toggle on Android 8+ requires two). Tapping one opens that shell: if it is already a page the
-app switches to it, and if it is not it becomes another page, which the header counts.
+A notification is the optional second way of being told: one setting, off by default, tailnet only,
+one channel, one notification per mark, which goes away when it is read or opened. It is never
+posted while the app is on screen, because the square beside the row already says it. Tapping it
+opens that shell: if it is already a page the app switches to it, and if it is not it becomes
+another page, which the header counts.
+
+**Exactly one notification in this app is persistent**, and it is not this one: a foreground service
+may not run without a notification, so the one that keeps a background link alive exists while the
+app is off screen, on the quietest channel there is, saying what is being kept (`2 shells open`).
+It stops the moment the app comes back on screen.
 
 ## 12. Build and test
 

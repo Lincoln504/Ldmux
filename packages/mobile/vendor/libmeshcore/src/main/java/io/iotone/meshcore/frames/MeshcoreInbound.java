@@ -46,6 +46,7 @@ public sealed interface MeshcoreInbound
                 CustomVarsFrame,
                 MessagesWaitingFrame,
                 RawDataFrame,
+                AdvertPathFrame,
                 TelemetryResponseFrame,
                 UnsupportedFrame,
                 DecodeFailure {

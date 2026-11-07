@@ -43,7 +43,15 @@ class LdmuxService : Service() {
         const val EXTRA_TEXT = "text"
 
         private const val TAG = "ldmux"
-        private const val CHANNEL_ID = "ldmux.session"
+        /**
+         * The channel of the "keeping the link open" notification, and the id it used to have.
+         *
+         * A channel's importance is fixed at creation, so the move to the quietest importance
+         * (`IMPORTANCE_MIN`) needed a new id. The old one is removed on upgrade, so the phone's
+         * notification settings do not list a channel the app no longer posts into.
+         */
+        private const val CHANNEL_ID = "ldmux.link"
+        private const val CHANNEL_ID_OLD = "ldmux.session"
         private const val NOTIFICATION_ID = 1
 
         /**
@@ -81,7 +89,7 @@ class LdmuxService : Service() {
     override fun onCreate() {
         super.onCreate()
         createChannel()
-        promote("Session open")
+        promote("Keeping the link open")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -99,7 +107,7 @@ class LdmuxService : Service() {
                 return START_NOT_STICKY
             }
         }
-        promote(intent?.getStringExtra(EXTRA_TEXT) ?: "Session open")
+        promote(intent?.getStringExtra(EXTRA_TEXT) ?: "Keeping the link open")
         acquireWakeLock()
         return START_NOT_STICKY
     }
@@ -151,18 +159,24 @@ class LdmuxService : Service() {
      */
     private fun createChannel() {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        runCatching { nm.deleteNotificationChannel(CHANNEL_ID_OLD) }
         if (nm.getNotificationChannel(CHANNEL_ID) != null) return
         nm.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ID,
-                "Open sessions",
-                // Low: this is a status light for something the user started, not
-                // something asking for attention. A terminal that buzzes is a
-                // terminal that gets uninstalled.
-                NotificationManager.IMPORTANCE_LOW,
+                "Keeping the link open",
+                // **The quietest channel there is.** This notification exists because the platform
+                // requires one for a foreground service, not because the operator asked to be told
+                // anything: it is posted only while the app is off screen, it makes no sound, shows
+                // no icon in the status bar and no badge, and says what is being kept ("2 shells
+                // open"). An app that announces itself is an app that gets uninstalled.
+                NotificationManager.IMPORTANCE_MIN,
             ).apply {
-                description = "Shown while a shell is connected"
+                description = "Shown only while a link is kept open in the background"
                 setShowBadge(false)
+                setSound(null, null)
+                enableVibration(false)
+                enableLights(false)
             },
         )
     }
@@ -211,8 +225,7 @@ actual object BackgroundSession {
     /** The intent extra a mark's notification carries: the shell it is about. */
     const val SHELL_EXTRA = "ldmux.shell"
 
-    private const val MARK_CHANNEL_SOUND = "ldmux.mark"
-    private const val MARK_CHANNEL_SILENT = "ldmux.mark.silent"
+    private const val MARK_CHANNEL = "ldmux.mark"
 
     /// Marks get their own id range, apart from the service's single id 1.
     private const val MARK_ID_BASE = 2_000
@@ -225,19 +238,65 @@ actual object BackgroundSession {
     fun markStopped() {
         running = false
         lastText = ""
+        // The operator pressed Disconnect: the service must not come back on the next foreground
+        // transition. The app asks again on the next `setActive`, which is what opening a shell or
+        // changing the route does.
+        wantLock = false
+        wantText = ""
     }
 
     /** Held so it is not collected — the framework keeps only a weak reference. */
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
-    actual fun setActive(active: Boolean, text: String) {
-        val ctx = AndroidApp.context
-        if (active == running && text == lastText) return
-        running = active
-        lastText = text
+    /**
+     * What the link needs, held across a foreground/background change.
+     *
+     * The platform callbacks re-read it ([applyLockState]), so the service starts at the moment the
+     * app leaves the screen and stops at the moment it comes back — which is the point: an ongoing
+     * notification that says an app is open is noise to someone looking at the app, and the
+     * Activity itself keeps the process alive while it is visible.
+     */
+    private var wantLock = false
+    private var wantText = ""
 
-        val intent = Intent(ctx, LdmuxService::class.java).putExtra(LdmuxService.EXTRA_TEXT, text)
-        if (!active) {
+    /** Whether the app is on screen, from `onResume`/`onPause`: the pair the platform ties to it. */
+    private var onScreen = true
+
+    /** `MainActivity.onPause`: still allowed to start a service, and about to stop being. */
+    fun screenPaused() {
+        onScreen = false
+        applyLockState()
+    }
+
+    /** `MainActivity.onResume`: no notification exists for an app the operator is looking at. */
+    fun screenResumed() {
+        onScreen = true
+        applyLockState()
+    }
+
+    actual fun setActive(active: Boolean, text: String) {
+        wantLock = active
+        wantText = text
+        applyLockState()
+    }
+
+    /**
+     * Run the service exactly while the app is **off screen** and the link wants to survive.
+     *
+     * The foreground service is what keeps Android from freezing the process — a socket, a BLE link
+     * and a claim cannot survive that — but it is also a notification the operator cannot dismiss,
+     * so it exists only for the time they are not looking: off screen. Coming back stops it, and the
+     * text says what is being kept (`2 shells open`), never that the app is running.
+     */
+    private fun applyLockState() {
+        val ctx = AndroidApp.context
+        val wanted = wantLock && !onScreen
+        if (wanted == running && (wantText == lastText || !wanted)) return
+        running = wanted
+        lastText = if (wanted) wantText else ""
+
+        val intent = Intent(ctx, LdmuxService::class.java).putExtra(LdmuxService.EXTRA_TEXT, wantText)
+        if (!wanted) {
             runCatching { ctx.stopService(intent) }.onFailure { Log.w(TAG, "stopService", it) }
             return
         }
@@ -307,18 +366,21 @@ actual object BackgroundSession {
     }
 
     /**
-     * A shell's mark, as a notification, when the operator asked for notifications.
+     * A shell's mark, as one notification, when the operator asked for notifications.
      *
-     * **Two channels, because a channel's importance is immutable.** The service's own channel is
-     * `IMPORTANCE_LOW` and can never be made to sound, and a sound toggle must be honourable on any
-     * Android 8+ install, so the sounding and the silent form are separate channels chosen at post
-     * time.
+     * **One channel, and it is not the service's.** The service's own channel exists because the
+     * platform demands a notification for a foreground service and is therefore silent and
+     * minimal; a mark is the opposite — something the operator asked to be told about — so it posts
+     * into its own channel with its own importance.
      *
      * One notification per shell: the id is the shell's hash, so a shell that finishes twice
-     * updates its own line instead of stacking. `setOnlyAlertOnce(false)` keeps the sound for a
-     * genuinely new mark, which is the only thing this notification is for.
+     * updates its own line instead of stacking. It is a one-off (`setAutoCancel`), never ongoing:
+     * the persistent notification in this app is the service's, and there is exactly one of those.
      */
-    actual fun postMark(shellId: String, title: String, body: String, sound: Boolean) {
+    actual fun postMark(shellId: String, title: String, body: String) {
+        // **Never over a page the operator is reading.** The square beside the shell's row is
+        // already on screen; a notification on top of the terminal says the same thing twice.
+        if (AppLifecycle.foreground) return
         val ctx = AndroidApp.context
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
         if (Build.VERSION.SDK_INT >= 33 &&
@@ -328,8 +390,7 @@ actual object BackgroundSession {
             // Nothing to post into: the permission is the user's, and the row mark still works.
             return
         }
-        ensureMarkChannels(nm)
-        val channel = if (sound) MARK_CHANNEL_SOUND else MARK_CHANNEL_SILENT
+        ensureMarkChannel(nm)
         val open = PendingIntent.getActivity(
             ctx,
             shellId.hashCode(),
@@ -338,7 +399,7 @@ actual object BackgroundSession {
                 .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val n = Notification.Builder(ctx, channel)
+        val n = Notification.Builder(ctx, MARK_CHANNEL)
             .setContentTitle(title)
             .setContentText(body)
             .setSmallIcon(R.drawable.ic_notification)
@@ -365,31 +426,21 @@ actual object BackgroundSession {
         return if (h == Int.MAX_VALUE) MARK_ID_BASE else MARK_ID_BASE + h
     }
 
-    private fun ensureMarkChannels(nm: NotificationManager) {
-        if (nm.getNotificationChannel(MARK_CHANNEL_SOUND) == null) {
-            nm.createNotificationChannel(
-                NotificationChannel(
-                    MARK_CHANNEL_SOUND,
-                    "Shell finished",
-                    NotificationManager.IMPORTANCE_DEFAULT,
-                ).apply {
-                    description = "A shell finished a turn or needs attention"
-                    setShowBadge(true)
-                },
-            )
-        }
-        if (nm.getNotificationChannel(MARK_CHANNEL_SILENT) == null) {
-            nm.createNotificationChannel(
-                NotificationChannel(
-                    MARK_CHANNEL_SILENT,
-                    "Shell finished (silent)",
-                    NotificationManager.IMPORTANCE_LOW,
-                ).apply {
-                    description = "A shell finished a turn, without a sound"
-                    setShowBadge(true)
-                },
-            )
-        }
+    private fun ensureMarkChannel(nm: NotificationManager) {
+        if (nm.getNotificationChannel(MARK_CHANNEL) != null) return
+        nm.createNotificationChannel(
+            NotificationChannel(
+                MARK_CHANNEL,
+                "Shell finished",
+                // Default, because this one is the whole point of the switch: the operator asked to
+                // be told that a shell finished a turn, and a notification nobody notices answers a
+                // question nobody asked. Turning the switch off is the way to want silence.
+                NotificationManager.IMPORTANCE_DEFAULT,
+            ).apply {
+                description = "A shell finished a turn or needs attention"
+                setShowBadge(true)
+            },
+        )
     }
 
     actual fun stopWatchingNetwork() {

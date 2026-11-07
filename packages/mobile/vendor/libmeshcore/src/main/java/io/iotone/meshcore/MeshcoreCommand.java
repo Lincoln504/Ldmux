@@ -28,6 +28,17 @@ public enum MeshcoreCommand {
     /** {@code CMD_GET_CONTACT_BY_KEY} — one contact by 32-byte public key. */
     GET_CONTACT_BY_KEY(0x1E),
 
+    /**
+     * {@code CMD_GET_ADVERT_PATH} (0x2A) — the path a recently heard advert took,
+     * read from the firmware's advert-path cache.
+     *
+     * <p>Body: {@code [reserved u8][6-byte public-key prefix]}. The reply is
+     * {@code RESP_CODE_ADVERT_PATH} (0x16). This needs no contact and no
+     * decryption, so it is how a companion learns a route through repeaters on
+     * firmware whose contacts were never populated.</p>
+     */
+    GET_ADVERT_PATH(0x2A),
+
     /** {@code CMD_GET_DEVICE_TIME} — source-only. */
     GET_DEVICE_TIME(0x05),
 

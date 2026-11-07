@@ -297,7 +297,7 @@ internal fun AppContent(
     // configuration, so a list captured in this effect would be the one from the day the setting
     // was changed: a shell created since then would show its id instead of its name.
     val currentSessions by rememberUpdatedState(sessions)
-    DisposableEffect(client, config.notifyMarks, config.notifySound, config.route) {
+    DisposableEffect(client, config.notifyMarks, config.route) {
         client.notifyMark = notify@{ id, mark, note ->
             if (!config.notifyMarks || config.route != MeshRoute.Tailnet) return@notify
             val title = currentSessions.firstOrNull { it.id == id }?.title?.ifEmpty { null }
@@ -310,7 +310,7 @@ internal fun AppContent(
                     ShellMark.Attention -> "needs attention"
                 }
             }
-            BackgroundSession.postMark(id, title, body, config.notifySound)
+            BackgroundSession.postMark(id, title, body)
         }
         onDispose { client.notifyMark = { _, _, _ -> } }
     }
@@ -348,13 +348,16 @@ internal fun AppContent(
     // The radio route does not do this: staying reachable there means keeping a radio session and a
     // BLE link alive, and the marks are replayed on the next attach instead.
     val reachable = config.route == MeshRoute.Tailnet && link != LinkState.Unpaired
+    // **This states the intent, not the service.** `setActive` records what the link needs; the
+    // platform decides when that becomes a foreground service, which is only while the app is off
+    // screen. A visible app needs no notification to say it is open.
     LaunchedEffect(terminalOpen, pages.size, reachable) {
         BackgroundSession.setActive(
             terminalOpen || reachable,
             when {
                 pages.size == 1 -> "1 shell open"
                 pages.isNotEmpty() -> "${pages.size} shells open"
-                else -> "reachable for shell marks"
+                else -> "linked to the desktop"
             },
         )
     }

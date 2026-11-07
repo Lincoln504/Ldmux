@@ -53,6 +53,15 @@ actual object AppPrefs {
     private const val KEY_MESH_INPUT_MODE = "mesh_input_mode"
     /** The desktop's tuple from the pairing code: four numbers, never a secret. */
     private const val KEY_MESH_HOST_PRESET = "mesh_host_preset"
+    /**
+     * Whether a finished shell may post a notification.
+     *
+     * **It was never written.** The switch existed, `Config` carried it, and neither `load` nor
+     * `save` touched it, so it read back as the default (`off`) on every launch: an operator turned
+     * notifications on and found them off again the next time the app started. A preference that
+     * silently resets is worse than no preference.
+     */
+    private const val KEY_NOTIFY_MARKS = "notify_marks"
 
     actual fun load(): LdmuxConfig {
         val sp = AndroidApp.context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -83,6 +92,7 @@ actual object AppPrefs {
             // Stored by name, not by ordinal: an enum's order is an implementation detail, and a
             // value that moved would silently change the mode of every install that had saved it.
             meshHostPreset = sp.getString(KEY_MESH_HOST_PRESET, null) ?: "",
+            notifyMarks = sp.getBoolean(KEY_NOTIFY_MARKS, LdmuxConfig.DEFAULT.notifyMarks),
             meshInputMode = sp.getString(KEY_MESH_INPUT_MODE, null)
                 ?.let { name -> MeshInputMode.entries.firstOrNull { it.name == name } }
                 ?: LdmuxConfig.DEFAULT.meshInputMode,
@@ -118,6 +128,7 @@ actual object AppPrefs {
             .putString(KEY_MESH_RADIO_NAME, config.meshRadioName)
             .putBoolean(KEY_MESH_OPEN_AIRTIME, config.meshOpenAirtime)
             .putBoolean(KEY_MESH_PUBLIC_CHANNEL, config.meshPublicChannel)
+            .putBoolean(KEY_NOTIFY_MARKS, config.notifyMarks)
             .putString(KEY_MESH_INPUT_MODE, config.meshInputMode.name)
             .putString(KEY_MESH_HOST_PRESET, config.meshHostPreset)
             .apply()

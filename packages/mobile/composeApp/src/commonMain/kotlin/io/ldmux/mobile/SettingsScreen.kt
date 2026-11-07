@@ -381,19 +381,9 @@ private fun Notifications(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
         }
     }
     SettingsNote(
-        "a banner when a shell finishes a turn or needs attention; the square beside the row " +
-            "appears either way, and the tailnet route is the one that can reach a pocketed phone",
+        "one notification when a shell finishes a turn or needs attention; the square beside the " +
+            "row appears either way, and the tailnet route is the one that can reach a pocketed phone",
     )
-    if (current.notifyMarks) {
-        SettingRow("sound") {
-            OptionButton("silent", selected = !current.notifySound) {
-                if (current.notifySound) onSave(current.copy(notifySound = false))
-            }
-            OptionButton("sound", selected = current.notifySound) {
-                if (!current.notifySound) onSave(current.copy(notifySound = true))
-            }
-        }
-    }
 }
 
 @Composable

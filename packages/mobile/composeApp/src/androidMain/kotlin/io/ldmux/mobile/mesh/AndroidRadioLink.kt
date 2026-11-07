@@ -14,6 +14,7 @@ import io.iotone.meshcore.android.MeshcoreSession
 import io.iotone.meshcore.android.RawSendCallback
 import io.iotone.meshcore.android.SessionListener
 import io.iotone.meshcore.android.SessionState
+import io.iotone.meshcore.frames.AdvertPathFrame
 import io.iotone.meshcore.frames.ContactFrame
 import io.iotone.meshcore.frames.BatteryStorageFrame
 import io.iotone.meshcore.frames.DeviceInfoFrame
@@ -123,6 +124,7 @@ class AndroidRadioLink(
     private var session: MeshcoreSession? = null
     private var ready: CompletableDeferred<Unit>? = null
     private var contactDone: CompletableDeferred<Unit>? = null
+    private var routeDone: CompletableDeferred<Unit>? = null
     private var deviceInfoDone: CompletableDeferred<RadioDeviceInfo>? = null
 
     @Volatile
@@ -240,13 +242,10 @@ class AndroidRadioLink(
                 // malformed path. Neither is a route.
                 hostPath = null
             } else {
-                val bytes = c.activePath()
-                val expected = c.pathHopCount() * c.pathHashSize()
-                hostPath = if (bytes.size == expected && bytes.size <= 64) {
-                    RadioPath(c.outPathLen(), bytes)
-                } else {
-                    null
-                }
+                // The firmware's own out-path, already in sending order. Validated by the same rule
+                // the advert path goes through, so one malformed answer cannot become a route.
+                hostPath = RadioRoute.fromContact(c.outPathLen(), c.activePath())
+                    ?.let { RadioPath(it.encoded, it.bytes) }
             }
             contactDone?.complete(Unit)
         }
@@ -254,7 +253,25 @@ class AndroidRadioLink(
         override fun onOtherFrame(frame: MeshcoreInbound) {
             when (frame) {
                 is EndOfContactsFrame -> contactDone?.complete(Unit)
-                is ErrorFrame -> contactDone?.complete(Unit)
+                // **A route heard on the air.** The advert-path cache is filled by every advert the
+                // radio hears; this is its answer for the host's six-byte prefix. The hops arrive in
+                // travel order, so they are reversed into sending order here (see `RadioRoute`).
+                is AdvertPathFrame -> {
+                    val path = RadioRoute.reversed(frame.pathLength(), frame.path())
+                    if (path != null) {
+                        hostPath = RadioPath(path.encoded, path.bytes)
+                        appLog("mesh advert route: ${path.encoded and 0x3F} hop(s)")
+                    } else {
+                        appLog("mesh advert route: malformed path, ignored")
+                    }
+                    routeDone?.complete(Unit)
+                }
+                is ErrorFrame -> {
+                    // One answer window, two possible questions: an error is "no" to both, and
+                    // both waiters should stop waiting rather than sit out their deadlines.
+                    contactDone?.complete(Unit)
+                    routeDone?.complete(Unit)
+                }
                 is DeviceInfoFrame -> {
                     val info = frame.info().toRadioDeviceInfo().copy(batteryMillivolts = batteryMv)
                     _deviceInfo.value = info
@@ -354,6 +371,18 @@ class AndroidRadioLink(
             // radio has - asked here, after the tracked contact query has settled, so it cannot
             // race the one answer window the companion has.
             if (s.isIdle()) s.requestBatteryStorage()
+            // **A route before the first record, when the radio can give one.** The contact answer
+            // above may have carried an out-path; when it did not, the advert-path cache is the only
+            // place a route can come from, and asking before the first send means one record goes
+            // out once instead of a zero-hop attempt that only reaches earshot.
+            val prefix = RadioRoute.prefix(hostKey)
+            if (hostPath == null && prefix != null && s.isIdle()) {
+                val done = CompletableDeferred<Unit>()
+                routeDone = done
+                s.getAdvertPath(prefix)
+                withTimeoutOrNull(ROUTE_WAIT_MS) { done.await() }
+                routeDone = null
+            }
             startPathRefresh(s)
             if (closing) {
                 closeTransport()
@@ -418,6 +447,11 @@ class AndroidRadioLink(
                 // once, rather than blackholing the session until a reboot.
                 hostPath = null
                 appLog("mesh path not found; retrying zero-hop")
+                // The route is stale: ask the radio for a fresh one now instead of waiting out
+                // PATH_RETRY_MS, so a walk to the other side of the building costs one record
+                // rather than a whole retry window of zero-hop.
+                val prefix = RadioRoute.prefix(hostKey)
+                if (prefix != null && s.isIdle()) runCatching { s.getAdvertPath(prefix) }
                 return send(record)
             }
             if (result == RadioSendResult.Accepted) {
@@ -593,13 +627,27 @@ class AndroidRadioLink(
     }
 
     /**
-     * Re-ask the radio for the host's contact: 45 s apart while no path is known, 10 minutes apart
-     * once one is, and never while another tracked command is outstanding (the companion has one
-     * answer window, and a second request inside it makes both answers ambiguous).
+     * Keep the route to the host current, from the two sources the radio offers.
+     *
+     * **The contact first, then the air.** A contact's out-path is the authoritative one: it comes
+     * from a path return and the firmware has already reversed it. It is also usually empty, because
+     * a companion never asks for a path return on its own and an advert does not teach one
+     * (`BaseChatMesh::onAdvertRecv` never touches `out_path`). So when the contact has no path, this
+     * asks for the **advert path**: the route the host's last advert took to arrive here, reversed
+     * into sending order. That route needs no contact on either radio and no decrypted exchange,
+     * which is what makes it work on firmware nobody reconfigured.
+     *
+     * **It stops asking once it has an answer.** Both queries are local commands — an advert-path
+     * read costs no airtime at all — but a loop that keeps polling with a route in hand is a loop
+     * that will overwrite a good route with a stale one. So: every [PATH_RETRY_MS] while there is no
+     * route, every [PATH_REFRESH_MS] once there is, and never while another tracked command is
+     * outstanding, because the companion has one answer window and a second request inside it makes
+     * both answers ambiguous.
      */
     private fun startPathRefresh(s: MeshcoreSession) {
         pathScope?.cancel()
         if (hostKey.isEmpty()) return
+        val prefix = RadioRoute.prefix(hostKey)
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         pathScope = scope
         scope.launch {
@@ -607,7 +655,13 @@ class AndroidRadioLink(
                 val wait = if (hostPath == null) PATH_RETRY_MS else PATH_REFRESH_MS
                 delay(wait)
                 if (closing || !s.isIdle()) continue
-                runCatching { s.getContact(hostKey) }
+                // One command per tick: the contact answer may itself carry a path, and asking for
+                // the advert path in the same window would make both answers ambiguous.
+                if (hostPath == null && prefix != null) {
+                    runCatching { s.getAdvertPath(prefix) }
+                } else {
+                    runCatching { s.getContact(hostKey) }
+                }
             }
         }
     }
@@ -700,6 +754,8 @@ class AndroidRadioLink(
          */
         const val BOND_CONNECT_TIMEOUT_MS = 75_000L
         const val CONTACT_WAIT_MS = 3_000L
+        /** How long connect() waits for the advert-path answer, which is a local cache read. */
+        const val ROUTE_WAIT_MS = 2_000L
         /** Re-ask for the host's path while none is known: often enough to catch a late advert. */
         const val PATH_RETRY_MS = 45_000L
         /** Re-ask once a path is known: paths move with the radios, but slowly. */

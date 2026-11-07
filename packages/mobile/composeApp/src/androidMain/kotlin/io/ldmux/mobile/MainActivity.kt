@@ -74,6 +74,25 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
+     * **The last moment a foreground service may be started.**
+     *
+     * Android 12+ refuses `startForegroundService` once the app is in the background, which is
+     * exactly the state `onStop` reports — so the service that keeps a socket or a BLE link alive
+     * would be refused at the one moment it is needed. `onPause` is while the activity is still
+     * allowed to start one.
+     */
+    override fun onPause() {
+        BackgroundSession.screenPaused()
+        super.onPause()
+    }
+
+    /** Back on screen: the service stops, and with it the notification nobody needs to read. */
+    override fun onResume() {
+        super.onResume()
+        BackgroundSession.screenResumed()
+    }
+
+    /**
      * The app left the screen.
      *
      * Deliberately `onStop` and not `onPause`: `onPause` fires for a dialog, a

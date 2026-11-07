@@ -92,7 +92,7 @@ tailnet, or a pair of LoRa radios when there is no internet at all.
   route does not hold a session open for it and delivers the marks on the next attach instead.
 - **Settings**: `link` (transport: `tailnet` or `LoRa radio`), `pairing` (token fingerprint,
   `pair` / `paste` / `unpair`), `diagnostics` (desktop, transport, radio, build, and an in-memory
-  log with `copy` and `show`), `shells` (notifications: off by default, sound on or off), `display`.
+  log with `copy` and `show`), `shells` (one notification when a shell finishes, off by default), `display`.
 - **Radio setup** is in the app: pick the phone's radio over Bluetooth, choose a preset (region
   presets, the public table, `randomise`, `restore`, or a `custom` `MHz kHz SF CR`), `apply`. The
   desktop's radio row has one `match` that copies the four numbers and nothing else.
@@ -159,8 +159,9 @@ channel key is involved: records are direct packets addressed to the peer's radi
 by the session, so a preset is a frequency to share, not a secret to match. The code carries the
 desktop radio's tuple, so the app compares it with its own radio and matches it in one press.
 `ldmux mesh status` prints the tuple; `ldmux mesh preset <MHz> <kHz> <SF> <CR>` sets it. Across
-repeaters the desktop advertises itself on open and every 30 minutes (`LDMUX_MESH_ADVERT_SECS`),
-and every reply follows the path the request arrived by (`docs/ARCHITECTURE.md` §11).
+repeaters the desktop advertises itself on open and every five minutes (`LDMUX_MESH_ADVERT_SECS`),
+the phone reads the route out of the advert it heard, and every reply follows the path the request
+arrived by (`docs/ARCHITECTURE.md` §11).
 
 ## Build and test
 
