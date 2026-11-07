@@ -346,6 +346,7 @@ suite (574 cases) green.
 | 17.70 | The presence connection's longer idle window was untested against a live daemon: a page's is 20 s, and a phone that beats once a minute would be reaped by it | VERIFIED 2026-11-06 against the running daemon: a `hello` with the `buzz` feature received the marks table, stayed connected through 25 s of silence and answered a ping afterwards, while a client that said nothing was closed at 23.6 s |
 | 17.71 | The `notifications` switch was never written to preferences — `Config` carried it, `load`/`save` skipped it, so it read back as `off` on every launch | FIXED — `notify_marks` is stored and restored |
 | 17.72 | A mark had two channels (sounding/silent) and a second settings row for a sound toggle, which is one concept too many for "tell me when a shell finishes" | SIMPLIFIED — one channel, one row, one notification per mark; the only persistent notification is the foreground service's, which exists because Android requires one |
+| 17.73 | The reply route was learned from an arriving record, and a direct packet's path is **consumed** by the repeaters that carry it (`Mesh::removeSelfFromPath`), so the receiver saw an empty path and replied zero-hop: the phone could send at range and never hear an answer | FIXED — routes come from **flooded adverts** in both directions: the phone reads the host's advert path (0x2A), the host reads the phone's after a 36-byte route hint (`LDRH` + the phone's key) says which prefix to look up, and the phone floods its own advert while the host is silent |
 
 ## How to use this
 

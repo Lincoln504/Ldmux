@@ -898,6 +898,12 @@ public final class MeshcoreSession {
         if (frame instanceof io.iotone.meshcore.frames.DeviceInfoFrame) {
             trackedAnswered();
         }
+        // The answer to `CMD_GET_ADVERT_PATH`. Without this the command stays "in flight" until the
+        // answer window expires, so `isIdle()` lies and raw sends are refused for seconds after a
+        // route has already been learned.
+        if (frame instanceof io.iotone.meshcore.frames.AdvertPathFrame) {
+            trackedAnswered();
+        }
         if (frame instanceof DecodeFailure f) {
             listener.onDecodeFailure(f);
             return;

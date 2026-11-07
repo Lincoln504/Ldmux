@@ -399,11 +399,18 @@ be transmitted and then ignored by every receiver. Direct means the sender must 
    answered by `createPathReturn`) — is not used, because it needs the host in the radio's contact
    table and the host's telemetry permission to allow the request (`telemetry_mode_base` defaults
    to deny), so a stock radio would answer nothing.
-3. **The host replies along the path the request arrived by.** Each record that crosses
-   repeaters arrives with its hops in travel order; `PeerPath::reversed` turns that into a
-   usable out-path (per `hash_size` bytes, not per byte) and the radio thread sends every
-   record along it. Until one arrives, records go zero-hop, which reaches only the radios in
-   earshot.
+3. **The host needs the phone's route the same way, and cannot read it off a record.** A direct
+   packet loses one hash per repeater (`Mesh::removeSelfFromPath`), so a record that crossed any
+   number of them arrives with an **empty** path: the receiver never learns a route from traffic it
+   receives. The phone therefore announces itself (a flooded advert, at most every three minutes and
+   only while the host has been silent for two), and tells the host which radio it is with a
+   **route hint** — a 36-byte record, `LDRH` and the phone's public key, sent before the session
+   handshake because the handshake's own answer is the first thing that needs a route. The host then
+   reads the phone's advert path out of its own radio's cache (the same `CMD_GET_ADVERT_PATH`), about
+   once every two minutes while the link is quiet.
+4. **Every reply follows the reverse of the path that was learned.** `PeerPath::reversed` flips the
+   hop groups (per `hash_size` bytes, not per byte) and the radio thread sends every record along it.
+   With no route, records go zero-hop, which reaches only the radios in earshot.
 
 Consequences worth knowing:
 
@@ -412,11 +419,12 @@ Consequences worth knowing:
   `max(2 s, 6 x airtime)` (`Config::with_airtime`), handed to the session by the carrier
   (`Bound::airtime_ms`) and by the app (`ldmux_session_set_airtime`). A fixed two-second retry
   would duplicate records the peer already has and spend the hour's allowance doing it.
-- **Paths move.** The phone asks its radio for the advert path every 45 s while it has no route
-  and reads the contact every 10 minutes once it has one, so a host that becomes reachable
-  mid-session becomes reachable without a reconnect. A route that turns out to be stale is dropped
-  by the app (the radio refuses the direct send), which retries zero-hop and asks for a fresh route
-  at once instead of waiting out the retry window.
+- **Paths move.** The phone asks its radio for the advert path every 45 s while it has no route and
+  re-reads it every 10 minutes once it has one, so a host that becomes reachable mid-session becomes
+  reachable without a reconnect. A route that turns out to be stale is dropped by the app (the radio
+  refuses the direct send), which retries zero-hop and asks for a fresh route at once instead of
+  waiting out the retry window. The same rule on the host side: a route is re-read from the cache
+  whenever nothing has arrived from the phone for two minutes.
 - **What is proven and what is not.** The reverse-path reply, the zero-hop fallback, the
   per-`hash_size` hop reversal (both directions: `PeerPath::reversed` and `RadioRoute.reversed`),
   the advert-path decoding and the airtime-scaled timers are unit-tested. Nothing in this tree has

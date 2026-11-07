@@ -54,6 +54,13 @@ interface RadioLink {
     /** Meter data airtime, or leave the operator's private channel unmetered. */
     fun setBudgetMode(mode: RadioBudgetMode) {}
 
+    /**
+     * This radio's own public key, once the companion handshake has run.
+     *
+     * Null before that: the key comes from `SELF_INFO`, which is the first answer the radio gives.
+     */
+    val radioPublicKey: ByteArray? get() = null
+
     fun close()
 
     /**
@@ -440,6 +447,7 @@ class MeshRadioGateway(private val link: RadioLink) : GatewayPort {
     override val problem: String? get() = link.lastProblem.value
     override val received: Flow<ByteArray> = link.received
     override val uplinkRecordMax: Int get() = link.uplinkRecordMax
+    override val radioPublicKey: ByteArray? get() = link.radioPublicKey
 
     override suspend fun send(record: ByteArray): MeshSendResult =
         MeshSendResult(0, link.send(record).outcome)

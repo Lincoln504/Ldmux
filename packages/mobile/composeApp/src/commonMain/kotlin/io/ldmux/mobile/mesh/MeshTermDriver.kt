@@ -34,6 +34,15 @@ interface GatewayPort {
     val problem: String? get() = null
 
     suspend fun send(record: ByteArray): MeshSendResult
+
+    /**
+     * This radio's own public key, once the link is bound; null before that or when the link has no
+     * radio to ask.
+     *
+     * It is what the route hint carries (see [RouteHint]): without it the host cannot look up a
+     * return route, and a phone behind a repeater never gets an answer.
+     */
+    val radioPublicKey: ByteArray? get() = null
 }
 
 /** One sealed record and the ARQ sequence number that names its slot. */
@@ -407,6 +416,14 @@ class MeshTermDriver(
         }
         val h = try { begin() } catch (e: MeshSessionException) {
             failed(e.state); publish(); return
+        }
+        // **Tell the host which radio this is, before the first session record.** A direct packet's
+        // path is consumed by the repeaters that carry it, so the host cannot learn a return route
+        // from anything we send; it needs our radio's public key to look the route up in its own
+        // radio's advert-path cache. Thirty-six bytes, unsealed, before the handshake — the first
+        // answer we need is the handshake's, and that answer has to know where to go.
+        gateway.radioPublicKey?.let { key ->
+            RouteHint.record(key)?.let { hint -> runCatching { gateway.send(hint) } }
         }
         handshake = h
         handshakeSince = clock()

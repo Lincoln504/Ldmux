@@ -99,6 +99,23 @@ class AndroidRadioLink(
     private val _selfInfo = MutableStateFlow<RadioSelfInfo?>(null)
     override val selfInfo: StateFlow<RadioSelfInfo?> = _selfInfo.asStateFlow()
 
+    /**
+     * This radio's own public key, from `SELF_INFO`.
+     *
+     * The host needs it to look up a return route (see `RouteHint`), and it is the radio's identity
+     * rather than a secret: every advert carries it.
+     */
+    @Volatile
+    override var radioPublicKey: ByteArray? = null
+        private set
+
+    /** When a record last arrived from the peer, and when this radio last announced itself. */
+    @Volatile
+    private var lastRxAt: Long = 0L
+
+    @Volatile
+    private var lastAnnounceAt: Long = 0L
+
     private val _deviceInfo = MutableStateFlow<RadioDeviceInfo?>(null)
     override val deviceInfo: StateFlow<RadioDeviceInfo?> = _deviceInfo.asStateFlow()
 
@@ -221,6 +238,7 @@ class AndroidRadioLink(
         override fun onReady(selfInfo: SelfInfo) {
             if (closing) return
             _selfInfo.value = selfInfo.toRadioSelfInfo()
+            radioPublicKey = selfInfo.publicKey()
             refreshStatus()
             _status.value = _status.value.copy(radioState = MeshStatus.RADIO_CONNECTED)
             _state.value = MeshLinkState.Bound
@@ -245,6 +263,7 @@ class AndroidRadioLink(
         }
 
         override fun onRawData(frame: RawDataFrame) {
+            lastRxAt = System.currentTimeMillis()
             _status.value = _status.value.copy(rssiDbm = frame.rssi())
             if (!inbox.trySend(frame.payload()).isSuccess) {
                 appLog("mesh radio inbox full, dropping one raw record")
@@ -350,6 +369,8 @@ class AndroidRadioLink(
         closing = false
         contactPath = null
         advertPath = null
+        radioPublicKey = null
+        lastRxAt = 0L
         _selfInfo.value = null
         _deviceInfo.value = null
         // A voltage from the previous session must not be attached to this one's DEVICE_INFO.
@@ -429,6 +450,24 @@ class AndroidRadioLink(
         }
     }
 
+    /**
+     * Announce this radio when the peer has gone quiet.
+     *
+     * **A flooded advert is the only thing that teaches the peer a route back.** Direct packets lose
+     * a hash per repeater, so nothing this phone sends carries a return route; the peer reads the
+     * route out of its own advert-path cache, and that cache is filled by our advert arriving through
+     * the repeaters. An advert is a broadcast — a few hundred milliseconds of air — so it is spent
+     * only while the peer is silent, and at most every [ANNOUNCE_EVERY_MS].
+     */
+    private fun announceIfQuiet(s: MeshcoreSession) {
+        val now = System.currentTimeMillis()
+        val quiet = lastRxAt == 0L || now - lastRxAt > ANNOUNCE_QUIET_MS
+        if (!quiet || now - lastAnnounceAt < ANNOUNCE_EVERY_MS) return
+        lastAnnounceAt = now
+        runCatching { s.sendSelfAdvert(true) }
+            .onFailure { appLog("mesh advert refused: ${it.message}") }
+    }
+
     override suspend fun send(record: ByteArray): RadioSendResult {
         if (record.isEmpty()) return RadioSendResult.TooLong
         if (record.size > uplinkRecordMax) return RadioSendResult.TooLong
@@ -444,6 +483,8 @@ class AndroidRadioLink(
         }
         // The companion has one uncorrelated answer window. A tracked command
         // still outstanding means a raw send would race it.
+        if (!s.isIdle()) return RadioSendResult.Failed
+        announceIfQuiet(s)
         if (!s.isIdle()) return RadioSendResult.Failed
         // One immutable path read for this send, including the packet build.
         val path = hostPath ?: RadioPath(0, ByteArray(0))
@@ -775,6 +816,10 @@ class AndroidRadioLink(
          */
         const val BOND_CONNECT_TIMEOUT_MS = 75_000L
         const val CONTACT_WAIT_MS = 3_000L
+        /** Nothing heard from the peer for this long means the route back may be stale or unknown. */
+        const val ANNOUNCE_QUIET_MS = 120_000L
+        /** At most one advert per this interval, because each one is a broadcast on a shared band. */
+        const val ANNOUNCE_EVERY_MS = 180_000L
         /** How long connect() waits for the advert-path answer, which is a local cache read. */
         const val ROUTE_WAIT_MS = 2_000L
         /** Re-ask for the host's path while none is known: often enough to catch a late advert. */

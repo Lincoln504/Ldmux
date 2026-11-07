@@ -24,6 +24,8 @@ pub mod codes {
     pub const CHANNEL_MSG_RECV: u8 = 0x08;
     pub const CHANNEL_MSG_RECV_V3: u8 = 0x11;
     pub const LOG_RX_DATA: u8 = 0x88;
+    /// The reply to [`commands::GET_ADVERT_PATH`]: `received u32`, `path byte`, path bytes.
+    pub const ADVERT_PATH: u8 = 0x16;
 }
 
 /// Command codes this crate sends.
@@ -55,6 +57,14 @@ pub mod commands {
     /// out-path — a route that survives the radio being out of direct range. Nothing else in
     /// MeshCore tells a peer how to reach a node it has never heard.
     pub const SEND_SELF_ADVERT: u8 = 0x07;
+    /// Read the path a recently heard advert took: `reserved u8`, then the originator's six-byte
+    /// public-key prefix (`MyMesh.cpp`, `CMD_GET_ADVERT_PATH`).
+    ///
+    /// **This is the only route a companion can learn on stock firmware.** A flooded request
+    /// (`CMD_SEND_PATH_DISCOVERY_REQ`) is answered with a path return only when the destination
+    /// produces a reply, which needs a contact entry and a telemetry permission that defaults to
+    /// deny; the advert-path cache needs neither.
+    pub const GET_ADVERT_PATH: u8 = 0x2A;
 }
 
 /// The protocol version this client claims. The firmware latches it from
@@ -113,6 +123,42 @@ pub fn build_raw_direct(hash_size: u8, path: &[u8], record: &[u8]) -> Result<Vec
     out.extend_from_slice(path);
     out.extend_from_slice(record);
     Ok(out)
+}
+
+/// A route read out of the radio's advert-path cache.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdvertPath {
+    /// The advert's own timestamp, as the firmware stored it.
+    pub received_at: u32,
+    /// Bytes per hop the path was heard with (1..=4).
+    pub hash_size: u8,
+    /// Hops, in travel order towards us.
+    pub hops: u8,
+    /// The path bytes, `hops * hash_size` of them.
+    pub bytes: Vec<u8>,
+}
+
+/// Parse a `RESP_CODE_ADVERT_PATH` frame, code included.
+///
+/// The length byte is the firmware's own encoding (`((hash_size - 1) << 6) | hops`), not a count of
+/// bytes, so a frame whose byte count disagrees with it is refused rather than half-read.
+#[must_use]
+pub fn parse_advert_path(frame: &[u8]) -> Option<AdvertPath> {
+    if frame.first() != Some(&codes::ADVERT_PATH) || frame.len() < 6 {
+        return None;
+    }
+    let received_at = u32::from_le_bytes(frame.get(1..5)?.try_into().ok()?);
+    let path_byte = *frame.get(5)?;
+    let hash_size = (path_byte >> 6) + 1;
+    let hops = path_byte & 0x3F;
+    let want = usize::from(hops) * usize::from(hash_size);
+    let bytes = frame.get(6..6 + want)?.to_vec();
+    Some(AdvertPath {
+        received_at,
+        hash_size,
+        hops,
+        bytes,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

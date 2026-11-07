@@ -31,6 +31,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ldmux_companion::codec::parse_advert_path;
 use ldmux_companion::{ByteLink, Companion, RAW_CUSTOM_DIRECT_HEADER, SerialLink, SessionError};
 use ldmux_mesh::carrier::{Bound, Budget, Carrier, Event};
 use ldmux_mesh::constants::{RECORD_MAX, RadioState, SendOutcome, UNKNOWN_BATTERY, UNKNOWN_RSSI};
@@ -85,6 +86,32 @@ const CLOSE_WAIT: Duration = Duration::from_millis(250);
 
 /// One second of the hour the budget is measured over.
 const HOUR: Duration = Duration::from_secs(3_600);
+
+/// How long the peer's route may go unrefreshed before it is asked for again.
+///
+/// A route is only true while the repeaters that carried it are still there, and a phone that moved
+/// has a different one. The read is a serial command, so it costs nothing on the air; two minutes is
+/// short enough that a walk is felt as a pause rather than as a dead link.
+const PEER_ROUTE_REFRESH: Duration = Duration::from_secs(120);
+
+/// The four bytes that mark a record as a **route hint** rather than a session message.
+const ROUTE_HINT_MAGIC: &[u8; 4] = b"LDRH";
+
+/// `[LDRH][32-byte radio public key]`: the peer telling this radio which node it is.
+///
+/// **Why a record and not a field somewhere.** The reply route has to exist before the session
+/// does — the handshake's own records need an answer — so the peer's radio identity cannot ride in
+/// the session, and it cannot be inferred from an arriving record either, because a direct packet's
+/// path is consumed by the repeaters that carry it. Thirty-six unencrypted bytes before the
+/// handshake are what make the lookup possible. They are a routing hint and nothing more: a forged
+/// one can only redirect where records are *sent*, and everything inside them is sealed by the
+/// session.
+fn route_hint(record: &[u8]) -> Option<[u8; 32]> {
+    if record.len() != 4 + 32 || record.get(..4)? != ROUTE_HINT_MAGIC {
+        return None;
+    }
+    record.get(4..).and_then(|k| k.try_into().ok())
+}
 
 /// The self-imposed airtime policy, in milliseconds per hour: one percent.
 const AIRTIME_BUDGET_MS: f64 = 36_000.0;
@@ -310,9 +337,20 @@ fn serve_loop<L: ByteLink>(
     let mut budget = budget_per_hour(settings.airtime_ms);
     let mut window = Instant::now();
     let mut sent: u32 = 0;
-    // The route to the peer, learned from the last record that arrived. `None` means every packet
-    // so far came zero-hop, so there is nothing to learn and nothing to send along.
+    // The route to the peer's radio. **A direct packet's path is consumed in transit**, so it
+    // cannot be learned from an arriving record: each repeater removes its own hash
+    // (`Mesh::removeSelfFromPath`), which leaves a packet that crossed repeaters with an empty path.
+    // The route therefore comes from the peer's *advert*, whose path accumulates because flooded
+    // packets append one hash per repeater (`Mesh::routeRecvPacket`), and is read back out of the
+    // radio's advert-path cache.
     let mut peer_path: Option<PeerPath> = None;
+    // Which radio the peer is, learned from its route hint. Without it there is no prefix to look a
+    // route up by, so replies stay zero-hop.
+    let mut peer_radio: Option<[u8; 32]> = None;
+    // When the peer's route was last asked for, so a quiet link does not ask on every tick.
+    let mut last_route_ask: Option<Instant> = None;
+    // When a record or a hint last arrived from the peer.
+    let mut last_peer_rx: Option<Instant> = None;
     // When the last advert went out; `None` means none yet, so the first idle moment sends one.
     let mut last_advert: Option<Instant> = None;
     let advert_every = advert_interval();
@@ -413,6 +451,28 @@ fn serve_loop<L: ByteLink>(
                 ))));
             }
             Err(RecvTimeoutError::Timeout) => {
+                // **The route to the peer, from its advert.** Asked for when the peer announces
+                // itself and then every `PEER_ROUTE_REFRESH` while the link is quiet, because a
+                // phone that moved has a new route and the old one silently carries nothing. This
+                // is one serial command: it costs no airtime.
+                if peer_radio.is_some()
+                    && last_route_ask.is_none_or(|t| t.elapsed() >= PEER_ROUTE_REFRESH)
+                    && last_peer_rx.is_none_or(|t| t.elapsed() >= PEER_ROUTE_REFRESH)
+                {
+                    last_route_ask = Some(Instant::now());
+                    if let Some(prefix) = peer_radio.as_ref().and_then(|k| k.get(..6)) {
+                        let prefix: [u8; 6] = prefix.try_into().unwrap_or([0; 6]);
+                        if let Ok(path) = companion.get_advert_path(&prefix)
+                            && let Some(reversed) = PeerPath::reversed(
+                                usize::from(path.hash_size),
+                                usize::from(path.hops),
+                                &path.bytes,
+                            )
+                        {
+                            peer_path = Some(reversed);
+                        }
+                    }
+                }
                 // The countdown, refreshed while the link is idle. Not a transmission: it is a
                 // message to this process only, and it is what lets the session see the hour roll
                 // over when it has been held back for the whole hour.
@@ -443,18 +503,27 @@ fn serve_loop<L: ByteLink>(
 
         match companion.next_push(Duration::from_millis(1)) {
             Ok(Some(frame)) => {
-                if let Some(incoming) = incoming_record(&frame) {
-                    // A zero-hop packet says nothing about a route; one that crossed repeaters
-                    // replaces whatever was held, because the last path a peer used is the most
-                    // likely to work next time.
-                    if incoming.path.is_some() {
-                        peer_path = incoming.path;
-                    }
-                    if events
-                        .blocking_send(Ok(Event::Recv(incoming.record)))
-                        .is_err()
+                if let Some(path) = parse_advert_path(&frame) {
+                    // The peer's own advert came through the cache: reversed, it is the route to
+                    // send along.
+                    if let Some(reversed) =
+                        PeerPath::reversed(usize::from(path.hash_size), usize::from(path.hops), &path.bytes)
                     {
-                        return;
+                        peer_path = Some(reversed);
+                    }
+                } else if let Some(incoming) = incoming_record(&frame) {
+                    // The peer announcing which radio it is, so the route above can be looked up.
+                    if let Some(key) = route_hint(&incoming.record) {
+                        peer_radio = Some(key);
+                        last_peer_rx = Some(Instant::now());
+                    } else {
+                        last_peer_rx = Some(Instant::now());
+                        if events
+                            .blocking_send(Ok(Event::Recv(incoming.record)))
+                            .is_err()
+                        {
+                            return;
+                        }
                     }
                 }
             }
@@ -506,16 +575,13 @@ impl PeerPath {
     }
 }
 
-/// One received packet: the record inside it, and the path it arrived by.
+/// One received packet, reduced to the record inside it.
 #[derive(Debug, PartialEq, Eq)]
 struct Incoming {
     record: Vec<u8>,
-    /// `None` for a zero-hop packet: it came straight from the peer's radio, so there is no path
-    /// to learn and nothing to reverse.
-    path: Option<PeerPath>,
 }
 
-/// One received packet, reduced to the record inside it and the path it took.
+/// One received packet, reduced to the record inside it.
 ///
 /// The guard is the header: only a packet LDMUX itself built (DIRECT with payload RAW_CUSTOM) can
 /// be a record. Everything else on the air — adverts, trace routes, another network's channel
@@ -524,7 +590,13 @@ struct Incoming {
 ///
 /// **A flooded `RAW_CUSTOM` cannot be one of ours**: the firmware drops flood-routed raw packets
 /// before the application sees them (`Mesh.cpp`, `case PAYLOAD_TYPE_RAW_CUSTOM` accepts only
-/// `isRouteDirect()`), so a record arrives direct, with a path if it crossed repeaters.
+/// `isRouteDirect()`), so a record always arrives direct.
+///
+/// **The path on a direct packet is consumed, not accumulated.** Each repeater removes its own hash
+/// before retransmitting (`Mesh::removeSelfFromPath`), so a record that crossed any number of them
+/// arrives with an empty path, and the field is skipped rather than read as a route. That is why the
+/// reply route comes from the peer's advert (flooded packets *append* a hash per repeater,
+/// `Mesh::routeRecvPacket`) and not from an arriving record.
 fn incoming_record(frame: &[u8]) -> Option<Incoming> {
     const PUSH_LOG_RX: u8 = 0x88;
 
@@ -550,10 +622,8 @@ fn incoming_record(frame: &[u8]) -> Option<Incoming> {
     if body > packet.len() {
         return None;
     }
-    let path = PeerPath::reversed(hash, hops, packet.get(offset..body)?);
     Some(Incoming {
         record: packet[body..].to_vec(),
-        path,
     })
 }
 
@@ -646,7 +716,6 @@ mod tests {
         let packet = build_raw_direct(1, &[], &[9, 8, 7]).unwrap();
         let incoming = incoming_record(&log_frame(&packet)).unwrap();
         assert_eq!(incoming.record, vec![9, 8, 7]);
-        assert!(incoming.path.is_none(), "zero hops: no route to learn");
     }
 
     #[test]
@@ -656,25 +725,47 @@ mod tests {
         assert_eq!(incoming.record, vec![1, 2]);
     }
 
-    /// **The reply goes back the way the request came.** A packet that crossed two repeaters
-    /// arrives with the hops in travel order, so the path to the *sender* is that list reversed —
-    /// and each hop is `hash_size` bytes, not one, or a 2-byte-hash network would reply to byte
-    /// pairs that mean nothing.
+    /// **A path on a record is skipped, never learned from.** A direct packet loses one hash per
+    /// repeater (`Mesh::removeSelfFromPath`), so what arrives has no route in it at all; the reply
+    /// route comes from the peer's advert instead.
     #[test]
-    fn the_path_a_record_arrived_by_is_reversed_for_the_reply() {
-        // One-byte hashes, two hops: arrived via r1 then r2, so replies go r2 then r1.
+    fn a_path_on_a_record_is_skipped_before_the_record_and_not_learned() {
+        // One-byte hashes, two hops, exactly what a sender writes before repeaters consume them.
         let packet = build_raw_direct(1, &[0x11, 0x22], &[7]).unwrap();
         let incoming = incoming_record(&log_frame(&packet)).unwrap();
-        let path = incoming.path.expect("two hops is a route");
+        assert_eq!(incoming.record, vec![7], "the record starts after the path");
+
+        // Two-byte hashes, two hops: the offset must count whole hops, not bytes.
+        let packet = build_raw_direct(2, &[0xA1, 0xA2, 0xB1, 0xB2], &[7]).unwrap();
+        let incoming = incoming_record(&log_frame(&packet)).unwrap();
+        assert_eq!(incoming.record, vec![7]);
+    }
+
+    /// **The route that is learned is the reverse of what an advert carries.** Flooded packets
+    /// append a hash per repeater, so the path read out of the advert cache is in travel order and
+    /// the reply needs the hop groups the other way round.
+    #[test]
+    fn the_advert_path_is_reversed_by_hop_for_the_reply() {
+        // One-byte hashes, two hops.
+        let path = PeerPath::reversed(1, 2, &[0x11, 0x22]).expect("two hops is a route");
         assert_eq!(path.bytes, vec![0x22, 0x11]);
         assert_eq!((path.hash_size, path.hops), (1, 2));
 
-        // Two-byte hashes, two hops: the pairs must not be split.
-        let packet = build_raw_direct(2, &[0xA1, 0xA2, 0xB1, 0xB2], &[7]).unwrap();
-        let incoming = incoming_record(&log_frame(&packet)).unwrap();
-        let path = incoming.path.expect("two hops is a route");
+        // Two-byte hashes: the pairs must not be split.
+        let path = PeerPath::reversed(2, 2, &[0xA1, 0xA2, 0xB1, 0xB2]).expect("two hops is a route");
         assert_eq!(path.bytes, vec![0xB1, 0xB2, 0xA1, 0xA2]);
         assert_eq!((path.hash_size, path.hops), (2, 2));
+    }
+
+    #[test]
+    fn a_route_hint_names_the_peers_radio() {
+        let mut record = ROUTE_HINT_MAGIC.to_vec();
+        record.extend_from_slice(&[7u8; 32]);
+        assert_eq!(route_hint(&record), Some([7u8; 32]));
+        // Anything else is a session record: a short one, a long one, or a different magic.
+        assert_eq!(route_hint(&[0u8; 36]), None);
+        assert_eq!(route_hint(&record[..35]), None);
+        assert_eq!(route_hint(&[9u8; 37]), None);
     }
 
     #[test]

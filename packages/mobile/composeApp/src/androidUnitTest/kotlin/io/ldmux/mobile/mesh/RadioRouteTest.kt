@@ -104,6 +104,18 @@ class RadioRouteTest {
     }
 
     @Test
+    fun `the route hint is the marker and the radio's key, and nothing else`() {
+        val key = ByteArray(32) { (it + 1).toByte() }
+        val hint = RouteHint.record(key)
+        assertNotNull(hint)
+        assertEquals(RouteHint.LENGTH, hint!!.size)
+        assertArrayEquals(RouteHint.MAGIC, hint.copyOfRange(0, 4))
+        assertArrayEquals(key, hint.copyOfRange(4, 36))
+        assertNull("a key that is not a public key names nothing", RouteHint.record(ByteArray(31)))
+        assertNull(RouteHint.record(ByteArray(33)))
+    }
+
+    @Test
     fun `an advert-path answer that promises more bytes than it carries is a decode failure`() {
         // pathLength says two hops, one byte arrives.
         val frame = byteArrayOf(0x16, 0x04, 0x03, 0x02, 0x01, 0x02, 0xAA.toByte())

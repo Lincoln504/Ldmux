@@ -17,8 +17,8 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use crate::codec::{
-    APP_TARGET_VERSION, CodecError, DeviceInfo, build_raw_direct, commands, codes, parse_device_info,
-    parse_self_info, SelfInfo,
+    APP_TARGET_VERSION, AdvertPath, CodecError, DeviceInfo, build_raw_direct, commands, codes,
+    parse_advert_path, parse_device_info, parse_self_info, SelfInfo,
 };
 use crate::framing::{FrameError, FrameReader, encode};
 use crate::link::ByteLink;
@@ -165,6 +165,21 @@ impl<L: ByteLink> Companion<L> {
             Duration::from_secs(10),
         )?;
         Ok(())
+    }
+
+    /// Read the route a recently heard advert took, from the radio's advert-path cache.
+    ///
+    /// The reply carries the path in travel order towards this radio; a caller sending *to* that
+    /// node reverses the hop groups (`PeerPath::reversed`). A radio that has not heard the node
+    /// recently answers `ERR_CODE_NOT_FOUND`, which arrives here as [`SessionError::Rejected`] — no
+    /// route, not a failure.
+    pub fn get_advert_path(&mut self, prefix: &[u8; 6]) -> Result<AdvertPath, SessionError> {
+        let mut payload = Vec::with_capacity(8);
+        payload.push(commands::GET_ADVERT_PATH);
+        payload.push(0); // reserved
+        payload.extend_from_slice(prefix);
+        let reply = self.request(&payload, codes::ADVERT_PATH, Duration::from_secs(5))?;
+        parse_advert_path(&reply).ok_or(SessionError::Malformed("advert path"))
     }
 
     /// Transmit one record as a raw direct packet, building the packet here.
