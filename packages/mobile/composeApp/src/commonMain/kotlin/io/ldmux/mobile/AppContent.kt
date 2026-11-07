@@ -50,8 +50,9 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.foundation.interaction.collectIsDraggedAsState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.runtime.setValue
 import io.ldmux.mobile.voice.Dictation
 import io.ldmux.mobile.voice.VoiceState
@@ -163,7 +164,11 @@ internal fun AppContent(
     // you are going to is a question worth asking before you are in one.
     var showLauncher by remember { mutableStateOf(true) }
     // Set by the notification's Disconnect, cleared by opening a shell: see `reachable`.
-    var disconnected by remember { mutableStateOf(false) }
+    //
+    // `rememberSaveable`, because this is the operator's decision and a rotation used to throw it
+    // away: the activity is recreated, the flag came back `false`, and the presence link re-armed
+    // itself on the next background transition.
+    var disconnected by rememberSaveable { mutableStateOf(false) }
     // Which shells the pager pages through: the ones the user chose, and nothing
     // else. It used to start as `null`, meaning "every shell", so the first
     // `+ shell` after launch opened a pager over *all* of them, attached page 0 —

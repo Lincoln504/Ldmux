@@ -99,7 +99,11 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         BackgroundSession.screenResumed()
-        LdmuxService.activity?.requestNotificationPermissionIfNeeded()
+        // **Only once the app actually wants to keep something alive.** A notification is for a
+        // background link, and asking on first launch — before anything is paired, let alone opened —
+        // was the app asking a question about itself rather than about the operator's work. The
+        // service sets this flag the first time a shell is opened.
+        if (BackgroundSession.wantsLock()) LdmuxService.activity?.requestNotificationPermissionIfNeeded()
     }
 
     /**

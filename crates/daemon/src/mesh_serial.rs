@@ -549,13 +549,14 @@ fn serve_loop<L: ByteLink>(
         match companion.next_push(Duration::from_millis(1)) {
             Ok(Some(frame)) => {
                 if let Some(path) = parse_advert_path(&frame) {
-                    // The peer's own advert came through the cache: reversed, it is the route to
-                    // send along.
-                    if let Some(reversed) =
-                        PeerPath::reversed(usize::from(path.hash_size), usize::from(path.hops), &path.bytes)
-                    {
-                        peer_path = Some(reversed);
-                    }
+                    // A late answer to a request that timed out. Assigned the same way
+                    // `refresh_peer_route` does, including the clear: two paths to one field that
+                    // disagree about a zero-hop answer is how a stale route survives.
+                    peer_path = PeerPath::reversed(
+                        usize::from(path.hash_size),
+                        usize::from(path.hops),
+                        &path.bytes,
+                    );
                 } else if let Some(incoming) = incoming_record(&frame) {
                     // The peer announcing which radio it is, so the route above can be looked up.
                     if let Some(key) = route_hint(&incoming.record) {

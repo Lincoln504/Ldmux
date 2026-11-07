@@ -88,20 +88,21 @@ fun App() {
                     } else null,
                 )
             }
-            // **Settings is a layer over the mesh screen, not a replacement for it.**
+            // **Settings is a layer over the live surface, not a replacement for it.**
             //
-            // It used to replace the whole subtree, which disposed `MeshTerminalScreen` and with it
-            // the mesh session: every visit to Settings ended that session, so coming back began a
-            // fresh Noise handshake over the radio. On a LoRa link that is minutes, and when the
-            // first records are lost it is the 8/16/32-second retry ladder before the connection
-            // gives up and rebuilds — which is exactly the "handshaking for ages" that pressing
-            // refresh cured, because refresh rebuilt the connection outright.
+            // It used to replace the whole subtree, which disposed the surface and with it the
+            // session: every visit to Settings ended that session, so coming back began a fresh
+            // Noise handshake over the radio. On a LoRa link that is minutes, and when the first
+            // records are lost it is the 8/16/32-second retry ladder before the connection gives up
+            // and rebuilds — which is exactly the "handshaking for ages" that pressing refresh
+            // cured, because refresh rebuilt the connection outright.
             //
-            // Over the tailnet the same disposal was invisible: a WebSocket handshake is instant.
-            // The tailnet route keeps the old shape, because its link is cheap to rebuild and
-            // Settings is where its route is chosen. The radio route keeps its session.
-            if (mesh != null) {
-                Box(Modifier.fillMaxSize()) {
+            // The tailnet route had the same disposal, and it was cheaper but not free: the socket
+            // closed, the pages went, and the claims were released, so coming back landed on the
+            // launcher and every shell had to be opened again. Overlaying it costs one composable
+            // and keeps the operator's place.
+            Box(Modifier.fillMaxSize()) {
+                if (mesh != null) {
                     MeshTerminalScreen(
                         mesh, config,
                         onOpenSettings = { showSettings = true },
@@ -110,12 +111,10 @@ fun App() {
                         // saving does not rebuild the connection.
                         onRadioClassified = { public -> store.update(store.config.value.copy(meshPublicChannel = public)) },
                     )
-                    if (showSettings) settingsScreen()
+                } else {
+                    AppContent(config, store, onOpenSettings = { showSettings = true })
                 }
-            } else if (showSettings) {
-                settingsScreen()
-            } else {
-                AppContent(config, store, onOpenSettings = { showSettings = true })
+                if (showSettings) settingsScreen()
             }
         }
     }

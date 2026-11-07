@@ -316,14 +316,14 @@ public final class MeshcoreSession {
      *
      * <p>No-op when not {@link SessionState#READY}.</p>
      *
-     * @param publicKeyPrefix first 6 bytes of the peer's public key
+     * @param publicKey the peer's full 32-byte public key
      */
-    public void getAdvertPath(@NonNull byte[] publicKeyPrefix) {
+    public void getAdvertPath(@NonNull byte[] publicKey) {
         if (state.get() != SessionState.READY) return;
         try {
-            sendTracked(MeshcoreFrameCodec.getAdvertPath(publicKeyPrefix));
+            sendTracked(MeshcoreFrameCodec.getAdvertPath(publicKey));
         } catch (IllegalArgumentException ignored) {
-            // A malformed prefix gets no command, not a broken answer window.
+            // A key that is not a public key gets no command, not a broken answer window.
         }
     }
 
@@ -337,7 +337,11 @@ public final class MeshcoreSession {
      */
     public void requestBatteryStorage() {
         if (state.get() != SessionState.READY) return;
-        sendTracked(MeshcoreFrameCodec.getBatteryStorage());
+        // **Untracked, because the firmware never answers it with `OK`/`ERR`.** It replies only with
+        // `RESP_CODE_BATT_AND_STORAGE` (`MyMesh.cpp:1479-1491`), so it can never be mistaken for
+        // another command's answer — and tracking it would hold the one answer window for the
+        // command's deadline if the frame were lost.
+        send(MeshcoreFrameCodec.getBatteryStorage());
     }
 
     /**

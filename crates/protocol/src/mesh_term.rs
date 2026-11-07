@@ -133,6 +133,11 @@ pub const ORIGIN_VERSION: u8 = 7;
 /// so the host sends the table when the phone attaches instead of pushing. A version-8 phone is
 /// never sent the tag, and a version-9 phone against a version-8 host simply never sees one, which
 /// the app must treat as "no marks" rather than as a broken link.
+/// `Marks` gained a `first`/`last` flags byte after this version number was chosen, and the number was
+/// deliberately **not** bumped: nothing has been released, so version 9 is the first and only layout
+/// the tag has ever had. A bump would claim a version 9 that existed and does not. The fixture under
+/// `test/fixtures/mesh-term-vectors.json` is the definition of the layout, and the app's codec test
+/// reads it.
 pub const MARKS_VERSION: u8 = 9;
 
 /// Most key names in one `Key` message.

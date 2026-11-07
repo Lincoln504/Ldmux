@@ -375,6 +375,10 @@ class AndroidRadioLink(
         advertPath = null
         radioPublicKey = null
         lastRxAt = 0L
+        // A rebuilt link is a link the peer may have forgotten: its advert-path entry expires, and
+        // the reconnect exists because something went wrong. Without this a rebuild within
+        // ANNOUNCE_EVERY_MS of the last advert stayed silent for the rest of that window.
+        lastAnnounceAt = 0L
         _selfInfo.value = null
         _deviceInfo.value = null
         // A voltage from the previous session must not be attached to this one's DEVICE_INFO.
@@ -414,6 +418,13 @@ class AndroidRadioLink(
             // radio has - asked here, after the tracked contact query has settled, so it cannot
             // race the one answer window the companion has.
             if (s.isIdle()) s.requestBatteryStorage()
+            // **Announce now, because the host needs this before it can answer anything.** Its route
+            // back to us exists only in its own radio's advert-path cache, and that cache is filled
+            // by our advert arriving through the repeaters. Waiting for the maintenance loop's first
+            // tick was a 45-second delay on the one connection that needs it most — the first one
+            // after the phone moved.
+            announceIfQuiet(s)
+            withTimeoutOrNull(ANNOUNCE_SETTLE_MS) { while (!s.isIdle()) delay(10) }
             // **A route before the first record, when the radio can give one.** The contact answer
             // above may have carried an out-path; when it did not, the advert-path cache is the only
             // place a route can come from, and asking before the first send means one record goes
@@ -724,16 +735,21 @@ class AndroidRadioLink(
         pathScope = scope
         scope.launch {
             while (isActive && !closing) {
-                // A route that exists still needs refreshing, because the phone moves: the advert
-                // path is re-read every ten minutes even when one is in hand. Both queries are
-                // local commands, so this costs no airtime at all.
-                val wait = if (advertPath == null) PATH_RETRY_MS else PATH_REFRESH_MS
+                // **Half the documented interval, because the two sources alternate.** Each tick
+                // reads one of them, so a full interval per tick would read each source every *two*
+                // intervals — 90 s and 20 minutes where the docs say 45 s and 10. A tick is a timer
+                // wakeup and a serial command: no airtime at all.
+                val wait = if (advertPath == null) PATH_RETRY_MS / 2 else PATH_REFRESH_MS / 2
                 delay(wait)
                 if (closing || !s.isIdle()) continue
                 // **Announce from here, not from a send.** A flooded advert is what teaches the
                 // peer its route back to us; it is a tracked command, so it may only be issued when
                 // the answer window is free. This loop is the one place that is always true.
                 announceIfQuiet(s)
+                // The advert is a tracked command, so it holds the answer window for a moment. Wait
+                // it out rather than skipping the tick: skipping meant an announce cost a whole
+                // interval and the route read was pushed past the case it exists for.
+                withTimeoutOrNull(ANNOUNCE_SETTLE_MS) { while (!s.isIdle()) delay(10) }
                 if (closing || !s.isIdle()) continue
                 // One command per tick: the companion has one answer window, and a second request
                 // inside it makes both answers ambiguous.
@@ -846,6 +862,8 @@ class AndroidRadioLink(
         const val ANNOUNCE_EVERY_MS = 180_000L
         /** How long connect() waits for the advert-path answer, which is a local cache read. */
         const val ROUTE_WAIT_MS = 2_000L
+        /** How long an advert's own `OK` is waited for, so the next command is not refused. */
+        const val ANNOUNCE_SETTLE_MS = 300L
         /** Re-ask for the host's path while none is known: often enough to catch a late advert. */
         const val PATH_RETRY_MS = 45_000L
         /** Re-ask once a path is known: paths move with the radios, but slowly. */

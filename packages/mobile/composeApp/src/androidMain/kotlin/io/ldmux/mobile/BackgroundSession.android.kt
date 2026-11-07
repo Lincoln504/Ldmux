@@ -262,6 +262,15 @@ actual object BackgroundSession {
     /** Whether the app is on screen, from `onResume`/`onPause`: the pair the platform ties to it. */
     private var onScreen = true
 
+    /**
+     * Whether anything is being kept alive, i.e. whether a notification would mean something.
+     *
+     * Read by `MainActivity.onResume` before asking for the notification permission: an app that has
+     * never opened a shell has nothing to notify about, and a dialog on first launch is a question
+     * about the app rather than about the operator's work.
+     */
+    fun wantsLock(): Boolean = wantLock
+
     /** `MainActivity.onPause`: still allowed to start a service, and about to stop being. */
     fun screenPaused() {
         onScreen = false

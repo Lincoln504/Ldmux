@@ -428,8 +428,11 @@ Consequences worth knowing:
   would duplicate records the peer already has and spend the hour's allowance doing it.
 - **Paths move.** The phone asks its radio for a route every 45 s while it has none and every 10
   minutes once it has one, alternating between the advert path and the contact so neither source can
-  starve the other, so a host that becomes reachable mid-session becomes reachable without a
-  reconnect. A route that turns out to be stale is dropped by the app (the radio refuses the direct
+  starve the other (the maintenance tick is half the interval, because each tick asks one of the two),
+  so a host that becomes reachable mid-session becomes reachable without a reconnect. It also
+  announces once, at the moment the link binds, because the host's route back exists only in its
+  advert-path cache and waiting for the first tick delayed that by 45 s on the connection that needs
+  it most. A route that turns out to be stale is dropped by the app (the radio refuses the direct
   send), which retries zero-hop and asks for a fresh route at once instead of waiting out the retry
   window. On the host side a route is re-read from the cache on the same cadence whatever is arriving,
   and **a zero-hop answer clears it**: the phone back in earshot advertises with no path, and keeping
