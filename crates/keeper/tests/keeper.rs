@@ -2223,6 +2223,50 @@ async fn a_bounded_peek_is_chunked_compact_and_lossless_and_the_old_peek_still_w
     );
     assert!(waited < std::time::Duration::from_millis(1_500), "{waited:?}");
 
+    // **A viewer waiting for output does not hold the keeper.** The wait is a `sleep` on the
+    // buffer, not a lock: every other session's `List`, `Snapshot` and `Peek` must be answered
+    // while one viewer waits, or one idle pane would freeze the whole keeper.
+    let id_idle = "idle1";
+    keeper_call(
+        &s,
+        &spawn_req(id_idle, 80, 24, None, Some(&["/bin/sh", "-c", "sleep 30"])),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await
+    .unwrap();
+    let waiting_socket = s.clone();
+    let waiter = tokio::spawn(async move {
+        keeper_call(
+            &waiting_socket,
+            &KeeperMessage::Peek(Peek::waiting(id_idle, 64 * 1024, 1_500)),
+            DEFAULT_TIMEOUT_MS,
+        )
+        .await
+    });
+    // Let the wait begin before asking the keeper anything else.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let started = std::time::Instant::now();
+    let answered = keeper_call(
+        &s,
+        &KeeperMessage::Snapshot(km::Snapshot {
+            session_id: id_idle.into(),
+            history_lines: None,
+            drain_output: false,
+        }),
+        DEFAULT_TIMEOUT_MS,
+    )
+    .await;
+    let took = started.elapsed();
+    assert!(
+        matches!(answered, Ok(KeeperMessage::SnapshotResult(_))),
+        "a snapshot is answered while another viewer waits: {answered:?}"
+    );
+    assert!(
+        took < std::time::Duration::from_millis(700),
+        "the wait must not hold the keeper's other work: {took:?}"
+    );
+    let _ = waiter.await.expect("the waiting call returned");
+
     // The original contract on the same session.
     let KeeperMessage::PeekResult(pr) =
         keeper_call(&s, &KeeperMessage::Peek(Peek::all(id)), DEFAULT_TIMEOUT_MS)
