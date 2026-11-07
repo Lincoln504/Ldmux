@@ -166,8 +166,8 @@ Audited 2026-11-05. The picture is better than expected: almost everything is bo
 | 11.5 | Mesh queues unbounded | OK — inbound 1024, outbound 8 KiB, pending 8; the phone's inbox 128 |
 | 11.6 | A wedged keeper blocks forever | OK — every keeper call has an 8 s timeout, and a connect failure respawns once |
 | 11.7 | A shell that ignores SIGTERM survives | OK — SIGTERM, grace, then SIGKILL, group and leader |
-| 11.8 | Disk full during a registry or token write | OK for those two (logged, atomic); the pairing write path is UNKNOWN |
-| 11.9 | A client that reconnects every second costs the host CPU | UNKNOWN — no per-peer rate limit found; the 64-connection cap bounds memory, not work |
+| 11.8 | Disk full during a registry or token write | OK — every private file has one writer now (`mesh_session::write_private`): temp file, `fsync`, `chmod 0600`, rename, then a directory `fsync`. The claims file used a hand-rolled copy of that and the mesh pairing did not sync the directory at all; both go through the one function, so a crash cannot leave a zero-length claims file (every claim lost) or lose the pinned phone key and replay floor |
+| 11.9 | A client that reconnects every second costs the host CPU | OK by design — there is no per-peer limiter, and the reason is the route: the WebSocket is tailnet-only and every connection must present the bearer token, so the population that can open one is the operator's own devices. The clients have a reconnect ladder (8 s doubling) and the 64-connection cap bounds memory. A limiter would be the thing that locks the operator out of their own host after a network flap |
 | 11.10 | Clock jump or host suspend breaks a deadline | UNKNOWN |
 
 ## 12. Multi-device and ownership

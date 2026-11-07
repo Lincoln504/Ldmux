@@ -564,6 +564,15 @@ fn parse_pairing(text: &str) -> Option<(Option<[u8; 32]>, u64)> {
 }
 
 /// Write a secret file `0600` from the first byte, atomically (write a sibling, then rename).
+/// Write a file that only this uid may read, so a crash mid-write cannot leave half of it.
+///
+/// **The bytes reach the disk before the name does, and the directory is synced after the rename.**
+/// The rename is atomic against a *reader*, not against a power cut: without the file's own `fsync`
+/// the directory entry can land while the data is still in the page cache, and ext4's documented
+/// outcome for that pair is a zero-length file. Without the directory's `fsync` the rename itself may
+/// not survive, which for `mesh-pairing.json` means losing the pinned phone key and the replay floor.
+/// Both of those are exactly what these files exist to prevent, so this is the one place that writes
+/// them.
 pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension("tmp");
     let mut f = fs::OpenOptions::new()
@@ -575,7 +584,11 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     f.write_all(bytes)?;
     f.sync_all()?;
     fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
-    fs::rename(&tmp, path)
+    fs::rename(&tmp, path)?;
+    if let Some(dir) = path.parent() {
+        fs::File::open(dir)?.sync_all()?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
