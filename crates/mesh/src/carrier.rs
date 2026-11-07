@@ -44,15 +44,22 @@ pub struct Bound {
 
 /// Where the hourly record budget comes from.
 ///
-/// One answer today, and it is written out rather than assumed: the radio the daemon owns runs
-/// its own transmitter duty cycle in firmware and refuses a record it will not send, so the
-/// session loop must not apply a second meter on top. Applying one — reading a budget the radio
-/// never reported as zero — is what once left a serial host able to send one probe record a
-/// minute and answer nothing (measured 2026-11-05: `ldmux mesh status` read `budget 0 records
-/// left this hour` while a paired phone retried `attach` in a loop).
+/// One answer today, and it is written out rather than assumed: **the carrier computes the hour and
+/// publishes it as [`Status::ops_left_this_hour`], and the loop spends what it is told.** For the
+/// serial radio that figure is derived from the tuple (`mesh_serial::budget_per_hour`), which is what
+/// makes the 1 % a European band requires enforceable at all: the firmware's own limiter is a 50 %
+/// duty cycle (`Dispatcher::getAirtimeBudgetFactor()` returns 1.0), so it is a ceiling far above the
+/// band rather than the meter.
+///
+/// **The loop must never gate on a budget that was never reported.** Reading silence as zero is what
+/// once left a serial host able to send one probe record a minute and answer nothing (measured
+/// 2026-11-05: `ldmux mesh status` read `budget 0 records left this hour` while a paired phone
+/// retried `attach` in a loop).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Budget {
-    /// The radio is the meter. What the loop may send is not gated here.
+    /// The carrier is the meter: it computes the hour and reports what is left, and
+    /// [`Status::ops_left_this_hour`](crate::messages::Status::ops_left_this_hour) is what the session
+    /// loop hands to the ARQ.
     RadioGoverned,
 }
 
