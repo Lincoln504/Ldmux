@@ -290,9 +290,9 @@ internal fun AppContent(
     val imeUp = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     var keyboardRequest by remember { mutableStateOf(0) }
 
-    // **A mark can become a banner, if the operator asked for one.** Off by default: the square
-    // beside the row is the product, and a banner is the second way of being told. Only the tailnet
-    // route can reach a phone that is away, so the radio route never posts one.
+    // **A mark can become a notification, if the operator asked for one.** Off by default: the
+    // square beside the row is the product, and a notification is the second way of being told. Only
+    // the tailnet route can reach a phone that is away, so the radio route never posts one.
     // **The title is read at post time, not at capture time.** The callback is installed once per
     // configuration, so a list captured in this effect would be the one from the day the setting
     // was changed: a shell created since then would show its id instead of its name.
@@ -716,7 +716,7 @@ internal fun AppContent(
     // This state is here rather than in a terminal surface for a measured reason:
     // the pager keeps a neighbour composed for an instant swipe, so a per-surface
     // owner stopped the wrong page's dictation when any page was disposed, and two
-    // composed pages could each draw the banner.
+    // composed pages could each draw the notice.
     var voice by remember { mutableStateOf<VoiceState>(VoiceState.Idle) }
 
     // Switching shells ends dictation. Keyed on the shell's *id*, not the pager's
@@ -730,7 +730,7 @@ internal fun AppContent(
     }
 
 
-    // The banner is feedback rather than a notification. It is drawn over the
+    // The notice is feedback rather than a notification. It is drawn over the
     // terminal, so a line that stays is a row of the terminal that stays covered —
     // and a failure that has been read, or never will be, is not worth that. Refused
     // permission is the exception: it is the one voice state a user can act on, and
@@ -893,7 +893,7 @@ internal fun AppContent(
                 // a shell and leaving the user on the screen that created it is a shell
                 // they cannot reach; navigating to an empty terminal for a request that
                 // never left the phone (offline) is the same stall with a worse message.
-                // When it was refused, `create` says so itself (the error banner on this
+                // When it was refused, `create` says so itself (the error notice on this
                 // screen) and the user stays here. The going is the `gotoSessionId`
                 // request above, made when the daemon answers.
                 //
@@ -1005,7 +1005,7 @@ internal fun AppContent(
                 // *below* the terminal, and `panelLeft` decides which side the panel
                 // is on in the one mode that has one.
                 if (!portrait && chrome && config.panelLeft) panel()
-                // The banner follows the app rather than the page, so it is drawn
+                // The notice follows the app rather than the page, so it is drawn
                 // over whichever shell is on screen and there is exactly one of it.
                 Box(Modifier.weight(1f).fillMaxHeight()) {
                     TerminalArea(

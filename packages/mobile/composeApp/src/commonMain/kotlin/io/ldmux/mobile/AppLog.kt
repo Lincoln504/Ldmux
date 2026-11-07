@@ -7,7 +7,7 @@ import kotlin.time.TimeSource
  *
  * This exists because there was no way to ask this app a question. `println` does
  * not reach logcat, commonMain cannot see `android.util.Log`, and the only surface
- * that rendered anything was the error banner — which clears itself after four
+ * that rendered anything was the error notice — which clears itself after four
  * seconds, so a screenshot at the wrong moment said "no message arrived" when a
  * message had arrived and gone. Diagnosing the empty launcher took far longer than
  * it should have for want of one function.

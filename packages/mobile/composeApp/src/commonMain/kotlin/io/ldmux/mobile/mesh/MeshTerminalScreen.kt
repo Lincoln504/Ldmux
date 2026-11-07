@@ -597,7 +597,7 @@ fun MeshTerminalScreen(
     LaunchedEffect(conn) { if (keyboardWanted) keyboardRequest++ }
     val typing = portrait && keyboardWanted
 
-    // Dictation is the tailnet's, with its own state and banner: it types into the shell, which on
+    // Dictation is the tailnet's, with its own state and notice: it types into the shell, which on
     // this route means the batcher. A microphone that outlives the screen is stopped at once.
     var voice by remember { mutableStateOf<VoiceState>(VoiceState.Idle) }
     DisposableEffect(conn) {
@@ -1013,7 +1013,7 @@ fun MeshTerminalScreen(
                         )
                         VoiceBanner(voice, Modifier.align(Alignment.TopStart))
                         // What the link adds is said only while it is true, over the terminal like the voice
-                        // banner, and never as a row: the tailnet's live screen is the terminal and the
+                        // a notice, and never as a row: the tailnet's live screen is the terminal and the
                         // bar. The hour's records and the typing that waits are on the shell list.
                         // **The app's own notice vocabulary, with its own weight.** These lines
                         // were all painted in the fault colour, including the two that are merely

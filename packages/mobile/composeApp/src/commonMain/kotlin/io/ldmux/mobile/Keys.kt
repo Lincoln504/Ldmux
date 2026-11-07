@@ -78,7 +78,7 @@ fun panelControlKeys(press: (String) -> Unit): List<Pair<String, () -> Unit>> = 
  *
  * The second filled those holes with `Up` itself, one key spanning the whole row.
  * Drawn at three times the width of `Down`, `Left` and `Right`, the most-used key in
- * a terminal looked like a banner and not a direction, and the block read as two
+ * a terminal looked like a strip and not a direction, and the block read as two
  * rows of different kinds (reported on the phone, 2026-11-01: "the up arrow is extra
  * long; it should be the same width").
  *

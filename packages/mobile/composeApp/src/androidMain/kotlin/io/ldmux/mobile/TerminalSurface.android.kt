@@ -303,7 +303,7 @@ actual fun TerminalSurfaceFor(
     // the app, driven from the side panel, because this composable exists per *page*
     // and the pager keeps a neighbour composed for an instant swipe — so stopping
     // dictation on dispose stopped the dictation belonging to whichever page was
-    // being swiped away from, and two composed pages could each draw the banner.
+    // being swiped away from, and two composed pages could each draw the notice.
 
     // The orientation itself is not set here any more: `App` owns it, because
     // this composable exists per *page* while the screen has one orientation, and

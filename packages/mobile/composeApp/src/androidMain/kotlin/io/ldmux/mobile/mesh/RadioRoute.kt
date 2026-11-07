@@ -18,9 +18,7 @@ package io.ldmux.mobile.mesh
 internal object RadioRoute {
 
     /** A path as the wire carries it: the encoded length byte, and the bytes it counts. */
-    internal class Path(val encoded: Int, val bytes: ByteArray) {
-        val isEmpty: Boolean get() = bytes.isEmpty()
-    }
+    internal class Path(val encoded: Int, val bytes: ByteArray)
 
     /** The firmware's `MAX_PATH_SIZE`; a longer path cannot be carried at all. */
     const val MAX_PATH_BYTES = 64

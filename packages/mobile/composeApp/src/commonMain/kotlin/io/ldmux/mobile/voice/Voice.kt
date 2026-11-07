@@ -63,7 +63,7 @@ sealed interface VoiceState {
  * is a correction, not a preference: it used to be driven from each terminal
  * surface, of which the pager keeps a neighbour composed for an instant swipe — so
  * disposing one page stopped dictation that belonged to another, and two composed
- * pages could each draw the same banner.
+ * pages could each draw the same notice.
  */
 expect object Dictation {
     /** True while a recognition session is running (the button toggles it). */

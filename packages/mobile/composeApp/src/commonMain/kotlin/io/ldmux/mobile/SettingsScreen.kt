@@ -259,7 +259,7 @@ internal enum class SettingsGroup(val title: String) {
      * How the app tells you a shell needs you.
      *
      * Its own section because it is the only thing here that reaches outside the app: the marks on
-     * the shell list are always on, and these rows are the optional banner on top of them.
+     * the shell list are always on, and this row decides whether a notification joins them.
      */
     Shells("shells"),
     Display("display"),
@@ -363,12 +363,12 @@ private fun PanelSide(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
 }
 
 /**
- * Shell marks: the list is always marked, and these decide whether a banner joins it.
+ * Shell marks: the list is always marked, and this decides whether a notification joins it.
  *
  * **The row mark is not optional**, because it is the product: a finished turn is a square beside
  * the shell's name, cleared by opening it. A notification is the second, optional way of being
  * told, and it exists only on the tailnet route — the radio cannot be reached while the phone is
- * away, so a banner there would be a promise the link cannot keep.
+ * away, so a notification there would be a promise the link cannot keep.
  */
 @Composable
 private fun Notifications(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {

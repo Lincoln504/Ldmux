@@ -255,7 +255,7 @@ class LdmuxClient(private var config: LdmuxConfig) {
     /**
      * The marks on shells, by session id: `done` or `attention`.
      *
-     * A state of the list rather than a stream of banners — the launcher is the one screen that
+     * A state of the list rather than a stream of notifications — the launcher is the one screen that
      * shows every shell, so it is where "which of these are waiting" belongs. A device that was
      * away is handed the whole table when it says hello, which is how the marks it missed arrive.
      */
@@ -305,7 +305,7 @@ class LdmuxClient(private var config: LdmuxConfig) {
         _liveResult.value = null
     }
 
-    /** The banner has been read (or timed out); nothing more to say. */
+    /** The notice has been read (or timed out); nothing more to say. */
     fun clearServerError() {
         _serverError.value = null
     }
@@ -670,7 +670,7 @@ class LdmuxClient(private var config: LdmuxConfig) {
             // stream, so a takeover cannot reach it. The ownership notice a page must show
             // comes from the attach path (`AttachClient.onOwned` → `HeldElsewhere`).
             // **A mark on a shell.** One word about a shell the operator may not be looking at, so
-            // it is a state on the list rather than a banner. `type: "marks"` is the whole table a
+            // it is a state on the list rather than a notification. `type: "marks"` is the whole table a
             // device is handed when it says hello, which is how the ones it missed arrive.
             "buzz" -> {
                 val m = root["mark"] as? JsonObject

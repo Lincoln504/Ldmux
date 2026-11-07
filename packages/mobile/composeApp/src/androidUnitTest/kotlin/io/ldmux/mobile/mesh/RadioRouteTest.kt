@@ -49,7 +49,7 @@ class RadioRouteTest {
         val route = RadioRoute.reversed(0, ByteArray(0))
         assertNotNull(route)
         assertEquals(0, route!!.encoded)
-        assertTrue(route.isEmpty)
+        assertEquals(0, route.bytes.size)
     }
 
     @Test

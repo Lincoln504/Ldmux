@@ -651,7 +651,7 @@ internal fun ordinalIn(entries: List<LauncherEntry>, chosen: List<String>, key: 
  * The mark beside a shell's name: a small square, one per shell, two meanings.
  *
  * **Deliberately a square and not a notification.** The operator's ask was a list of squares on the
- * rows rather than a stream of banners: a terminal that buzzes is a terminal that gets uninstalled,
+ * rows rather than a stream of notifications: a terminal that buzzes is one that gets uninstalled,
  * and the launcher already answers "what is running" in one glance. `done` reads as calm (the work
  * finished), `attention` as the interface's own amber (the shell is waiting on a person).
  *

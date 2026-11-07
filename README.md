@@ -30,9 +30,9 @@ tailnet, or a pair of LoRa radios when there is no internet at all.
   command costs a fraction of the air typing it live would, and the 1 % allowance a European band
   requires is enforced on both ends ([`docs/AIRTIME.md`](docs/AIRTIME.md)).
 - **A shell can say it is done.** `ldmux buzz` marks a shell in the app's list — finished a turn, or
-  waiting for the operator — and the mark is cleared by opening it. No banner by default; an optional
-  notification exists for the tailnet route, and `contrib/skills/ldmux-buzz` ships the agent skill
-  that rings it at the end of a turn.
+  waiting for the operator — and the mark is cleared by opening it. A notification is optional and off
+  by default, and only the tailnet route can reach a phone that is away;
+  `contrib/skills/ldmux-buzz` ships the agent skill that rings it at the end of a turn.
 
 ## Components
 
