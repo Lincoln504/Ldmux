@@ -807,11 +807,13 @@ impl<H: Host, L: Link> Bridge<H, L> {
                         // with the attach, because the radio cannot reach a phone that is not
                         // connected and this is the only moment delivery is possible. A phone on a
                         // version below [MARKS_VERSION] is not sent the tag at all.
+                        //
+                        // **Sent even when it is empty.** An empty page is how the phone learns that
+                        // a mark it still shows has expired or been read elsewhere; skipping the
+                        // message left the stale row on the launcher until the app restarted.
                         if version >= MARKS_VERSION {
                             let marks = self.host.marks().await;
-                            if !marks.is_empty() {
-                                self.reply(shell, &marks_pages(marks));
-                            }
+                            self.reply(shell, &marks_pages(marks));
                         }
                     }
                     _ => {
@@ -872,13 +874,12 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 // said no version at all, and that is the launcher's case. It gets the table anyway:
                 // an unknown tag is skipped by every phone this app has ever shipped, and a version
                 // the host has not learned yet is not worth another round trip. The table costs one
-                // record, and only when there is something to say.
+                // record per list, empty included: an empty page is how the phone learns that a mark
+                // it still draws has expired, or was read on the desk.
                 let marks_version_ok = self.versions.get(&shell).is_none_or(|v| *v >= MARKS_VERSION);
                 if marks_version_ok {
                     let marks = self.host.marks().await;
-                    if !marks.is_empty() {
-                        self.reply(shell, &marks_pages(marks));
-                    }
+                    self.reply(shell, &marks_pages(marks));
                 }
             }
             // ── version 7: the phone starts and ends shells, as the tailnet client does ──
@@ -2074,6 +2075,31 @@ mod tests {
         );
     }
 
+    /// **An empty table is still a message.** It is how the phone learns that a mark it still draws
+    /// has expired on the host, or was read on the desk: skipping the message left the stale row on
+    /// the launcher until the app restarted.
+    #[tokio::test]
+    async fn an_empty_mark_table_is_still_sent_on_attach() {
+        let (mut b, _host, link) = setup();
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: "abcd-1".into(),
+            },
+        );
+        b.tick().await;
+        assert!(
+            sent(&link, 1).iter().any(|m| matches!(
+                m,
+                Message::Marks { first: true, last: true, entries } if entries.is_empty()
+            )),
+            "the empty table travels too: {:?}",
+            sent(&link, 1)
+        );
+    }
+
     #[tokio::test]
     async fn a_phone_below_the_marks_version_is_not_sent_the_table() {
         let (mut b, host, link) = setup();
@@ -2480,9 +2506,17 @@ mod tests {
         );
         b.tick().await;
         let sent = link.0.lock().unwrap().sent.clone();
+        // The profile, not "the first record": a version-9 phone is also sent the mark table (empty
+        // here), and that page is a record of its own.
         let first = |shell: u8| {
-            let (_, bytes) = sent.iter().find(|(s, _)| *s == shell).unwrap();
-            Decoder::new().push(bytes).unwrap().remove(0).unwrap()
+            sent.iter()
+                .filter(|(s, _)| *s == shell)
+                .flat_map(|(_, bytes)| Decoder::new().push(bytes).unwrap())
+                .find_map(|m| match m {
+                    Ok(Message::Profile { .. }) => Some(m.unwrap()),
+                    _ => None,
+                })
+                .expect("a profile was sent")
         };
         // An empty selector: the host picked the shell, and says which.
         assert!(

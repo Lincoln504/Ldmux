@@ -2916,6 +2916,12 @@ impl LdmuxDaemon {
         self.buzz.snapshot(now_ms())
     }
 
+    /// How many times the mark table has changed shape, so a listener can notice a mark going away.
+    #[must_use]
+    pub fn marks_revision(&self) -> u64 {
+        self.buzz.revision()
+    }
+
     pub fn take_buzzes(&mut self) -> Vec<crate::buzz::Mark> {
         self.buzz.drain_out()
     }

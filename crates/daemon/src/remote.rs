@@ -485,6 +485,10 @@ pub(crate) struct Shared {
     release_grace_ms: u64,
     /// How often the claim sweep runs ([`CLAIM_TICK_MS`]).
     claim_tick_ms: u64,
+    /// The mark table's revision as the last broadcast left it, so a mark that **goes away** is
+    /// noticed. A new mark has a push of its own; a removed one would otherwise linger on a
+    /// connected phone until it reconnected.
+    marks_revision: Mutex<u64>,
     stopped: AtomicBool,
     /// One permit per connection being served (see [`MAX_CONNECTIONS`]).
     slots: Arc<tokio::sync::Semaphore>,
@@ -516,6 +520,7 @@ impl Shared {
             send_timeout_ms,
             release_grace_ms,
             claim_tick_ms,
+            marks_revision: Mutex::new(0),
             stopped: AtomicBool::new(false),
             slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS)),
             next_conn: std::sync::atomic::AtomicU64::new(1),
@@ -2269,11 +2274,34 @@ async fn notify_displaced(shared: &Arc<Shared>, device_id: &str, session_id: &st
 /// session list at all) and because draining the queue is only correct for the connections that can
 /// read it: one client without the feature must not consume the others' news.
 pub(crate) async fn broadcast_buzzes(shared: &Arc<Shared>) {
-    let marks = {
+    let (marks, revision) = {
         let mut d = shared.daemon.lock().await;
         d.prune_marks();
-        d.take_buzzes()
+        let revision = d.marks_revision();
+        (d.take_buzzes(), revision)
     };
+    // **A mark that goes away needs a message too.** A new mark has a push of its own; an expiry or
+    // a shell read on the desk has nothing, so a connected phone kept drawing the square until it
+    // reconnected. A change in the table's revision sends the whole table — small JSON, and only when
+    // something moved.
+    let table_changed = {
+        let mut last = relock(&shared.marks_revision);
+        let changed = *last != revision;
+        *last = revision;
+        changed
+    };
+    if table_changed {
+        let conns: Vec<Arc<ConnShared>> = {
+            let map = relock(&shared.conns);
+            map.values().cloned().collect()
+        };
+        for c in conns {
+            if !relock(&c.inner).features.buzz {
+                continue;
+            }
+            send_marks(&c, shared).await;
+        }
+    }
     if marks.is_empty() {
         return;
     }
@@ -2893,6 +2921,7 @@ mod tests {
             send_timeout_ms: WS_SEND_TIMEOUT_MS,
             release_grace_ms: RELEASE_GRACE_MS,
             claim_tick_ms: crate::daemon::CLAIM_TICK_MS,
+            marks_revision: Mutex::new(0),
             stopped: AtomicBool::new(false),
             slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS)),
             next_conn: std::sync::atomic::AtomicU64::new(1),
@@ -3042,6 +3071,7 @@ mod tests {
             send_timeout_ms,
             release_grace_ms: RELEASE_GRACE_MS,
             claim_tick_ms: crate::daemon::CLAIM_TICK_MS,
+            marks_revision: Mutex::new(0),
             stopped: AtomicBool::new(false),
             slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS)),
             next_conn: std::sync::atomic::AtomicU64::new(1),

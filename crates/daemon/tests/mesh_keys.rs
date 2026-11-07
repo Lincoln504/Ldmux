@@ -189,13 +189,22 @@ async fn the_profile_names_the_shell_the_host_chose() {
     );
     bridge.tick().await;
     let sent = link.0.lock().unwrap().sent.clone();
-    let (_, first) = sent.first().expect("the host answered");
-    match Decoder::new().push(first).unwrap().remove(0).unwrap() {
+    // The profile, not "the first record": a version-9 phone is also sent the mark table, and that
+    // page is a record of its own.
+    let profile = sent
+        .iter()
+        .flat_map(|(_, bytes)| Decoder::new().push(bytes).unwrap())
+        .find_map(|m| match m {
+            Ok(p @ Message::Profile { .. }) => Some(p),
+            _ => None,
+        })
+        .expect("the host answered with a profile");
+    match profile {
         Message::Profile { version, shell, .. } => {
             assert_eq!(version, VERSION);
             assert_eq!(shell, rig.session);
         }
-        m => panic!("the first message is a Profile, not {m:?}"),
+        _ => unreachable!(),
     }
 }
 

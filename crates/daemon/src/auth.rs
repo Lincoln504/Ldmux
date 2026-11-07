@@ -70,25 +70,13 @@ pub fn load_or_create_token(state_dir: &str, token_path: Option<&str>) -> Result
         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
             .map_err(|e| format!("chmod {}: {e}", parent.display()))?;
     }
-    // Created 0600 from the first byte: `fs::write` then `chmod` left a window in
-    // which the credential existed with the umask's mode (0644), readable by any
-    // local user when the parent directory was not ours to tighten.
-    {
-        use std::io::Write as _;
-        use std::os::unix::fs::OpenOptionsExt as _;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)
-            .map_err(|e| format!("write the token {path}: {e}"))?;
-        f.write_all(token.as_bytes())
-            .and_then(|_| f.sync_all())
-            .map_err(|e| format!("write the token {path}: {e}"))?;
-    }
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|e| format!("chmod the token {path}: {e}"))?;
+    // **One writer for every private file, and this one is a credential.** It goes through
+    // `write_private` for two reasons that are both about a crash: a truncate-in-place leaves a
+    // short token if the write fails partway (every paired phone locked out, with nothing on screen
+    // to say why), and the temp file is created 0600 from its first byte rather than chmod-ed after,
+    // so the umask cannot widen it.
+    crate::mesh_session::write_private(std::path::Path::new(&path), token.as_bytes())
+        .map_err(|e| format!("write the token {path}: {e}"))?;
 
     // Once the token has a path of its own, the legacy copy must go, so a
     // deletion of the real token really rotates it.

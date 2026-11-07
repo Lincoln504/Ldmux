@@ -24,17 +24,9 @@ pub fn read(state_dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Persist the policy (mode 0600, like every other file the daemon keeps).
+/// Persist the policy, through the one private-file writer the daemon has.
 pub fn write(state_dir: &Path, on: bool) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path(state_dir))?;
-    f.write_all(if on { b"on\n" } else { b"off\n" })
+    crate::mesh_session::write_private(&path(state_dir), if on { b"on\n" } else { b"off\n" })
 }
 
 #[cfg(test)]

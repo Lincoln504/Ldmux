@@ -394,6 +394,18 @@ class MeshTermDriver(
      */
     private var markPage: Map<String, ShellMark>? = null
 
+    /**
+     * Drop a half-arrived page run.
+     *
+     * Called wherever the shell or the connection changes: a run whose `first` page was lost would
+     * otherwise be merged into by the next run, and the launcher would show a table that never
+     * existed. The `first` flag makes that unlikely rather than impossible; this makes it
+     * impossible.
+     */
+    private fun forgetMarkPage() {
+        markPage = null
+    }
+
     /** Records that failed a session check (tag, replay, decode). Evidence of noise or an attacker, not a failure. */
     var rejectedRecords = 0
         private set
@@ -431,8 +443,19 @@ class MeshTermDriver(
         // from anything we send; it needs our radio's public key to look the route up in its own
         // radio's advert-path cache. Thirty-six bytes, unsealed, before the handshake — the first
         // answer we need is the handshake's, and that answer has to know where to go.
+        //
+        // **A refused hint is retried before the handshake goes.** The link is bound and idle, so a
+        // refusal here is a transient one; sending the handshake anyway costs a whole rung of the
+        // ladder (8 s, doubling) for a session the host could not answer. Bounded, so a radio that
+        // will not take it still gets the handshake.
         gateway.radioPublicKey?.let { key ->
-            RouteHint.record(key)?.let { hint -> runCatching { gateway.send(hint) } }
+            val hint = RouteHint.record(key)
+            if (hint != null) {
+                repeat(HINT_TRIES) {
+                    if (gateway.send(hint).outcome == MeshSendOutcome.SentDirect) return@repeat
+                    delay(HINT_RETRY_MS)
+                }
+            }
         }
         handshake = h
         handshakeSince = clock()
@@ -473,6 +496,7 @@ class MeshTermDriver(
         handshake = null
         session?.close()
         session = null
+        forgetMarkPage()
         terminalView = MeshTermView.LinkDown(state)
         // Every one of these is the transport's word, not the user's: a refused link, a handshake
         // that got no answer, or a session the host stopped acknowledging. Re-handshaking over the
@@ -1153,6 +1177,7 @@ class MeshTermDriver(
         hostVersion = 0
         attachedId = null
         terminalView = null
+        forgetMarkPage()
         pick = Pick.Listing
         pages = ArrayList()
         choices = emptyList()
@@ -1373,6 +1398,17 @@ class MeshTermDriver(
          */
         const val UNKNOWN_BUDGET = 255
         const val IDLE_TICK_MS = 30_000L
+
+        /**
+         * How often a refused route hint is retried before the handshake goes anyway.
+         *
+         * The hint is what teaches the host where to send its answer, so a handshake that leaves
+         * without it spends a rung of the ladder (8 s, doubling) on a session the host cannot
+         * complete. Three tries at a quarter second covers a transient refusal without holding the
+         * handshake behind a radio that will not take it at all.
+         */
+        const val HINT_TRIES = 3
+        const val HINT_RETRY_MS = 250L
     }
 }
 

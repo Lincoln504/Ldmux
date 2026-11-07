@@ -442,6 +442,12 @@ class AndroidRadioLink(
                 withTimeoutOrNull(ROUTE_WAIT_MS) { done.await() }
                 routeDone = null
             }
+            // **Leave with the answer window free.** A tracked command lives ten seconds, and a
+            // connect that returned with one outstanding made the caller's route hint and its
+            // handshake message both refused by the `isIdle` gate — a whole handshake rung spent on
+            // a link that was ready. The wait is bounded: a radio that never answers gets the
+            // transport torn down by the caller's own timeout.
+            withTimeoutOrNull(ROUTE_WAIT_MS) { while (!s.isIdle()) delay(10) }
             startPathRefresh(s)
             if (closing) {
                 closeTransport()
@@ -524,18 +530,19 @@ class AndroidRadioLink(
         return try {
             val result = withTimeout(SEND_TIMEOUT_MS) { answer.await() }
             if (result == RadioSendResult.NotFound && path.encoded > 0) {
-                // A stored direct path can outlive the peer. The radio has just
-                // told us it cannot route there; drop it and try the neighbour
-                // once, rather than blackholing the session until a reboot.
+                // A stored direct path can outlive the peer. The radio has just told us it cannot
+                // route there; drop it and try the neighbour once, rather than blackholing the
+                // session until a reboot.
+                //
+                // **The retry comes before the fresh lookup.** Asking for the route first is a
+                // tracked command, the tracked command holds the one answer window, and the retry's
+                // own `isIdle` gate then refuses the record — so the "retry zero-hop" this block
+                // promises was never sent, and the ARQ spent an attempt on a record that never
+                // reached the air. `startPathRefresh` asks for the route on its own cadence, and the
+                // zero-hop retry reaches the peer whenever it is in earshot.
                 contactPath = null
                 advertPath = null
                 appLog("mesh path not found; retrying zero-hop")
-                // The route is stale: ask the radio for a fresh one now instead of waiting out
-                // PATH_RETRY_MS, so a walk to the other side of the building costs one record
-                // rather than a whole retry window of zero-hop.
-                hostKey.takeIf { it.size == 32 }?.let { key ->
-                    if (s.isIdle()) runCatching { s.getAdvertPath(key) }
-                }
                 return send(record)
             }
             if (result == RadioSendResult.Accepted) {

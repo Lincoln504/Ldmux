@@ -108,6 +108,71 @@ async fn a_client_that_asks_for_buzzes_is_handed_the_table_and_the_next_push() {
     assert!(hit.is_some(), "no push for the new mark, saw {seen:?}");
 }
 
+/// **A mark that goes away is announced too.** A new mark has a push of its own; an expiry, or a
+/// shell read on the desk, has nothing — so a connected phone kept drawing the square until it
+/// reconnected. The table is re-sent when its revision moves, and an empty table is how the phone
+/// learns to clear.
+#[tokio::test]
+async fn a_cleared_mark_is_re_sent_as_an_empty_table() {
+    let rig = Rig::start().await;
+    let mut ws = rig.connect(None).await;
+    ws.send_json(&serde_json::json!({
+        "type":"hello",
+        "device":{"id":"wire-clear","name":"Clear","kind":"phone"},
+        "features":["buzz"],
+    }))
+    .await;
+    // The table on hello, taken so the later one is a change and not the replay.
+    assert!(until_type(&mut ws, "marks", Duration::from_secs(5)).await.is_some());
+
+    rig.arc
+        .lock()
+        .await
+        .handle(
+            "buzz",
+            serde_json::json!({"session": rig.session, "kind": "done"}),
+        )
+        .await
+        .unwrap();
+    // Its push (and possibly the table again, if the mark bumped the revision) arrives first.
+    let deadline = std::time::Instant::now() + Duration::from_secs(4);
+    while std::time::Instant::now() < deadline {
+        if until_type(&mut ws, "buzz", Duration::from_millis(500)).await.is_some() {
+            break;
+        }
+    }
+
+    // The desk opens the shell: the daemon clears its mark.
+    rig.arc
+        .lock()
+        .await
+        .handle(
+            "claim",
+            serde_json::json!({
+                "id": rig.session,
+                "device": {"id": "desk-wire", "name": "Desk", "kind": "desktop"},
+            }),
+        )
+        .await
+        .unwrap();
+
+    // The next table says the shell has no mark. That is the message a phone needs to drop the
+    // square; there is no "unmark" push to rely on.
+    let deadline = std::time::Instant::now() + Duration::from_secs(6);
+    let mut empties = 0;
+    while std::time::Instant::now() < deadline {
+        if let Some(table) = until_type(&mut ws, "marks", Duration::from_millis(1500)).await {
+            let marks = table["marks"].as_array().cloned().unwrap_or_default();
+            let mine = marks.iter().any(|m| m["session"].as_str() == Some(rig.session.as_str()));
+            if !mine {
+                empties += 1;
+                break;
+            }
+        }
+    }
+    assert_eq!(empties, 1, "the cleared mark is sent as a table without it");
+}
+
 #[tokio::test]
 async fn a_client_that_did_not_ask_is_not_sent_the_table_or_a_push() {
     let rig = Rig::start().await;

@@ -63,14 +63,15 @@ fun App() {
             // `connectionKey` is the radio/tailnet identity without font, theme or other view state.
             var credentialsVersion by remember { mutableStateOf(0) }
             val mesh = remember(config.connectionKey, credentialsVersion) { meshScreenFor(config) }
-            // **Settings is a screen, and it owns the link.** It is drawn once, here, for every
-            // route, because it used to belong to the tailnet surface and the mesh terminal then had
-            // no way in at all. It is also where the link is chosen: the launcher shows the mode the
-            // app is in, and switching modes is a settings decision rather than a menu item.
+            // **Settings is drawn once, here, for every route.** It used to belong to the tailnet
+            // surface, and the mesh terminal then had no way in at all. It is also where the link is
+            // chosen: the launcher shows the mode the app is in, and switching modes is a settings
+            // decision rather than a menu item.
             var showSettings by remember { mutableStateOf(false) }
-            // Leaving settings lands on the launcher, which is the app's main menu: a mode change
-            // is answered by the launcher's own list, and the shells that were open are let go
-            // (they live in the keeper; re-opening one is a single attach).
+            // Leaving settings puts back whatever was underneath it, with nothing let go: the
+            // surface was never disposed, so the pages, the claims and the socket are all still
+            // there. A mode change is the one case where that surface rebuilds, and the shells
+            // themselves live in the keeper.
             val leaveSettings: () -> Unit = { showSettings = false }
             val settingsScreen: @Composable () -> Unit = {
                 SettingsScreen(

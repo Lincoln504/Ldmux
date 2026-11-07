@@ -322,7 +322,10 @@ fun MeshTerminalScreen(
             MeshTermView.Idle, is MeshTermView.LinkDown, is MeshTermView.HostClosed -> false
             else -> true
         }
-        BackgroundSession.setActive(up, "Mesh session open")
+        // The same wording as the tailnet surface: what is being kept, never that the app is
+        // running. "Mesh session open" named the app's own state, which is the line the operator
+        // objected to.
+        BackgroundSession.setActive(up, "linked to the desktop over the radio")
     }
     DisposableEffect(conn) {
         onDispose { BackgroundSession.setActive(false, "") }

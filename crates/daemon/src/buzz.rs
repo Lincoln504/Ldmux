@@ -130,6 +130,14 @@ impl Refused {
 pub struct Marks {
     by_session: BTreeMap<String, Mark>,
     out: Vec<Mark>,
+    /// Bumped whenever the table changes *shape* — an entry added, removed or expired.
+    ///
+    /// The queue ([`Marks::drain_out`]) is what pushes a new mark. A mark that **goes away** has no
+    /// push of its own, and a connected phone would keep drawing the square until it reconnected: the
+    /// desk opening the shell clears the host's mark, and the tailnet route had no way to say so.
+    /// A listener compares this against the last value it sent and answers a change with the whole
+    /// table, which is a small JSON message and only when something actually moved.
+    revision: u64,
 }
 
 impl Marks {
@@ -159,13 +167,22 @@ impl Marks {
         };
         self.by_session.insert(session.to_string(), mark.clone());
         self.out.push(mark.clone());
+        self.revision = self.revision.wrapping_add(1);
         self.prune(now);
         Ok(mark)
     }
 
     /// Forget a shell's mark: the operator opened it, so it has been read.
     pub fn clear(&mut self, session: &str) {
-        self.by_session.remove(session);
+        if self.by_session.remove(session).is_some() {
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+
+    /// How many times the table's shape has changed. See [`Marks::revision`].
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// The current table, in session-id order, for a device that has just connected.
@@ -190,6 +207,7 @@ impl Marks {
 
     /// Drop what has expired, and the oldest entries past the cap.
     pub fn prune(&mut self, now: u64) {
+        let before = self.by_session.len();
         self.by_session
             .retain(|_, m| now.saturating_sub(m.at) <= MARK_TTL_MS);
         let mut live: Vec<(String, u64)> = self
@@ -197,13 +215,17 @@ impl Marks {
             .iter()
             .map(|(k, m)| (k.clone(), m.at))
             .collect();
-        if live.len() <= MARKS_MAX {
-            return;
+        if live.len() > MARKS_MAX {
+            live.sort_by_key(|(_, at)| *at);
+            let drop_n = live.len() - MARKS_MAX;
+            for (session, _) in live.into_iter().take(drop_n) {
+                self.by_session.remove(&session);
+            }
         }
-        live.sort_by_key(|(_, at)| *at);
-        let drop_n = live.len() - MARKS_MAX;
-        for (session, _) in live.into_iter().take(drop_n) {
-            self.by_session.remove(&session);
+        // An expiry or an eviction is a change a connected phone has to hear about, or the square
+        // stays on its launcher for a shell whose mark is gone.
+        if self.by_session.len() != before {
+            self.revision = self.revision.wrapping_add(1);
         }
     }
 }

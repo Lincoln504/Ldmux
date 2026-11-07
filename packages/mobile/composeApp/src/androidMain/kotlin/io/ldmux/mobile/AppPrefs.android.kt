@@ -132,6 +132,12 @@ actual object AppPrefs {
             .putString(KEY_MESH_INPUT_MODE, config.meshInputMode.name)
             .putString(KEY_MESH_HOST_PRESET, config.meshHostPreset)
             .apply()
+        // **The token is rewritten only when it changed.** Every settings save used to re-encrypt it
+        // through the Keystore, and the text-size stepper saves on every step — holding the button
+        // meant an encrypt per 90 ms on the composition dispatcher. The token is a credential that
+        // changes when a pairing does, which is the only time it needs writing.
+        val current = runCatching { tokenBlob.load()?.let { String(it, Charsets.UTF_8) } }.getOrNull()
+        if (current == config.token) return
         // Encrypt BEFORE dropping the plaintext. If the Keystore refuses — a restored backup, a
         // reset keystore — keeping the old plaintext key is the difference between a pairing that
         // still works and one the user has to redo. The plaintext is removed only on success.
