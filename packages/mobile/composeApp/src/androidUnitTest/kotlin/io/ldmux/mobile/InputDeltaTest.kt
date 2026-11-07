@@ -100,6 +100,24 @@ class InputDeltaTest {
         assertEquals(listOf("key:BSpace,BSpace,BSpace,BSpace,BSpace", "text:there"), ops("hello world", "hello there"))
     }
 
+    /**
+     * **Why a synthesized burst counts as keys.** `adb shell input text` does not append to the
+     * field: it rewrites it, so one injected character can arrive as "the old value is gone" and
+     * then "the new value is here". The first half is a real deletion in the field, and a deletion
+     * is a backspace — that is not a bug in the reading, it is the reading. A held-input summary
+     * therefore says "14 characters and 120 keys" after `input text` even though nothing but text
+     * was typed, and a real keyboard, which appends, does not produce it.
+     */
+    @Test
+    fun a_rewritten_field_reads_as_deletions_and_that_is_the_truth() {
+        // What the IME does for one injected character: the field goes from the old value to empty,
+        // then to the new value.
+        assertEquals(listOf("key:BSpace"), ops("a", ""))
+        assertEquals(listOf("text:ab"), ops("", "ab"))
+        // A whole burst in one change is text; nothing is deleted, so nothing is a key.
+        assertTrue(inputOpsFor("", "abcdefghij").all { it is InputOp.Text })
+    }
+
     @Test
     fun the_shared_prefix_never_runs_past_either_string() {
         assertEquals(0, commonPrefixOf("", "abc"))
