@@ -845,6 +845,12 @@ public final class MeshcoreFrameCodec {
                     int receivedAt = (int) c.u32("advertPath.receivedAt");
                     int pathLen = c.u8("advertPath.pathLen");
                     int hashSize = ((pathLen >> 6) & 0x03) + 1;
+                    if (hashSize == 4) { // reserved by the firmware, so the frame is malformed
+                        return new DecodeFailure(MeshcoreDecodeError.of(
+                                DecodeErrorKind.MALFORMED,
+                                "advertPath claims the reserved 4-byte hash width",
+                                0x16));
+                    }
                     int want = (pathLen & 0x3F) * hashSize;
                     if (c.remaining() < want) {
                         return new DecodeFailure(MeshcoreDecodeError.of(

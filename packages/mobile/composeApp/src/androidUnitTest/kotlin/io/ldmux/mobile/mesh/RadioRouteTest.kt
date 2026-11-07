@@ -59,6 +59,14 @@ class RadioRouteTest {
     }
 
     @Test
+    fun `the reserved four-byte hash width is refused`() {
+        // The width bits encode 1..=4 and the firmware reserves 4 for the future
+        // (`Packet::isValidPathLen`, `src/Packet.cpp:13-18`), so 0xC2 is malformed, not wide.
+        assertNull(RadioRoute.reversed(0xC2, ByteArray(8)))
+        assertNull(RadioRoute.fromContact(0xC2, ByteArray(8)))
+    }
+
+    @Test
     fun `a path wider than the firmware allows is refused`() {
         // hashSize 2 with 33 hops = 66 bytes > MAX_PATH_SIZE.
         assertNull(RadioRoute.reversed(0x40 or 33, ByteArray(66)))

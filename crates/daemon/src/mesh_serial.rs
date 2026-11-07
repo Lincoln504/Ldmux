@@ -613,8 +613,12 @@ struct PeerPath {
 impl PeerPath {
     /// The reverse of a path that arrived, or `None` when there is nothing to reverse (zero hops,
     /// a malformed length, or a path longer than the firmware's 64-byte limit).
+    ///
+    /// **Hash size 4 is refused.** The encoded length byte has two bits for the hash width, giving
+    /// 1..=4, and the firmware reserves 4 for the future: `Packet::isValidPathLen` rejects it
+    /// outright (`src/Packet.cpp:13-18`), so a frame that claims it is malformed, not a wide path.
     fn reversed(hash_size: usize, hops: usize, path: &[u8]) -> Option<Self> {
-        if hops == 0 || hash_size == 0 || path.len() != hops * hash_size {
+        if hops == 0 || !(1..=3).contains(&hash_size) || path.len() != hops * hash_size {
             return None;
         }
         if path.len() > MAX_PATH_SIZE {

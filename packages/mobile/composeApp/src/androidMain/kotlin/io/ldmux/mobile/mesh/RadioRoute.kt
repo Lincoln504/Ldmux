@@ -35,6 +35,9 @@ internal object RadioRoute {
      */
     fun reversed(pathLength: Int, bytes: ByteArray): Path? {
         val hashSize = ((pathLength ushr 6) and 0x03) + 1
+        // The two width bits encode 1..=4 and the firmware reserves 4 for the future
+        // (`Packet::isValidPathLen`, `src/Packet.cpp:13-18`).
+        if (hashSize == 4) return null
         val hops = pathLength and 0x3F
         if (hops == 0) return if (bytes.isEmpty()) Path(0, ByteArray(0)) else null
         val want = hops * hashSize
@@ -54,6 +57,7 @@ internal object RadioRoute {
      */
     fun fromContact(outPathLen: Int, outPath: ByteArray): Path? {
         val hashSize = ((outPathLen ushr 6) and 0x03) + 1
+        if (hashSize == 4) return null
         val hops = outPathLen and 0x3F
         val want = hops * hashSize
         if (outPath.size != want) return null

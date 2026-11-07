@@ -151,6 +151,11 @@ pub fn parse_advert_path(frame: &[u8]) -> Option<AdvertPath> {
     let received_at = u32::from_le_bytes(frame.get(1..5)?.try_into().ok()?);
     let path_byte = *frame.get(5)?;
     let hash_size = (path_byte >> 6) + 1;
+    // The two width bits encode 1..=4 and the firmware reserves 4 for the future
+    // (`Packet::isValidPathLen`, `src/Packet.cpp:13-18`), so a frame claiming it is malformed.
+    if hash_size == 4 {
+        return None;
+    }
     let hops = path_byte & 0x3F;
     let want = usize::from(hops) * usize::from(hash_size);
     let bytes = frame.get(6..6 + want)?.to_vec();
