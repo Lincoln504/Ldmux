@@ -70,7 +70,8 @@ class AndroidRadioLink(
     fun updateHostKey(key: ByteArray) {
         if (key.isEmpty() || key.contentEquals(hostKey)) return
         hostKey = key.copyOf()
-        hostPath = null
+        contactPath = null
+        advertPath = null
         if (_state.value == MeshLinkState.Bound) {
             // The path belongs to the previous host key; ask for this host's
             // contact instead of keeping a route that now points at nobody.
@@ -116,8 +117,24 @@ class AndroidRadioLink(
      */
     private data class RadioPath(val encoded: Int, val bytes: ByteArray)
 
+    /**
+     * The route from the radio's contact record, and the one read off the host's advert.
+     *
+     * **Two sources, kept apart on purpose.** The contact's out-path is authoritative when the
+     * firmware has one, but it is normally empty — a companion never asks for a path return, and an
+     * advert does not teach the radio a route. Sharing one variable meant a periodic contact read
+     * that answered "no path" wiped a perfectly good advert route every ten minutes, dropping the
+     * link to zero-hop for the retry window. `hostPath` prefers the contact and falls back to the
+     * advert.
+     */
     @Volatile
-    private var hostPath: RadioPath? = null
+    private var contactPath: RadioPath? = null
+
+    @Volatile
+    private var advertPath: RadioPath? = null
+
+    private val hostPath: RadioPath?
+        get() = contactPath ?: advertPath
 
     private val mutex = Mutex()
     private var transport: AndroidBleTransport? = null
@@ -240,11 +257,11 @@ class AndroidRadioLink(
             if (!c.hasValidPathEncoding()) {
                 // 0xFF is "no known path"; the reserved hash-size code is a
                 // malformed path. Neither is a route.
-                hostPath = null
+                contactPath = null
             } else {
                 // The firmware's own out-path, already in sending order. Validated by the same rule
                 // the advert path goes through, so one malformed answer cannot become a route.
-                hostPath = RadioRoute.fromContact(c.outPathLen(), c.activePath())
+                contactPath = RadioRoute.fromContact(c.outPathLen(), c.activePath())
                     ?.let { RadioPath(it.encoded, it.bytes) }
             }
             contactDone?.complete(Unit)
@@ -259,7 +276,7 @@ class AndroidRadioLink(
                 is AdvertPathFrame -> {
                     val path = RadioRoute.reversed(frame.pathLength(), frame.path())
                     if (path != null) {
-                        hostPath = RadioPath(path.encoded, path.bytes)
+                        advertPath = RadioPath(path.encoded, path.bytes)
                         appLog("mesh advert route: ${path.encoded and 0x3F} hop(s)")
                     } else {
                         appLog("mesh advert route: malformed path, ignored")
@@ -331,7 +348,8 @@ class AndroidRadioLink(
         if (!bonded) _lastProblem.value = "accept the Bluetooth pairing request"
 
         closing = false
-        hostPath = null
+        contactPath = null
+        advertPath = null
         _selfInfo.value = null
         _deviceInfo.value = null
         // A voltage from the previous session must not be attached to this one's DEVICE_INFO.
@@ -445,7 +463,8 @@ class AndroidRadioLink(
                 // A stored direct path can outlive the peer. The radio has just
                 // told us it cannot route there; drop it and try the neighbour
                 // once, rather than blackholing the session until a reboot.
-                hostPath = null
+                contactPath = null
+                advertPath = null
                 appLog("mesh path not found; retrying zero-hop")
                 // The route is stale: ask the radio for a fresh one now instead of waiting out
                 // PATH_RETRY_MS, so a walk to the other side of the building costs one record
@@ -629,20 +648,19 @@ class AndroidRadioLink(
     /**
      * Keep the route to the host current, from the two sources the radio offers.
      *
-     * **The contact first, then the air.** A contact's out-path is the authoritative one: it comes
-     * from a path return and the firmware has already reversed it. It is also usually empty, because
-     * a companion never asks for a path return on its own and an advert does not teach one
-     * (`BaseChatMesh::onAdvertRecv` never touches `out_path`). So when the contact has no path, this
-     * asks for the **advert path**: the route the host's last advert took to arrive here, reversed
-     * into sending order. That route needs no contact on either radio and no decrypted exchange,
-     * which is what makes it work on firmware nobody reconfigured.
+     * **The contact when it has one, the advert path when it does not.** A contact's out-path is
+     * authoritative — it comes from a path return and the firmware has already reversed it — and it
+     * is normally empty, because a companion never asks for a path return and an advert does not
+     * teach the radio a route (`BaseChatMesh::onAdvertRecv` never touches `out_path`). The advert
+     * path is the route the host's last advert took to arrive here, reversed into sending order; it
+     * needs no contact on either radio and no decrypted exchange, which is what makes it work on
+     * firmware nobody reconfigured.
      *
-     * **It stops asking once it has an answer.** Both queries are local commands — an advert-path
-     * read costs no airtime at all — but a loop that keeps polling with a route in hand is a loop
-     * that will overwrite a good route with a stale one. So: every [PATH_RETRY_MS] while there is no
-     * route, every [PATH_REFRESH_MS] once there is, and never while another tracked command is
-     * outstanding, because the companion has one answer window and a second request inside it makes
-     * both answers ambiguous.
+     * **Both queries are local commands**, so a refresh costs no airtime at all. What it does cost
+     * is the one answer window the companion has, so it asks one question per tick and never while
+     * another tracked command is outstanding. A refresh is not wasted work even with a route in
+     * hand: the phone moves, and a route is only true while the repeaters that carried it are still
+     * there.
      */
     private fun startPathRefresh(s: MeshcoreSession) {
         pathScope?.cancel()
@@ -652,15 +670,18 @@ class AndroidRadioLink(
         pathScope = scope
         scope.launch {
             while (isActive && !closing) {
-                val wait = if (hostPath == null) PATH_RETRY_MS else PATH_REFRESH_MS
+                // A route that exists still needs refreshing, because the phone moves: the advert
+                // path is re-read every ten minutes even when one is in hand. Both queries are
+                // local commands, so this costs no airtime at all.
+                val wait = if (advertPath == null) PATH_RETRY_MS else PATH_REFRESH_MS
                 delay(wait)
                 if (closing || !s.isIdle()) continue
-                // One command per tick: the contact answer may itself carry a path, and asking for
-                // the advert path in the same window would make both answers ambiguous.
-                if (hostPath == null && prefix != null) {
-                    runCatching { s.getAdvertPath(prefix) }
-                } else {
-                    runCatching { s.getContact(hostKey) }
+                // One command per tick: the companion has one answer window, and a second request
+                // inside it makes both answers ambiguous.
+                when {
+                    prefix == null -> Unit
+                    contactPath == null -> runCatching { s.getAdvertPath(prefix) }
+                    else -> runCatching { s.getContact(hostKey) }
                 }
             }
         }
