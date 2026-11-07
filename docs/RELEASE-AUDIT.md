@@ -357,6 +357,14 @@ suite (574 cases) green.
 | 17.79 | The notification permission was asked from `onPause`, the moment a system dialog is answered by nobody | FIXED — asked from `onResume` |
 | 17.80 | The notification's Disconnect was re-armed by the presence link on the next background transition | FIXED — a Disconnect suppresses the link until a shell is opened |
 | 17.81 | A mark whose shell had ended left its notification in the shade | FIXED — the prune cancels it |
+| 17.82 | The stale-path recovery cleared the route, asked for a fresh one through the tracked queue, and then retried the record — which the `isIdle` gate refused, so "retrying zero-hop" always returned `Failed` and the ARQ spent an attempt on a record that never reached the air | FIXED — the retry goes first; the lookup is `startPathRefresh`'s cadence |
+| 17.83 | A mark that expired or was read on the desk could not leave a connected tailnet phone: a new mark has a push, a removed one had nothing | FIXED — `buzz::Marks` carries a revision, and the broadcaster re-sends the table when it moves |
+| 17.84 | `connect()` could return with a tracked command in flight, so the route hint and the first handshake message were refused and a rung of the ladder was spent on a ready link | FIXED — bounded wait for the answer window before returning |
+| 17.85 | A refused route hint was swallowed, costing a handshake rung on a session the host could not complete | FIXED — three tries at a quarter second, then the handshake goes anyway |
+| 17.86 | The bearer token truncated in place and the clipboard policy neither renamed nor synced, so a crash could leave a short token and lock out every paired phone | FIXED — both go through `write_private` |
+| 17.87 | Every settings save re-encrypted the bearer token through the Keystore, and the text-size stepper saves per step | FIXED — written only when it changed |
+| 17.88 | `markPage` was never reset when a session failed or the list came back | FIXED — and `first` on the wire means a lost tail was unlikely rather than impossible |
+| 17.89 | The radio route's persistent notification said `Mesh session open`, the app's own state rather than what is being kept | FIXED — `linked to the desktop over the radio` |
 
 ## How to use this
 
