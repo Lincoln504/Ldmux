@@ -131,7 +131,7 @@ implements are in `docs/adr/`.
 | 9.14 | Typing while reading scrollback sent the keys to a prompt off screen | FIXED `aca7220` — input returns the view to live, in both routes |
 | 9.9 | No scroll affordance on settings | OPEN |
 | 9.18 | Settings read as a two-column table: a fixed 92 dp label band, values in a second band, 6 dp everywhere so a heading and a row were the same distance apart | FIXED `33ecbbe` — a list of statements, uppercase section headers carrying the hierarchy, 8 dp rows against 20 dp between sections, one-character indent for a note that belongs to the row above. The mesh pairing became one titled row instead of three bare lines and a row called `code` |
-| 9.10 | Text size needs 21 taps | OPEN |
+| 9.10 | Text size needs 21 taps | FIXED — `MiniTextButton` repeats while held (after a 400 ms beat, then every 90 ms), and only the two text-size buttons opt in: a held thumb on `unpair` or `close` must not repeat |
 | 9.11 | `AppHeader` always reads `ldmux` | OK — a convention, not a defect |
 | 9.15 | A shell created headlessly from the CLI was drawn with the amber `no window` anomaly, which says something went wrong when nothing did | FIXED `c57f99a` — the daemon keeps `hadWindow`, backfilled at registry load; the label fires only for a window that went away. Verified on the device: no row says it any more, and the seven windowed sessions report `hadWindow=true` |
 | 9.16 | A shell created from the phone must show a phone icon, offer send-to-desktop, and be the only kind the phone may close | OK — verified on the device: the row carries `opened on this phone`, `send to desktop` and `close shell`; `+ shell` creates one end to end |

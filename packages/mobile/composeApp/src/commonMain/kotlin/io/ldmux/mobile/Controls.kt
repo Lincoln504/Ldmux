@@ -11,7 +11,13 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
@@ -25,6 +31,14 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
+
+/// How long a repeatable button must be held before it starts repeating.
+private const val REPEAT_DELAY_MS = 400L
+
+/// How often it steps while held: fast enough to cross the text-size range in about two seconds,
+/// slow enough that a held thumb lands on a size rather than overshooting it.
+private const val REPEAT_EVERY_MS = 90L
 
 /**
  * A button that carries the accent, for the single primary action.
@@ -230,11 +244,38 @@ internal fun MiniTextButton(
      * claims the weight of a setting.
      */
     bordered: Boolean = true,
+    /**
+     * Repeat while held, for a control that walks a range rather than performing a verb.
+     *
+     * The text size is 7 to 28 in single steps, which was twenty-one taps from one end to the other
+     * — a control nobody reaches the far side of. A hold repeats after a short beat, so the far end
+     * is one gesture. Off by default: `unpair` and `close` must not repeat because a held thumb is
+     * not a command.
+     */
+    repeat: Boolean = false,
     content: @Composable RowScope.() -> Unit,
 ) {
+    val source = remember { MutableInteractionSource() }
+    if (repeat) {
+        val pressed by source.collectIsPressedAsState()
+        // `onClick` is a lambda rebuilt every recomposition, so it is read through the latest value
+        // rather than captured once: a stale capture would step from the value the button had when
+        // the gesture began and the range would never advance.
+        val step by rememberUpdatedState(onClick)
+        LaunchedEffect(pressed, enabled) {
+            if (!pressed || !enabled) return@LaunchedEffect
+            // A beat before repeating, so a tap that happens to be a little slow is still one step.
+            delay(REPEAT_DELAY_MS)
+            while (true) {
+                step()
+                delay(REPEAT_EVERY_MS)
+            }
+        }
+    }
     TextButton(
         onClick = onClick,
         enabled = enabled,
+        interactionSource = source,
         // A caller's modifier comes first so `weight` decides the width and the height
         // stays the app's own: a button that is wider than its label is a button that
         // lines up with the one beside it.

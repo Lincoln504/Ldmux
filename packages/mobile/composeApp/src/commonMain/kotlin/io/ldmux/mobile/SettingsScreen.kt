@@ -408,9 +408,12 @@ private fun TextSize(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
         // that produces no visible change looks broken and hides the reason.
         val smaller = current.fontSp > LdmuxConfig.MIN_FONT_SP
         val larger = current.fontSp < LdmuxConfig.MAX_FONT_SP
+        // Held, these repeat: the range is 7 to 28 in single steps, and twenty-one taps is a
+        // control nobody reaches the far side of.
         MiniTextButton(
             onClick = { onSave(current.copy(fontSp = (current.fontSp - 1f).coerceAtLeast(LdmuxConfig.MIN_FONT_SP))) },
             enabled = smaller,
+            repeat = true,
         ) {
             Text("\u2212", color = if (smaller) Accent else Dim.copy(alpha = 0.4f), fontSize = 16.sp)
         }
@@ -418,6 +421,7 @@ private fun TextSize(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
         MiniTextButton(
             onClick = { onSave(current.copy(fontSp = (current.fontSp + 1f).coerceAtMost(LdmuxConfig.MAX_FONT_SP))) },
             enabled = larger,
+            repeat = true,
         ) {
             Text("+", color = if (larger) Accent else Dim.copy(alpha = 0.4f), fontSize = 16.sp)
         }
