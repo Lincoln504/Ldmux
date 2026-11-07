@@ -22,11 +22,30 @@ fn on_path(tool: &str) -> bool {
         .any(|d| !d.is_empty() && std::path::Path::new(d).join(tool).is_file())
 }
 
-/// Kill the children when the test ends, however it ends.
+/// Stop the children when the test ends, however it ends — **politely**.
+///
+/// `Child::kill` is `SIGKILL`, and an X server killed that way cannot remove its own
+/// `/tmp/.X<n>-lock` and `/tmp/.X11-unix/X<n>`; the next run then finds a display that looks
+/// taken and a socket that exists but refuses to answer. That litter is what made this test fail
+/// intermittently, so the children are asked to stop first (`SIGTERM`, which Xvfb and i3 both
+/// handle by exiting cleanly) and only a stubborn one is killed.
 struct Guard(Vec<std::process::Child>);
 impl Drop for Guard {
     fn drop(&mut self) {
+        use nix::sys::signal::{kill, Signal};
+        use nix::unistd::Pid;
+        for c in self.0.iter() {
+            // ESRCH for one that has already exited, which is not a failure.
+            let _ = kill(Pid::from_raw(c.id() as i32), Signal::SIGTERM);
+        }
         for c in self.0.iter_mut().rev() {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                if matches!(c.try_wait(), Ok(Some(_))) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
             let _ = c.kill();
             let _ = c.wait();
         }
@@ -65,9 +84,22 @@ async fn a_window_is_opened_found_placed_and_closed_under_i3() {
     )
     .unwrap();
 
-    // A random display so two runs never collide on the WM-selection atom.
-    let n = 90 + (rand::random::<u8>() % 8) as u32;
-    let display = format!(":{n}");
+    // **A display that is actually free, not a guess among eight.**
+    //
+    // This used to pick a random number in 90..97, and a crashed earlier run leaves both
+    // `/tmp/.X<n>-lock` and `/tmp/.X11-unix/X<n>` behind: Xvfb then refuses to start on that
+    // number, while the socket-existence check below passes because the *stale* socket is there.
+    // The result was i3 with no server under it and a 45-second "i3 never answered" failure that
+    // depended on how many runs had died before it (measured 2026-11-07: every one of :90-:97
+    // stale on this host). Scanning for a number with neither file makes the choice independent
+    // of history, and the readiness check below no longer trusts a socket's existence.
+    let (n, display) = (90..=199u32)
+        .find(|n| {
+            !std::path::Path::new(&format!("/tmp/.X{n}-lock")).exists()
+                && !std::path::Path::new(&format!("/tmp/.X11-unix/X{n}")).exists()
+        })
+        .map(|n| (n, format!(":{n}")))
+        .expect("a free X display number in 90..200");
     let mut guard = Guard(Vec::new());
     guard.0.push(
         Command::new("Xvfb")
@@ -77,9 +109,15 @@ async fn a_window_is_opened_found_placed_and_closed_under_i3() {
             .spawn()
             .expect("failed to start Xvfb"),
     );
+    // **Answering, not merely present.** A socket file outlives the server that made it, so
+    // connecting is the only way to know Xvfb is up: a live server accepts, a stale socket refuses.
     let socket = format!("/tmp/.X11-unix/X{n}");
-    if !wait_until(10, || std::path::Path::new(&socket).exists()).await {
-        eprintln!("SKIP desktop_e2e: Xvfb did not come up on {display}");
+    let up = wait_until(10, || {
+        std::os::unix::net::UnixStream::connect(&socket).is_ok()
+    })
+    .await;
+    if !up {
+        eprintln!("SKIP desktop_e2e: Xvfb did not answer on {display}");
         return;
     }
 
