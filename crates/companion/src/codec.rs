@@ -84,7 +84,8 @@ pub const PATH_FLOOD: u8 = 0xFF;
 /// Build the path byte for a direct packet: hash width in the top two bits, hop
 /// count in the low six. `hash_size` is 1..=4, matching the firmware's encoding.
 pub fn path_byte(hash_size: u8, hops: u8) -> Result<u8, CodecError> {
-    if !(1..=4).contains(&hash_size) {
+    // 4 is reserved for the future (`Packet::isValidPathLen`, `src/Packet.cpp:13-18`).
+    if !(1..=3).contains(&hash_size) {
         return Err(CodecError::BadHashSize(hash_size));
     }
     if hops > 0x3F {
@@ -93,18 +94,26 @@ pub fn path_byte(hash_size: u8, hops: u8) -> Result<u8, CodecError> {
     Ok(((hash_size - 1) << 6) | hops)
 }
 
-/// The largest read-path frame the firmware will accept, header included.
-pub const READ_PATH_MAX: usize = 176;
+/// The largest packet a `CMD_SEND_RAW_PACKET` frame may carry.
+///
+/// The firmware's frame ceiling is 176 bytes (`MAX_FRAME_SIZE`, `BaseSerialInterface.h:5`), and a raw
+/// send is `[0x41][priority][header][path_len][path][record]` — the command and the priority are two
+/// of those bytes, so the packet itself gets 174. A longer frame is **truncated** by the serial
+/// reader (`checkRecvFrame`, `ArduinoSerialInterface.cpp:56-59`), which turns an oversized record
+/// into a parse failure rather than a send, so the limit has to be exact here.
+pub const PACKET_MAX: usize = 174;
 
 /// Build a raw direct packet around `record`.
 ///
 /// **Both ends of the path are checked here.** A path whose length is not a multiple of the hash
 /// width cannot be encoded: the hop count truncates and the receiver walks `hops * hash` bytes,
 /// landing inside the path, so every record fails its tag and the link looks like a radio fault
-/// rather than a caller's mistake. A frame over [`READ_PATH_MAX`] is refused by the firmware's
-/// `readPath` anyway, and refusing it here names the fault at its source.
+/// rather than a caller's mistake. A packet over [`PACKET_MAX`] would be truncated by the firmware's
+/// serial reader, and refusing it here names the fault at its source.
 pub fn build_raw_direct(hash_size: u8, path: &[u8], record: &[u8]) -> Result<Vec<u8>, CodecError> {
-    if !(1..=4).contains(&hash_size) {
+    // 4 is reserved for the future and `Packet::isValidPathLen` refuses it (`src/Packet.cpp:13-18`),
+    // so a path built at that width would be dropped by every receiver.
+    if !(1..=3).contains(&hash_size) {
         return Err(CodecError::BadHashSize(hash_size));
     }
     if !path.len().is_multiple_of(usize::from(hash_size)) {
@@ -114,8 +123,8 @@ pub fn build_raw_direct(hash_size: u8, path: &[u8], record: &[u8]) -> Result<Vec
         });
     }
     let total = 2 + path.len() + record.len();
-    if total > READ_PATH_MAX {
-        return Err(CodecError::TooLong { len: total, max: READ_PATH_MAX });
+    if total > PACKET_MAX {
+        return Err(CodecError::TooLong { len: total, max: PACKET_MAX });
     }
     let encoded = path_byte(hash_size, (path.len() / hash_size as usize) as u8)?;
     let mut out = Vec::with_capacity(2 + path.len() + record.len());
@@ -189,7 +198,9 @@ impl std::fmt::Display for CodecError {
             CodecError::RaggedPath { len, hash } => {
                 write!(f, "a {len}-byte path is not a whole number of {hash}-byte hashes")
             }
-            CodecError::TooLong { len, max } => write!(f, "a {len}-byte frame exceeds the {max}-byte read path"),
+            CodecError::TooLong { len, max } => {
+                write!(f, "a {len}-byte packet exceeds the {max}-byte limit for a raw send")
+            }
             CodecError::WrongResponse { want, got } => {
                 write!(f, "expected response {want:#04x}, got {got:#04x}")
             }
@@ -422,9 +433,12 @@ mod tests {
     fn path_byte_encodes_hash_width_in_the_top_two_bits() {
         assert_eq!(path_byte(1, 0).unwrap(), 0x00);
         assert_eq!(path_byte(2, 3).unwrap(), 0x43);
-        assert_eq!(path_byte(4, 63).unwrap(), 0b1100_0000 | 63);
+        assert_eq!(path_byte(3, 63).unwrap(), 0b1000_0000 | 63);
         assert!(path_byte(0, 0).is_err());
         assert!(path_byte(5, 0).is_err());
+        // 4 is reserved for the future and `Packet::isValidPathLen` refuses it, so a path built at
+        // that width would be dropped by every receiver.
+        assert!(path_byte(4, 1).is_err());
         assert!(path_byte(1, 64).is_err());
     }
 

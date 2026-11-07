@@ -15,9 +15,9 @@ pub const CREDIT_WINDOW: u8 = 8;
 
 /// Absolute ceiling for an opaque record.
 ///
-/// A raw send is `[0x41][path_len][path][payload]` inside the companion frame's 176 bytes, which
-/// leaves 172 for the sealed record. The real limit is advertised per peer, because a longer path
-/// leaves less room; this is the ceiling no path may exceed.
+/// A raw send is `[0x41][priority][header][path_len][path][record]` inside the companion frame's 176
+/// bytes, which leaves 172 for the sealed record when the path is empty. The real limit is advertised
+/// per peer, because a longer path leaves less room; this is the ceiling no path may exceed.
 pub const RECORD_MAX: usize = 172;
 
 /// The conservative floor: a long path still fits a record this size.
