@@ -18,7 +18,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.ui.unit.sp
@@ -164,7 +167,17 @@ internal data class Notice(val text: String, val ok: Boolean)
 @Composable
 internal fun NoticeLine(notice: Notice?) {
     if (notice == null) return
-    Text(notice.text, color = if (notice.ok) Muted else Warn, fontSize = 11.sp)
+    Text(
+        notice.text,
+        color = if (notice.ok) Muted else Warn,
+        fontSize = 11.sp,
+        // **A refusal is announced, not just drawn.** The line clears itself after four seconds,
+        // which is exactly the case a screen reader misses: it reads what it is focused on, and this
+        // is a plain `Text` that appears on top of whatever that was. A live region makes the
+        // refusal audible the moment it arrives; polite rather than assertive, because a keystroke
+        // being held is not an emergency.
+        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+    )
 }
 
 /**

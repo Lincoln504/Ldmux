@@ -122,7 +122,7 @@ implements are in `docs/adr/`.
 | 9.3 | A resync that never answers says "resyncing" forever | FIXED `8fd09b6` |
 | 9.11 | A shell created from the phone appeared on a blank page in one adb-driven run on the tailnet | NOT A DEFECT in normal use: the operator reports the prompt appears on creation, and the host has it. The log for the run showed `attached` twice, then `grid 46x21 (asked 46 x 21)`, then no frame — which is a consistency question worth a test (the surface rebuilds its engine for the measured grid), not a user-visible fault |
 | 9.4 | The radio's failure reason is discarded | FIXED 2026-11-06 — `RadioLink.lastProblem` carries the sentence the link built to the picker and to `LinkDown`; `match` also reports a refused write |
-| 9.5 | A refused action's message vanishes after 4 s, not a live region | OPEN |
+| 9.5 | A refused action's message vanishes after 4 s, not a live region | FIXED — `NoticeLine` is a polite live region, so the refusal is announced when it arrives rather than only drawn for four seconds |
 | 9.6 | The shell list survives a dead link with `open` armed | FIXED `b44a8de` |
 | 9.7 | Settings opens as a screen and ends the session | OPEN — a decision, expensive on radio |
 | 9.8 | Settings sub-flows opened at the end of the list, under `code` rather than under their own row | FIXED `ac87947`, **verified on the device 2026-11-05**: the picker renders at y 1080–1228 under the `radio` row at 949–1005, and pushes `code` from 1092 to 1468 |
