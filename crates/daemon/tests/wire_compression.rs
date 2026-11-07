@@ -219,14 +219,21 @@ async fn compression_cuts_the_wire_cost_of_every_real_workload() {
         );
         assert!(c.2 > 0, "{name}: nothing was compressed");
     }
-    // A keystroke echo is not worth compressing: it must not be made larger by
-    // more than the cost of nothing (it is sent plain).
+    // **A keystroke is not made bigger.** That is the requirement, and it is what this asserts:
+    // the deflate of a keystroke's echo must not cost more than the plain one plus a header.
+    //
+    // It used to assert `compressed_messages == 0` instead, which is the *mechanism* and not the
+    // rule: whether the echo arrives alone (11 B, under `MIN_COMPRESS_BYTES` and therefore plain)
+    // or bundled with a prompt redraw past 96 B (compressed, and still not one byte bigger) depends
+    // on batching, which depends on timing, and this binary runs beside thirty others. Under the
+    // parallel gate it failed for exactly that reason. The threshold itself is pinned where it is
+    // decidable — `the_threshold_is_96_bytes` in `ws.rs` sends 95 B and 96 B and asserts the bit.
     let (p, c) = (get(&plain, "one keystroke"), get(&comp, "one keystroke"));
-    assert_eq!(c.2, 0, "a tiny frame goes plain");
     assert!(
         c.1 <= p.1 + 8,
-        "a keystroke cost {} B compressed vs {} B plain",
+        "a keystroke cost {} B in {} message(s) compressed vs {} B plain",
         c.1,
+        c.2,
         p.1
     );
 }

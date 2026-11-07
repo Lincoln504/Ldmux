@@ -98,6 +98,12 @@ pub struct StreamSubscriber {
     pub on_reset: Box<dyn Fn(&str) + Send + Sync>,
 }
 
+/// How often the poll thread makes a pass while someone is watching.
+///
+/// Not how often it *asks* the keeper: a pass waits for output inside the keeper
+/// ([`PEEK_WAIT_MS`]), so this is the sleep between passes and the floor under an echo's latency.
+pub const WATCHED_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
 /// How long the watched poll holds a keeper call open waiting for output.
 ///
 /// Half of what the old 10 ms poll could add to an echo, so a wait never makes a keystroke
@@ -310,13 +316,27 @@ impl PaneStream {
         id
     }
 
-    /// How long a pass may wait: **inside the keeper** for output, and then for its next turn.
+    /// How long the poll thread should sleep before its next pass.
     ///
-    /// The same value does both jobs, which is what keeps the cadence honest: a pass that waited
-    /// and found nothing sleeps this long again, and one the keeper answered the moment a byte
-    /// arrived goes straight back to waiting. A keeper too old to wait answers at once, and this
-    /// is then the whole interval — the old cadence rather than a hot loop.
+    /// **This is not the wait.** A pass waits inside the keeper ([`Self::peek_wait`]) and then
+    /// sleeps this long, and the two are separate numbers on purpose: output that lands while the
+    /// thread is sleeping can only be delivered after it wakes, so this is the floor under an
+    /// echo's latency. Ten milliseconds is the old poll's own interval; a hundred would have been
+    /// a hundred milliseconds added to every keystroke's echo on a quiet shell.
     pub fn poll_interval(&self) -> std::time::Duration {
+        if self.subscriber_count() == 0 {
+            UNWATCHED_POLL
+        } else {
+            WATCHED_POLL
+        }
+    }
+
+    /// How long a pass holds its keeper call open waiting for output.
+    ///
+    /// The round trips this removes are the point: a watched shell used to ask, and be told
+    /// "nothing", a hundred times a second. This is also the most a snapshot can be delayed, since
+    /// the gate is held across the wait.
+    pub fn peek_wait(&self) -> std::time::Duration {
         if self.subscriber_count() == 0 {
             UNWATCHED_POLL
         } else {
@@ -1272,9 +1292,14 @@ mod tests {
             "a subscriber must cut the wait short, waited {waited:?}"
         );
         assert_eq!(
-            stream.poll_interval(),
+            stream.peek_wait(),
             PEEK_WAIT_MS,
             "with a subscriber a pass waits for output, and returns the moment there is some"
+        );
+        assert_eq!(
+            stream.poll_interval(),
+            WATCHED_POLL,
+            "and the sleep between passes stays short: it is the floor under an echo"
         );
     }
 
@@ -1548,7 +1573,7 @@ mod tests {
         let (sub, _got, _resets) = collecting();
         let (_id, _u) = s.subscribe(sub);
 
-        s.poll_once_waiting(s.poll_interval()).unwrap();
+        s.poll_once_waiting(s.peek_wait()).unwrap();
         s.poll_once().unwrap();
         let waits = keeper.waits.lock().unwrap().clone();
         assert_eq!(

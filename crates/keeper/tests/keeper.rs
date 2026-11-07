@@ -28,14 +28,42 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// A scratch socket path, unique per test (tests run in parallel).
-fn socket_path() -> std::path::PathBuf {
+/// A scratch socket path, unique per test (tests run in parallel), **removed when it drops**.
+///
+/// A unix socket file outlives the listener that made it, so a bare path left one behind per
+/// test: thirty-eight per run of this binary had accumulated in `/tmp` on the machine this was
+/// measured on (2026-11-07). Derefs to `Path`, so `&sock` still coerces for a function taking
+/// `&Path`.
+struct ScratchSock(std::path::PathBuf);
+impl std::ops::Deref for ScratchSock {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+impl AsRef<std::ffi::OsStr> for ScratchSock {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.0.as_os_str()
+    }
+}
+impl AsRef<std::path::Path> for ScratchSock {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+impl Drop for ScratchSock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn socket_path() -> ScratchSock {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
+    ScratchSock(std::env::temp_dir().join(format!(
         "ldmux-keeper-test-{}-{}.sock",
         std::process::id(),
         n
-    ))
+    )))
 }
 
 /// Boot the keeper on `socket` (in-process) and hand back the `Arc` so the
@@ -1453,7 +1481,7 @@ async fn a_killed_keeper_ends_its_shells_even_when_a_later_one_ignores_hup() {
     assert!(socket.exists(), "the keeper bound its socket");
 
     let spawn = |session_id: &str, command: Option<Vec<String>>| {
-        let socket = socket.clone();
+        let socket = socket.0.clone();
         let session_id = session_id.to_string();
         async move {
             let res: KeeperMessage = keeper_call(

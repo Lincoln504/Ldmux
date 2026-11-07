@@ -474,8 +474,8 @@ impl LdmuxDaemon {
     /// `registry.json` all live there).
     pub fn new(state_dir: PathBuf, keeper_bin: PathBuf) -> Self {
         Self {
-            state_dir: state_dir.clone(),
-            keeper: std::sync::Arc::new(KeeperSupervisor::new(state_dir.clone(), keeper_bin)),
+            state_dir: state_dir.to_path_buf(),
+            keeper: std::sync::Arc::new(KeeperSupervisor::new(state_dir.to_path_buf(), keeper_bin)),
             socket_path: state_dir.join("ldmuxd.sock"),
             registry: Registry::new(state_dir.join("registry.json").to_string_lossy()),
             ownership: Ownership::new(),
@@ -1736,8 +1736,9 @@ impl LdmuxDaemon {
                     // terminal on every device, with the link looking healthy).
                     // A waiting peek, so an idle shell costs one keeper call per
                     // [`crate::stream::PEEK_WAIT_MS`] instead of one per 10 ms: the keeper answers the
-                    // moment a byte arrives, so the wait costs no latency, only round trips.
-                    let wait = poll_stream.poll_interval();
+                    // moment a byte arrives, so the wait costs no latency, only round trips. The sleep
+                    // after a pass stays at `poll_interval`, which is what bounds an echo's latency.
+                    let wait = poll_stream.peek_wait();
                     let more = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         poll_stream.poll_once_waiting(wait)
                     }))
@@ -3150,10 +3151,8 @@ mod tests {
     use ldmux_protocol::keeper::{Kill, Spawn};
     use ldmux_protocol::rpc::SessionRecord;
 
-    fn scratch() -> std::path::PathBuf {
-        let p = std::env::temp_dir().join(format!("ldmux-daemon-core-{}", rand::random::<u64>()));
-        std::fs::create_dir_all(&p).unwrap();
-        p
+    fn scratch() -> crate::testutil::Scratch {
+        crate::testutil::Scratch::dir("ldmux-daemon-core")
     }
 
     /// A session's spawn env pins the colour terminal, so a keeper that does
@@ -3237,7 +3236,7 @@ mod tests {
         wait_socket(&keeper_sock).await;
 
         // A daemon rooted at the same dir (its keeper socket == the fake's).
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         assert_eq!(d.keeper_socket_path(), keeper_sock.as_path());
 
         // Spawn a session on the fake keeper (the daemon's keeper_call path).
@@ -3327,7 +3326,7 @@ mod tests {
         wait_socket(&keeper_sock).await;
 
         // A daemon rooted at the same dir (its keeper socket == the fake's).
-        let d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
 
         // A session the registry does not know (the daemon's own session).
         // The keeper session id IS the keeper name.
@@ -3381,7 +3380,7 @@ mod tests {
         });
         wait_socket(&keeper_sock).await;
 
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         // Create a session in the current dir (which exists).
         let cwd = std::env::current_dir()
             .unwrap()
@@ -3429,7 +3428,7 @@ mod tests {
         });
         wait_socket(&keeper_sock).await;
 
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         let cwd = std::env::current_dir()
             .unwrap()
             .to_string_lossy()
@@ -3466,7 +3465,7 @@ mod tests {
         });
         wait_socket(&keeper_sock).await;
 
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         let cwd = std::env::current_dir()
             .unwrap()
             .to_string_lossy()
@@ -3513,7 +3512,7 @@ mod tests {
         });
         wait_socket(&keeper_sock).await;
 
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         let cwd = std::env::current_dir()
             .unwrap()
             .to_string_lossy()
@@ -3565,7 +3564,7 @@ mod tests {
         });
         wait_socket(&keeper_sock).await;
 
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         let cwd = std::env::current_dir()
             .unwrap()
             .to_string_lossy()
@@ -3641,7 +3640,7 @@ mod tests {
         });
         wait_socket(&keeper_sock).await;
 
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         let cwd = std::env::current_dir()
             .unwrap()
             .to_string_lossy()
@@ -3694,7 +3693,7 @@ mod tests {
         });
         wait_socket(&keeper_sock).await;
 
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         let cwd = std::env::current_dir()
             .unwrap()
             .to_string_lossy()
@@ -3768,7 +3767,7 @@ mod tests {
         });
         wait_socket(&keeper_sock).await;
 
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         let cwd = std::env::current_dir()
             .unwrap()
             .to_string_lossy()
@@ -3822,7 +3821,7 @@ mod tests {
     #[test]
     fn a_claim_with_no_connection_behind_it_is_given_back() {
         let dir = scratch();
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         let device = ldmux_protocol::rpc::DeviceInfo {
             id: "desktop".into(),
             name: "desktop".into(),
@@ -3984,7 +3983,7 @@ mod tests {
         tokio::spawn(async move { FakeKeeper::serve(&fk2, ks.as_path()).await.unwrap() });
         wait_socket(&keeper_sock).await;
         let mut d =
-            LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent")).with_dead_keep_ms(400);
+            LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent")).with_dead_keep_ms(400);
         for id in ["a", "b", "c"] {
             if id != "c" {
                 spawn_fake(&keeper_sock, &format!("ldmux-{id}")).await;
@@ -4041,7 +4040,7 @@ mod tests {
             name: "phone".into(),
             kind: "phone".into(),
         };
-        let mut d1 = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d1 = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         d1.registry().upsert(running_record("s1"));
         d1.claim("s1", &device, false);
         assert!(dir.join("claims.json").exists());
@@ -4053,7 +4052,7 @@ mod tests {
         d1.stop(); // a stopping daemon must not wipe the file
         drop(d1);
 
-        let mut d2 = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d2 = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         d2.registry().upsert(running_record("s1"));
         d2.registry().upsert(running_record("s2"));
         d2.load_claims();
@@ -4076,7 +4075,7 @@ mod tests {
         assert!(!d2.holds("s1", "phone"));
 
         // A freed claim stays freed: the file was rewritten when d2 let it go.
-        let mut d3 = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d3 = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         d3.registry().upsert(running_record("s1"));
         d3.load_claims();
         assert!(!d3.holds("s1", "phone"), "a freed claim is not resurrected");
@@ -4093,12 +4092,12 @@ mod tests {
             name: "phone".into(),
             kind: "phone".into(),
         };
-        let mut d1 = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d1 = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         d1.registry().upsert(running_record("s1"));
         d1.claim("s1", &device, false);
         d1.stop();
         drop(d1);
-        let mut d2 = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d2 = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         d2.registry().upsert(running_record("s1"));
         d2.load_claims();
         assert_eq!(d2.restored.len(), 1);
@@ -4124,7 +4123,7 @@ mod tests {
         });
         wait_socket(&keeper_sock).await;
 
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         let cwd = std::env::current_dir()
             .unwrap()
             .to_string_lossy()
@@ -4166,7 +4165,7 @@ mod tests {
                 .unwrap();
         });
         wait_socket(&keeper_sock).await;
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
         let rec = d
             .create_session(&cwd, None, "local")
@@ -4204,7 +4203,7 @@ mod tests {
                 .unwrap();
         });
         wait_socket(&keeper_sock).await;
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
         let a = d
             .create_session(&cwd, None, "local")
@@ -4257,7 +4256,7 @@ mod tests {
                 .unwrap();
         });
         wait_socket(&keeper_sock).await;
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
         let rec = d
             .create_session(&cwd, None, "local")
@@ -4314,7 +4313,7 @@ mod tests {
                 .unwrap();
         });
         wait_socket(&keeper_sock).await;
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
         let rec = d
             .create_session(&cwd, None, "local")
@@ -4351,7 +4350,7 @@ mod tests {
                 .unwrap();
         });
         wait_socket(&keeper_sock).await;
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
         let rec = d
             .create_session(&cwd, None, "local")
@@ -4385,7 +4384,7 @@ mod tests {
         });
         wait_socket(&keeper_sock).await;
 
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
 
         // `ping` returns the keeper socket, and the build that answered: without it
         // nothing can tell whether the daemon is the install that was just deployed.
@@ -4491,7 +4490,7 @@ mod tests {
         });
         wait_socket(&keeper_sock).await;
 
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         let cwd = std::env::current_dir()
             .unwrap()
             .to_string_lossy()
@@ -4540,7 +4539,7 @@ mod tests {
         });
         wait_socket(&keeper_sock).await;
 
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         let cwd = std::env::current_dir()
             .unwrap()
             .to_string_lossy()
@@ -4593,7 +4592,7 @@ mod tests {
         });
         wait_socket(&keeper_sock).await;
 
-        let d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         let arc = std::sync::Arc::new(tokio::sync::Mutex::new(d));
         let mut d = arc.lock().await;
         d.start(&std::sync::Arc::clone(&arc)).await.unwrap();
@@ -4642,7 +4641,7 @@ mod tests {
         });
         wait_socket(&keeper_sock).await;
 
-        let d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         let arc = std::sync::Arc::new(tokio::sync::Mutex::new(d));
         let mut d = arc.lock().await;
         d.start(&std::sync::Arc::clone(&arc)).await.unwrap();
@@ -4673,10 +4672,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o775)).unwrap();
+            std::fs::set_permissions(&*dir, std::fs::Permissions::from_mode(0o775)).unwrap();
         }
 
-        let d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         let arc = std::sync::Arc::new(tokio::sync::Mutex::new(d));
         let mut d = arc.lock().await;
         d.start(&std::sync::Arc::clone(&arc)).await.unwrap();
@@ -4686,7 +4685,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+            let mode = std::fs::metadata(&*dir).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o700, "state dir should be tightened to 0700");
         }
 
@@ -4715,7 +4714,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
 
         // Start a daemon that wants the same port.
-        let d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent")).with_remote(
+        let d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent")).with_remote(
             "127.0.0.1".to_string(),
             port,
             "test-token".to_string(),
@@ -4775,7 +4774,7 @@ mod tests {
         // The rebuild clears a window from a session that is not running, and
         // never leaves it in the live map.
         let dir = scratch();
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         d.registry().upsert(SessionRecord {
             id: "dead1".into(),
             keeper_name: "ldmux-dead1".into(),
@@ -4831,7 +4830,7 @@ mod tests {
                 .unwrap();
         });
         wait_socket(&keeper_sock).await;
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         // The window-close rule, without the real five seconds.
         d.live_window_grace_ms = 0;
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
@@ -4898,7 +4897,7 @@ mod tests {
                 .unwrap();
         });
         wait_socket(&keeper_sock).await;
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
         let rec = d
             .create_session(&cwd, None, "local")
@@ -4934,7 +4933,7 @@ mod tests {
                 .unwrap();
         });
         wait_socket(&keeper_sock).await;
-        let mut d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let mut d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         let cwd = std::env::temp_dir().to_string_lossy().into_owned();
         let rec = d
             .create_session(&cwd, None, "local")
@@ -4985,7 +4984,7 @@ mod tests {
     #[test]
     fn the_control_socket_path_can_be_set_apart_from_the_state_dir() {
         let dir = scratch();
-        let d = LdmuxDaemon::new(dir.clone(), PathBuf::from("/nonexistent"));
+        let d = LdmuxDaemon::new(dir.to_path_buf(), PathBuf::from("/nonexistent"));
         assert_eq!(d.socket_path(), dir.join("ldmuxd.sock"));
         let elsewhere = dir.join("custom.sock");
         let d = d.with_socket_path(elsewhere.clone());
