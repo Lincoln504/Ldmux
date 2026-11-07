@@ -224,18 +224,31 @@ fn locked_write(lock: &Mutex<()>, fd: std::os::fd::RawFd, bytes: &[u8]) -> std::
 /// session nobody is watching can reach it.
 pub const OUT_CAP: usize = 4 * 1024 * 1024;
 
-/// How often a waiting `Peek` looks at the buffer.
-///
-/// Half the interval the daemon used to poll a watched shell at, so a wait never delays output
-/// more than the old polling did, and a thousand times cheaper than asking over the socket.
-const PEEK_TICK: std::time::Duration = std::time::Duration::from_millis(5);
-
 /// A session's buffered, not-yet-peeked output.
-#[derive(Default)]
+///
+/// **The wake-up lives here, with the bytes.** A waiting `Peek` must learn about output the moment
+/// the reader task appends it, and the two values are shared with that task through this one `Arc`
+/// — so a notification cannot be sent to a buffer that is not the one being waited on, and a wait
+/// costs nothing at all while the pane is quiet. A poll on a short timer would have been simpler to
+/// write and cost 200 wake-ups a second for every watched shell, which is most of what the wait
+/// exists to remove.
 pub struct OutBuf {
     pub q: VecDeque<u8>,
     /// Bytes were discarded at `OUT_CAP` since the last peek.
     pub lost: bool,
+    /// Notified after every [`OutBuf::push`]. `notify_waiters`, so a push with no waiter costs a
+    /// length check.
+    pub wake: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl Default for OutBuf {
+    fn default() -> Self {
+        Self {
+            q: VecDeque::new(),
+            lost: false,
+            wake: std::sync::Arc::new(tokio::sync::Notify::new()),
+        }
+    }
 }
 
 impl OutBuf {
@@ -245,10 +258,13 @@ impl OutBuf {
             self.q.clear();
             self.lost = true;
             if bytes.len() > OUT_CAP {
+                // Nothing was appended, but `lost` changed, which is also worth a wake.
+                self.wake.notify_waiters();
                 return;
             }
         }
         self.q.extend(bytes.iter().copied());
+        self.wake.notify_waiters();
     }
 
     /// Take at most `max` bytes (and whether any was lost before them), and
@@ -487,6 +503,33 @@ pub fn utf8_env() -> Vec<(String, String)> {
 #[cfg(test)]
 mod out_buf_tests {
     use super::*;
+
+    /// **A push wakes the waiter, and this is the whole of the idle-cost fix.**
+    ///
+    /// The daemon holds a `Peek` open instead of asking a hundred times a second, and the call
+    /// returns because of this notification rather than because a timer fired. If `push` stopped
+    /// notifying, every viewer would still be answered — at its deadline — and the poll would be
+    /// back without anything failing, so it is pinned here rather than inferred.
+    #[tokio::test]
+    async fn a_push_wakes_a_waiting_peek() {
+        let m = Arc::new(Mutex::new(OutBuf::default()));
+        let wake = m.relock().wake.clone();
+        let waiter = tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            tokio::time::timeout(std::time::Duration::from_millis(5_000), wake.notified())
+                .await
+                .expect("a push must wake this");
+            started.elapsed()
+        });
+        // Let the waiter register before anything is pushed.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        m.relock().push(b"x");
+        let took = waiter.await.expect("the waiter finished");
+        assert!(
+            took < std::time::Duration::from_millis(1_000),
+            "the wake is the push, not a timer: {took:?}"
+        );
+    }
 
     /// A panic while a lock is held must not make every later use of it panic: the
     /// keeper owns every PTY, and a poisoned `sessions` table or output buffer used
@@ -923,16 +966,11 @@ impl Keeper {
                 };
                 let max = max.clamp(1, km::PEEK_MAX_BYTES) as usize;
                 let wait = p.wait_ms.unwrap_or(0).min(km::PEEK_MAX_WAIT_MS);
-                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait);
-                // **Wait in short ticks, not on a condition variable.** The pair (mutex,
-                // condvar) the buffer would need lives inside a value everything else reaches
-                // through the sessions map, and the two seconds of plumbing to notify a waiter
-                // are worth less than a tick that costs a lock and a comparison. Five
-                // milliseconds is half the interval the daemon used to poll at, so the wait is
-                // never the reason a keystroke's echo is late.
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(wait);
+                let wake = out.relock().wake.clone();
                 loop {
                     let (data, lost, more) = out.relock().take_up_to(max);
-                    if !data.is_empty() || lost || std::time::Instant::now() >= deadline {
+                    if !data.is_empty() || lost {
                         return Ok(KeeperMessage::PeekResult(PeekResult::compact(
                             p.session_id.clone(),
                             &data,
@@ -940,7 +978,36 @@ impl Keeper {
                             lost,
                         )));
                     }
-                    tokio::time::sleep(PEEK_TICK).await;
+                    let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    if left.is_zero() {
+                        return Ok(KeeperMessage::PeekResult(PeekResult::compact(
+                            p.session_id.clone(),
+                            &[],
+                            more,
+                            lost,
+                        )));
+                    }
+                    // **Registered before the buffer is looked at again.** `notify_waiters` only
+                    // wakes waiters that are already registered, so arming the future and then
+                    // re-checking is what makes a byte that lands in between impossible to miss
+                    // until the deadline.
+                    let fut = wake.notified();
+                    tokio::pin!(fut);
+                    fut.as_mut().enable();
+                    if !out.relock().q.is_empty() {
+                        continue;
+                    }
+                    tokio::select! {
+                        () = &mut fut => {}
+                        () = tokio::time::sleep(left) => {
+                            return Ok(KeeperMessage::PeekResult(PeekResult::compact(
+                                p.session_id.clone(),
+                                &[],
+                                more,
+                                lost,
+                            )));
+                        }
+                    }
                 }
             }
             // The full snapshot: hand the render to the session's emulator
