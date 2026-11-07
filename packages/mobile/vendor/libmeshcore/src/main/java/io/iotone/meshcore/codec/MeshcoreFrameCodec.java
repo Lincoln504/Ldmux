@@ -340,29 +340,29 @@ public final class MeshcoreFrameCodec {
     /**
      * {@code CMD_GET_ADVERT_PATH} (0x2A): the route a recently heard advert took.
      *
-     * <p>Body is {@code [reserved][6-byte public-key prefix]}. The firmware looks
-     * the prefix up in its advert-path cache and answers
+     * <p>Body is {@code [reserved][32-byte public key]}. The firmware looks the
+     * key up in its advert-path cache — matching on the first seven bytes, the
+     * width of {@code AdvertPath::pubkey_prefix} — and answers
      * {@code RESP_CODE_ADVERT_PATH} (0x16), or {@code ERR_CODE_NOT_FOUND} when it
      * has not heard that node recently.</p>
      *
-     * <p>The prefix is the <em>advert's</em> originator, so a caller passes the
-     * first six bytes of the peer's public key. Six is the firmware's own
-     * {@code AdvertPath::pubkey_prefix} width and is not the configurable path
-     * hash size.</p>
+     * <p><strong>The whole key, not a prefix.</strong> The firmware's guard is
+     * {@code len >= PUB_KEY_SIZE + 2} ({@code MyMesh.cpp:1851}), so a shorter frame
+     * falls through to "unsupported command" and no route is ever learned.</p>
      *
-     * @param publicKeyPrefix first 6 bytes of the peer's public key
+     * @param publicKey the peer's full 32-byte public key
      * @return the encoded frame
-     * @throws IllegalArgumentException when the prefix is not 6 bytes
+     * @throws IllegalArgumentException when the key is not 32 bytes
      */
-    public static byte[] getAdvertPath(byte[] publicKeyPrefix) {
-        if (publicKeyPrefix.length != MeshcoreConstants.PUB_KEY_PREFIX_SIZE) {
-            throw new IllegalArgumentException("public key prefix must be exactly "
-                    + MeshcoreConstants.PUB_KEY_PREFIX_SIZE + " bytes");
+    public static byte[] getAdvertPath(byte[] publicKey) {
+        if (publicKey.length != MeshcoreConstants.PUB_KEY_SIZE) {
+            throw new IllegalArgumentException("public key must be exactly "
+                    + MeshcoreConstants.PUB_KEY_SIZE + " bytes");
         }
         return new FrameBuilder()
                 .u8(MeshcoreCommand.GET_ADVERT_PATH.code())
                 .u8(0) // reserved
-                .fixed(publicKeyPrefix, MeshcoreConstants.PUB_KEY_PREFIX_SIZE)
+                .fixed(publicKey, MeshcoreConstants.PUB_KEY_SIZE)
                 .build();
     }
 

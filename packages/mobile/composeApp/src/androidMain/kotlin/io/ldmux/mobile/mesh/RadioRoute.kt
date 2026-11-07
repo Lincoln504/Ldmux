@@ -22,15 +22,8 @@ internal object RadioRoute {
         val isEmpty: Boolean get() = bytes.isEmpty()
     }
 
-    /** The firmware's `PUB_KEY_PREFIX_SIZE`: what the advert-path lookup is keyed by. */
-    const val PREFIX = 6
-
     /** The firmware's `MAX_PATH_SIZE`; a longer path cannot be carried at all. */
     const val MAX_PATH_BYTES = 64
-
-    /** The first six bytes of a public key, as `AdvertPath::pubkey_prefix` stores it. */
-    fun prefix(publicKey: ByteArray): ByteArray? =
-        if (publicKey.size < PREFIX) null else publicKey.copyOf(PREFIX)
 
     /**
      * The same route, to be used in the opposite direction.

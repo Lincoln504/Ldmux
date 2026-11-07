@@ -169,15 +169,20 @@ impl<L: ByteLink> Companion<L> {
 
     /// Read the route a recently heard advert took, from the radio's advert-path cache.
     ///
+    /// **The request carries the whole 32-byte public key**, even though the cache is keyed by the
+    /// first seven bytes: the firmware's guard is `len >= PUB_KEY_SIZE + 2` and it compares
+    /// `sizeof(AdvertPath::pubkey_prefix)` — seven — bytes of that key (`MyMesh.cpp:1851-1858`). A
+    /// short prefix frame is answered `ERR_CODE_UNSUPPORTED_CMD` and no route is ever learned.
+    ///
     /// The reply carries the path in travel order towards this radio; a caller sending *to* that
     /// node reverses the hop groups (`PeerPath::reversed`). A radio that has not heard the node
     /// recently answers `ERR_CODE_NOT_FOUND`, which arrives here as [`SessionError::Rejected`] — no
     /// route, not a failure.
-    pub fn get_advert_path(&mut self, prefix: &[u8; 6]) -> Result<AdvertPath, SessionError> {
-        let mut payload = Vec::with_capacity(8);
+    pub fn get_advert_path(&mut self, public_key: &[u8; 32]) -> Result<AdvertPath, SessionError> {
+        let mut payload = Vec::with_capacity(34);
         payload.push(commands::GET_ADVERT_PATH);
         payload.push(0); // reserved
-        payload.extend_from_slice(prefix);
+        payload.extend_from_slice(public_key);
         let reply = self.request(&payload, codes::ADVERT_PATH, Duration::from_secs(5))?;
         parse_advert_path(&reply).ok_or(SessionError::Malformed("advert path"))
     }
@@ -365,17 +370,19 @@ mod tests {
         reply.extend([0xA1, 0xA2, 0xB1, 0xB2]);
         link.push_payload(&reply);
         let mut companion = Companion::new(link);
-        let path = companion.get_advert_path(&[1, 2, 3, 4, 5, 6]).expect("advert path");
+        let path = companion.get_advert_path(&[7u8; 32]).expect("advert path");
         assert_eq!(path.hash_size, 2);
         assert_eq!(path.hops, 2);
         assert_eq!(path.bytes, vec![0xA1, 0xA2, 0xB1, 0xB2]);
         assert_eq!(path.received_at, 0x1122_3344);
-        // What went out: the command, a zero, then the prefix.
+        // What went out: the command, a zero, then the whole 32-byte key — the firmware's guard is
+        // `len >= PUB_KEY_SIZE + 2`, so a short prefix frame is answered "unsupported command".
         let written = &companion.link_mut().written;
         let body = &written[3..];
         assert_eq!(body[0], commands::GET_ADVERT_PATH);
         assert_eq!(body[1], 0);
-        assert_eq!(&body[2..8], &[1, 2, 3, 4, 5, 6]);
+        assert_eq!(&body[2..34], &[7u8; 32]);
+        assert_eq!(body.len(), 34);
     }
 
     #[test]

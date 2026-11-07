@@ -388,8 +388,10 @@ be transmitted and then ignored by every receiver. Direct means the sender must 
    accumulates.
 2. **The phone reads the route off the advert.** An advert does not teach the *radio* a route
    (`BaseChatMesh::onAdvertRecv` never touches `out_path`), but the firmware keeps every advert's
-   accumulated path in an advert-path cache, keyed by the originator's six-byte key prefix
-   (`onDiscoveredContact` → `advert_paths[]`). `CMD_GET_ADVERT_PATH` (0x2A) reads it back, and the
+   accumulated path in an advert-path cache, keyed by the first seven bytes of the originator's key
+   (`onDiscoveredContact` → `advert_paths[]`). `CMD_GET_ADVERT_PATH` (0x2A) reads it back — the request
+   carries the **whole 32-byte key**, because the firmware's guard is `len >= PUB_KEY_SIZE + 2` even
+   though only seven bytes are compared — and the
    app reverses the hop groups into sending order (`RadioRoute.reversed`, mirroring the desktop's
    `PeerPath::reversed`). **This needs no contact on either radio and no decrypted exchange**, so
    it works on firmware as shipped. The route is validated before use: a length byte that

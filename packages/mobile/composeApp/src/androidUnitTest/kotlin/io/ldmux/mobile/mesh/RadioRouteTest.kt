@@ -74,18 +74,15 @@ class RadioRouteTest {
     }
 
     @Test
-    fun `the lookup prefix is the first six bytes of the key`() {
-        val key = ByteArray(32) { it.toByte() }
-        val prefix = RadioRoute.prefix(key)
-        assertNotNull(prefix)
-        assertArrayEquals(byteArrayOf(0, 1, 2, 3, 4, 5), prefix)
-        assertNull("a key shorter than the prefix names nothing", RadioRoute.prefix(byteArrayOf(1, 2)))
-    }
-
-    @Test
-    fun `the advert-path request is the command, a reserved zero, and the prefix`() {
-        val frame = MeshcoreFrameCodec.getAdvertPath(byteArrayOf(1, 2, 3, 4, 5, 6))
-        assertArrayEquals(byteArrayOf(0x2A, 0x00, 1, 2, 3, 4, 5, 6), frame)
+    fun `the advert-path request is the command, a reserved zero, and the whole key`() {
+        // The firmware's guard is `len >= PUB_KEY_SIZE + 2` and it matches on the first seven bytes
+        // of the key, so the frame carries all 32 — a six-byte prefix frame is "unsupported".
+        val key = ByteArray(32) { (it + 1).toByte() }
+        val frame = MeshcoreFrameCodec.getAdvertPath(key)
+        assertEquals(34, frame.size)
+        assertEquals(0x2A.toByte(), frame[0])
+        assertEquals(0x00.toByte(), frame[1])
+        assertArrayEquals(key, frame.copyOfRange(2, 34))
     }
 
     @Test

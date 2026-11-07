@@ -136,13 +136,10 @@ fn refresh_peer_route<L: ByteLink>(
     peer_radio: Option<&[u8; 32]>,
     peer_path: &mut Option<PeerPath>,
 ) -> bool {
-    let Some(prefix) = peer_radio.and_then(|k| k.get(..6)) else {
+    let Some(key) = peer_radio else {
         return false;
     };
-    let Ok(prefix) = <[u8; 6]>::try_from(prefix) else {
-        return false;
-    };
-    match companion.get_advert_path(&prefix) {
+    match companion.get_advert_path(key) {
         Ok(path) => {
             if let Some(reversed) = PeerPath::reversed(
                 usize::from(path.hash_size),

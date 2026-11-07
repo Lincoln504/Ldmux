@@ -57,8 +57,9 @@ pub mod commands {
     /// out-path — a route that survives the radio being out of direct range. Nothing else in
     /// MeshCore tells a peer how to reach a node it has never heard.
     pub const SEND_SELF_ADVERT: u8 = 0x07;
-    /// Read the path a recently heard advert took: `reserved u8`, then the originator's six-byte
-    /// public-key prefix (`MyMesh.cpp`, `CMD_GET_ADVERT_PATH`).
+    /// Read the path a recently heard advert took: `reserved u8`, then the originator's **full
+    /// 32-byte** public key (`MyMesh.cpp:1851`, guard `len >= PUB_KEY_SIZE + 2`). The cache is keyed
+    /// by the first seven bytes of it, but the request must carry all 32.
     ///
     /// **This is the only route a companion can learn on stock firmware.** A flooded request
     /// (`CMD_SEND_PATH_DISCOVERY_REQ`) is answered with a path return only when the destination

@@ -419,11 +419,11 @@ class AndroidRadioLink(
             // in the last place the phone was is still a well-formed route, so nothing refuses it
             // and nothing notices it is wrong. Re-reading it per attempt is what turns "walked
             // outside, the link died" into "walked outside, the next attempt used the new path".
-            val prefix = RadioRoute.prefix(hostKey)
-            if (prefix != null && s.isIdle()) {
+            val key = hostKey.takeIf { it.size == 32 }
+            if (key != null && s.isIdle()) {
                 val done = CompletableDeferred<Unit>()
                 routeDone = done
-                s.getAdvertPath(prefix)
+                s.getAdvertPath(key)
                 withTimeoutOrNull(ROUTE_WAIT_MS) { done.await() }
                 routeDone = null
             }
@@ -515,8 +515,9 @@ class AndroidRadioLink(
                 // The route is stale: ask the radio for a fresh one now instead of waiting out
                 // PATH_RETRY_MS, so a walk to the other side of the building costs one record
                 // rather than a whole retry window of zero-hop.
-                val prefix = RadioRoute.prefix(hostKey)
-                if (prefix != null && s.isIdle()) runCatching { s.getAdvertPath(prefix) }
+                hostKey.takeIf { it.size == 32 }?.let { key ->
+                    if (s.isIdle()) runCatching { s.getAdvertPath(key) }
+                }
                 return send(record)
             }
             if (result == RadioSendResult.Accepted) {
@@ -711,7 +712,7 @@ class AndroidRadioLink(
     private fun startPathRefresh(s: MeshcoreSession) {
         pathScope?.cancel()
         if (hostKey.isEmpty()) return
-        val prefix = RadioRoute.prefix(hostKey)
+        val key = hostKey.takeIf { it.size == 32 }
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         pathScope = scope
         scope.launch {
@@ -725,8 +726,8 @@ class AndroidRadioLink(
                 // One command per tick: the companion has one answer window, and a second request
                 // inside it makes both answers ambiguous.
                 when {
-                    prefix == null -> Unit
-                    contactPath == null -> runCatching { s.getAdvertPath(prefix) }
+                    key == null -> Unit
+                    contactPath == null -> runCatching { s.getAdvertPath(key) }
                     else -> runCatching { s.getContact(hostKey) }
                 }
             }
