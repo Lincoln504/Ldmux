@@ -369,7 +369,7 @@ internal fun AppContent(
             when {
                 pages.size == 1 -> "1 shell open"
                 pages.isNotEmpty() -> "${pages.size} shells open"
-                else -> "linked to the desktop"
+                else -> "linked to desktop"
             },
         )
     }
@@ -1146,9 +1146,9 @@ internal fun AppContent(
  * here makes the app look unpaired and unfixable.
  */
 internal fun unpairedSteps(): List<String> = listOf(
-    "needs: a Linux machine running ldmuxd",
-    "the phone reaches it over the same tailnet, or over a pair of LoRa radios",
-    "pair: on the host run `ldmux code`, then scan it here",
+    "needs: Linux host running ldmuxd",
+    "reaches it over tailnet, or LoRa radios",
+    "pair: `ldmux code` on host, scan here",
 )
 
 /**
@@ -1173,7 +1173,7 @@ private fun UnpairedHome(
     onUseRadio: () -> Unit,
 ) {
     Column(Modifier.fillMaxWidth().padding(horizontal = 2.dp)) {
-        Text("this phone is not paired", color = Fg, fontSize = 14.sp)
+        Text("not paired", color = Fg, fontSize = 14.sp)
         Spacer(Modifier.height(LocalTouch.current.rowPad))
         for (line in unpairedSteps()) {
             Text(line, color = Dim, fontSize = 11.sp)
@@ -1193,7 +1193,7 @@ private fun UnpairedHome(
             Text(it.text, color = Muted, fontSize = 11.sp)
             if (it.useRadio) {
                 Spacer(Modifier.height(4.dp))
-                MiniTextButton(onClick = onUseRadio) { Text("use the radio", color = Accent, fontSize = 12.sp) }
+                MiniTextButton(onClick = onUseRadio) { Text("use radio", color = Accent, fontSize = 12.sp) }
             }
         }
     }

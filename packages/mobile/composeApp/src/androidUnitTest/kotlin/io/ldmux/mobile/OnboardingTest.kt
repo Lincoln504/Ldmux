@@ -38,7 +38,7 @@ class OnboardingTest {
         // The case that looked like failure: the keys were stored, no tailnet fact changed, so
         // `connectionKey` did not change and the screen did not either.
         val note = pairingNote(meshOnlyPairing(), radioKeysStored = true, route = MeshRoute.Tailnet, hasMeshRoute = true)
-        assertEquals("radio paired; the app is still on the tailnet", note?.text)
+        assertEquals("radio paired · app still on tailnet", note?.text)
         assertTrue(note!!.useRadio, "the note comes with the one press that makes it usable")
     }
 
@@ -54,7 +54,7 @@ class OnboardingTest {
         // A Keystore refusal leaves the tailnet half working and the radio half empty; a bare
         // "paired" would promise a route whose keys are not there.
         val note = pairingNote(meshKeysPairing(), radioKeysStored = false, route = MeshRoute.Tailnet, hasMeshRoute = true)
-        assertTrue(note!!.text.contains("were not stored"), note.text)
+        assertTrue(note!!.text.contains("not stored"), note.text)
     }
 
     @Test

@@ -236,8 +236,17 @@ fn print_mesh_status(v: &serde_json::Value) {
         && p.len() == 4
     {
         let n = |i: usize| p[i].as_u64().unwrap_or(0);
+        // **The path width is part of the tuple on this radio.** A wider hash is what keeps two
+        // repeaters from colliding; it is also what two ends must agree about to read each other's
+        // hops, so an operator comparing this line with the phone's `path N B` row compares the
+        // whole tuple rather than three quarters of it.
+        let width = v
+            .get("pathHashSize")
+            .and_then(serde_json::Value::as_u64)
+            .map(|w| format!("  path {w} B"))
+            .unwrap_or_default();
         println!(
-            "preset   {:.3} MHz  {:.1} kHz  SF{}  CR{}",
+            "preset   {:.3} MHz  {:.1} kHz  SF{}  CR{}{width}",
             n(0) as f64 / 1000.0,
             n(1) as f64 / 1000.0,
             n(2),

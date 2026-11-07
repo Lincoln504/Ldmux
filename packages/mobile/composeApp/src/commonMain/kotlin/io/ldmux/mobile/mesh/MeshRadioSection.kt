@@ -62,7 +62,7 @@ internal fun RadioPickerPanel(
     }
     DisposableEffect(Unit) { onDispose { RadioScanner.cancel() } }
 
-    SettingsPanel("choose a LoRa radio", onDismiss) {
+    SettingsPanel("choose LoRa radio", onDismiss) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             if (scanning) {
                 Text("scanning…", color = Muted, fontSize = 12.sp)
@@ -91,9 +91,9 @@ internal fun RadioPickerPanel(
                 // The two causes a scan cannot tell apart, said instead of "no radio found":
                 // a radio that is off advertises nothing, and one another app (or another phone)
                 // already holds advertises but never answers the companion handshake.
-                Text("no LoRa radio found", color = Muted, fontSize = 12.sp)
+                Text("no LoRa radio", color = Muted, fontSize = 12.sp)
                 Text(
-                    "check: powered on, not connected to another app",
+                    "check: on, not connected elsewhere",
                     color = Muted,
                     fontSize = 11.sp,
                 )
@@ -330,7 +330,7 @@ internal fun RadioPresetPanel(
                 // Wrapped, not one row: the region names are wider than a phone's panel, and a
                 // row that overflows loses the last one — the same bug the portrait key bar was
                 // rebuilt to avoid.
-                SettingsChoice("private channel", summary = "a random tuple inside the region's rules") {
+                SettingsChoice("private channel", summary = "random tuple in region's rules") {
                     FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -359,11 +359,11 @@ internal fun RadioPresetPanel(
                     )
                     Text(
                         if (customText.isBlank()) {
-                            "MHz kHz SF CR — `ldmux mesh status` on the host prints its own preset"
+                            "MHz kHz SF CR — `ldmux mesh status` on host prints its preset"
                         } else if (typed == null) {
                             "not a tuple · four numbers: 137-1020 MHz, 62.5-500 kHz, SF5-12, CR5-8"
                         } else {
-                            "host LoRa radio's own tuple"
+                            "host radio's own tuple"
                         },
                         color = if (customText.isNotBlank() && typed == null) Warn else Dim,
                         fontSize = 11.sp,
@@ -417,10 +417,9 @@ internal fun RadioPresetPanel(
                 // has moved.
                 if (hostTuple != null && !sameTuple(selected, hostTuple)) {
                     Text(
-                        "the desktop's radio is on " + channelLine(hostTuple) +
-                            ". Applying this leaves the link down until the desktop is moved to it " +
-                            "(`ldmux mesh preset` there), or move this radio back and press match " +
-                            "on the radio page.",
+                        "desktop radio on " + channelLine(hostTuple) +
+                            " · apply leaves link down until desktop moves " +
+                            "(`ldmux mesh preset` there) or you press match here",
                         color = Warn,
                         fontSize = 11.sp,
                         fontFamily = MonoFont,
@@ -506,9 +505,9 @@ internal fun channelLine(p: RadioPreset): String =
     "${p.frequencyMhz} MHz  ${p.bandwidthKhz} kHz  SF${p.spreadingFactor}  CR${p.codingRate}"
 
 private fun radioProblemLine(problem: RadioScanProblem?): String = when (problem) {
-    RadioScanProblem.PermissionDenied -> "Bluetooth permission off · grant it, then scan"
-    RadioScanProblem.BluetoothOff -> "Bluetooth is off."
-    RadioScanProblem.Unsupported -> "no Bluetooth LE on this device"
+    RadioScanProblem.PermissionDenied -> "Bluetooth permission off · grant, then scan"
+    RadioScanProblem.BluetoothOff -> "Bluetooth off"
+    RadioScanProblem.Unsupported -> "no Bluetooth LE here"
     RadioScanProblem.Failed -> "scan failed · try again"
     null -> ""
 }
@@ -517,7 +516,7 @@ private fun radioLinkProblemLine(state: MeshLinkState): String = when (state) {
     MeshLinkState.NeedsRadio -> "choose LoRa radio first"
     MeshLinkState.NeedsPermission -> "Bluetooth permission off"
     MeshLinkState.RadioUnavailable -> "LoRa radio not answering"
-    MeshLinkState.NoPath -> "host path does not fit the terminal"
+    MeshLinkState.NoPath -> "host path does not fit"
     else -> meshLinkLabel(state)
 }
 

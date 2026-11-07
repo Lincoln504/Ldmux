@@ -48,7 +48,7 @@ internal fun ScrollPad(
     ) {
         PadButton("scroll up", "\u2191", onUp)
         PadButton("scroll down", "\u2193", onDown)
-        PadButton("scroll to the bottom", "\u21d3", onBottom)
+        PadButton("scroll to bottom", "\u21d3", onBottom)
     }
 }
 

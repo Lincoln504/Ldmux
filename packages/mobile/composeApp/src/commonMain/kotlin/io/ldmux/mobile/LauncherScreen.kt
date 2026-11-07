@@ -175,7 +175,7 @@ fun LauncherScreen(
                         // shells of the same kind apart. The process is the name.
                         title = shellRowTitle(e.label, e.cwd),
                         mobileShell = e.openedByPhone,
-                        subtitle = rowSubtitle(e.cwd, e.state),
+                        subtitle = rowSubtitle(e.cwd, e.state, shellRowTitle(e.label, e.cwd)),
                         stateWarn = e.state == NO_WINDOW_STATE,
                         inUse = e.inUseOnPhone,
                         chosen = e.key in chosen,
@@ -380,8 +380,16 @@ internal fun shellStateLabel(
 internal const val NO_WINDOW_STATE = "no window"
 
 /** The row's second line: where it is, then where the shell itself lives. */
-internal fun rowSubtitle(cwd: String, state: String): String =
-    if (state.isBlank()) tildify(cwd) else "${tildify(cwd)}  \u00b7  $state"
+internal fun rowSubtitle(cwd: String, state: String, title: String = ""): String {
+    // **Do not say the folder twice.** When the title is the folder's own name — the daemon's
+    // fallback for a shell nothing has named — the second line repeated the first word, so
+    // `meshmore-sns` sat above `~/Documents/meshmore-sns` and the row spent a line saying nothing.
+    // The folder line stays whenever it adds a fact: a titled shell, or a state to report.
+    val folder = tildify(cwd)
+    val repeats = title.isNotBlank() && folder.substringAfterLast('/') == title
+    val where = if (repeats) "" else folder
+    return listOf(where, state).filter { it.isNotBlank() }.joinToString("  \u00b7  ")
+}
 
 /**
  * The workspace a shell's live window is on, or null when there is not a usable one.

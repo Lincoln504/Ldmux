@@ -369,7 +369,9 @@ cannot use a radio the host is holding.
    factor, coding rate). The host's is read from the radio it drives: `ldmux mesh
    status` prints it (`preset 910.525 MHz  500.0 kHz  SF7  CR5`) and `ldmux mesh
    preset <MHz> <kHz> <SF> <CR>` sets it, validated by the firmware. The phone's is
-   set in the app under Settings, `phone's radio`, `edit`.
+   set in the app under Settings, `phone's radio`, `edit`. `ldmux mesh status` prints the host's
+   path-hash width on the same line (`preset 910.525 MHz  500.0 kHz  SF7  CR5  path 2 B`), so the
+   two radios are compared over the whole tuple rather than part of it.
 6. Pair the phone with `ldmux code --mesh`. The code carries the session keys, the
    host radio key, the tailnet address and token, **and the tuple the host's radio
    is on**. So the app can compare the two radios itself: when they differ, the radio

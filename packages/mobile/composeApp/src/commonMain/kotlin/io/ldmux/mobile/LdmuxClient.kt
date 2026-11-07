@@ -362,7 +362,7 @@ class LdmuxClient(private var config: LdmuxConfig) {
         // the connection was *already* down. It is answered here the way the daemon
         // would answer a refused one, so the same path clears the wait and says why.
         if (!sendControl(msg)) {
-            _serverError.value = ServerError(code = "offline", message = "not connected to the host")
+            _serverError.value = ServerError(code = "offline", message = "not connected to host")
             _errorTick.value += 1
             return false
         }
@@ -648,7 +648,7 @@ class LdmuxClient(private var config: LdmuxConfig) {
             "error" -> {
                 _serverError.value = ServerError(
                     code = root.text("code").ifEmpty { "error" },
-                    message = root.text("message").ifEmpty { "the daemon refused that" },
+                    message = root.text("message").ifEmpty { "daemon refused that" },
                 )
                 _errorTick.value += 1
             }

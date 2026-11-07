@@ -89,7 +89,7 @@ class LdmuxService : Service() {
     override fun onCreate() {
         super.onCreate()
         createChannel()
-        promote("Keeping the link open")
+        promote("link kept open")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -107,7 +107,7 @@ class LdmuxService : Service() {
                 return START_NOT_STICKY
             }
         }
-        promote(intent?.getStringExtra(EXTRA_TEXT) ?: "Keeping the link open")
+        promote(intent?.getStringExtra(EXTRA_TEXT) ?: "link kept open")
         acquireWakeLock()
         return START_NOT_STICKY
     }
@@ -175,7 +175,7 @@ class LdmuxService : Service() {
             // open"). An app that announces itself is an app that gets uninstalled.
             NotificationManager.IMPORTANCE_MIN,
         ).apply {
-            description = "While the app keeps a link open in the background"
+            description = "app off screen · link kept open"
             setShowBadge(false)
             setSound(null, null)
             enableVibration(false)
@@ -450,7 +450,7 @@ actual object BackgroundSession {
             "Shell finished or waiting",
             NotificationManager.IMPORTANCE_DEFAULT,
         ).apply {
-            description = "A shell finished a turn, or is waiting on you"
+            description = "shell finished a turn · waiting on you"
             setShowBadge(true)
         }
         val have = nm.getNotificationChannel(MARK_CHANNEL)

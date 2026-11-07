@@ -85,7 +85,7 @@ internal fun PublicChannelBar(
     val status = when {
         flushing -> "sending…"
         reported -> "no answer yet · link busy or down"
-        awaiting -> "waiting for the answer"
+        awaiting -> "waiting for answer"
         // **"Nothing typed", not "nothing held".** The line sits beside a button that says `show`,
         // and the mode may still be holding a screen the host sent: what is empty here is the
         // typed buffer, which is the only thing this summary counts.
@@ -126,9 +126,9 @@ internal fun PublicChannelBar(
                 .padding(horizontal = 12.dp, vertical = LocalTouch.current.pad)
                 .semantics {
                     contentDescription = when {
-                        flushing -> "sending: waiting for the shell's screen"
-                        summary.isEmpty() -> "sync: show the shell's newest screen"
-                        else -> "sync: send $summary, then show the shell's screen"
+                        flushing -> "sending: waiting for shell screen"
+                        summary.isEmpty() -> "sync: show newest screen"
+                        else -> "sync: send $summary, show screen"
                     }
                 },
         ) {

@@ -88,7 +88,7 @@ internal fun MeshRouteSection(
         // keys changes no tailnet fact, so with nothing said here a completed pairing and a
         // refused one looked the same. The row above says `· radio`; this says what is stored.
         if (view.present.size == MeshCredential.entries.size) {
-            SettingsNote("radio keys stored · host radio key pinned")
+            SettingsNote("keys stored · host radio key pinned")
         } else if (view.present.isNotEmpty()) {
             SettingsNote(
                 "stored: " + view.present.joinToString { meshCredentialName(it) } +
@@ -194,7 +194,7 @@ internal fun MeshRouteSection(
                         // keystrokes are collected and leave together. The reason the mode is forced is
                         // that a shared channel is somebody else's airtime, so the app reduces how many
                         // transmissions it spends.
-                        SettingsNote("public channel forces batch: keystrokes leave together, fewer broadcasts")
+                        SettingsNote("public channel forces batch: keystrokes leave together")
                     }
                 },
             )
@@ -314,7 +314,7 @@ private fun MeshRadioFacts(
                     val ok = runCatching { l.applyPreset(hostPreset.channelOf(mine)) }.getOrElse { false }
                     // A refused write used to vanish: the row stayed on screen with no sentence,
                     // which reads as the press having done nothing.
-                    matchProblem = if (ok) null else "radio did not take the desktop's tuple · still on the one above"
+                    matchProblem = if (ok) null else "radio did not take desktop's tuple · still on the one above"
                 }
             }) {
                 Text("match", color = Accent, fontSize = 12.sp, maxLines = 1)
@@ -328,19 +328,23 @@ private fun MeshRadioFacts(
     // box says whether the meter is applied, and the line says what it has spent — which is the
     // question a reader asks the moment they see the box.
     val mustMeter = preset?.let { dutyCycleRequired(it) } == true
-    SettingsToggle(
-        "airtime limit",
-        checked = !openAirtime,
-        summary = when {
-            // Not a preference in this band: 869.4-869.65 MHz carries a 10 % duty cycle as a
-            // condition of use, so the meter being off here is not a setting a reader should be
-            // able to leave without being told.
-            mustMeter && openAirtime -> "off · this band requires a 10 % duty cycle"
-            openAirtime -> "off · no hourly limit"
-            else -> "on · 36 s per hour"
-        },
-        onChange = { metered -> onBudget(if (metered) RadioBudgetMode.Metered else RadioBudgetMode.Open) },
-    )
+    if (mustMeter) {
+        // **Not a setting in this band.** 869.4-869.65 MHz carries a 10 % duty cycle as a condition
+        // of use, so a toggle here could only ever be switched to a wrong answer — and the row said
+        // so ("off · band requires 10 % duty cycle") while still offering the press. It is applied,
+        // not offered, and a stored `open` from another band is corrected rather than shown.
+        LaunchedEffect(mustMeter, openAirtime) {
+            if (openAirtime) onBudget(RadioBudgetMode.Metered)
+        }
+        SettingsRow("airtime limit", summary = "on · band requires 10 % duty cycle")
+    } else {
+        SettingsToggle(
+            "airtime limit",
+            checked = !openAirtime,
+            summary = if (openAirtime) "off · no hourly limit" else "on · 36 s per hour",
+            onChange = { metered -> onBudget(if (metered) RadioBudgetMode.Metered else RadioBudgetMode.Open) },
+        )
+    }
     SettingsNote(airtimeLine(status))
 }
 

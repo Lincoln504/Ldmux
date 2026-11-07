@@ -376,7 +376,7 @@ fun MeshTerminalScreen(
         // The same wording as the tailnet surface: what is being kept, never that the app is
         // running. "Mesh session open" named the app's own state, which is the line the operator
         // objected to.
-        BackgroundSession.setActive(up, "linked to the desktop over the radio")
+        BackgroundSession.setActive(up, "linked to desktop over radio")
     }
     DisposableEffect(conn) {
         onDispose { BackgroundSession.setActive(false, "") }
@@ -526,7 +526,7 @@ fun MeshTerminalScreen(
     LaunchedEffect(hadHeld) { if (hadHeld) heldBeforeRebuild = true }
     LaunchedEffect(conn) {
         if (heldBeforeRebuild) {
-            syncNotice = "held text discarded: the link was rebuilt"
+            syncNotice = "held text discarded: link rebuilt"
             heldBeforeRebuild = false
         }
     }
@@ -574,7 +574,7 @@ fun MeshTerminalScreen(
         if (heldFor != null && heldFor != now) {
             if (handle.hasPending) {
                 handle.discardHeld()
-                syncNotice = "held text discarded: the shell changed"
+                syncNotice = "held text discarded: shell changed"
             }
             // One shell's rows are never under another's name: the engine and its scrollback go
             // when the shell does. Here rather than on `ProfileMissing`, which a rotation also
@@ -717,6 +717,23 @@ fun MeshTerminalScreen(
         // And what the page was saying about them: a notice about this shell's buffer must not
         // greet the next shell the user opens.
         syncNotice = null
+        // **Entering the list lets go of the shell, and this is the only place that does it.**
+        //
+        // `launcher()` was reached only from the `needList` effect, whose condition requires the
+        // view to be *not live* — so coming back from a live shell left it attached: the desk
+        // window this phone had displaced stayed on "press r to take it back" for as long as the
+        // phone sat on the list, and the operator pressed `r` at the desk instead (reported
+        // 2026-11-07). A claim means "this screen is showing that shell" (ADR-0010); the list is
+        // not showing it.
+        //
+        // `launcher` is the one act: one `Detach` gives the claim and the pty back, one
+        // `ListRequest` makes the rows the host's answer rather than a picture from before.
+        //
+        // Only while a shell is still on screen. That is the state the `needList` effect cannot
+        // cover — and calling it in both places would spend two records on one press. On a dead
+        // link `launcher` refuses anyway (there is nothing attached to release), and `needList`
+        // retries it once the session is back.
+        if (terminalLive) conn.driver.launcher()
     }
     // Leaving the terminal is the user's decision, so it is also the one that cancels the resume: a
     // rebuild after this must land on the list, not drag them back into a shell they left.
@@ -740,9 +757,9 @@ fun MeshTerminalScreen(
         val g = lastGrid ?: return@LaunchedEffect
         conn.driver.setGrid(g.first, g.second)
     }
-    // Coming to the launcher is one act: the effect above asks the host (and lets go of the shell
-    // it was in). Nothing is sent from here, so there is one path and one place to look when it
-    // does not answer.
+    // Coming to the launcher is one act: the `showList` effect asks the host and lets go of the
+    // shell it was in (`launcher`), and `needList` does the same once a dead link is back. Nothing
+    // is sent from here, so there is one place to look when it does not answer.
     val openList = {
         chosen = emptyList(); showList = true; resumeShell = ""
         Unit
@@ -1070,7 +1087,7 @@ fun MeshTerminalScreen(
                         // the seconds it has taken. (A resize keeps the old screen up, so it needs no line.)
                         if (toShow == null && drawn == null) {
                             Box(Modifier.align(Alignment.TopStart).background(Bg).padding(horizontal = 6.dp, vertical = 2.dp)) {
-                                WaitingLine("waiting for the shell's screen", attemptNo)
+                                WaitingLine("waiting for shell screen", attemptNo)
                             }
                         }
                         // The same three controls as the tailnet route, over the same surface.
@@ -1100,17 +1117,17 @@ fun MeshTerminalScreen(
                             handle.overflow && source.publicChannel && handle.hasPending ->
                                 Notice("too much held: sync to send", ok = false)
                             handle.overflow && source.publicChannel ->
-                                Notice("input refused: the held text is at its limit", ok = false)
-                            handle.overflow -> Notice("too much typed: wait for it to send", ok = false)
+                                Notice("input refused: held text at limit", ok = false)
+                            handle.overflow -> Notice("too much typed: wait for send", ok = false)
                             // **Live mode has no bar, so a link that stopped carrying used to look
                             // live for twenty seconds.** The driver's own verdict is the silence
                             // rule; this is the same silence said earlier, and only while something
                             // is still owed - an idle shell is silent by design and says nothing.
                             quietSecs > 0L && !config.meshHoldsInput ->
-                                Notice("link quiet · ${quietSecs} s, nothing heard", ok = true)
+                                Notice("link quiet · ${quietSecs} s", ok = true)
                             live?.stalled == true -> Notice("waiting for send budget", ok = true)
                             live?.screen?.alternate == true ->
-                                Notice("full-screen program: updates are large and slow", ok = true)
+                                Notice("full-screen program: updates large and slow", ok = true)
                             else -> null
                         }
                         if (notice != null) {
@@ -1204,8 +1221,8 @@ fun MeshTerminalScreen(
                     val waiting = when (v) {
                         MeshTermView.Idle -> "starting"
                         MeshTermView.Handshaking -> "handshaking"
-                        MeshTermView.ProfileMissing -> "the host has not described a terminal yet"
-                        MeshTermView.Listing -> "asking the host which shells are running"
+                        MeshTermView.ProfileMissing -> "host has no terminal yet"
+                        MeshTermView.Listing -> "asking host for shells"
                         else -> null
                     }
                     if (waiting != null) {

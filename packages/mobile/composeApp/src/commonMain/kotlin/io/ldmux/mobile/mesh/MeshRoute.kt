@@ -113,15 +113,15 @@ fun meshLinkLabel(state: MeshLinkState): String = when (state) {
     MeshLinkState.Connecting -> "mesh · connecting"
     MeshLinkState.Bound -> "mesh · bound"
     MeshLinkState.RadioUnavailable -> "mesh · LoRa radio unavailable"
-    MeshLinkState.Refused -> "mesh · radio refused record, retrying"
-    MeshLinkState.SessionFailed -> "mesh · link dropped, reconnecting"
+    MeshLinkState.Refused -> "mesh · refused record, retrying"
+    MeshLinkState.SessionFailed -> "mesh · dropped, reconnecting"
     MeshLinkState.Closed -> "mesh · closed"
 }
 
 fun meshProblemLabel(p: MeshRouteProblem): String = when (p) {
-    MeshRouteProblem.SessionNotBuilt -> "mesh · session library unavailable"
+    MeshRouteProblem.SessionNotBuilt -> "mesh · library missing"
     MeshRouteProblem.TerminalNotBuilt -> "mesh · terminal unavailable"
-    MeshRouteProblem.NeedsSessionKeys -> "mesh · scan a code from ldmux code --mesh"
+    MeshRouteProblem.NeedsSessionKeys -> "mesh · scan code from ldmux code --mesh"
     MeshRouteProblem.NeedsPeer -> "mesh · needs host radio key"
 }
 

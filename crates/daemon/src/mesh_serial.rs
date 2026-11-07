@@ -330,6 +330,14 @@ pub struct RadioPreset {
     pub bw_khz: f64,
     pub sf: u8,
     pub cr: u8,
+    /// Bytes per path hash this radio puts on its own packets, after the default was applied.
+    ///
+    /// Published with the tuple because it is the other half of what two radios have to agree
+    /// about to find each other: the width the host's adverts carry. A phone on a different width
+    /// still hears them (a repeater forwards whatever arrives), so this is a fact to read, not a
+    /// constraint to match — but it is the first thing to check when a peer's advert path never
+    /// resolves.
+    pub hash_size: u8,
     /// This radio's own public key, from the same `SELF_INFO`.
     ///
     /// The daemon owns the radio, so it can read the key a phone must bind. Requiring the operator
@@ -397,6 +405,7 @@ fn prepare(device: &str) -> Result<(Companion<SerialLink>, Bound, Settings), Mes
         sf: self_info.radio_sf,
         cr: self_info.radio_cr,
         public_key: self_info.public_key,
+        hash_size,
     };
     Ok((companion, bound, Settings { hash_size, airtime_ms, preset }))
 }
@@ -518,6 +527,8 @@ fn serve_loop<L: ByteLink>(
                         sf,
                         cr,
                         public_key: settings.preset.public_key,
+                        // A retune does not touch the path width; it stays what the radio reports.
+                        hash_size: settings.preset.hash_size,
                     };
                     // The airtime estimate follows the new tuple, or the budget keeps measuring
                     // the radio that is no longer in use.
@@ -1050,6 +1061,7 @@ mod tests {
                         sf: 8,
                         cr: 5,
                         public_key: [7u8; 32],
+                        hash_size: 1,
                     },
                 },
                 command_rx,
@@ -1092,6 +1104,7 @@ mod tests {
                         sf: 8,
                         cr: 5,
                         public_key: [7u8; 32],
+                        hash_size: 1,
                     },
                 },
                 command_rx,
@@ -1148,6 +1161,7 @@ mod tests {
                         sf: 8,
                         cr: 5,
                         public_key: [7u8; 32],
+                        hash_size: 1,
                     },
                 },
                 command_rx,
@@ -1192,6 +1206,7 @@ mod tests {
                         sf: 8,
                         cr: 5,
                         public_key: [7u8; 32],
+                        hash_size: 1,
                     },
                 },
                 command_rx,
@@ -1215,6 +1230,7 @@ mod tests {
                         sf: 8,
                         cr: 5,
                         public_key: [7u8; 32],
+                        hash_size: 1,
                     },
                 };
         let status = status(&settings, 255, 0);

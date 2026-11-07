@@ -233,7 +233,7 @@ fun NewShellModal(
             FieldValue(path, { path = it }, "~", focusRequester = focus)
         }
         Text(
-            "Runs the host's login shell there · empty means home directory",
+            "host login shell · empty means home",
             color = Muted,
             fontSize = 10.sp,
         )

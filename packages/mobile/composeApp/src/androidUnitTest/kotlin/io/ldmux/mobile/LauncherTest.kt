@@ -79,6 +79,12 @@ class LauncherTest {
     @Test
     fun `the row's second line is the folder and then the state`() {
         assertEquals("~/proj", rowSubtitle("/home/u/proj", ""))
+        // **A title that is the folder is not repeated.** The second line is for a fact the first
+        // one does not carry.
+        assertEquals("", rowSubtitle("/home/u/proj", "", title = "proj"))
+        assertEquals("on desktop 2", rowSubtitle("/home/u/proj", "on desktop 2", title = "proj"))
+        // A titled shell still says where it lives, because `Radio paths` is not a path.
+        assertEquals("~/proj", rowSubtitle("/home/u/proj", "", title = "Radio paths"))
         assertEquals("~/proj  \u00b7  on desktop 2", rowSubtitle("/home/u/proj", "on desktop 2"))
     }
 

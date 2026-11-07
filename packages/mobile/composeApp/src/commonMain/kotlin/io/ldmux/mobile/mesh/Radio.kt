@@ -261,14 +261,31 @@ fun regionOfPreset(preset: RadioPreset): RadioRegion {
 }
 
 /**
- * A private tuple inside the region's legal envelope. It is deliberately not
- * a public MeshCore preset: the point is a channel the operator's two radios
- * share without joining (or interfering with) the public mesh.
+ * A private tuple inside the region's legal envelope. It is deliberately not a public MeshCore
+ * preset: the point is a channel the operator's two radios share without joining (or interfering
+ * with) the public mesh.
  *
  * - USA/Canada: 500 kHz DTS, centre kept 250 kHz from both band edges.
  * - EU/UK: 125 kHz inside the 869.4-869.65 MHz sub-band, away from the
  *   869.525 and 869.618 public centres.
  * - Australia/New Zealand: 125 kHz inside 915-928 MHz.
+ *
+ * **Only the frequency is drawn.** The width, coding rate and power come from the region, and the
+ * spreading factor is the envelope's fastest, because those three are not "which channel" decisions:
+ *
+ *  - **Frequency is the only truly orthogonal dimension.** A different centre frequency sits in a
+ *    different slice of the band; a different spreading factor does not separate two transmitters.
+ *    Spreading factors are only *quasi*-orthogonal — measured rejection between different SFs is
+ *    about −8 to −25 dB depending on the pair and is worst for a low-SF victim, so changing SF does
+ *    not remove the other network, it changes which of you loses.
+ *  - **SF is the range and airtime lever.** Each step buys about 2.5 dB of sensitivity for *twice*
+ *    the airtime and twice the energy, and its symbol time decides whether low-data-rate
+ *    optimisation is mandatory. Drawing it at random makes a link whose range and speed change on
+ *    every press, for no gain the operator can see.
+ *  - **Every drawn value has to be matched by hand on the other radio.** Frequency, bandwidth and
+ *    spreading factor must be identical at both ends (coding rate and power may differ), so each
+ *    one the button randomises is one more number to get right, with a silent failure when it is
+ *    wrong: a receiver on another SF simply does not hear the packet.
  */
 fun privatePreset(region: RadioRegion, random: Random = Random.Default): RadioPreset {
     val env = envelopeOf(region)
@@ -290,7 +307,9 @@ fun privatePreset(region: RadioRegion, random: Random = Random.Default): RadioPr
         // preset randomiser, on exactly the phones the EU rows exist for.
         frequencyMhz = (freq * 10_000.0).roundToLong() / 10_000.0,
         bandwidthKhz = env.bandwidthKhz,
-        spreadingFactor = env.spreadingFactors.random(random),
+        // The envelope's fastest SF, not a drawn one: see the note above. The preset editor lets
+        // the operator raise it when the link is longer than the arithmetic expects.
+        spreadingFactor = env.spreadingFactors.first(),
         codingRate = env.codingRate,
         txPowerDbm = env.txPowerDbm,
         // The same default as every other preset; a randomiser should not put a node on the
@@ -561,7 +580,7 @@ expect fun meshRadioLink(address: String, hostKey: ByteArray): RadioLink?
 /** A link that exists only so the common screen can compile where no radio is built. */
 internal class UnsupportedRadioLink : RadioLink {
     private val _state = MutableStateFlow(MeshLinkState.NeedsRadio)
-    private val _lastProblem = MutableStateFlow<String?>("the mesh route is not available on this device")
+    private val _lastProblem = MutableStateFlow<String?>("mesh route not available on this device")
     override val lastProblem: StateFlow<String?> = _lastProblem.asStateFlow()
     override val state: StateFlow<MeshLinkState> = _state.asStateFlow()
     private val _status = MutableStateFlow<MeshStatus?>(null)

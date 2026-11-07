@@ -1012,7 +1012,7 @@ class TerminalController(
         // screen would say it went nowhere; say so, and let it fade rather than become chrome
         // that stays for the life of the page.
         if (code == "input_failed") {
-            _inputRefused.value = "the shell did not take that input"
+            _inputRefused.value = "shell did not take input"
             inputRefusedJob?.cancel()
             inputRefusedJob = scope.launch {
                 delay(INPUT_REFUSED_MS)
@@ -1085,7 +1085,7 @@ class TerminalController(
     }
 
     private companion object {
-        /** How long "the shell did not take that input" stays on screen. */
+        /** How long "shell did not take input" stays on screen. */
         const val INPUT_REFUSED_MS = 4_000L
 
         const val DEFAULT_COLS = 120

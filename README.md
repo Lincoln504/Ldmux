@@ -86,13 +86,17 @@ tailnet, or a pair of LoRa radios when there is no internet at all.
   and says when it falls back to a cloud recogniser. Portrait uses the keyboard's own.
 - **Predictive echo** draws a keystroke before the desktop answers while the link is slow, turns
   itself off below the threshold, and never at a password prompt.
-- **Leaving the screen** keeps the pages for 45 seconds behind a notification, then detaches them and
-  releases their claims while the shell keeps running. On the tailnet the app stays reachable behind
-  that notification while it is paired, so a shell's mark can arrive with no page open; the radio
-  route does not hold a session open for it and delivers the marks on the next attach instead.
+- **Leaving the shell** — back to the list, or on to another page — gives it back at once, so the
+  desk window the phone displaced comes back without a keystroke, and the shell keeps running.
+  Off the screen entirely, a 10 s grace on the radio route covers a glance, and the platform's 45 s
+  release detaches the pages and their claims. On the tailnet the app stays reachable behind the one
+  notification while it is paired, so a shell's mark can arrive with no page open; the radio route
+  delivers the marks on the next attach.
 - **Settings**: `link` (transport: `tailnet` or `LoRa radio`), `pairing` (token fingerprint,
-  `pair` / `paste` / `unpair`), `diagnostics` (desktop, transport, radio, build, and an in-memory
-  log with `copy` and `show`), `shells` (one notification when a shell finishes, off by default), `display`.
+  `pair` / `paste` / `unpair`), `diagnostics` (the address, the fingerprint, the build, and an
+  in-memory log with `copy` and `show`), `shells` (one notification when a shell finishes, off by
+  default, tailnet only), `display`. Settings that cannot act are not drawn: the airtime limit is a
+  fact in a duty-cycle band, and the notification switch is absent on the radio route.
 - **Radio setup** is in the app: pick the phone's radio over Bluetooth, choose a preset (region
   presets, the public table, `randomise`, `restore`, or a `custom` `MHz kHz SF CR`), `apply`. The
   desktop's radio row has one `match` that copies the four numbers and nothing else.
@@ -100,9 +104,10 @@ tailnet, or a pair of LoRa radios when there is no internet at all.
   hour limit is forced on between 869.4 and 869.65 MHz. The desktop applies the same allowance
   from the tuple the radio reports.
 - **Batch bar**: the held text and its cost (`12 characters, 1 record`), then `sending…`,
-  `waiting for the answer` (until the desktop says the pane settled), or `no answer yet`, and
-  `view N behind` when the screen has fallen behind. One button: `sync` while text waits, `show`
-  when only screens do; held text is dropped when leaving the page.
+  `waiting for answer` (until the desktop says the pane settled), or `no answer yet · link busy or
+  down`. One button: `sync` while text waits, `show` when only screens do; held text is dropped when
+  leaving the page. It does not count screens behind: that number described the client's own hold,
+  could not be acted on, and the state is the only thing worth saying.
 - **Limits**: 64 live shells (`LDMUX_MAX_SESSIONS`), 10 000 lines or 40 MiB of scrollback each.
 - **Android 9 or newer**, `arm64-v8a` or `x86_64`, Tailscale signed in for the tailnet. There is
   no iOS client yet. One is planned, and it will be tailnet only, because the radio route's

@@ -88,10 +88,10 @@ internal fun VoiceBanner(state: VoiceState, modifier: Modifier) {
         VoiceState.Idle -> return
         VoiceState.RequestingPermission -> "microphone permission…"
         VoiceState.Listening -> "listening…"
-        VoiceState.ListeningCloud -> "listening · cloud recognition, audio leaves the phone"
+        VoiceState.ListeningCloud -> "listening · cloud, audio leaves phone"
         VoiceState.Denied -> "microphone permission denied"
         VoiceState.NoSpeech -> "no speech heard"
-        VoiceState.Unavailable -> "no speech recognition on this device"
+        VoiceState.Unavailable -> "no speech recognition here"
         is VoiceState.Partial -> if (state.cloud) "\u2601 ${state.text}" else state.text
         is VoiceState.Failed -> "voice: ${state.reason}"
     }

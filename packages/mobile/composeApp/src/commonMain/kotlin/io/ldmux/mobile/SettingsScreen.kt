@@ -413,6 +413,15 @@ private fun PanelSide(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
  */
 @Composable
 private fun Notifications(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
+    if (current.route != MeshRoute.Tailnet) {
+        // **Not offered where it cannot act.** A radio cannot reach a phone that is away, so the
+        // switch would change nothing on this route — which is exactly the kind of setting the
+        // operator asked to be managed automatically instead of drawn. The mark square stays,
+        // because the list still carries it.
+        SettingsRow("notifications", summary = "off · tailnet only")
+        SettingsNote("row square appears anyway")
+        return
+    }
     SettingRow("notifications") {
         OptionButton("off", selected = !current.notifyMarks) {
             if (current.notifyMarks) onSave(current.copy(notifyMarks = false))
@@ -421,7 +430,7 @@ private fun Notifications(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
             if (!current.notifyMarks) onSave(current.copy(notifyMarks = true))
         }
     }
-    SettingsNote("one-off notification when a shell finishes · row square appears either way · tailnet only")
+    SettingsNote("one-off notification when a shell finishes · row square appears anyway")
 }
 
 @Composable
@@ -548,8 +557,8 @@ private fun PairingRow(
         // noise on the one screen where the consequence is real.
         if (confirmUnpair && (meshPresent || radioPaired)) {
             SettingsNote(
-                if (current.isPaired) "also forgets mesh keys and LoRa radio"
-                else "forgets radio keys and chosen radio",
+                if (current.isPaired) "also forgets mesh keys and radio"
+                else "forgets radio keys and radio",
             )
         }
         problem?.let { SettingsNote(it, color = Danger) }
@@ -557,7 +566,7 @@ private fun PairingRow(
             SettingsNote(it.text, color = Muted)
             if (it.useRadio) {
                 MiniTextButton(onClick = onUseRadio) {
-                    Text("use the radio", color = Accent, fontSize = 12.sp)
+                    Text("use radio", color = Accent, fontSize = 12.sp)
                 }
             }
         }
@@ -577,12 +586,8 @@ private fun PairingRow(
 internal data class ConnectionSummary(
     /** `address:port`, `radio only`, or `not paired`. */
     val host: String,
-    /** The chosen route in the app's own words. */
-    val route: String,
     /** The credential that identifies the pairing, by fingerprint — never the secret. */
     val pairing: String,
-    /** Which radio this install chose, or that none is chosen. */
-    val radio: String,
     /** Why the chosen route cannot run, when it cannot. */
     val problem: String?,
 )
@@ -590,8 +595,6 @@ internal data class ConnectionSummary(
 internal fun connectionSummary(
     config: LdmuxConfig,
     radioPaired: Boolean,
-    radioName: String = config.meshRadioName,
-    radioAddress: String = config.meshRadio,
 ): ConnectionSummary {
     val host = when {
         config.isPaired -> config.host
@@ -611,19 +614,9 @@ internal fun connectionSummary(
         radioPaired -> "radio keys stored"
         else -> "none"
     }
-    val radio = when {
-        radioName.isNotEmpty() -> radioName
-        radioAddress.isNotEmpty() -> radioAddress
-        else -> "none chosen"
-    }
     return ConnectionSummary(
         host = host,
-        route = when (config.route) {
-            MeshRoute.Tailnet -> "tailnet"
-            MeshRoute.Mesh -> "LoRa radio"
-        },
         pairing = pairing,
-        radio = radio,
         // `radioPaired` means the Keystore holds both halves (the session keys and the host's
         // radio key), which is exactly what the resolver asks about.
         problem = config.routeProblem(hasPeer = radioPaired, hasSessionKeys = radioPaired)
@@ -644,13 +637,14 @@ internal const val DIAGNOSTIC_LINES = 40
 @Composable
 private fun Diagnostics(current: LdmuxConfig, radioPaired: Boolean) {
     val summary = connectionSummary(current, radioPaired)
+    // **Two rows, because two facts are not said above.** `host`, `route` and the radio are all
+    // drawn by the rows that set them (`pairing`, `link`, `phone's radio`), and repeating them here
+    // gave the same fact two different wordings on one screen — `over Tailscale` in `link` and
+    // `tailnet` here, `heltec-v3 · public channel` in `pairing` and `heltec-v3` here. What is left is
+    // what nothing above says: the address behind the name, and *which* pairing by fingerprint.
     SettingsRow("host") { SettingsValue(summary.host, Modifier.weight(1f)) }
-    SettingsRow("route") { SettingsValue(summary.route, Modifier.weight(1f)) }
-    // The problem is a fact about the route, so it sits under the route row: a note under
-    // `host` would read as "this machine is broken" rather than "this route cannot run".
     summary.problem?.let { SettingsNote(it, color = Warn) }
     SettingsRow("pairing") { SettingsValue(summary.pairing, Modifier.weight(1f)) }
-    SettingsRow("radio") { SettingsValue(summary.radio, Modifier.weight(1f)) }
     // The build, because it is the first thing a support thread asks and the footer is the only
     // other place it appears. An empty log plus no version is a section with nothing to say.
     SettingsRow("build") {
@@ -688,7 +682,7 @@ private fun DiagnosticsLog() {
     if (!open) return
     val shown = logTail(lines, DIAGNOSTIC_LINES)
     if (shown.isEmpty()) {
-        SettingsNote("nothing yet · log is in memory, empty each launch")
+        SettingsNote("nothing yet · in memory, empty each launch")
         return
     }
     Text(
@@ -698,6 +692,6 @@ private fun DiagnosticsLog() {
         fontFamily = MonoFont,
         modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
     )
-    SettingsNote("copy takes every kept line, not just the ones shown")
+    SettingsNote("copy takes every kept line")
 }
 

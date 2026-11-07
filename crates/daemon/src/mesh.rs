@@ -249,6 +249,8 @@ pub struct MeshSnapshot {
     /// The tuple the host's own radio reported: `(frequency in kHz, bandwidth in Hz, SF, CR)`.
     /// `None` before the radio has been identified.
     pub radio_preset: Option<(u32, u32, u8, u8)>,
+    /// Bytes per path hash on this radio's own adverts, once it has been identified.
+    pub path_hash_size: Option<u8>,
     /// The serial device the daemon drives, `None` when this host has no radio route.
     pub serial: Option<String>,
     /// The largest record this peer's path allows, reported by the carrier at open.
@@ -281,6 +283,7 @@ impl MeshSnapshot {
             state: "connecting",
             own_radio_key: None,
             radio_preset: None,
+            path_hash_size: None,
             serial: Some(cfg.serial.clone()),
             uplink_record_max: None,
             records_left: None,
@@ -308,6 +311,9 @@ impl MeshSnapshot {
             "radioPreset": self
                 .radio_preset
                 .map(|(f, b, sf, cr)| vec![u64::from(f), u64::from(b), u64::from(sf), u64::from(cr)]),
+            // The width the host's adverts carry: the other half of "the same tuple" when a
+            // peer's advert path never resolves.
+            "pathHashSize": self.path_hash_size,
             "rssi": self.rssi,
             "batteryPercent": self.battery_percent,
             "txAirtimeTenths": self.tx_airtime_tenths,
@@ -663,6 +669,7 @@ async fn link(
             preset.sf,
             preset.cr,
         ));
+        s.path_hash_size = Some(preset.hash_size);
     });
     session(carrier, promise, runtime, setup, bound).await
 }

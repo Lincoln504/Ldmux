@@ -28,13 +28,13 @@ fun meshTermLabel(view: MeshTermView): String = when (view) {
     // is three small records and is now retried every six seconds, so the honest label is the
     // state, not a warning about how long it might take.
     MeshTermView.Handshaking -> "mesh · securing link"
-    MeshTermView.ProfileMissing -> "mesh · linked, no terminal yet"
+    MeshTermView.ProfileMissing -> "mesh · linked, no terminal"
     MeshTermView.Listing -> "mesh · listing shells"
     // **The state, not an action.** `open on the desktop` was the label for the button that takes
     // the shell back, printed where the header names where the shell *is*. The overlay under it
     // already says `in use on X`; the header said something else about the same fact.
-    is MeshTermView.HeldBy -> "mesh · in use on radio link"
-    is MeshTermView.Choose -> "mesh · choose a shell"
+    is MeshTermView.HeldBy -> "mesh · in use on radio"
+    is MeshTermView.Choose -> "mesh · choose shell"
     MeshTermView.NoShells -> "mesh · host runs no shell"
     is MeshTermView.Live -> when {
         view.resyncing -> "mesh · resyncing screen"
@@ -43,7 +43,7 @@ fun meshTermLabel(view: MeshTermView): String = when (view) {
         else -> "mesh · live (reduced)"
     }
     is MeshTermView.HostClosed -> when (view.reason) {
-        null -> "mesh · host ended session"
+        null -> "mesh · host ended it"
         MeshTerm.Closed.NOT_FOUND -> "mesh · no such shell"
         MeshTerm.Closed.EXITED -> "mesh · shell exited"
         MeshTerm.Closed.UNAVAILABLE -> "mesh · host could not read screen"

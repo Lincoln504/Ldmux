@@ -32,9 +32,7 @@ class DiagnosticsTest {
     fun `a tailnet pairing shows the address it connects to`() {
         val s = connectionSummary(tailnet(), radioPaired = false)
         assertEquals("100.100.0.1:7625", s.host)
-        assertEquals("tailnet", s.route)
         assertEquals("token 0123\u2026cdef", s.pairing)
-        assertEquals("none chosen", s.radio)
         // A tailnet route's problem is never about missing radio keys.
         assertNull(s.problem)
     }
@@ -44,7 +42,6 @@ class DiagnosticsTest {
         // The screen must not send a radio-only user looking for a token they do not need.
         val s = connectionSummary(meshOnly.copy(route = MeshRoute.Mesh), radioPaired = true)
         assertEquals("radio only", s.host)
-        assertEquals("LoRa radio", s.route)
         assertEquals("radio keys stored", s.pairing)
     }
 
@@ -66,15 +63,6 @@ class DiagnosticsTest {
     fun `both halves are named when both are held`() {
         val s = connectionSummary(tailnet(route = MeshRoute.Mesh), radioPaired = true)
         assertTrue(s.pairing.startsWith("token ") && s.pairing.endsWith("radio keys"), s.pairing)
-        assertEquals("LoRa radio", s.route)
-    }
-
-    @Test
-    fun `the radio row prefers the name it advertised, then the address`() {
-        val named = tailnet().copy(meshRadio = "AA:BB:CC:DD:EE:FF", meshRadioName = "heltec-v3")
-        assertEquals("heltec-v3", connectionSummary(named, radioPaired = true).radio)
-        val bare = tailnet().copy(meshRadio = "AA:BB:CC:DD:EE:FF")
-        assertEquals("AA:BB:CC:DD:EE:FF", connectionSummary(bare, radioPaired = false).radio)
     }
 
     @Test

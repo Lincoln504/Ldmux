@@ -177,7 +177,7 @@ internal fun TerminalArea(
                 if (tokenRefused) {
                     LinkNotice("pairing rejected \u00b7 pair again in settings")
                 } else if (linkNow.offline && madeVisitable == null) {
-                    LinkNotice("offline \u00b7 input is not being sent")
+                    LinkNotice("offline \u00b7 input not sent")
                 } else if (inputRefused != null) {
                     // Said instead of nothing: the key was taken by this page and then dropped by
                     // the pane, which is the one case where the screen looks like the typing worked.

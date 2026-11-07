@@ -37,12 +37,12 @@ fun meshBodyFor(view: MeshTermView): MeshBody? = when (view) {
         // One fact, then at most one action. Each of these used to carry its action inside the
         // same sentence, so a reader had to parse a colon to find out whether anything was wrong.
         when (view.reason) {
-            null -> "host ended the session"
+            null -> "host ended it"
             MeshTerm.Closed.NOT_FOUND -> "shell gone"
             MeshTerm.Closed.EXITED -> "shell exited"
-            MeshTerm.Closed.UNAVAILABLE -> "host could not read the screen"
-            MeshTerm.Closed.VERSION -> "host speaks another terminal version"
-            else -> "host closed the terminal (${view.reason})"
+            MeshTerm.Closed.UNAVAILABLE -> "host could not read screen"
+            MeshTerm.Closed.VERSION -> "host speaks another version"
+            else -> "host closed terminal (${view.reason})"
         },
         when (view.reason) {
             MeshTerm.Closed.VERSION -> "update the older side"
@@ -82,14 +82,14 @@ fun meshBodyFor(view: MeshTermView): MeshBody? = when (view) {
 /** The sentence under the header when the mesh route cannot run at all. */
 fun meshRouteBodyFor(problem: MeshRouteProblem?): MeshBody? = when (problem) {
     null -> null
-    MeshRouteProblem.NeedsSessionKeys -> MeshBody("scan ldmux code in Settings to pair the radio route")
+    MeshRouteProblem.NeedsSessionKeys -> MeshBody("scan ldmux code in Settings")
     // Re-scanning cannot fix this one: the code that was scanned simply has no host radio
     // key in it, so the same scan produces the same state. The cure is on the host.
     MeshRouteProblem.NeedsPeer -> MeshBody(
         "pairing code has no host radio key",
         "print a new one: ldmux code --mesh",
     )
-    MeshRouteProblem.SessionNotBuilt -> MeshBody("session library did not load")
+    MeshRouteProblem.SessionNotBuilt -> MeshBody("library did not load")
     MeshRouteProblem.TerminalNotBuilt -> MeshBody("terminal unavailable on this device")
 }
 

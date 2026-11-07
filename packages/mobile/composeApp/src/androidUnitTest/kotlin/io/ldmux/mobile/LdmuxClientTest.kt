@@ -23,7 +23,7 @@ class LdmuxClientTest {
     fun `null fields do not throw`() {
         val c = client()
         c.onMessage("""{"type":"error","code":null,"message":null}""")
-        assertEquals(LdmuxClient.ServerError("error", "the daemon refused that"), c.serverError.value)
+        assertEquals(LdmuxClient.ServerError("error", "daemon refused that"), c.serverError.value)
         c.onMessage("""{"type":"created","sessionId":null}""")
         assertTrue(c.created.value.isEmpty())
         c.onMessage("""{"type":"live","sessionId":null,"ok":null,"detail":null}""")

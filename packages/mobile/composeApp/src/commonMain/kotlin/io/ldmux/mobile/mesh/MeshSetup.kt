@@ -35,8 +35,8 @@ fun meshSetupView(
 
 /** One credential as a settings line. */
 fun meshCredentialName(c: MeshCredential): String = when (c) {
-    MeshCredential.SessionKeys -> "session keys"
-    MeshCredential.HostRadioKey -> "host LoRa radio key"
+    MeshCredential.SessionKeys -> "keys"
+    MeshCredential.HostRadioKey -> "host radio key"
 }
 
 
@@ -67,14 +67,14 @@ fun pairingNote(
 ): PairingNote? = when {
     // A code that is only keys, on a build that has no radio: nothing was paired and nothing
     // can be, and the honest line is that the code cannot be used here.
-    p.isMeshOnly && !hasMeshRoute -> PairingNote("this build has no radio route; that code does nothing here")
+    p.isMeshOnly && !hasMeshRoute -> PairingNote("no radio route in this build")
     // The tailnet half landed and the radio half did not. Saying "paired" alone would promise a
     // route whose keys are not in the Keystore, and the radio row would then say "unpaired".
     p.mesh != null && radioKeysStored == false ->
-        PairingNote("paired, but the radio keys were not stored. Scan again, or unpair and re-pair")
+        PairingNote("paired · radio keys not stored · scan again or re-pair")
     // Keys stored, route still the tailnet: the app stays where it was, so this is the only
     // sentence that can tell the user the radio half worked.
-    p.isMeshOnly && route != MeshRoute.Mesh -> PairingNote("radio paired; the app is still on the tailnet", useRadio = true)
+    p.isMeshOnly && route != MeshRoute.Mesh -> PairingNote("radio paired · app still on tailnet", useRadio = true)
     p.isMeshOnly -> PairingNote("radio paired")
     else -> null
 }

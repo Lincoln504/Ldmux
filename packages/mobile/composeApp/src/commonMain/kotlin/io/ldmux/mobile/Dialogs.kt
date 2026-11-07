@@ -31,7 +31,7 @@ internal fun ConfirmPairing(p: Pairing, onDismiss: () -> Unit, onConfirm: () -> 
     // code say "work laptop" and point anywhere on the tailnet. See [pairingPrompt].
     val prompt = pairingPrompt(p)
     ModalCard(
-        if (p.isMeshOnly) "pair over radio?" else "pair with this host?",
+        if (p.isMeshOnly) "pair over radio?" else "pair with host?",
         onDismiss,
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -40,9 +40,9 @@ internal fun ConfirmPairing(p: Pairing, onDismiss: () -> Unit, onConfirm: () -> 
             PairingFact(if (p.isMeshOnly) "key" else "token", prompt.fingerprint)
             Text(
                 if (p.isMeshOnly) {
-                    "Typing goes over the LoRa radio to this host. Tailnet pairing stays as it is."
+                    "typing goes over LoRa radio · tailnet pairing unchanged"
                 } else {
-                    "Typing goes to this address."
+                    "typing goes to this address"
                 },
                 color = Muted,
                 fontSize = 11.sp,
@@ -85,7 +85,7 @@ internal fun PastePairingLink(onDismiss: () -> Unit, onPair: (Pairing) -> Unit) 
     ModalCard("paste pairing link", onDismiss) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(
-                "on the host: `ldmux code`, then copy the whole link",
+                "on host: `ldmux code`, copy whole link",
                 color = Muted,
                 fontSize = 11.sp,
             )

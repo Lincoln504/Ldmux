@@ -155,8 +155,9 @@ what it will do.
   for the same reason: it is rebuilt from the confirmed screen on every change and any paint of
   the host's screen replaces it, so no fake outlives the next *paint*. Note the word: while the
   view is frozen the host's screens are kept rather than painted, so the base the echo is drawn on
-  is as old as the freeze — which is what the bar's `view N behind` is counting, and the reason a
-  frozen view should not be left frozen for long.
+  is as old as the freeze, which is the reason a frozen view should not be left frozen for long.
+  (The bar used to count the screens it was behind; that number was removed in 2026-11-07, so the
+  state is now the only thing said, not how far behind it is.)
 - **The half-duplex radio argument is the mode's premise**, and the numbers support it:
   LoRaWAN's `RECEIVE_DELAY1` is 1 s and no uplink may be broadcast during a receive window, and
   measured device-to-device LoRa round trips start at ~34 ms (SF7/500 kHz) at the physical layer
