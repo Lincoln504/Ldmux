@@ -382,10 +382,11 @@ by the host radio, by the app before it retunes, and by every budget below.
 
 ### The client's look and its voice
 
-The Android client has **five themes**, and they are a contract rather than a decoration: one
+The Android client has **six themes**, and they are a contract rather than a decoration: one
 `Palette` of thirteen tokens plus a terminal palette, one monospace and one proportional face per
-theme, and — for four of them — three session cues. `Dark` is the default and is silent on purpose;
-`Forest`, `Air`, `Daybreak`, `Nerv` and `Gruvbox` each answer a session event in one *material*.
+theme, and — for all but the first — three session cues. `Dark` is the default and is silent on
+purpose; `Forest`, `Air`, `Daybreak`, `Nerv` and `Gruvbox` each answer a session event in one
+*material*.
 
 - **The tokens are the API.** `Bg`, `Surface`, `Raised`, `Line`, `Edge`, `Fg`, `Dim`, `Muted`,
   `Accent`, `Chosen`, `Danger`, `Warn`, `OnAccent` are read by ~200 call sites; each theme supplies
