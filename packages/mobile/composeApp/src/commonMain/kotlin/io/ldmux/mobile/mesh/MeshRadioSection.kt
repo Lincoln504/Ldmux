@@ -252,7 +252,7 @@ internal fun RadioPresetPanel(
     // **Two flags, because one was doing two jobs.** `seeded` meant both "the radio's own tuple
     // has arrived" and "the user has touched this dialog", and `choose()` set it. So tapping a
     // region or "randomise" before the radio answered made the seeding effect return early for
-    // good: `original` stayed null, "restore" was disabled forever, the "current …" comparison
+    // good: `original` stayed null, "undo" was disabled forever, the "current …" comparison
     // never appeared, and "apply" became enabled with no idea what it was replacing. `seeded`
     // now means only "the radio's tuple has been read"; `userTouched` only "the proposal is the
     // user's, so the arrival must not overwrite it".
@@ -282,7 +282,7 @@ internal fun RadioPresetPanel(
         // tuple it opened with: "preset" said one byte more than "current", and the next `apply`
         // would have put the old tuple back. Following the radio keeps the two lines honest; a
         // proposal the user has started is still left alone. `original` is deliberately not moved:
-        // it is what `restore` returns to, and that must stay the tuple the dialog opened on.
+        // it is what `undo` writes back, and that must stay the tuple the dialog opened on.
         if (!userTouched && selected != c) {
             region = regionOfPreset(c)
             selected = c
@@ -415,6 +415,15 @@ internal fun RadioPresetPanel(
                         seed += 1
                         choose(privatePreset(region, Random(seed)))
                     }) { Text("randomise", color = Accent, fontSize = 11.sp, maxLines = 1) }
+                    // **`undo`, not `restore`, and not `match`.**
+                    //
+                    // Two one-press writes sit on this screen and they read as one when both are
+                    // called some kind of "put it back": this one writes the tuple the radio had
+                    // **when the panel opened**, and `match` (in the settings list, beside the
+                    // desktop's tuple) writes **the desktop's** tuple. `restore` named neither
+                    // strongly enough — after the panel started following the radio, the tuple this
+                    // button writes is not on screen anywhere, so `restore` could be read as "back
+                    // to what it is now", which is nothing. `undo` says which direction it goes.
                     MiniTextButton(
                         enabled = original != null && !busy && state == MeshLinkState.Bound,
                         onClick = {
@@ -423,7 +432,7 @@ internal fun RadioPresetPanel(
                             choose(o)
                             applyNow(o)
                         },
-                    ) { Text("restore", color = Accent, fontSize = 11.sp, maxLines = 1) }
+                    ) { Text("undo", color = Accent, fontSize = 11.sp, maxLines = 1) }
                     // The way to join the host's channel instead of proposing a new one.
                     MiniTextButton(onClick = {
                         custom = !custom
