@@ -39,6 +39,11 @@ pub mod commands {
     /// what to tune to: the user had to configure it with a different tool while the phone
     /// configured its own from the app. There is no reason for that asymmetry.
     pub const SET_RADIO_PARAMS: u8 = 0x0B;
+    /// Set transmit power: **one signed byte of dBm** (`MyMesh.cpp:1386`), window -9..max.
+    ///
+    /// Separate from the tuple because it is a separate register, and global to the radio like the
+    /// tuple: whichever app writes it last is what the radio transmits at.
+    pub const SET_RADIO_TX_POWER: u8 = 0x0C;
     pub const SYNC_NEXT_MESSAGE: u8 = 0x0A;
     pub const DEVICE_QUERY: u8 = 0x16;
     /// Send a complete packet we built: `priority u8`, then the packet bytes.

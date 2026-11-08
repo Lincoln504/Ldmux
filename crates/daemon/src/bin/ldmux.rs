@@ -247,8 +247,16 @@ fn print_mesh_status(v: &serde_json::Value) {
             .and_then(serde_json::Value::as_u64)
             .map(|w| format!("  path {w} B"))
             .unwrap_or_default();
+        // **Power is the third thing two radios can disagree about.** The phone shows its own, so a
+        // host that stays silent leaves an operator comparing half a channel: same tuple, same
+        // width, and one end shouting at 22 dBm while the other whispers at 14.
+        let power = v
+            .get("txPowerDbm")
+            .and_then(serde_json::Value::as_i64)
+            .map(|p| format!("  {p} dBm"))
+            .unwrap_or_default();
         println!(
-            "preset   {:.3} MHz  {:.1} kHz  SF{}  CR{}{width}",
+            "preset   {:.3} MHz  {:.1} kHz  SF{}  CR{}{width}{power}",
             n(0) as f64 / 1000.0,
             n(1) as f64 / 1000.0,
             n(2),
@@ -377,12 +385,28 @@ fn mesh_subcommand(rest: &[String]) -> &str {
 /// one channel to a network: MeshCore's public presets name neighbours in one byte, our own in
 /// two, and a node whose width disagrees with the repeater in between cannot read the path that
 /// repeater built. The width is in bytes, because that is what `ldmux mesh status` prints.
-fn preset_args(n: &[&str]) -> Result<(f64, f64, u8, u8, Option<u8>), String> {
+/// A retune as the CLI parses it: the four numbers, then the two registers that are not part of
+/// the channel — the path width and the power, either of which may be left alone.
+type PresetArgs = (f64, f64, u8, u8, Option<u8>, Option<i8>);
+
+fn preset_args(n: &[&str]) -> Result<PresetArgs, String> {
     let mut positional: Vec<&str> = Vec::new();
     let mut path: Option<u8> = None;
+    let mut power: Option<i8> = None;
     let mut it = n.iter().copied();
     while let Some(a) = it.next() {
-        if a == "--path" {
+        if a == "--power" {
+            let Some(v) = it.next() else {
+                return Err("--power needs a number of dBm: -9 to 30".to_string());
+            };
+            let parsed = v
+                .parse::<i8>()
+                .map_err(|_| format!("--power is dBm (-9 to 30), not {v:?}"))?;
+            if !(-9..=30).contains(&parsed) {
+                return Err(format!("--power is -9 to 30 dBm, not {parsed}"));
+            }
+            power = Some(parsed);
+        } else if a == "--path" {
             let Some(v) = it.next() else {
                 return Err("--path needs a number: 1, 2 or 3".to_string());
             };
@@ -408,7 +432,7 @@ fn preset_args(n: &[&str]) -> Result<(f64, f64, u8, u8, Option<u8>), String> {
     ) else {
         return Err("needs four numbers: <MHz> <kHz> <SF> <CR>".to_string());
     };
-    Ok((f, b, sf, cr, path))
+    Ok((f, b, sf, cr, path, power))
 }
 
 /// The rows `ldmux list` prints.
@@ -438,6 +462,7 @@ fn reject_unknown_flag(rest: &[String]) -> Option<String> {
         "--mesh",
         "--mesh-only",
         "--name",
+        "--power",
         "--explain",
         "--readonly",
         "--kind",
@@ -1010,11 +1035,13 @@ async fn main() {
                 // `ldmux mesh preset <MHz> <kHz> <SF> <CR>`: tune the host's OWN radio.
                 let n: Vec<&str> = rest.iter().skip(1).map(String::as_str).collect();
                 let parsed = preset_args(&n);
-                let (f, b, sf, cr, path) = match parsed {
+                let (f, b, sf, cr, path, power) = match parsed {
                     Ok(v) => v,
                     Err(why) => {
                         eprintln!("{why}");
-                        eprintln!("usage: ldmux mesh preset <MHz> <kHz> <SF> <CR> [--path 1|2|3]");
+                        eprintln!(
+                            "usage: ldmux mesh preset <MHz> <kHz> <SF> <CR> [--path 1|2|3] [--power dBm]"
+                        );
                         eprintln!("  e.g. ldmux mesh preset 910.525 62.5 7 5 --path 1");
                         std::process::exit(2);
                     }
@@ -1023,14 +1050,18 @@ async fn main() {
                 if let Some(p) = path {
                     params["pathBytes"] = serde_json::json!(p);
                 }
+                if let Some(dbm) = power {
+                    params["powerDbm"] = serde_json::json!(dbm);
+                }
                 let r: Result<serde_json::Value, CallError> =
                     daemon_call(&sock, "mesh.preset", &params).await;
                 match r {
                     Ok(v) if v.get("ok").and_then(|o| o.as_bool()) == Some(true) => {
-                        match path {
-                            Some(p) => println!("tuned: {f} MHz  {b} kHz  SF{sf}  CR{cr}  path {p} B"),
-                            None => println!("tuned: {f} MHz  {b} kHz  SF{sf}  CR{cr}"),
-                        }
+                        // What was asked for, in the same shape `mesh status` prints, so the two
+                        // lines can be compared by eye.
+                        let w = path.map_or_else(String::new, |p| format!("  path {p} B"));
+                        let dbm = power.map_or_else(String::new, |d| format!("  {d} dBm"));
+                        println!("tuned: {f} MHz  {b} kHz  SF{sf}  CR{cr}{w}{dbm}");
                     }
                     Ok(v) => {
                         let detail = v
@@ -1524,7 +1555,7 @@ mod preset_args_tests {
     fn the_four_numbers_alone_leave_the_width_alone() {
         assert_eq!(
             preset_args(&["910.525", "62.5", "7", "5"]),
-            Ok((910.525, 62.5, 7, 5, None))
+            Ok((910.525, 62.5, 7, 5, None, None))
         );
     }
 
@@ -1532,11 +1563,32 @@ mod preset_args_tests {
     fn a_width_is_bytes_and_may_come_before_the_numbers() {
         assert_eq!(
             preset_args(&["910.525", "62.5", "7", "5", "--path", "1"]),
-            Ok((910.525, 62.5, 7, 5, Some(1)))
+            Ok((910.525, 62.5, 7, 5, Some(1), None))
         );
         assert_eq!(
             preset_args(&["--path", "2", "910.525", "500", "7", "5"]),
-            Ok((910.525, 500.0, 7, 5, Some(2)))
+            Ok((910.525, 500.0, 7, 5, Some(2), None))
+        );
+    }
+
+    #[test]
+    fn power_is_dbm_and_rides_with_the_tuple() {
+        assert_eq!(
+            preset_args(&["910.525", "62.5", "7", "5", "--path", "1", "--power", "14"]),
+            Ok((910.525, 62.5, 7, 5, Some(1), Some(14)))
+        );
+        // A negative power is legal: the firmware's window starts at -9 dBm.
+        assert_eq!(
+            preset_args(&["--power", "-9", "910.525", "62.5", "7", "5"]),
+            Ok((910.525, 62.5, 7, 5, None, Some(-9)))
+        );
+        assert_eq!(
+            preset_args(&["910.525", "62.5", "7", "5", "--power", "31"]).unwrap_err(),
+            "--power is -9 to 30 dBm, not 31"
+        );
+        assert_eq!(
+            preset_args(&["910.525", "62.5", "7", "5", "--power"]).unwrap_err(),
+            "--power needs a number of dBm: -9 to 30"
         );
     }
 

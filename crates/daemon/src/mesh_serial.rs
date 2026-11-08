@@ -189,6 +189,11 @@ enum Command {
         bytes: u8,
         reply: std::sync::mpsc::Sender<Result<(), String>>,
     },
+    /// Set transmit power in dBm, answered the same way.
+    SetPower {
+        dbm: i8,
+        reply: std::sync::mpsc::Sender<Result<(), String>>,
+    },
 }
 
 /// The radio, seen as a carrier.
@@ -284,6 +289,22 @@ impl Carrier for SerialCarrier {
         }
     }
 
+    async fn set_tx_power(&mut self, dbm: i8) -> Result<(), MeshError> {
+        let (reply, answer) = channel();
+        self.commands
+            .as_ref()
+            .ok_or(MeshError::Closed)?
+            .send(Command::SetPower { dbm, reply })
+            .map_err(|_| MeshError::Closed)?;
+        match answer.recv_timeout(Duration::from_secs(10)) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(MeshError::Unsupported(format!(
+                "the radio refused the power: {e}"
+            ))),
+            Err(_) => Err(MeshError::Timeout("the radio did not answer the power change")),
+        }
+    }
+
     async fn send_record(&mut self, seq: u8, record: &[u8]) -> Result<(), MeshError> {
         let commands = self.commands.as_ref().ok_or(MeshError::Closed)?;
         commands
@@ -354,6 +375,9 @@ pub struct RadioPreset {
     pub bw_khz: f64,
     pub sf: u8,
     pub cr: u8,
+    /// Transmit power in dBm, as the radio reports it. Read from `SELF_INFO` byte 2, which is the
+    /// *configured* power rather than the board's ceiling (byte 3).
+    pub tx_power_dbm: i8,
     /// Bytes per path hash this radio puts on its own packets, after the default was applied.
     ///
     /// Published with the tuple because it is the other half of what two radios have to agree
@@ -478,6 +502,7 @@ fn prepare(
         bw_khz: self_info.radio_bw_khz,
         sf: self_info.radio_sf,
         cr: self_info.radio_cr,
+        tx_power_dbm: i8::try_from(self_info.tx_power).unwrap_or(0),
         public_key: self_info.public_key,
         hash_size,
     };
@@ -603,6 +628,8 @@ fn serve_loop<L: ByteLink>(
                         public_key: settings.preset.public_key,
                         // A retune does not touch the path width; it stays what the radio reports.
                         hash_size: settings.preset.hash_size,
+                        // ...and neither does it touch the power.
+                        tx_power_dbm: settings.preset.tx_power_dbm,
                     };
                     // The airtime estimate follows the new tuple, or the budget keeps measuring
                     // the radio that is no longer in use.
@@ -636,6 +663,20 @@ fn serve_loop<L: ByteLink>(
                 let _ = reply.send(result);
                 // The status carries the width, so the daemon's snapshot follows the radio instead
                 // of the value it was started with.
+                let _ = events.blocking_send(Ok(Event::Status(status(
+                    &settings, budget, sent,
+                ))));
+            }
+            Ok(Command::SetPower { dbm, reply }) => {
+                let result = match companion.set_tx_power(dbm) {
+                    Ok(()) => {
+                        settings.preset.tx_power_dbm = dbm;
+                        Ok(())
+                    }
+                    Err(e) => Err(format!("{e:?}")),
+                };
+                let _ = reply.send(result);
+                // The status carries the power, so the daemon's snapshot follows the radio.
                 let _ = events.blocking_send(Ok(Event::Status(status(
                     &settings, budget, sent,
                 ))));
@@ -1153,6 +1194,7 @@ mod tests {
                         bw_khz: 500.0,
                         sf: 8,
                         cr: 5,
+        tx_power_dbm: 22,
                         public_key: [7u8; 32],
                         hash_size: 1,
                     },
@@ -1196,6 +1238,7 @@ mod tests {
                         bw_khz: 500.0,
                         sf: 8,
                         cr: 5,
+        tx_power_dbm: 22,
                         public_key: [7u8; 32],
                         hash_size: 1,
                     },
@@ -1253,6 +1296,7 @@ mod tests {
                         bw_khz: 500.0,
                         sf: 8,
                         cr: 5,
+        tx_power_dbm: 22,
                         public_key: [7u8; 32],
                         hash_size: 1,
                     },
@@ -1298,6 +1342,7 @@ mod tests {
                         bw_khz: 500.0,
                         sf: 8,
                         cr: 5,
+        tx_power_dbm: 22,
                         public_key: [7u8; 32],
                         hash_size: 1,
                     },
@@ -1322,6 +1367,7 @@ mod tests {
                         bw_khz: 500.0,
                         sf: 8,
                         cr: 5,
+        tx_power_dbm: 22,
                         public_key: [7u8; 32],
                         hash_size: 1,
                     },

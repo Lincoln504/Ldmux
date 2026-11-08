@@ -226,6 +226,21 @@ impl<L: ByteLink> Companion<L> {
         Ok(())
     }
 
+    /// Set the radio's transmit power in dBm.
+    ///
+    /// `CMD_SET_RADIO_TX_POWER` (0x0C) is **one signed byte** (`MyMesh.cpp:1386-1396`), and the
+    /// firmware's window is -9 to the board's maximum, refusing anything else with
+    /// `ILLEGAL_ARG`. It is a global, persisted setting of the radio, like the tuple, so a phone
+    /// that sets it and a host that sets it are writing the same register — last writer wins.
+    pub fn set_tx_power(&mut self, dbm: i8) -> Result<(), SessionError> {
+        self.request(
+            &[commands::SET_RADIO_TX_POWER, dbm as u8],
+            codes::OK,
+            Duration::from_secs(5),
+        )?;
+        Ok(())
+    }
+
     /// Tune the radio to a tuple, and confirm the firmware took it.
     ///
     /// Frequencies are in kHz and bandwidths in Hz, which is what the command carries; the

@@ -258,6 +258,11 @@ pub struct MeshSnapshot {
     pub radio_preset: Option<(u32, u32, u8, u8)>,
     /// Bytes per path hash on this radio's own adverts, once it has been identified.
     pub path_hash_size: Option<u8>,
+    /// The host radio's transmit power in dBm, as it reports it (`SELF_INFO` byte 2).
+    ///
+    /// Published for the same reason as the tuple and the width: the phone shows its own power, so
+    /// a host that never says its own leaves an asymmetry whose only cure is guessing.
+    pub tx_power_dbm: Option<i8>,
     /// The serial device the daemon drives, `None` when this host has no radio route.
     pub serial: Option<String>,
     /// The largest record this peer's path allows, reported by the carrier at open.
@@ -291,6 +296,7 @@ impl MeshSnapshot {
             own_radio_key: None,
             radio_preset: None,
             path_hash_size: None,
+            tx_power_dbm: None,
             serial: Some(cfg.serial.clone()),
             uplink_record_max: None,
             records_left: None,
@@ -321,6 +327,7 @@ impl MeshSnapshot {
             // The width the host's adverts carry: the other half of "the same tuple" when a
             // peer's advert path never resolves.
             "pathHashSize": self.path_hash_size,
+            "txPowerDbm": self.tx_power_dbm,
             "rssi": self.rssi,
             "batteryPercent": self.battery_percent,
             "txAirtimeTenths": self.tx_airtime_tenths,
@@ -372,6 +379,8 @@ pub struct Retune {
     pub cr: u8,
     /// `None` leaves the width alone.
     pub path_bytes: Option<u8>,
+    /// `None` leaves the power alone. One signed byte on the wire, window -9..max.
+    pub power_dbm: Option<i8>,
 }
 
 /// The running link, shared with the RPC handler.
@@ -701,6 +710,7 @@ async fn link(
             preset.cr,
         ));
         s.path_hash_size = Some(preset.hash_size);
+        s.tx_power_dbm = Some(preset.tx_power_dbm);
     });
     session(carrier, promise, runtime, setup, bound).await
 }
@@ -827,6 +837,7 @@ async fn session<C: Carrier>(
                 sf,
                 cr,
                 path_bytes,
+                power_dbm,
             } = want;
             match carrier.set_preset(freq_khz, bw_hz, sf, cr).await {
                 Ok(()) => {
@@ -842,6 +853,18 @@ async fn session<C: Carrier>(
                         match carrier.set_path_width(bytes).await {
                             Ok(()) => {
                                 set(snapshot, |s| s.path_hash_size = Some(bytes));
+                            }
+                            Err(e) => {
+                                set(snapshot, |s| s.last_error = Some(e.to_string()));
+                            }
+                        }
+                    }
+                    // **Power is the third register**, separate from the tuple and the width, and
+                    // global to the radio: whichever app writes it last wins.
+                    if let Some(dbm) = power_dbm {
+                        match carrier.set_tx_power(dbm).await {
+                            Ok(()) => {
+                                set(snapshot, |s| s.tx_power_dbm = Some(dbm));
                             }
                             Err(e) => {
                                 set(snapshot, |s| s.last_error = Some(e.to_string()));
@@ -1149,6 +1172,7 @@ mod tests {
     fn test_runtime() -> MeshRuntime {
         let cfg = MeshConfig {
             serial: "/dev/null".to_owned(),
+            width_marker: None,
         };
         MeshRuntime {
             pairing_keys: None,
@@ -1612,6 +1636,7 @@ mod tests {
     fn a_snapshot_serialises_every_field_the_cli_prints() {
         let cfg = MeshConfig {
             serial: "/dev/ttyACM0".to_owned(),
+            width_marker: None,
         };
         let snapshot = MeshSnapshot::new(&cfg);
         let json = snapshot.to_json();

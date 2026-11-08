@@ -90,6 +90,15 @@ pub trait Carrier {
     /// network's own (one byte, so a repeater's hash is one byte), and a node that names its
     /// neighbours in two bytes cannot read a path a public repeater built. The default is the same
     /// refusal as [`Carrier::set_preset`]: a carriage that does not own its radio must say so.
+    /// Set the radio's transmit power, in dBm. `Err(Unsupported)` when this carriage is not the
+    /// radio's owner.
+    async fn set_tx_power(&mut self, dbm: i8) -> Result<(), MeshError> {
+        let _ = dbm;
+        Err(MeshError::Unsupported(
+            "this carriage does not own its radio".to_owned(),
+        ))
+    }
+
     async fn set_path_width(&mut self, bytes: u8) -> Result<(), MeshError> {
         let _ = bytes;
         Err(MeshError::Unsupported(

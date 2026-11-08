@@ -1851,6 +1851,16 @@ impl LdmuxDaemon {
                     Some(n) if (1..=3).contains(&n) => Some(n as u8),
                     Some(n) => return Err(format!("bad_preset: pathBytes is 1, 2 or 3, not {n}")),
                 };
+                // Transmit power, in dBm, when the caller named one. The firmware's window is -9
+                // to the board's maximum, and it answers ILLEGAL_ARG outside it, so nothing is
+                // pre-checked here beyond the range a signed byte can hold.
+                let power_dbm = match params.get("powerDbm").and_then(serde_json::Value::as_i64) {
+                    None => None,
+                    Some(n) if (-9..=30).contains(&n) => Some(n as i8),
+                    Some(n) => {
+                        return Err(format!("bad_preset: powerDbm is -9 to 30 dBm, not {n}"));
+                    }
+                };
                 let Some(runtime) = crate::mesh::MeshRuntime::global() else {
                     return Err("mesh is disabled: no radio is configured".to_string());
                 };
@@ -1860,6 +1870,7 @@ impl LdmuxDaemon {
                     sf: want.2,
                     cr: want.3,
                     path_bytes,
+                    power_dbm,
                 };
                 if !runtime.request_preset(want_retune) {
                     return Err("the mesh link is not accepting requests".to_string());
