@@ -137,7 +137,7 @@ fn command_help(cmd: &str) -> Option<&'static str> {
         "forget" => "ldmux forget <id>\n  Drop a session's record without touching the keeper.",
         "adopt" => "ldmux adopt <keeper-name>\n  Adopt a keeper session the daemon does not know.",
         "mesh" => {
-            "ldmux mesh [status|preset ...] [--json]\n  The radio route: the device the daemon owns, the records left this hour by the radio's own count, its reading, and the tuple it is tuned to.\n\nldmux mesh preset <MHz> <kHz> <SF> <CR> [--path 1|2|3]\n  Tune the host's own radio, e.g. `ldmux mesh preset 910.525 62.5 7 5`. The firmware validates it and the command fails if it refuses. `--path` is the path hash width in bytes, and it is part of the channel whenever other nodes are in the path: MeshCore's public presets are one byte, ldmux's own channel is two."
+            "ldmux mesh [status|preset ...] [--json]\n  The radio route: the device the daemon owns, the records the hour's allowance still covers by ldmux's own count, its reading, and the tuple it is tuned to.\n\nldmux mesh preset <MHz> <kHz> <SF> <CR> [--path 1|2|3]\n  Tune the host's own radio, e.g. `ldmux mesh preset 910.525 62.5 7 5`. The firmware validates it and the command fails if it refuses. `--path` is the path hash width in bytes, and it is part of the channel whenever other nodes are in the path: MeshCore's public presets are one byte, ldmux's own channel is two."
         }
         "code" => {
             "ldmux code [--mesh | --mesh-only]\n  Print a QR code the phone app scans to pair. --mesh adds the session key and the pairing secret for the mesh route (the code is then as sensitive as the token and the secret together). --mesh-only carries the mesh keys and nothing of the tailnet: no address, no daemon token, for a phone that will only ever reach this machine by radio."
@@ -275,7 +275,12 @@ fn print_mesh_status(v: &serde_json::Value) {
     // was applying, which it is not.
     match v.get("recordsLeft").and_then(serde_json::Value::as_u64) {
         Some(255) => println!("records  up to 255 left this hour (the field's ceiling)"),
-        Some(left) => println!("records  {left} left this hour, by the radio's own count"),
+        // **Whose count it is.** This is ldmux's arithmetic — the hour's allowance in seconds
+        // divided by one record at this tuple's airtime, minus what this daemon has sent — not a
+        // figure the firmware reports. A peer's handshakes and their retransmissions are charged
+        // too, and they cannot be refused, so an hour can end with less than the arithmetic
+        // promised.
+        Some(left) => println!("records  {left} left this hour, by ldmux's own count"),
         None => println!("records  not reported yet"),
     }
     let radio = match v.get("radioState").and_then(serde_json::Value::as_u64) {
@@ -299,7 +304,7 @@ fn print_mesh_status(v: &serde_json::Value) {
     println!("signal   {signal}, battery {charge}");
     if let Some(tenths) = v.get("txAirtimeTenths").and_then(serde_json::Value::as_u64) {
         println!(
-            "airtime  {:.1} s this hour (the radio's own estimate)",
+            "airtime  {:.1} s this hour (records sent x one record's air here)",
             f64::from(tenths as u32) / 10.0
         );
     }

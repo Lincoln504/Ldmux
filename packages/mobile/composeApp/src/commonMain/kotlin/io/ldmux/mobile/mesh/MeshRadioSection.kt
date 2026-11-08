@@ -257,6 +257,10 @@ internal fun RadioPresetPanel(
     // now means only "the radio's tuple has been read"; `userTouched` only "the proposal is the
     // user's, so the arrival must not overwrite it".
     var userTouched by remember { mutableStateOf(false) }
+    // The radio's tuple as this dialog last saw it. A *change* after the first read is somebody
+    // else moving the radio — the `match` row, another app, a preset applied from the list — and it
+    // makes the proposal in this dialog stale rather than precious.
+    var radioSeen by remember { mutableStateOf<RadioPreset?>(null) }
     // The radio's own tuple is the truth about which channel it is on, so it is reported every
     // time it arrives rather than only on the first read.
     LaunchedEffect(current) {
@@ -277,13 +281,24 @@ internal fun RadioPresetPanel(
             seeded = true
             return@LaunchedEffect
         }
-        // **The radio moving is news, not a proposal.** A `match` pressed in the settings row
-        // changes the radio while this dialog is open, and the dialog used to keep showing the
-        // tuple it opened with: "preset" said one byte more than "current", and the next `apply`
-        // would have put the old tuple back. Following the radio keeps the two lines honest; a
-        // proposal the user has started is still left alone. `original` is deliberately not moved:
-        // it is what `undo` writes back, and that must stay the tuple the dialog opened on.
-        if (!userTouched && selected != c) {
+        // **The radio moving is news, not a proposal.**
+        //
+        // Two different events arrive here. The *first* read must not overwrite a choice the user
+        // began making while the radio was still answering, so it leaves the proposal alone. Any
+        // *later* change is somebody moving the radio — the `match` row, another app, a preset
+        // applied elsewhere — and it makes this dialog's proposal stale by definition: measured on
+        // the device, 2026-11-07, `randomise` then `match` left the panel proposing the randomised
+        // channel and warning that "apply leaves link down", about a radio it had already put on the
+        // desktop's channel. The proposal follows the radio, and `userTouched` goes with it so the
+        // next change keeps following.
+        //
+        // `original` is deliberately not moved: it is what `undo` writes back, and that must stay the
+        // tuple the dialog opened on.
+        val seen = radioSeen
+        radioSeen = c
+        if (seen != null && seen != c) {
+            // A change after the first read: the radio moved under this dialog.
+            userTouched = false
             region = regionOfPreset(c)
             selected = c
         }
@@ -466,10 +481,15 @@ internal fun RadioPresetPanel(
                 // break: the desktop's own command, and this radio's `match` row once the desktop
                 // has moved.
                 if (hostTuple != null && !sameChannel(selected, hostTuple)) {
+                    // **The subject is the press, not the desktop.** The old sentence led with
+                    // "desktop radio on …", which read as a statement about the link *now* — most
+                    // confusingly right after a `match` had put the radio on that very channel. It
+                    // now says what `apply` would do, and names the cure for the link it would
+                    // break.
                     Text(
-                        "desktop radio on " + channelLine(hostTuple) +
-                            " · apply leaves link down until desktop moves " +
-                            "(`ldmux mesh preset` there) or you press match here",
+                        "apply moves this radio to " + channelLine(selected) +
+                            " · the desktop stays on " + channelLine(hostTuple) +
+                            " until you move it (`ldmux mesh preset` there)",
                         color = Warn,
                         fontSize = 11.sp,
                         fontFamily = MonoFont,

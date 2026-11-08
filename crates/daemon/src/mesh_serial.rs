@@ -228,12 +228,16 @@ impl SerialCarrier {
     pub async fn open(
         device: &str,
         width_marker: Option<std::path::PathBuf>,
+        window_record: Option<std::path::PathBuf>,
     ) -> Result<(Self, Bound, RadioPreset), MeshError> {
         let path = device.to_owned();
-        let prepared = tokio::task::spawn_blocking(move || prepare(&path, width_marker))
+        let prepared =
+            tokio::task::spawn_blocking(move || prepare(&path, width_marker, window_record))
             .await
             .map_err(|e| MeshError::Io(std::io::Error::other(e.to_string())))?;
         let (companion, bound, settings) = prepared?;
+        // Read before `settings` moves into the thread: the caller wants the tuple it is on.
+        let preset = settings.preset;
 
         let (command_tx, command_rx) = channel();
         let (event_tx, event_rx) = async_mpsc::channel(64);
@@ -256,7 +260,7 @@ impl SerialCarrier {
                 stopped: Some(stopped_rx),
             },
             bound,
-            settings.preset,
+            preset,
         ))
     }
 }
@@ -369,7 +373,10 @@ impl Drop for SerialCarrier {
 }
 
 /// What the radio told us at open time, and what the loop needs from it.
-#[derive(Clone, Copy)]
+///
+/// Not `Copy`: it owns the record paths now, and copying a path to a state file to then write
+/// through the copy is the kind of quiet aliasing this file does not need.
+#[derive(Clone)]
 struct Settings {
     /// Bytes per path hash, from the firmware's reported path-hash mode.
     hash_size: u8,
@@ -381,6 +388,13 @@ struct Settings {
     /// mismatch looked exactly like being out of range. The user needs to be able to compare the
     /// two numbers.
     preset: RadioPreset,
+    /// Where the hour's spend is recorded, so the allowance survives a daemon restart.
+    ///
+    /// **The window was per process.** `sent` started at zero whenever the worker started, so a
+    /// restart handed out a fresh 36 s on a band whose allowance is 1 % of any hour rather than 1 %
+    /// of a process's life. Measured 2026-11-07: an afternoon of restarts left `airtime 61.4 s this
+    /// hour` from a budget of 36 s, because each restart forgot what the previous one had spent.
+    window_record: Option<std::path::PathBuf>,
 }
 
 /// The four numbers that decide whether two radios can hear each other.
@@ -417,6 +431,28 @@ fn marker_matches(marker: &std::path::Path, key: &[u8; 32]) -> bool {
     std::fs::read_to_string(marker).is_ok_and(|t| t.trim() == hex_key(key))
 }
 
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// The hour's spend as `unix_start sent`, or `None` when absent, unreadable or malformed.
+fn load_window(path: &std::path::Path) -> Option<(u64, u32)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut it = text.split_whitespace();
+    let start = it.next()?.parse::<u64>().ok()?;
+    let sent = it.next()?.parse::<u32>().ok()?;
+    Some((start, sent))
+}
+
+/// Record the hour's spend. Best effort: a state directory that cannot be written must not stop the
+/// radio from working, it only means the next restart forgets again.
+fn save_window(path: &std::path::Path, start_unix: u64, sent: u32) {
+    let _ = std::fs::write(path, format!("{start_unix} {sent}"));
+}
+
 /// Record that this radio's path width has been decided, so a later bind does not overrule it.
 pub(crate) fn record_width(marker: &std::path::Path, key: &[u8; 32]) {
     // Best effort: a state directory that cannot be written must not stop the radio from opening.
@@ -435,6 +471,7 @@ fn hex_key(key: &[u8; 32]) -> String {
 fn prepare(
     device: &str,
     width_marker: Option<std::path::PathBuf>,
+    window_record: Option<std::path::PathBuf>,
 ) -> Result<(Companion<SerialLink>, Bound, Settings), MeshError> {
     let link = SerialLink::open(device).map_err(MeshError::Io)?;
     link.lock_exclusive().map_err(|e| {
@@ -521,7 +558,16 @@ fn prepare(
         public_key: self_info.public_key,
         hash_size,
     };
-    Ok((companion, bound, Settings { hash_size, airtime_ms, preset }))
+    Ok((
+        companion,
+        bound,
+        Settings {
+            hash_size,
+            airtime_ms,
+            preset,
+            window_record,
+        },
+    ))
 }
 
 /// The radio thread: serve commands and the air until the loop lets go.
@@ -546,8 +592,24 @@ fn serve_loop<L: ByteLink>(
     // Recomputed on a retune: a budget is records per hour at *this* tuple's airtime, so a
     // radio moved to a slower spreading factor can spend fewer records than this number said.
     let mut budget = budget_per_hour(settings.airtime_ms);
+    // **The allowance belongs to the hour, not to this process.** A restart used to hand out a
+    // fresh 36 s; the spend is now read back from the state directory and the window resumes where
+    // the previous process left it, as long as it is still the same hour.
     let mut window = Instant::now();
+    let mut window_start_unix = unix_now();
     let mut sent: u32 = 0;
+    if let Some(path) = settings.window_record.as_deref()
+        && let Some((start_unix, spent)) = load_window(path)
+    {
+        let age = unix_now().saturating_sub(start_unix);
+        if age < HOUR.as_secs()
+            && let Some(base) = Instant::now().checked_sub(Duration::from_secs(age))
+        {
+            window = base;
+            window_start_unix = start_unix;
+            sent = spent;
+        }
+    }
     // The route to the peer's radio. **A direct packet's path is consumed in transit**, so it
     // cannot be learned from an arriving record: each repeater removes its own hash
     // (`Mesh::removeSelfFromPath`), which leaves a packet that crossed repeaters with an empty path.
@@ -591,7 +653,11 @@ fn serve_loop<L: ByteLink>(
         }
         if window.elapsed() >= HOUR {
             window = Instant::now();
+            window_start_unix = unix_now();
             sent = 0;
+            if let Some(path) = settings.window_record.as_deref() {
+                save_window(path, window_start_unix, sent);
+            }
         }
 
         match commands.recv_timeout(COMMAND_WAIT) {
@@ -606,6 +672,9 @@ fn serve_loop<L: ByteLink>(
                 let outcome = match companion.send_raw(hash_size, path, &record) {
                     Ok(()) => {
                         sent = sent.saturating_add(1);
+                        if let Some(path) = settings.window_record.as_deref() {
+                            save_window(path, window_start_unix, sent);
+                        }
                         SendOutcome::SentDirect
                     }
                     Err(e) => refused(&e),
@@ -795,8 +864,20 @@ fn serve_loop<L: ByteLink>(
                     // band where the whole allowance is 36 s. One record's worth is charged: an
                     // advert is smaller than a record at every tuple, so this over-counts rather
                     // than under-counts, and the operator's usable records move by a dozen an hour.
-                    if companion.send_self_advert(true).is_ok() {
+                    // **Nothing goes out of a budget that is spent.** The advert is charged below,
+                    // so it must also be refused when the charge would take the hour past its
+                    // allowance: an advert is the host's courtesy, not an answer to anything the
+                    // operator asked for. Measured 2026-11-07: an afternoon of reconnects at
+                    // 62.5 kHz left `records 0 left this hour` with 14 records pending, and the
+                    // broadcast would otherwise have kept spending a band the daemon had already
+                    // declared exhausted.
+                    if budget.saturating_sub(u8::try_from(sent).unwrap_or(u8::MAX)) > 0
+                        && companion.send_self_advert(true).is_ok()
+                    {
                         sent = sent.saturating_add(1);
+                        if let Some(path) = settings.window_record.as_deref() {
+                            save_window(path, window_start_unix, sent);
+                        }
                     }
                     last_advert = Some(Instant::now());
                 }
@@ -833,9 +914,15 @@ fn serve_loop<L: ByteLink>(
                         // route exists the hint costs no air at all.
                         if peer_path.is_none()
                             && last_advert.is_none_or(|t| t.elapsed() >= HINT_ADVERT_FLOOR)
+                            // Spent is spent: a hint is the peer asking, and an advert floods to
+                            // everyone in range on a band the allowance covers.
+                            && budget.saturating_sub(u8::try_from(sent).unwrap_or(u8::MAX)) > 0
                         {
                             if companion.send_self_advert(true).is_ok() {
                                 sent = sent.saturating_add(1);
+                        if let Some(path) = settings.window_record.as_deref() {
+                            save_window(path, window_start_unix, sent);
+                        }
                             }
                             last_advert = Some(Instant::now());
                         }
@@ -1108,6 +1195,25 @@ mod tests {
     }
 
     #[test]
+    fn the_hours_spend_is_remembered_across_a_restart() {
+        // **The allowance is 1 % of an hour, not 1 % of a process's life.** A restart used to hand
+        // out a fresh 36 s; the record now carries the hour's start and what it has spent.
+        let dir = std::env::temp_dir().join(format!("ldmux-airtime-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mesh-airtime");
+        assert!(load_window(&path).is_none(), "nothing spent yet");
+        let start = unix_now();
+        save_window(&path, start, 41);
+        assert_eq!(load_window(&path), Some((start, 41)), "what the hour spent");
+        // A different hour is a different allowance: the caller compares the start against now.
+        save_window(&path, start - HOUR.as_secs() - 1, 66);
+        let (old, spent) = load_window(&path).unwrap();
+        assert!(unix_now() - old > HOUR.as_secs(), "an hour ago is a spent window");
+        assert_eq!(spent, 66, "and its count is still readable");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn dropping_a_carrier_whose_thread_is_slow_does_not_block_the_loop() {
         // A real radio that keeps the port open and stops draining is not reproducible here,
         // so the shape is: a thread that has not signalled it stopped. `drop` must return
@@ -1347,7 +1453,8 @@ mod tests {
                 Settings {
                     hash_size: 1,
                     airtime_ms: 137.9,
-                    preset: RadioPreset {
+                    window_record: None,
+                preset: RadioPreset {
                         freq_mhz: 914.25,
                         bw_khz: 500.0,
                         sf: 8,
@@ -1391,7 +1498,8 @@ mod tests {
                 Settings {
                     hash_size: 1,
                     airtime_ms: 137.9,
-                    preset: RadioPreset {
+                    window_record: None,
+                preset: RadioPreset {
                         freq_mhz: 914.25,
                         bw_khz: 500.0,
                         sf: 8,
@@ -1449,7 +1557,8 @@ mod tests {
                 Settings {
                     hash_size: 1,
                     airtime_ms: 137.9,
-                    preset: RadioPreset {
+                    window_record: None,
+                preset: RadioPreset {
                         freq_mhz: 914.25,
                         bw_khz: 500.0,
                         sf: 8,
@@ -1495,7 +1604,8 @@ mod tests {
                 Settings {
                     hash_size: 1,
                     airtime_ms: 137.9,
-                    preset: RadioPreset {
+                    window_record: None,
+                preset: RadioPreset {
                         freq_mhz: 914.25,
                         bw_khz: 500.0,
                         sf: 8,
@@ -1520,7 +1630,8 @@ mod tests {
         let settings = Settings {
                     hash_size: 1,
                     airtime_ms: 137.9,
-                    preset: RadioPreset {
+                    window_record: None,
+                preset: RadioPreset {
                         freq_mhz: 914.25,
                         bw_khz: 500.0,
                         sf: 8,

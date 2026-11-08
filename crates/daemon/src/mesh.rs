@@ -83,6 +83,8 @@ pub struct MeshConfig {
     /// Filled by the daemon rather than read from the environment, because it must sit beside the
     /// state it protects. `None` in a test that drives the radio directly.
     pub width_marker: Option<std::path::PathBuf>,
+    /// Where the hour's spent airtime is recorded, so a restart resumes the same hour.
+    pub airtime_record: Option<std::path::PathBuf>,
 }
 
 impl MeshConfig {
@@ -108,8 +110,9 @@ impl MeshConfig {
             }
             Some(device) => Ok(Some(Self {
                 serial: device.trim().to_owned(),
-                // The daemon adds the state directory's record; a bare config has none.
+                // The daemon adds the state directory's records; a bare config has none.
                 width_marker: None,
+                airtime_record: None,
             })),
         }
     }
@@ -693,7 +696,11 @@ async fn link(
     set(&runtime.snapshot, |s| s.state = "handshaking");
     let opened = tokio::time::timeout(
         CARRIER_TIMEOUT,
-        crate::mesh_serial::SerialCarrier::open(&cfg.serial, cfg.width_marker.clone()),
+        crate::mesh_serial::SerialCarrier::open(
+            &cfg.serial,
+            cfg.width_marker.clone(),
+            cfg.airtime_record.clone(),
+        ),
     )
     .await
     .map_err(|_| MeshError::Timeout("the radio did not open"))??;
@@ -1173,6 +1180,7 @@ mod tests {
         let cfg = MeshConfig {
             serial: "/dev/null".to_owned(),
             width_marker: None,
+            airtime_record: None,
         };
         MeshRuntime {
             pairing_keys: None,
@@ -1637,6 +1645,7 @@ mod tests {
         let cfg = MeshConfig {
             serial: "/dev/ttyACM0".to_owned(),
             width_marker: None,
+            airtime_record: None,
         };
         let snapshot = MeshSnapshot::new(&cfg);
         let json = snapshot.to_json();

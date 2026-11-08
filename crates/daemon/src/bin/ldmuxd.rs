@@ -180,6 +180,7 @@ fn main() {
             // Beside the other state: the record of whether this radio's path width has already
             // been decided once (see `mesh_serial::prepare`).
             c.width_marker = Some(state_dir.join("mesh-width"));
+            c.airtime_record = Some(state_dir.join("mesh-airtime"));
             c
         }),
         Err(e) => {

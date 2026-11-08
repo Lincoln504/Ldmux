@@ -17,6 +17,38 @@ Three facts are worth stating plainly, because they are the reason the mode exis
 - **An agent turn** of several typed commands costs about a seventh, which is the figure that decides
   whether the public band is usable at all for agent work.
 
+## What a spent hour looks like
+
+Measured on this box, 2026-11-07, after an afternoon of radio work on the public tuple:
+`records  0 left this hour`, `airtime  57.6 s this hour`, `records 9 sent ... 14 pending`, and
+`held back 20552 times by the airtime budget`. The allowance at 62.5 kHz is ≈66 records or 36 s.
+
+Three things filled it, and only one of them was the operator's typing:
+
+- **Live typing**, which the table above already prices at 36.5 s for one 40-character command. A
+  single command line can be the whole hour.
+- **Reconnects**: every handshake is three records each way, and their retransmissions are charged
+  too. An afternoon of daemon and app restarts is a dozen handshakes.
+- **Adverts**: one flood on open and one every five minutes, plus one when a peer's route hint
+  arrives and no route exists yet.
+
+The first two cannot be refused — a handshake is the peer asking to be heard, and refusing it makes
+the host unreachable. The third can, and now is: **an advert is not sent once the hour's allowance
+is spent** (`mesh_serial`). The budget therefore stops spending on broadcasts, and an hour can still
+end over the arithmetic if a peer's handshakes and the acknowledgements for its traffic use it up.
+
+**The hour is a rolling hour from the daemon's first send, and it is now written down.** The
+allowance starts when the radio is opened and the spend is recorded in `<state>/mesh-airtime`, so a
+restart resumes the same hour instead of handing out a fresh 36 s — measured 2026-11-07, an afternoon
+of restarts reached `airtime 61.4 s` against a 36 s budget because every restart forgot what the last
+one had spent. It is not a wall-clock hour and there is no official reset time in the firmware: the
+companion protocol reports no airtime at all, which is why the meter is ours to keep.
+
+**The two figures are ldmux's own arithmetic, not the radio's.** `airtime` is records sent multiplied
+by one record's air at the current tuple, and `records left` is the allowance minus that count. The
+firmware reports neither; `mesh status` used to label both as the radio's own, which is wrong and now
+says what it is.
+
 ## Why this is measured rather than reasoned about
 
 The radio's budget is counted in **records** (`recordsLeftThisHour`), and a record costs its payload
