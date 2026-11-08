@@ -2,6 +2,30 @@
 
 ldmux itself is MIT-licensed (see `LICENSE`). It incorporates the following third-party software.
 
+## Theme faces: Fira Sans, IBM Plex Mono, PT Sans, Space Mono, Lato, Chakra Petch, Cousine, Share Tech Mono, Rajdhani
+
+Each of the client's five themes carries its own monospace and sans face, all bundled under
+`packages/mobile/composeApp/src/androidMain/res/font/` so a theme looks the same on every device
+rather than changing with whatever the OEM calls "monospace". All but Cousine are licensed under the
+SIL Open Font License 1.1; the licence text is the same as the Fira Mono block above, and each face
+was taken from the Google Fonts repository at the path named beside it.
+
+| file | face | upstream | licence |
+|---|---|---|---|
+| `fira_sans_regular.ttf`, `fira_sans_bold.ttf` | Fira Sans | `ofl/firasans` (github.com/google/fonts) | SIL OFL 1.1 |
+| `ibm_plex_mono_regular.ttf`, `ibm_plex_mono_bold.ttf` | IBM Plex Mono | `ofl/ibmplexmono` | SIL OFL 1.1 |
+| `pt_sans_regular.ttf`, `pt_sans_bold.ttf` | PT Sans | `ofl/ptsans` | SIL OFL 1.1 |
+| `space_mono_regular.ttf`, `space_mono_bold.ttf` | Space Mono | `ofl/spacemono` | SIL OFL 1.1 |
+| `lato_light.ttf`, `lato_regular.ttf` | Lato | `ofl/lato` | SIL OFL 1.1 |
+| `chakra_petch_regular.ttf`, `chakra_petch_bold.ttf` | Chakra Petch | `ofl/chakrapetch` | SIL OFL 1.1 |
+| `cousine_regular.ttf`, `cousine_bold.ttf` | Cousine | `ofl/cousine` | Apache License 2.0 |
+| `share_tech_mono_regular.ttf` | Share Tech Mono | `ofl/sharetechmono` | SIL OFL 1.1 |
+| `rajdhani_medium.ttf`, `rajdhani_bold.ttf` | Rajdhani | `ofl/rajdhani` | SIL OFL 1.1 |
+
+Cousine is Copyright 2010 Google Inc. and licensed under the Apache License, Version 2.0
+(<http://www.apache.org/licenses/LICENSE-2.0>); it is distributed unchanged, and is used only as the
+Vermillion theme's monospace face.
+
 ## Fira Mono
 
 The mobile client's monospace face, bundled as
