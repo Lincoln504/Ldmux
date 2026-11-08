@@ -23,7 +23,6 @@ import io.ldmux.mobile.voice.VoiceBanner
 import io.ldmux.mobile.voice.Dictation
 import io.ldmux.mobile.DisconnectRequests
 import io.ldmux.mobile.NewShellRow
-import io.ldmux.mobile.shellRowTitle
 import io.ldmux.mobile.SidePanel
 import io.ldmux.mobile.BackToLauncher
 import io.ldmux.mobile.AppLifecycle
@@ -66,6 +65,7 @@ import io.ldmux.mobile.PortraitBar
 import io.ldmux.mobile.ScrollPad
 import io.ldmux.mobile.Session
 import io.ldmux.mobile.Warn
+import io.ldmux.mobile.rowLabel
 import io.ldmux.mobile.tildify
 import io.ldmux.mobile.MonoFont
 import kotlin.random.Random
@@ -1324,10 +1324,9 @@ private fun MeshShellList(
             item(key = "+shell") { NewShellRow(onClick = onNewShell) }
             items(entries, key = { it.id }) { e ->
                 ChoiceRow(
-                    // The folder is the row's second line, as on the tailnet launcher: it is what
-                    // tells two shells of the same kind apart. The id is still the attach
-                    // selector, it is just no longer the thing a person reads.
-                    title = shellRowTitle(e.label, e.cwd),
+                    // **The same two fields as the tailnet launcher**: the name (the session's
+                    // own, else its shell) in bold, the folder underneath in grey.
+                    title = rowLabel(e.label, e.cwd, e.shell),
                     subtitle = meshRowSubtitle(e),
                     chosen = e.id in chosen,
                     ordinal = picked.indexOfFirst { it.id == e.id }.takeIf { it >= 0 }?.plus(1),

@@ -173,9 +173,9 @@ fun LauncherScreen(
                     ChoiceRow(
                         // The folder is always shown, because it is what tells two
                         // shells of the same kind apart. The process is the name.
-                        title = shellRowTitle(e.label, e.cwd),
+                        title = e.label,
                         mobileShell = e.openedByPhone,
-                        subtitle = rowSubtitle(e.cwd, e.state, e.shell),
+                        subtitle = rowSubtitle(e.cwd, e.state),
                         stateWarn = e.state == NO_WINDOW_STATE,
                         inUse = e.inUseOnPhone,
                         chosen = e.key in chosen,
@@ -309,15 +309,14 @@ data class LauncherEntry(
     val state: String = "",
 ) {
     /**
-     * What the row is called.
+     * What the row is called: **the session's own name when it was given one, else its shell.**
      *
-     * **The title, not the process.** A row used to be named after the program in the pane, so
-     * every agent-run shell read as `pi` and the folder underneath was the only way to tell them
-     * apart — which is the thing the operator asked to stop. The daemon's title is already the
-     * conversation's name with the folder as its fallback (`session_title`), so this is the same
-     * word the CLI prints.
+     * Two fields, and this is the bold one. The daemon's `title` is the conversation's name with the
+     * folder as its fallback, so a title that is only the folder's name means "nothing named this",
+     * and the honest name for that shell is the shell itself (`bash`). The folder belongs on the
+     * second line, next to it, and nowhere else.
      */
-    val label: String get() = title
+    val label: String get() = rowLabel(title, cwd, shell)
 }
 
 /**
@@ -383,6 +382,23 @@ internal fun shellStateLabel(
 internal const val NO_WINDOW_STATE = "no window"
 
 /**
+ * The row's name: the session's own name if it has one, else the shell it is running.
+ *
+ * **A title equal to the folder is not a name.** `session_title` falls back to the folder for a
+ * shell nothing has named, so comparing the two is how "never named" is known without another wire
+ * field — and a shell nothing named should read as what it is, `bash`, with its folder underneath.
+ */
+internal fun rowLabel(title: String, cwd: String, shell: String): String {
+    // The folder's own name comes from the path, **not from the tildified line**: `~` would
+    // otherwise never equal the daemon's fallback title (`ldeen` for `/home/ldeen`) and every home
+    // shell would keep a name nobody gave it.
+    val folder = cwd.trimEnd('/').substringAfterLast('/')
+    val named = title.isNotBlank() && title != "shell" && title != folder
+    if (named) return title
+    return shell.ifBlank { "shell" }
+}
+
+/**
  * The row's second line: **where it is**, then where the shell itself lives.
  *
  * The folder is always drawn. It used to be dropped when the title was the folder's own name, to
@@ -395,9 +411,9 @@ internal const val NO_WINDOW_STATE = "no window"
  * program and then a piece of the session id, which put hex on a row nobody asked to identify —
  * and the operator's answer was that identical rows are fine.
  */
-internal fun rowSubtitle(cwd: String, state: String, shell: String = ""): String {
+internal fun rowSubtitle(cwd: String, state: String): String {
     val folder = tildify(cwd)
-    return listOf(folder, shell, state).filter { it.isNotBlank() }.joinToString("  \u00b7  ")
+    return listOf(folder, state).filter { it.isNotBlank() }.joinToString("  \u00b7  ")
 }
 
 /**
@@ -446,21 +462,6 @@ internal fun OpenBar(label: String, enabled: Boolean, onOpen: () -> Unit) {
     }
 }
 
-/**
- * What a row is called.
- *
- * A shell the host has no name for must not be introduced by its id: the id is an attach selector,
- * twelve hex characters nobody recognises, and the operator asked for the folder instead. The label
- * the host sends is the name; failing that, the folder the shell is in; failing that, the plain word
- * `shell`. One rule, so the tailnet launcher and the radio route cannot disagree about it.
- */
-internal fun shellRowTitle(label: String, cwd: String): String {
-    if (label.isNotBlank()) return label
-    val folder = cwd.trimEnd('/').substringAfterLast('/')
-    if (folder.isNotBlank() && folder != "~") return folder
-    if (cwd.trim() == "~" || cwd.trim() == "/") return cwd.trim()
-    return "shell"
-}
 
 /**
  * The list's first row: starting another shell.

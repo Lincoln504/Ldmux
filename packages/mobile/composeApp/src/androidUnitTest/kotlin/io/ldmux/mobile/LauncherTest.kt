@@ -22,14 +22,13 @@ class LauncherTest {
     @Test
     fun `desk pi processes are not rows, only shells that can be opened are`() {
         // A pi outside ldmux cannot be opened, and a row for it used to start a new
-        // phone shell instead (2026-09-20). A pi inside a desk window is that window's shell
-        // row, and it is named by its title (the folder, when nothing has named it) — not by the
-        // program in the pane.
+        // phone shell instead (2026-09-20). A pi inside a desk window is that window's shell row,
+        // and an unnamed one is named after its shell — not after the program in the pane.
         val rows = launcherEntries(
-            listOf(shell("abc", "/home/u/proj").copy(process = "pi", title = "proj")),
+            listOf(shell("abc", "/home/u/proj").copy(process = "pi", title = "proj", shell = "bash")),
         )
         assertEquals(listOf("abc"), rows.map { it.sessionId })
-        assertEquals("proj", rows[0].label)
+        assertEquals("bash", rows[0].label)
     }
 
     @Test
@@ -46,12 +45,19 @@ class LauncherTest {
     }
 
     @Test
-    fun `a shell with no title still has a name`() {
-        // No title and no folder: the daemon falls back to the id, and an empty one here still
-        // reaches the row's last resort rather than a blank line.
-        val rows = launcherEntries(listOf(shell("abc", "/x").copy(title = "")))
-        assertEquals("", rows[0].label)
-        assertEquals("x", shellRowTitle(rows[0].label, rows[0].cwd))
+    fun `an unnamed shell is named after itself, and a named one after its name`() {
+        // The daemon titles an unnamed shell after its folder, so a title equal to the folder is
+        // the marker for "nothing named this" — and that row reads as its shell, with the folder
+        // on the second line.
+        val unnamed = launcherEntries(listOf(shell("abc", "/home/u/proj").copy(title = "proj", shell = "bash")))
+        assertEquals("bash", unnamed[0].label)
+        assertEquals("~/proj", rowSubtitle(unnamed[0].cwd, unnamed[0].state))
+        // A title that is not the folder is a conversation's own name, and that wins.
+        val named = launcherEntries(listOf(shell("abc", "/home/u/proj").copy(title = "Radio paths", shell = "bash")))
+        assertEquals("Radio paths", named[0].label)
+        // Nothing at all still has something to draw.
+        val bare = launcherEntries(listOf(shell("abc", "/x").copy(title = "", shell = "")))
+        assertEquals("shell", bare[0].label)
     }
 
     @Test
