@@ -48,6 +48,14 @@ const COMMAND_WAIT: Duration = Duration::from_millis(10);
 /// status tied to transmission would never refresh. Half a second is invisible to a person and
 /// costs no airtime.
 const STATUS_REFRESH: Duration = Duration::from_millis(500);
+/// How often the radio's own settings are re-read while the link is quiet.
+///
+/// **Another app can retune this radio and nothing announces it.** The research is explicit: the
+/// companion protocol has no client identity and no notification of a parameter change, so a radio
+/// an operator retuned from the phone (or from a CLI session) keeps our snapshot lying about the
+/// frequency we are on. `APP_START` re-reads `SELF_INFO`, which carries the tuple, the power and the
+/// configured width; it is a serial command with **no airtime**, so a minute costs nothing.
+const PARAM_WATCH: Duration = Duration::from_secs(60);
 
 /// The firmware's own ceiling for a path, in bytes (`MAX_PATH_SIZE`, `MeshCore.h`).
 const MAX_PATH_SIZE: usize = 64;
@@ -562,6 +570,9 @@ fn serve_loop<L: ByteLink>(
     // waiting on "the host has not described a terminal yet" for as long as the countdown stayed
     // stale.
     let mut last_status = Instant::now();
+    // When the radio's own settings were last re-read, so a quiet link notices a retune by another
+    // app within a minute rather than never.
+    let mut last_params = Instant::now();
 
     // One status before anything else: the loop starts with no budget, and an
     // unknown budget is zero, so without this it would never send the first record.
@@ -713,6 +724,56 @@ fn serve_loop<L: ByteLink>(
                 // The countdown, refreshed while the link is idle. Not a transmission: it is a
                 // message to this process only, and it is what lets the session see the hour roll
                 // over when it has been held back for the whole hour.
+                // **The radio's settings, re-read from the radio.** A retune by another app is not
+                // announced by anything, so the snapshot would otherwise keep claiming the old
+                // frequency until the daemon restarts. One `APP_START` per minute is a serial
+                // command: no airtime, and no effect on the session.
+                if last_params.elapsed() >= PARAM_WATCH {
+                    last_params = Instant::now();
+                    if let Ok(info) = companion.app_start("ldmux") {
+                        let seen = SeenParams {
+                            freq_khz: (info.radio_freq_mhz * 1000.0).round() as u32,
+                            bw_hz: (info.radio_bw_khz * 1000.0).round() as u32,
+                            sf: info.radio_sf,
+                            cr: info.radio_cr,
+                            tx_power_dbm: i8::try_from(info.tx_power).unwrap_or(0),
+                        };
+                        if seen != SeenParams::of(&settings.preset) {
+                            // Say it once, where an operator will look, and publish the truth: the
+                            // phone compares its own tuple against this one, so a snapshot left
+                            // stale is a mismatch nobody can see.
+                            eprintln!(
+                                "ldmuxd: the radio's settings changed under us: {:.3} MHz  {:.1} kHz  SF{}  CR{}  {} dBm",
+                                f64::from(seen.freq_khz) / 1000.0,
+                                f64::from(seen.bw_hz) / 1000.0,
+                                seen.sf,
+                                seen.cr,
+                                seen.tx_power_dbm
+                            );
+                            settings.preset.freq_mhz = f64::from(seen.freq_khz) / 1000.0;
+                            settings.preset.bw_khz = f64::from(seen.bw_hz) / 1000.0;
+                            settings.preset.sf = seen.sf;
+                            settings.preset.cr = seen.cr;
+                            settings.preset.tx_power_dbm = seen.tx_power_dbm;
+                            // The width is a register of its own on the same radio, and another app
+                            // setting it is the case that cost a whole afternoon: read it too.
+                            if let Ok(info) = companion.device_query()
+                                && let Some(mode) = info.path_hash_mode
+                            {
+                                settings.preset.hash_size = mode.saturating_add(1).clamp(1, 3);
+                            }
+                            // The airtime estimate follows the tuple, or the budget keeps measuring
+                            // the radio that is no longer in use.
+                            settings.airtime_ms = info.time_on_air_ms(RECORD_MAX);
+                            if events
+                                .blocking_send(Ok(Event::Status(status(&settings, budget, sent))))
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                    }
+                }
                 if last_status.elapsed() >= STATUS_REFRESH {
                     last_status = Instant::now();
                     let left = budget.saturating_sub(u8::try_from(sent).unwrap_or(u8::MAX));
@@ -811,6 +872,65 @@ fn serve_loop<L: ByteLink>(
                 return;
             }
         }
+    }
+}
+
+/// The part of a radio's state that another app can change under us, comparable in one place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SeenParams {
+    freq_khz: u32,
+    bw_hz: u32,
+    sf: u8,
+    cr: u8,
+    tx_power_dbm: i8,
+}
+
+impl SeenParams {
+    fn of(preset: &RadioPreset) -> Self {
+        Self {
+            freq_khz: (preset.freq_mhz * 1000.0).round() as u32,
+            bw_hz: (preset.bw_khz * 1000.0).round() as u32,
+            sf: preset.sf,
+            cr: preset.cr,
+            tx_power_dbm: preset.tx_power_dbm,
+        }
+    }
+}
+
+#[cfg(test)]
+mod seen_params_tests {
+    use super::{RadioPreset, SeenParams};
+
+    fn preset() -> RadioPreset {
+        RadioPreset {
+            freq_mhz: 910.525,
+            bw_khz: 62.5,
+            sf: 7,
+            cr: 5,
+            tx_power_dbm: 22,
+            hash_size: 1,
+            public_key: [0; 32],
+        }
+    }
+
+    #[test]
+    fn a_radio_reporting_what_we_last_set_is_not_a_change() {
+        let p = preset();
+        // Through the wire's integer units and back: the snapshot must not "notice" its own values.
+        assert_eq!(SeenParams::of(&p), SeenParams::of(&p));
+        assert_eq!(SeenParams::of(&p).freq_khz, 910_525);
+        assert_eq!(SeenParams::of(&p).bw_hz, 62_500);
+    }
+
+    #[test]
+    fn a_retune_or_a_power_change_is_a_change() {
+        let p = preset();
+        let mut q = p;
+        q.freq_mhz = 915.8;
+        assert_ne!(SeenParams::of(&p), SeenParams::of(&q));
+        let mut r = p;
+        r.tx_power_dbm = 14;
+        assert_ne!(SeenParams::of(&p), SeenParams::of(&r));
     }
 }
 
