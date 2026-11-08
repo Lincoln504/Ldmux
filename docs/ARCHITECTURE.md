@@ -147,7 +147,10 @@ Mesh terminal protocol, version 9:
 Version 7 added shell control. Version 8 added the holder and the takeover. Version 9 added the
 mark table: one entry per marked shell, paged because a message's body is capped at 134 bytes and a
 dozen marks overflow one, and sent with the `Sessions` answer and with an `Attach` rather than
-pushed, because the radio cannot reach a phone that is not connected.
+pushed, because the radio cannot reach a phone that is not connected. Version 10 added the **shell** to each `Sessions` entry
+(`bash`), behind the same kind of flag: the launcher draws the folder and the shell on a row's
+second line, because a row's name is the conversation and the line under it has to say where the
+shell is and what it is.
 
 **The channel is the tuple and the path width.** `ldmux mesh preset <MHz> <kHz> <SF> <CR> [--path N]`
 tunes the host's own radio, and `--path` sets the path hash width in bytes. The firmware keeps the

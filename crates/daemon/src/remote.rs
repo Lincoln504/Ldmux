@@ -3133,6 +3133,7 @@ mod tests {
                 updated_at: now,
                 created_by: "phone".into(),
                 status: "running".into(),
+                shell: None,
                 exit_code: None,
                 exited_at: None,
                 live_workspace: None,

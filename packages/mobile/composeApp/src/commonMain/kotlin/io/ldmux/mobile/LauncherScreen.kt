@@ -175,7 +175,7 @@ fun LauncherScreen(
                         // shells of the same kind apart. The process is the name.
                         title = shellRowTitle(e.label, e.cwd),
                         mobileShell = e.openedByPhone,
-                        subtitle = rowSubtitle(e.cwd, e.state, shellRowTitle(e.label, e.cwd)),
+                        subtitle = rowSubtitle(e.cwd, e.state, e.shell),
                         stateWarn = e.state == NO_WINDOW_STATE,
                         inUse = e.inUseOnPhone,
                         chosen = e.key in chosen,
@@ -287,6 +287,8 @@ data class LauncherEntry(
     val process: String,
     /** The shell's name from the daemon: the conversation's title, else its folder. */
     val title: String,
+    /** The shell the session was created with (`bash`), empty when the host has no record of it. */
+    val shell: String = "",
     val cwd: String,
     /**
      * A phone is using it right now. Shown as a shade, not as words: the rows used
@@ -338,6 +340,7 @@ internal fun launcherEntries(openShells: List<Session>): List<LauncherEntry> =
             sessionId = shell.id,
             process = shell.process,
             title = shell.title,
+            shell = shell.shell,
             cwd = shell.cwd,
             inUseOnPhone = shell.ownerKind == "phone",
             openedByPhone = shell.openedByPhone,
@@ -379,16 +382,22 @@ internal fun shellStateLabel(
  */
 internal const val NO_WINDOW_STATE = "no window"
 
-/** The row's second line: where it is, then where the shell itself lives. */
-internal fun rowSubtitle(cwd: String, state: String, title: String = ""): String {
-    // **Do not say the folder twice.** When the title is the folder's own name — the daemon's
-    // fallback for a shell nothing has named — the second line repeated the first word, so
-    // `meshmore-sns` sat above `~/Documents/meshmore-sns` and the row spent a line saying nothing.
-    // The folder line stays whenever it adds a fact: a titled shell, or a state to report.
+/**
+ * The row's second line: **where it is**, then where the shell itself lives.
+ *
+ * The folder is always drawn. It used to be dropped when the title was the folder's own name, to
+ * avoid repeating a word — and that left every unnamed row with no place on it at all (measured
+ * 2026-11-07: `ldmux`, `meshmore-sns`, `tmp` and `RCNT` each showed one word and nothing else),
+ * while five shells in the home directory showed the same three characters. A row's name is a
+ * promise about *what* it is; only the second line can say *where*.
+ *
+ * **Two rows may read the same, and that is allowed.** They were pulled apart with the pane's
+ * program and then a piece of the session id, which put hex on a row nobody asked to identify —
+ * and the operator's answer was that identical rows are fine.
+ */
+internal fun rowSubtitle(cwd: String, state: String, shell: String = ""): String {
     val folder = tildify(cwd)
-    val repeats = title.isNotBlank() && folder.substringAfterLast('/') == title
-    val where = if (repeats) "" else folder
-    return listOf(where, state).filter { it.isNotBlank() }.joinToString("  \u00b7  ")
+    return listOf(folder, shell, state).filter { it.isNotBlank() }.joinToString("  \u00b7  ")
 }
 
 /**

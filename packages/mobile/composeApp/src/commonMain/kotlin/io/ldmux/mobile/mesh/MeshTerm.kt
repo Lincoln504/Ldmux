@@ -24,7 +24,7 @@ object MeshTerm {
      * Version 6 adds a shell's working directory to each `Sessions` entry, so the picker shows the
      * folder instead of the id it would send.
      */
-    const val VERSION = 9
+    const val VERSION = 10
     const val MIN_VERSION = 1
     /** The first version that has `Key` and the shell id in `Profile`. */
     const val KEY_VERSION = 2
@@ -156,6 +156,14 @@ object MeshTerm {
 
     /** The first version whose host sends [TermMessage.Marks]. */
     const val MARKS_VERSION = 9
+
+    /**
+     * Version 10: each `Sessions` entry carries the **shell** it was created with (`bash`).
+     *
+     * A row is named after the conversation and its second line says where it is; the shell belongs
+     * on that line too, because a folder alone does not say what kind of shell is inside it.
+     */
+    const val SHELL_VERSION = 10
     internal const val T_PROFILE = 0x81
     internal const val T_ROWS = 0x82
     internal const val T_COMMIT = 0x83
@@ -200,6 +208,8 @@ data class SessionEntry(
      * close and open-on-desktop actions after the app restarts instead of passing for a desk shell.
      */
     val origin: String = "",
+    /** The shell the session was created with, as a bare name (`bash`), version 10. */
+    val shell: String = "",
     /**
      * Who holds it now: `desktop`, `phone`, `mesh`, or empty for nobody (version 8).
      *
@@ -286,6 +296,8 @@ sealed interface TermMessage {
         val cwd: Boolean = false,
         val origin: Boolean = false,
         val owner: Boolean = false,
+        /** The entries carry their shell (version 10). */
+        val shell: Boolean = false,
     ) : TermMessage
 
     /**
@@ -479,7 +491,7 @@ fun TermMessage.encode(): ByteArray {
         is TermMessage.Sessions -> {
             body.add(
                 ((if (last) 1 else 0) or (if (cwd) 2 else 0) or (if (origin) 4 else 0) or
-                    (if (owner) 8 else 0)).toByte(),
+                    (if (owner) 8 else 0) or (if (shell) 16 else 0)).toByte(),
             )
             for (e in entries) {
                 val id = e.id.encodeToByteArray()
@@ -496,6 +508,11 @@ fun TermMessage.encode(): ByteArray {
                 if (cwd) { body.add(path.size.toByte()); path.forEach { body.add(it) } }
                 if (origin) body.add(by.toByte())
                 if (owner) body.add(holderCode(e.owner).toByte())
+                if (shell) {
+                    val shellName = e.shell.encodeToByteArray()
+                    if (shellName.size > MeshTerm.MAX_LABEL) throw TermEncodeException("shell name too long")
+                    body.add(shellName.size.toByte()); shellName.forEach { body.add(it) }
+                }
             }
             if (body.size > MeshTerm.MAX_ROWS_BODY) throw TermEncodeException("sessions body too long")
             MeshTerm.T_SESSIONS
@@ -695,6 +712,7 @@ class TermDecoder {
                 val withCwd = body[0].toInt() and 2 != 0
                 val withOrigin = body[0].toInt() and 4 != 0
                 val withOwner = body[0].toInt() and 8 != 0
+                val withShell = body[0].toInt() and 16 != 0
                 val entries = ArrayList<SessionEntry>()
                 var p = 1
                 fun field(max: Int): String? {
@@ -717,9 +735,19 @@ class TermDecoder {
                         if (p >= body.size) return Parsed.Bad
                         holderWord(b(body, p)).also { p += 1 }
                     } else ""
-                    entries += SessionEntry(id, label, cwd, origin, owner)
+                    val shell = if (withShell) field(MeshTerm.MAX_LABEL) ?: return Parsed.Bad else ""
+                    entries += SessionEntry(id, label, cwd, origin, shell, owner)
                 }
-                ok(TermMessage.Sessions(body[0].toInt() and 1 == 1, entries, withCwd, withOrigin, withOwner))
+                ok(
+                    TermMessage.Sessions(
+                        last = body[0].toInt() and 1 == 1,
+                        entries = entries,
+                        cwd = withCwd,
+                        origin = withOrigin,
+                        owner = withOwner,
+                        shell = withShell,
+                    ),
+                )
             }
             else -> Parsed.Unknown
         }

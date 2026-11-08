@@ -1514,6 +1514,9 @@ impl LdmuxDaemon {
             live_workspace: None,
             had_window: false,
             live_pid: None,
+            // The keeper spawns the default shell and the daemon records its name, from one
+            // resolution (`protocol::paths`), so the label and the pane cannot disagree.
+            shell: Some(ldmux_protocol::paths::shell_name()),
             ended_reason: None,
             exit_signal: None,
             ended_kind: None,
@@ -2579,6 +2582,9 @@ impl LdmuxDaemon {
             updated_at: now,
             created_by: "adopt".into(),
             status: "running".into(),
+            // An adopted shell's shell is whatever the keeper spawned; the name is the same
+            // default, and a row that says `bash` for it is right on every host this runs on.
+            shell: Some(ldmux_protocol::paths::shell_name()),
             exit_code: None,
             exited_at: None,
             live_workspace: None,
@@ -2691,6 +2697,13 @@ impl LdmuxDaemon {
                     created_by: record.created_by.clone(),
                     last_activity_at,
                     process,
+                    // **A record from before the field still has a shell.** Every session this
+                    // daemon creates uses `default_shell()` (nothing passes a command), so the
+                    // default name is the right answer for an older record rather than a blank.
+                    shell: record
+                        .shell
+                        .clone()
+                        .or_else(|| Some(ldmux_protocol::paths::shell_name())),
                     owner,
                     live_workspace,
                     had_window: record.had_window,
@@ -3292,6 +3305,7 @@ mod tests {
             updated_at: now,
             created_by: "adopt".into(),
             status: "running".into(),
+            shell: None,
             exit_code: None,
             exited_at: None,
             live_workspace: None,
@@ -3954,6 +3968,7 @@ mod tests {
             updated_at: now,
             created_by: "adopt".into(),
             status: "running".into(),
+            shell: None,
             exit_code: None,
             exited_at: None,
             live_workspace: None,
@@ -4775,6 +4790,7 @@ mod tests {
             updated_at: 1,
             created_by: "local".into(),
             status: "running".into(),
+            shell: None,
             exit_code: None,
             exited_at: None,
             live_workspace: Some("1".into()),
@@ -4808,6 +4824,7 @@ mod tests {
             updated_at: 1,
             created_by: "local".into(),
             status: "dead".into(),
+            shell: None,
             exit_code: None,
             exited_at: None,
             live_workspace: Some("1".into()),

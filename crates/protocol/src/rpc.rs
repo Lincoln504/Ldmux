@@ -100,6 +100,10 @@ pub struct SessionRecord {
     pub updated_at: u64,
     pub created_by: String,
     pub status: String,
+    /// The shell this session was created with, as a bare name (`bash`, `zsh`, `sh`). Absent on a
+    /// record written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -184,6 +188,13 @@ pub struct SessionInfo {
     /// What the pane is currently running (`bash`, `vim`, `pi`), when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process: Option<String>,
+    /// The shell this session was created with, as a bare name (`bash`, `zsh`, `sh`).
+    ///
+    /// `process` is the program in the foreground *now*; this is the shell the pane was born with,
+    /// which is what a row can say without changing as the operator works. Absent on a record
+    /// written before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
     /// The device holding this shell, when one does (ADR-0010).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner: Option<SessionOwner>,
@@ -351,6 +362,7 @@ mod tests {
             created_by: "local".into(),
             last_activity_at: None,
             process: None,
+            shell: None,
             owner: None,
             live_workspace: None,
             had_window: false,
@@ -386,6 +398,7 @@ mod tests {
             updated_at: 2,
             created_by: "d".into(),
             status: "running".into(),
+            shell: None,
             exit_code: None,
             exited_at: None,
             live_workspace: None,
@@ -418,6 +431,7 @@ mod tests {
             updated_at: 2,
             created_by: "d".into(),
             status: "dead".into(),
+            shell: None,
             exit_code: Some(130),
             exited_at: Some(99),
             live_workspace: None,

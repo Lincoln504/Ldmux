@@ -27,8 +27,8 @@ use std::time::{Duration, Instant};
 use ldmux_protocol::keeper::SnapshotResult;
 use ldmux_protocol::mesh_term::{
     CWD_VERSION, DecodeError, Decoder, Differ, KEY_VERSION, MARKS_VERSION, MIN_VERSION, MarkEntry,
-    Message, ORIGIN_VERSION, OWNER_VERSION, RESIZE_VERSION, SHELL_CONTROL_VERSION, STREAM_VERSION,
-    Screen, VERSION, closed, session_pages,
+    Message, ORIGIN_VERSION, OWNER_VERSION, RESIZE_VERSION, SHELL_CONTROL_VERSION, SHELL_VERSION,
+    STREAM_VERSION, Screen, VERSION, closed, session_pages,
 };
 
 /// The session as the bridge sees it.
@@ -60,12 +60,15 @@ pub trait Host {
     /// `(id, label, cwd, created_by, holder)` of the running shells, for the phone's picker. The default has
     /// no labels, no paths and no origin; a host that knows where a shell runs gives the phone the
     /// folder and who started it, as the tailnet launcher does.
-    async fn listing(&mut self) -> Option<Vec<(String, String, String, String, String)>> {
+    async fn listing(&mut self) -> Option<Vec<ldmux_protocol::mesh_term::SessionSummary>> {
         Some(
             self.running()
                 .await?
                 .into_iter()
-                .map(|id| (id, String::new(), String::new(), String::new(), String::new()))
+                .map(|id| ldmux_protocol::mesh_term::SessionSummary {
+                    id,
+                    ..Default::default()
+                })
                 .collect(),
         )
     }
@@ -773,7 +776,7 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 // would sit on a screen nobody is feeding.
                 let listing = self.host.listing().await;
                 let Some(running) = listing.as_ref().map(|rows| {
-                    rows.iter().map(|r| r.0.clone()).collect::<Vec<_>>()
+                    rows.iter().map(|r| r.id.clone()).collect::<Vec<_>>()
                 }) else {
                     // Unknown is not "not found": answering `Closed` here told the phone the
                     // shell had ended when the host had merely failed to answer. Stay silent and
@@ -917,9 +920,12 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 // a list is answered before any attach has a profile to gate on.
                 let with_origin = version.is_some_and(|v| v >= ORIGIN_VERSION);
                 let with_owner = version.is_some_and(|v| v >= OWNER_VERSION);
+                // The shell rides the list like the folder and the holder: one flag, one string per
+                // entry, and only for a phone that speaks it.
+                let with_shell = version.is_some_and(|v| v >= SHELL_VERSION);
                 self.reply(
                     shell,
-                    &session_pages(&listing, with_cwd, with_origin, with_owner),
+                    &session_pages(&listing, with_cwd, with_origin, with_owner, with_shell),
                 );
                 // **The marks ride with the list.** The launcher is the one screen that shows every
                 // shell, so it is the one screen that needs the table — and it lists without
@@ -982,7 +988,7 @@ impl<H: Host, L: Link> Bridge<H, L> {
                     .host
                     .listing()
                     .await
-                    .and_then(|rows| rows.into_iter().find(|r| r.0 == id).map(|r| r.4))
+                    .and_then(|rows| rows.into_iter().find(|r| r.id == id).map(|r| r.owner))
                     .unwrap_or_default();
                 if !holder.is_empty() && holder != "mesh" {
                     self.reply(shell, &[Message::Closed { reason: closed::HELD }]);
@@ -1010,7 +1016,13 @@ impl<H: Host, L: Link> Bridge<H, L> {
                     let with_owner = version >= OWNER_VERSION;
                     self.reply(
                         shell,
-                        &session_pages(&listing, with_cwd, with_origin, with_owner),
+                        &session_pages(
+                            &listing,
+                            with_cwd,
+                            with_origin,
+                            with_owner,
+                            version >= SHELL_VERSION,
+                        ),
                     );
                 }
             }
@@ -1198,7 +1210,7 @@ impl Host for DaemonHost {
         Some(ids)
     }
 
-    async fn listing(&mut self) -> Option<Vec<(String, String, String, String, String)>> {
+    async fn listing(&mut self) -> Option<Vec<ldmux_protocol::mesh_term::SessionSummary>> {
         let v = self
             .0
             .lock()
@@ -1229,13 +1241,17 @@ impl Host for DaemonHost {
                             .and_then(|o| o.get("kind"))
                             .and_then(|x| x.as_str())
                             .unwrap_or("");
-                        Some((
-                            id.to_owned(),
-                            label.to_owned(),
-                            cwd.to_owned(),
-                            origin.to_owned(),
-                            holder.to_owned(),
-                        ))
+                        // The shell the session was created with (`bash`), for the row's second
+                        // line: the folder and the shell, always.
+                        let shell = s.get("shell").and_then(|x| x.as_str()).unwrap_or("");
+                        Some(ldmux_protocol::mesh_term::SessionSummary {
+                            id: id.to_owned(),
+                            label: label.to_owned(),
+                            cwd: cwd.to_owned(),
+                            origin: origin.to_owned(),
+                            owner: holder.to_owned(),
+                            shell: shell.to_owned(),
+                        })
                     })
                     .collect::<Vec<_>>()
             })
@@ -1626,7 +1642,7 @@ mod tests {
             }
             Some(s.running.clone())
         }
-        async fn listing(&mut self) -> Option<Vec<(String, String, String, String, String)>> {
+        async fn listing(&mut self) -> Option<Vec<ldmux_protocol::mesh_term::SessionSummary>> {
             let s = self.0.lock().unwrap();
             if s.fail_list {
                 return None;
@@ -1634,14 +1650,13 @@ mod tests {
             Some(
                 s.running
                     .iter()
-                    .map(|id| {
-                        (
-                            id.clone(),
-                            format!("label of {id}"),
-                            format!("/work/{id}"),
-                            "phone".to_string(),
-                            s.holders.get(id).cloned().unwrap_or_default(),
-                        )
+                    .map(|id| ldmux_protocol::mesh_term::SessionSummary {
+                        id: id.clone(),
+                        label: format!("label of {id}"),
+                        cwd: format!("/work/{id}"),
+                        origin: "phone".to_string(),
+                        owner: s.holders.get(id).cloned().unwrap_or_default(),
+                        shell: "bash".to_string(),
                     })
                     .collect(),
             )
@@ -2399,6 +2414,7 @@ mod tests {
                     cwd,
                     origin: _,
                     owner: _,
+                    shell: _,
                     entries,
                 } = m
                 else {
@@ -2468,6 +2484,7 @@ mod tests {
                 cwd,
                 origin: _,
                 owner: _,
+                shell: _,
                 entries,
             } = &sessions_seen(&link, 4)[0]
             else {

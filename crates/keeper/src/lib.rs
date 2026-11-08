@@ -1969,79 +1969,12 @@ async fn serve_conn(me: &Arc<Keeper>, sock: tokio::net::UnixStream) -> std::io::
     Ok(())
 }
 
-/// The shell argv for sessions that name no command: `$SHELL` when it is set,
-/// non-empty and executable; else the passwd entry's shell; else `/bin/sh`.
+/// The shell argv for sessions that name no command: `$SHELL` when it is set, non-empty and
+/// executable; else the passwd entry's shell; else `/bin/sh`.
 ///
-/// **Login-shell policy: not a login shell.** The argv is the bare program (no
-/// `-l`, `argv[0]` not prefixed with `-`). The keeper is spawned by the daemon,
-/// which already runs in the user's session with their environment (and the
-/// `LDMUX_*` overlay); a login shell would re-run the profile files on every
-/// pane and stack PATH entries onto an environment that was already built. A
-/// user who wants one configures their rc file, or the daemon passes a `command`.
-pub fn default_shell() -> Vec<String> {
-    let passwd = nix::unistd::User::from_uid(nix::unistd::getuid())
-        .ok()
-        .flatten()
-        .map(|u| u.shell.to_string_lossy().into_owned());
-    vec![pick_shell(
-        std::env::var("SHELL").ok(),
-        passwd,
-        is_executable,
-    )]
-}
-
-/// The choice in [`default_shell`], with the environment and the executable
-/// check injected so it is testable.
-pub fn pick_shell(
-    env_shell: Option<String>,
-    passwd_shell: Option<String>,
-    ok: impl Fn(&str) -> bool,
-) -> String {
-    [env_shell, passwd_shell]
-        .into_iter()
-        .flatten()
-        .find(|s| !s.is_empty() && ok(s))
-        .unwrap_or_else(|| "/bin/sh".to_string())
-}
-
-fn is_executable(path: &str) -> bool {
-    use std::os::unix::fs::PermissionsExt as _;
-    // `metadata` follows symlinks (a distro `/bin/sh` is one).
-    std::fs::metadata(path)
-        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
-#[cfg(test)]
-mod shell_tests {
-    use super::pick_shell;
-
-    #[test]
-    fn env_shell_wins_when_usable_else_passwd_else_sh() {
-        let ok = |p: &str| p != "/nope";
-        assert_eq!(
-            pick_shell(Some("/bin/zsh".into()), Some("/bin/bash".into()), ok),
-            "/bin/zsh"
-        );
-        assert_eq!(
-            pick_shell(Some("".into()), Some("/bin/bash".into()), ok),
-            "/bin/bash"
-        );
-        assert_eq!(
-            pick_shell(Some("/nope".into()), Some("/bin/bash".into()), ok),
-            "/bin/bash"
-        );
-        assert_eq!(pick_shell(None, Some("/nope".into()), ok), "/bin/sh");
-        assert_eq!(pick_shell(None, None, ok), "/bin/sh");
-    }
-
-    #[test]
-    fn executability_is_checked_on_disk() {
-        assert!(super::is_executable("/bin/sh"));
-        assert!(!super::is_executable("/etc/passwd"));
-        assert!(!super::is_executable("/definitely/not/here"));
-    }
-}
+/// The rule lives in [`ldmux_protocol::paths::default_shell`], because the daemon needs the same
+/// answer to put a name on the shell's record, and two copies would eventually disagree.
+pub use ldmux_protocol::paths::default_shell;
 
 #[cfg(test)]
 mod proc_tests {

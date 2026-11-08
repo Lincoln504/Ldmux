@@ -422,6 +422,7 @@ mod tests {
             updated_at: over.updated_at.map(|v| v as u64).unwrap_or(now as u64),
             created_by: "test".into(),
             status: over.status.unwrap_or_else(|| "running".into()),
+            shell: None,
             exit_code: over.exit_code,
             exited_at: over.exited_at,
             live_workspace: None,

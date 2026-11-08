@@ -70,16 +70,18 @@ class MeshTermCodecTest {
                 o["last"]!!.jsonPrimitive.boolean,
                 o["entries"]!!.jsonArray.map {
                     SessionEntry(
-                        it.jsonObject["id"]!!.jsonPrimitive.content,
-                        it.jsonObject["label"]!!.jsonPrimitive.content,
-                        it.jsonObject["cwd"]!!.jsonPrimitive.content,
-                        (it.jsonObject["origin"] ?: JsonPrimitive(""))!!.jsonPrimitive.content,
-                        (it.jsonObject["owner"] ?: JsonPrimitive(""))!!.jsonPrimitive.content,
+                        id = it.jsonObject["id"]!!.jsonPrimitive.content,
+                        label = it.jsonObject["label"]!!.jsonPrimitive.content,
+                        cwd = it.jsonObject["cwd"]!!.jsonPrimitive.content,
+                        origin = (it.jsonObject["origin"] ?: JsonPrimitive(""))!!.jsonPrimitive.content,
+                        shell = (it.jsonObject["shell"] ?: JsonPrimitive(""))!!.jsonPrimitive.content,
+                        owner = (it.jsonObject["owner"] ?: JsonPrimitive(""))!!.jsonPrimitive.content,
                     )
                 },
-                o["cwd"]!!.jsonPrimitive.boolean,
-                (o["origin"] ?: JsonPrimitive(false))!!.jsonPrimitive.boolean,
-                (o["owner"] ?: JsonPrimitive(false))!!.jsonPrimitive.boolean,
+                cwd = o["cwd"]!!.jsonPrimitive.boolean,
+                origin = (o["origin"] ?: JsonPrimitive(false))!!.jsonPrimitive.boolean,
+                owner = (o["owner"] ?: JsonPrimitive(false))!!.jsonPrimitive.boolean,
+                shell = (o["shell"] ?: JsonPrimitive(false))!!.jsonPrimitive.boolean,
             )
             else -> error("unknown fixture kind $kind")
         }
@@ -113,6 +115,7 @@ class MeshTermCodecTest {
         assertEquals(n("streamVersion"), MeshTerm.STREAM_VERSION)
         assertEquals(n("lineVersion"), MeshTerm.LINE_VERSION)
         assertEquals(n("originVersion"), MeshTerm.ORIGIN_VERSION)
+        assertEquals(n("shellVersion"), MeshTerm.SHELL_VERSION)
         assertEquals(n("ownerVersion"), MeshTerm.OWNER_VERSION)
         assertEquals(n("maxKeys"), MeshTerm.MAX_KEYS)
         val all = with(MeshTerm.Unsupported) { SCROLLBACK or STYLE or HYPERLINKS or MOUSE or IMAGES or RESIZE or CLIPBOARD }

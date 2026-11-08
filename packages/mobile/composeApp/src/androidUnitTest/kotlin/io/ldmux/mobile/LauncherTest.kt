@@ -77,15 +77,14 @@ class LauncherTest {
     }
 
     @Test
-    fun `the row's second line is the folder and then the state`() {
+    fun `the row's second line is always the folder, then the state`() {
         assertEquals("~/proj", rowSubtitle("/home/u/proj", ""))
-        // **A title that is the folder is not repeated.** The second line is for a fact the first
-        // one does not carry.
-        assertEquals("", rowSubtitle("/home/u/proj", "", title = "proj"))
-        assertEquals("on desktop 2", rowSubtitle("/home/u/proj", "on desktop 2", title = "proj"))
-        // A titled shell still says where it lives, because `Radio paths` is not a path.
-        assertEquals("~/proj", rowSubtitle("/home/u/proj", "", title = "Radio paths"))
+        // **The folder is never dropped.** It used to be, when the title was the folder's own name,
+        // and that left `ldmux`, `meshmore-sns`, `tmp` and `RCNT` with no place on the row at all
+        // (measured on the device, 2026-11-07). Two rows may read the same; that is allowed.
         assertEquals("~/proj  \u00b7  on desktop 2", rowSubtitle("/home/u/proj", "on desktop 2"))
+        assertEquals("~", rowSubtitle("~", ""))
+        assertEquals("~  \u00b7  no window", rowSubtitle("~", "no window"))
     }
 
     @Test

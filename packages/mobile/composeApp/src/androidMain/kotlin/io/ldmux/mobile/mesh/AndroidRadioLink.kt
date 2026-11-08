@@ -621,11 +621,21 @@ class AndroidRadioLink(
         val oldHashMode = oldInfo?.pathHashMode
         val hashMode = (preset.pathHashSize - 1).coerceIn(0, 2)
         val tx = minOf(preset.txPowerDbm, old?.maxTxPowerDbm ?: preset.txPowerDbm)
+        // **The width is asked for first, and refused on its own.** A radio can take a channel and
+        // refuse its hash width: measured 2026-11-07 on a MeshCore-WIOld, which takes
+        // 910.525/62.5/SF7/CR5 and keeps two-byte paths when one is written. Judged together, that
+        // refusal failed the whole apply and rolled the *channel* back too, so joining the host's
+        // channel looked impossible. Asked separately, a refusal costs the width and nothing else,
+        // and the app says which half it kept.
+        val widthWanted = oldHashMode != null && oldHashMode != hashMode
+        if (widthWanted) {
+            s.setPathHashMode(hashMode)
+            withTimeoutOrNull(PRESET_COMMAND_WAIT_MS) { while (!s.isIdle()) delay(25) }
+        }
         s.setRadioParams(
             RadioParams.of(preset.frequencyMhz, preset.bandwidthKhz, preset.spreadingFactor, preset.codingRate),
         )
         s.setTxPower(tx)
-        s.setPathHashMode(hashMode)
         // Setters are tracked commands, not fire-and-forget proof. Wait for the
         // answer window to clear before the reconnect; the read-back after it is
         // the only proof that the radio took the operating point.
@@ -635,12 +645,17 @@ class AndroidRadioLink(
         connect()
         val got = selfInfo.value ?: return false
         val info = readDeviceInfo()
+        val widthTaken = !widthWanted || info?.pathHashMode == hashMode
+        if (widthWanted && !widthTaken) {
+            // Said once, in the row that keeps it: the channel is the host's, the width is this
+            // radio's own, and a repeater in the path is what makes the difference matter.
+            _lastProblem.value = "channel taken · this radio keeps its own path width"
+        }
         val sameRadio = kotlin.math.abs(got.frequencyMhz - preset.frequencyMhz) < 0.01 &&
             kotlin.math.abs(got.bandwidthKhz - preset.bandwidthKhz) < 0.1 &&
             got.spreadingFactor == preset.spreadingFactor &&
             got.codingRate == preset.codingRate &&
-            got.txPowerDbm == tx &&
-            info?.pathHashMode == hashMode
+            got.txPowerDbm == tx
         if (!sameRadio && old != null) {
             // Put the radio back on the tuple it had before the failed write.
             // Best effort, then reconnect again so the link is usable even when
@@ -650,7 +665,8 @@ class AndroidRadioLink(
                 RadioParams.of(old.frequencyMhz, old.bandwidthKhz, old.spreadingFactor, old.codingRate),
             )
             restore?.setTxPower(old.txPowerDbm)
-            if (oldHashMode != null) restore?.setPathHashMode(oldHashMode)
+            // The width is not part of the rollback: a refusal of it is not a failure of the
+            // channel, and re-writing it here would only refuse again.
             withTimeoutOrNull(PRESET_COMMAND_WAIT_MS) { while (restore?.isIdle() == false) delay(25) }
             delay(PRESET_SETTLE_MS)
             resetLink()

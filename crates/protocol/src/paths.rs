@@ -338,3 +338,94 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 }
+
+/// The shell argv for a session that names no command: `$SHELL` when it is set, non-empty and
+/// executable; else the passwd entry's shell; else `/bin/sh`.
+///
+/// **Login-shell policy: not a login shell.** The argv is the bare program (no `-l`, `argv[0]` not
+/// prefixed with `-`). The keeper is spawned by the daemon, which already runs in the user's
+/// session with their environment (and the `LDMUX_*` overlay); a login shell would re-run the
+/// profile files on every pane and stack PATH entries onto an environment that was already built. A
+/// user who wants one configures their rc file, or the daemon passes a `command`.
+///
+/// **One resolution, two readers.** The keeper spawns this and the daemon puts its basename on the
+/// shell's record, so a row can say `bash` without a round trip; two copies of "which shell" would
+/// eventually disagree about the same pane.
+#[must_use]
+pub fn default_shell() -> Vec<String> {
+    let passwd = nix::unistd::User::from_uid(nix::unistd::getuid())
+        .ok()
+        .flatten()
+        .map(|u| u.shell.to_string_lossy().into_owned());
+    vec![pick_shell(
+        std::env::var("SHELL").ok(),
+        passwd,
+        is_executable,
+    )]
+}
+
+/// The basename of [`default_shell`]: what a row shows (`bash`, `zsh`, `sh`).
+#[must_use]
+pub fn shell_name() -> String {
+    let argv = default_shell();
+    let first = argv.first().map(String::as_str).unwrap_or("/bin/sh");
+    first.rsplit('/').next().unwrap_or(first).to_string()
+}
+
+/// The choice in [`default_shell`], with the environment and the executable check injected so it is
+/// testable.
+#[must_use]
+pub fn pick_shell(
+    env_shell: Option<String>,
+    passwd_shell: Option<String>,
+    ok: impl Fn(&str) -> bool,
+) -> String {
+    [env_shell, passwd_shell]
+        .into_iter()
+        .flatten()
+        .find(|s| !s.is_empty() && ok(s))
+        .unwrap_or_else(|| "/bin/sh".to_string())
+}
+
+fn is_executable(path: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    // `metadata` follows symlinks (a distro `/bin/sh` is one).
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod shell_tests {
+    use super::{pick_shell, shell_name};
+
+    #[test]
+    fn env_shell_wins_when_usable_else_passwd_else_sh() {
+        let ok = |p: &str| p != "/nope";
+        assert_eq!(
+            pick_shell(Some("/bin/zsh".into()), Some("/bin/bash".into()), ok),
+            "/bin/zsh"
+        );
+        assert_eq!(
+            pick_shell(Some("".into()), Some("/bin/bash".into()), ok),
+            "/bin/bash"
+        );
+        assert_eq!(
+            pick_shell(Some("/nope".into()), Some("/bin/bash".into()), ok),
+            "/bin/bash"
+        );
+        assert_eq!(pick_shell(None, Some("/nope".into()), ok), "/bin/sh");
+        assert_eq!(pick_shell(None, None, ok), "/bin/sh");
+    }
+
+    #[test]
+    fn the_name_a_row_shows_is_the_basename() {
+        // Whatever this machine's shell is, the row shows a word and not a path.
+        let name = shell_name();
+        assert!(!name.is_empty(), "a shell name is never empty");
+        assert!(!name.contains('/'), "{name} is a path, not a name");
+        assert!(super::is_executable("/bin/sh"));
+        assert!(!super::is_executable("/etc/passwd"));
+        assert!(!super::is_executable("/definitely/not/here"));
+    }
+}

@@ -23,9 +23,10 @@
     "recordMax": 172,
     "recordPayload": 143,
     "resizeVersion": 3,
+    "shellVersion": 10,
     "streamVersion": 4,
     "unsupportedAllV1": 127,
-    "version": 9
+    "version": 10
   },
   "messages": [
     {
@@ -237,7 +238,8 @@
         "kind": "sessions",
         "last": true,
         "origin": false,
-        "owner": false
+        "owner": false,
+        "shell": false
       }
     },
     {
@@ -250,20 +252,23 @@
             "id": "ab12cd34",
             "label": "RCNT",
             "origin": "",
-            "owner": ""
+            "owner": "",
+            "shell": ""
           },
           {
             "cwd": "",
             "id": "ef56",
             "label": "héllo 漢",
             "origin": "",
-            "owner": ""
+            "owner": "",
+            "shell": ""
           }
         ],
         "kind": "sessions",
         "last": false,
         "origin": false,
-        "owner": false
+        "owner": false,
+        "shell": false
       }
     },
     {
@@ -276,13 +281,15 @@
             "id": "ab12cd34",
             "label": "RCNT",
             "origin": "",
-            "owner": ""
+            "owner": "",
+            "shell": ""
           }
         ],
         "kind": "sessions",
         "last": true,
         "origin": false,
-        "owner": false
+        "owner": false,
+        "shell": false
       }
     }
   ],
@@ -295,7 +302,7 @@
           "rows": 3,
           "shell": "",
           "unsupported": 95,
-          "version": 9
+          "version": 10
         },
         {
           "epoch": 1,
@@ -346,7 +353,7 @@
         ],
         "rows": 3
       },
-      "stream": "81060914035f00008208010001000002242083050100020000"
+      "stream": "81060a14035f00008208010001000002242083050100020000"
     },
     {
       "messages": [
@@ -467,7 +474,7 @@
           "rows": 3,
           "shell": "",
           "unsupported": 95,
-          "version": 9
+          "version": 10
         },
         {
           "epoch": 4,
@@ -540,7 +547,7 @@
         ],
         "rows": 3
       },
-      "stream": "810609ff035f000082850104000100000424206c73010078787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878821d04000001010a7878787878787878787802000a68c3a96c6c6f20e6bca283050400020000"
+      "stream": "81060aff035f000082850104000100000424206c73010078787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878821d04000001010a7878787878787878787802000a68c3a96c6c6f20e6bca283050400020000"
     },
     {
       "messages": [
@@ -591,7 +598,7 @@
           "rows": 2,
           "shell": "",
           "unsupported": 95,
-          "version": 9
+          "version": 10
         },
         {
           "epoch": 6,
@@ -645,7 +652,7 @@
         ],
         "rows": 2
       },
-      "stream": "81060928025f0000820f0600010000036f6e6501000374776f83050600020000"
+      "stream": "81060a28025f0000820f0600010000036f6e6501000374776f83050600020000"
     }
   ],
   "sessionPages": {
@@ -655,54 +662,61 @@
         "id": "00ffffffffffffffffffffffffffffff",
         "label": "shell number 0 long label",
         "origin": "phone",
-        "owner": ""
+        "owner": "",
+        "shell": "bash"
       },
       {
         "cwd": "~/projects/shell-1",
         "id": "01ffffffffffffffffffffffffffffff",
         "label": "shell number 1 long label",
         "origin": "phone",
-        "owner": ""
+        "owner": "",
+        "shell": "bash"
       },
       {
         "cwd": "~/projects/shell-2",
         "id": "02ffffffffffffffffffffffffffffff",
         "label": "shell number 2 long label",
         "origin": "phone",
-        "owner": ""
+        "owner": "",
+        "shell": "bash"
       },
       {
         "cwd": "~/projects/shell-3",
         "id": "03ffffffffffffffffffffffffffffff",
         "label": "shell number 3 long label",
         "origin": "phone",
-        "owner": ""
+        "owner": "",
+        "shell": "bash"
       },
       {
         "cwd": "~/projects/shell-4",
         "id": "04ffffffffffffffffffffffffffffff",
         "label": "shell number 4 long label",
         "origin": "phone",
-        "owner": ""
+        "owner": "",
+        "shell": "bash"
       },
       {
         "cwd": "~/projects/shell-5",
         "id": "05ffffffffffffffffffffffffffffff",
         "label": "shell number 5 long label",
         "origin": "phone",
-        "owner": ""
+        "owner": "",
+        "shell": "bash"
       },
       {
         "cwd": "~/projects/shell-6",
         "id": "06ffffffffffffffffffffffffffffff",
         "label": "shell number 6 long label",
         "origin": "phone",
-        "owner": ""
+        "owner": "",
+        "shell": "bash"
       }
     ],
     "pages": [
       {
-        "hex": "85500e203030666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722030206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d300100",
+        "hex": "85551e203030666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722030206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d3001000462617368",
         "message": {
           "cwd": true,
           "entries": [
@@ -711,17 +725,19 @@
               "id": "00ffffffffffffffffffffffffffffff",
               "label": "shell number 0 long labe",
               "origin": "phone",
-              "owner": ""
+              "owner": "",
+              "shell": "bash"
             }
           ],
           "kind": "sessions",
           "last": false,
           "origin": true,
-          "owner": true
+          "owner": true,
+          "shell": true
         }
       },
       {
-        "hex": "85500e203031666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722031206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d310100",
+        "hex": "85551e203031666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722031206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d3101000462617368",
         "message": {
           "cwd": true,
           "entries": [
@@ -730,17 +746,19 @@
               "id": "01ffffffffffffffffffffffffffffff",
               "label": "shell number 1 long labe",
               "origin": "phone",
-              "owner": ""
+              "owner": "",
+              "shell": "bash"
             }
           ],
           "kind": "sessions",
           "last": false,
           "origin": true,
-          "owner": true
+          "owner": true,
+          "shell": true
         }
       },
       {
-        "hex": "85500e203032666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722032206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d320100",
+        "hex": "85551e203032666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722032206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d3201000462617368",
         "message": {
           "cwd": true,
           "entries": [
@@ -749,17 +767,19 @@
               "id": "02ffffffffffffffffffffffffffffff",
               "label": "shell number 2 long labe",
               "origin": "phone",
-              "owner": ""
+              "owner": "",
+              "shell": "bash"
             }
           ],
           "kind": "sessions",
           "last": false,
           "origin": true,
-          "owner": true
+          "owner": true,
+          "shell": true
         }
       },
       {
-        "hex": "85500e203033666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722033206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d330100",
+        "hex": "85551e203033666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722033206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d3301000462617368",
         "message": {
           "cwd": true,
           "entries": [
@@ -768,17 +788,19 @@
               "id": "03ffffffffffffffffffffffffffffff",
               "label": "shell number 3 long labe",
               "origin": "phone",
-              "owner": ""
+              "owner": "",
+              "shell": "bash"
             }
           ],
           "kind": "sessions",
           "last": false,
           "origin": true,
-          "owner": true
+          "owner": true,
+          "shell": true
         }
       },
       {
-        "hex": "85500e203034666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722034206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d340100",
+        "hex": "85551e203034666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722034206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d3401000462617368",
         "message": {
           "cwd": true,
           "entries": [
@@ -787,17 +809,19 @@
               "id": "04ffffffffffffffffffffffffffffff",
               "label": "shell number 4 long labe",
               "origin": "phone",
-              "owner": ""
+              "owner": "",
+              "shell": "bash"
             }
           ],
           "kind": "sessions",
           "last": false,
           "origin": true,
-          "owner": true
+          "owner": true,
+          "shell": true
         }
       },
       {
-        "hex": "85500e203035666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722035206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d350100",
+        "hex": "85551e203035666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722035206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d3501000462617368",
         "message": {
           "cwd": true,
           "entries": [
@@ -806,17 +830,19 @@
               "id": "05ffffffffffffffffffffffffffffff",
               "label": "shell number 5 long labe",
               "origin": "phone",
-              "owner": ""
+              "owner": "",
+              "shell": "bash"
             }
           ],
           "kind": "sessions",
           "last": false,
           "origin": true,
-          "owner": true
+          "owner": true,
+          "shell": true
         }
       },
       {
-        "hex": "85500f203036666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722036206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d360100",
+        "hex": "85551f203036666666666666666666666666666666666666666666666666666666666666187368656c6c206e756d6265722036206c6f6e67206c616265127e2f70726f6a656374732f7368656c6c2d3601000462617368",
         "message": {
           "cwd": true,
           "entries": [
@@ -825,13 +851,15 @@
               "id": "06ffffffffffffffffffffffffffffff",
               "label": "shell number 6 long labe",
               "origin": "phone",
-              "owner": ""
+              "owner": "",
+              "shell": "bash"
             }
           ],
           "kind": "sessions",
           "last": true,
           "origin": true,
-          "owner": true
+          "owner": true,
+          "shell": true
         }
       }
     ]

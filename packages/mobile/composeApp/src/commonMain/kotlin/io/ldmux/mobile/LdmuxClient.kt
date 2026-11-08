@@ -50,6 +50,14 @@ data class Session(
      */
     val process: String = "",
     /**
+     * The shell the session was created with, as a bare name (`bash`, `zsh`, `sh`).
+     *
+     * `process` is what the pane runs *now*; this is what it was born as. The launcher's second
+     * line names it beside the folder, because a row's name is the conversation and the line under
+     * it has to say where the shell is and what it is.
+     */
+    val shell: String = "",
+    /**
      * Whether a desktop window is holding this shell open, and where.
      *
      * The server's fact, not a window-manager probe: a client cannot see the
@@ -778,6 +786,7 @@ internal fun parseSessions(element: JsonElement?, deviceId: String): List<Sessio
             keeperName = o.text("keeperName"),
             createdBy = o.text("createdBy"),
             process = o.text("process"),
+            shell = o.text("shell"),
             liveWorkspace = o.optionalText("liveWorkspace"),
             hadWindow = o.flag("hadWindow"),
             ownerName = owner?.optionalText("name"),

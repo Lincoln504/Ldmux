@@ -70,7 +70,7 @@ use std::collections::VecDeque;
 /// `Sessions` page is answered **before** an attach can succeed (the phone learns which shell to
 /// attach to from it), so it cannot be gated on a `Profile`'s version: the page carries a flag of
 /// its own and the host sets it only for a phone that has attached with version 6 or later.
-pub const VERSION: u8 = 9;
+pub const VERSION: u8 = 10;
 /// The oldest profile version a host still speaks.
 pub const MIN_VERSION: u8 = 1;
 /// The first version that has `Key` and the shell id in `Profile`.
@@ -118,6 +118,12 @@ pub const SHELL_CONTROL_VERSION: u8 = 7;
 /// Version 8 carries the holder on each `Sessions` entry and refuses a plain `Attach` on a
 /// shell somebody else holds; `Takeover` is the phone saying yes.
 pub const OWNER_VERSION: u8 = 8;
+
+/// Version 10 adds the **shell** a session was created with to each `Sessions` entry (`bash`,
+/// `zsh`): the launcher draws it beside the folder, because a row's name is the conversation and
+/// only the second line can say where and what. `process` is the program in the foreground now and
+/// changes as the operator works; this does not.
+pub const SHELL_VERSION: u8 = 10;
 /// The version whose `Sessions` entries carry the `created_by` origin (version 7).
 ///
 /// The mesh launcher needs the same fact the tailnet one has: a shell this phone opened stays the
@@ -294,6 +300,9 @@ pub struct SessionEntry {
     /// a version-6 phone. The mesh launcher reads this to keep a phone-opened shell marked as the
     /// phone's, so its close and open-on-desktop actions survive an app restart.
     pub origin: String,
+    /// The shell the session was created with, as a bare name (`bash`, version 10). Empty in a page
+    /// built for a version-9 phone, where the field is not on the wire at all.
+    pub shell: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -356,6 +365,9 @@ pub enum Message {
         cwd: bool,
         origin: bool,
         owner: bool,
+        /// The entries carry their shell (version 10), set only for a phone on
+        /// [`SHELL_VERSION`] or later.
+        shell: bool,
         entries: Vec<SessionEntry>,
     },
     /// The marks that are true right now: one per shell, `kind` 0 = done, 1 = attention.
@@ -623,13 +635,15 @@ impl Message {
                 cwd,
                 origin,
                 owner,
+                shell,
                 entries,
             } => {
                 body.push(
                     u8::from(*last)
                         | if *cwd { 2 } else { 0 }
                         | if *origin { 4 } else { 0 }
-                        | if *owner { 8 } else { 0 },
+                        | if *owner { 8 } else { 0 }
+                        | if *shell { 16 } else { 0 },
                 );
                 for e in entries {
                     if e.id.len() > MAX_SELECTOR || e.label.len() > MAX_LABEL {
@@ -652,6 +666,13 @@ impl Message {
                     }
                     if *owner {
                         body.push(holder_code(&e.owner));
+                    }
+                    if *shell {
+                        if e.shell.len() > MAX_LABEL {
+                            return Err(EncodeError::TooLong);
+                        }
+                        body.push(e.shell.len() as u8);
+                        body.extend_from_slice(e.shell.as_bytes());
                     }
                 }
                 if body.len() > MAX_ROWS_BODY {
@@ -846,6 +867,7 @@ impl Message {
                 let with_cwd = flags & 2 != 0;
                 let with_origin = flags & 4 != 0;
                 let with_owner = flags & 8 != 0;
+                let with_shell = flags & 16 != 0;
                 let mut entries = Vec::new();
                 while !rest.is_empty() {
                     let mut field = |max: usize| -> Result<String, DecodeError> {
@@ -881,12 +903,29 @@ impl Message {
                     } else {
                         String::new()
                     };
+                    // Read directly rather than through the closure above: a later use of it
+                    // after the direct reads would extend its borrow of `rest` past them.
+                    let shell = if with_shell {
+                        let (&n, tail) = rest.split_first().ok_or(bad.clone())?;
+                        let n = usize::from(n);
+                        if n > MAX_LABEL || tail.len() < n {
+                            return Err(bad.clone());
+                        }
+                        let text = std::str::from_utf8(&tail[..n])
+                            .map_err(|_| bad.clone())?
+                            .to_owned();
+                        rest = &tail[n..];
+                        text
+                    } else {
+                        String::new()
+                    };
                     entries.push(SessionEntry {
                         id,
                         label,
                         cwd,
                         origin,
                         owner,
+                        shell,
                     });
                 }
                 Self::Sessions {
@@ -894,6 +933,7 @@ impl Message {
                     cwd: with_cwd,
                     origin: with_origin,
                     owner: with_owner,
+                    shell: with_shell,
                     entries,
                 }
             }
@@ -968,34 +1008,52 @@ fn cut(text: &str, max: usize) -> String {
     text[..end].to_owned()
 }
 
-/// The `Sessions` pages for a list of `(id, label, cwd)`: at most [`MAX_SESSIONS`] entries, ids,
+/// One row of the launcher, as the host knows it, before it is cut into a page.
+///
+/// A named type rather than a six-tuple: `session_pages` grew a field per version and a tuple of
+/// strings is exactly where a swap goes unnoticed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionSummary {
+    pub id: String,
+    pub label: String,
+    pub cwd: String,
+    pub origin: String,
+    pub owner: String,
+    /// The shell the session was created with (`bash`), empty when the host has no record of it.
+    pub shell: String,
+}
+
+/// The `Sessions` pages for a list of sessions: at most [`MAX_SESSIONS`] entries, ids,
 /// labels and paths cut to their limits, each page packed up to [`MAX_ROWS_BODY`] so it fits one
 /// record, the final page flagged `last`. `cwd` says the entries carry the working directory
 /// (version 6); a page built for an older phone leaves it off the wire and its entries carry an
 /// empty `cwd`. Always at least one page, so "no shells" is an answer.
 #[must_use]
 pub fn session_pages(
-    sessions: &[(String, String, String, String, String)],
+    sessions: &[SessionSummary],
     cwd: bool,
     origin: bool,
     owner: bool,
+    shell: bool,
 ) -> Vec<Message> {
     let mut pages: Vec<Vec<SessionEntry>> = vec![Vec::new()];
     let mut size = 1; // the flags byte
-    for (id, label, path, by, held) in sessions.iter().take(MAX_SESSIONS) {
+    for s in sessions.iter().take(MAX_SESSIONS) {
         let e = SessionEntry {
-            id: cut(id, MAX_SELECTOR),
-            label: cut(label, MAX_LABEL),
-            cwd: if cwd { cut(path, MAX_CWD) } else { String::new() },
-            origin: if origin { cut(by, MAX_ORIGIN) } else { String::new() },
-            owner: if owner { cut(held, MAX_ORIGIN) } else { String::new() },
+            id: cut(&s.id, MAX_SELECTOR),
+            label: cut(&s.label, MAX_LABEL),
+            cwd: if cwd { cut(&s.cwd, MAX_CWD) } else { String::new() },
+            origin: if origin { cut(&s.origin, MAX_ORIGIN) } else { String::new() },
+            owner: if owner { cut(&s.owner, MAX_ORIGIN) } else { String::new() },
+            shell: if shell { cut(&s.shell, MAX_LABEL) } else { String::new() },
         };
         let cost = 2
             + e.id.len()
             + e.label.len()
             + if cwd { 1 + e.cwd.len() } else { 0 }
             + if origin { 1 } else { 0 }
-            + if owner { 1 } else { 0 };
+            + if owner { 1 } else { 0 }
+            + if shell { 1 + e.shell.len() } else { 0 };
         if size + cost > MAX_ROWS_BODY {
             pages.push(Vec::new());
             size = 1;
@@ -1012,6 +1070,7 @@ pub fn session_pages(
             cwd,
             origin,
             owner,
+            shell,
             entries,
         })
         .collect()
@@ -1967,16 +2026,15 @@ mod tests {
         });
     }
 
-    fn sh(n: usize) -> Vec<(String, String, String, String, String)> {
+    fn sh(n: usize) -> Vec<SessionSummary> {
         (0..n)
-            .map(|i| {
-                (
-                    format!("{i:02x}{}", "f".repeat(30)),
-                    format!("shell number {i} long label"),
-                    format!("~/projects/shell-{i}"),
-                    "phone".to_string(),
-                    String::new(),
-                )
+            .map(|i| SessionSummary {
+                id: format!("{i:02x}{}", "f".repeat(30)),
+                label: format!("shell number {i} long label"),
+                cwd: format!("~/projects/shell-{i}"),
+                origin: "phone".to_string(),
+                owner: String::new(),
+                shell: "bash".to_string(),
             })
             .collect()
     }
@@ -1986,22 +2044,23 @@ mod tests {
         assert_eq!(Message::List.encode().unwrap(), [0x05, 0x00]);
         // no shells: one page, `last`, no entries
         assert_eq!(
-            session_pages(&[], false, false, false),
+            session_pages(&[], false, false, false, false),
             vec![Message::Sessions {
                 last: true,
                 cwd: false,
                 origin: false,
                 owner: false,
+                shell: false,
                 entries: vec![]
             }]
         );
         assert_eq!(
-            session_pages(&[], false, false, false).remove(0).encode().unwrap(),
+            session_pages(&[], false, false, false, false).remove(0).encode().unwrap(),
             [0x85, 0x01, 0x01]
         );
         // The same page for a version-6 phone: the cwd flag is set, and there are still no entries.
         assert_eq!(
-            session_pages(&[], true, false, false).remove(0).encode().unwrap(),
+            session_pages(&[], true, false, false, false).remove(0).encode().unwrap(),
             [0x85, 0x01, 0x03]
         );
         let one = Message::Sessions {
@@ -2009,12 +2068,14 @@ mod tests {
             cwd: false,
             origin: false,
             owner: false,
+            shell: false,
             entries: vec![SessionEntry {
                 id: "ab".into(),
                 label: "x".into(),
                 cwd: String::new(),
                         origin: String::new(),
                 owner: String::new(),
+                shell: String::new(),
     }],
         };
         // flags 1, id_len 2 "ab", label_len 1 "x" (no cwd: version 5 form)
@@ -2027,12 +2088,14 @@ mod tests {
             cwd: true,
             origin: false,
             owner: false,
+            shell: false,
             entries: vec![SessionEntry {
                 id: "ab".into(),
                 label: "x".into(),
                 cwd: "~/".into(),
                         origin: String::new(),
                 owner: String::new(),
+                shell: String::new(),
     }],
         };
         // flags 3, id 2 "ab", label 1 "x", cwd 2 "~/"
@@ -2046,12 +2109,14 @@ mod tests {
             cwd: true,
             origin: true,
             owner: false,
+            shell: false,
             entries: vec![SessionEntry {
                 id: "ab".into(),
                 label: "x".into(),
                 cwd: "~/".into(),
                 origin: "phone".into(),
                         owner: String::new(),
+                        shell: String::new(),
         }],
         };
         // flags 7 (last|cwd|origin), id 2 "ab", label 1 "x", cwd 2 "~/", origin one byte (1 = phone)
@@ -2062,7 +2127,7 @@ mod tests {
         // A version-7 page with no shells still carries the origin bit, so the phone knows the
         // entries would have said who started them.
         assert_eq!(
-            session_pages(&[], false, true, false).remove(0).encode().unwrap(),
+            session_pages(&[], false, true, false, false).remove(0).encode().unwrap(),
             [0x85, 0x01, 0x05]
         );
         assert_eq!(
@@ -2083,7 +2148,7 @@ mod tests {
     fn sessions_pages_fit_one_record_and_say_which_is_last() {
         for with_cwd in [false, true] {
             for n in [0usize, 1, 2, 3, 7, MAX_SESSIONS, MAX_SESSIONS + 5] {
-                let pages = session_pages(&sh(n), with_cwd, with_cwd, with_cwd);
+                let pages = session_pages(&sh(n), with_cwd, with_cwd, with_cwd, with_cwd);
                 let mut total = 0;
                 for (i, m) in pages.iter().enumerate() {
                     let bytes = m.encode().unwrap();
@@ -2107,7 +2172,7 @@ mod tests {
                 );
             }
             assert!(
-                session_pages(&sh(7), with_cwd, with_cwd, with_cwd).len() > 1,
+                session_pages(&sh(7), with_cwd, with_cwd, with_cwd, with_cwd).len() > 1,
                 "a long list really does span records"
             );
         }
@@ -2115,14 +2180,17 @@ mod tests {
 
     #[test]
     fn sessions_survive_any_chunking_and_cut_at_char_boundaries() {
-        let list = vec![(
-            "é".repeat(30),
-            "漢".repeat(20),
-            "~/漢".repeat(20),
-            "phone".to_string(),
-            String::new(),
-        )]; // 60-byte id, 60-byte label, 120-byte path
-        let pages = session_pages(&list, true, true, true);
+        let list = vec![SessionSummary {
+            id: "é".repeat(30),
+            label: "漢".repeat(20),
+            cwd: "~/漢".repeat(20),
+            origin: "phone".to_string(),
+            owner: String::new(),
+            shell: "bash".to_string(),
+        }]; // 60-byte id, 60-byte label, 120-byte path
+        // No shell here: with every flag on, one entry of this size no longer fits a page, and
+        // this test is about chunking a stream and cutting at character boundaries.
+        let pages = session_pages(&list, true, true, true, false);
         let mut stream = Vec::new();
         for m in &pages {
             stream.extend(m.encode().unwrap());
@@ -2157,12 +2225,14 @@ mod tests {
             cwd: false,
             origin: false,
             owner: false,
+            shell: false,
             entries: vec![SessionEntry {
                 id: "x".repeat(MAX_SELECTOR + 1),
                 label: String::new(),
                 cwd: String::new(),
                         origin: String::new(),
                 owner: String::new(),
+                shell: String::new(),
     }],
         };
         assert_eq!(bad.encode(), Err(EncodeError::TooLong));
@@ -2171,12 +2241,14 @@ mod tests {
             cwd: true,
             origin: false,
             owner: false,
+            shell: false,
             entries: vec![SessionEntry {
                 id: "a".into(),
                 label: String::new(),
                 cwd: "p".repeat(MAX_CWD + 1),
                         origin: String::new(),
                 owner: String::new(),
+                shell: String::new(),
     }],
         };
         assert_eq!(bad_cwd.encode(), Err(EncodeError::TooLong));
@@ -2770,9 +2842,9 @@ mod tests {
                 "kind":"commit","epoch":epoch,"cursorX":cursor_x,"cursorY":cursor_y,"flags":flags}),
             Message::Closed { reason } => json!({"kind":"closed","reason":reason}),
             Message::List => json!({"kind":"list"}),
-            Message::Sessions { last, cwd, origin, owner, entries } => json!({
-                "kind":"sessions","last":last,"cwd":cwd,"origin":origin,"owner":owner,
-                "entries": entries.iter().map(|e| json!({"id":e.id,"label":e.label,"cwd":e.cwd,"origin":e.origin,"owner":e.owner})).collect::<Vec<_>>()}),
+            Message::Sessions { last, cwd, origin, owner, shell, entries } => json!({
+                "kind":"sessions","last":last,"cwd":cwd,"origin":origin,"owner":owner,"shell":shell,
+                "entries": entries.iter().map(|e| json!({"id":e.id,"label":e.label,"cwd":e.cwd,"origin":e.origin,"owner":e.owner,"shell":e.shell})).collect::<Vec<_>>()}),
             Message::Marks { first, last, entries } => json!({
                 "kind":"marks","first":first,"last":last,
                 "entries": entries.iter().map(|e| json!({"id":e.id,"kind":e.kind})).collect::<Vec<_>>()}),
@@ -2891,6 +2963,7 @@ mod tests {
                 cwd: false,
                 origin: false,
                 owner: false,
+                shell: false,
                 entries: vec![],
             },
             Message::Sessions {
@@ -2898,6 +2971,7 @@ mod tests {
                 cwd: false,
                 origin: false,
                 owner: false,
+                shell: false,
                 entries: vec![
                     SessionEntry {
                         id: "ab12cd34".into(),
@@ -2905,6 +2979,7 @@ mod tests {
                         cwd: String::new(),
                                         origin: String::new(),
                                 owner: String::new(),
+                                shell: String::new(),
             },
                     SessionEntry {
                         id: "ef56".into(),
@@ -2912,6 +2987,7 @@ mod tests {
                         cwd: String::new(),
                                         origin: String::new(),
                                 owner: String::new(),
+                                shell: String::new(),
             },
                 ],
             },
@@ -2920,27 +2996,28 @@ mod tests {
                 cwd: true,
                 origin: false,
                 owner: false,
+                shell: false,
                 entries: vec![SessionEntry {
                     id: "ab12cd34".into(),
                     label: "RCNT".into(),
                     cwd: "~/Documents/RCNT".into(),
                                 origin: String::new(),
                         owner: String::new(),
+                        shell: String::new(),
         }],
             },
         ];
-        let many: Vec<(String, String, String, String, String)> = (0..7)
-            .map(|i| {
-                (
-                    format!("{i:02x}{}", "f".repeat(30)),
-                    format!("shell number {i} long label"),
-                    format!("~/projects/shell-{i}"),
-                    "phone".to_string(),
-                    String::new(),
-                )
+        let many: Vec<SessionSummary> = (0..7)
+            .map(|i| SessionSummary {
+                id: format!("{i:02x}{}", "f".repeat(30)),
+                label: format!("shell number {i} long label"),
+                cwd: format!("~/projects/shell-{i}"),
+                origin: "phone".to_string(),
+                owner: String::new(),
+                shell: "bash".to_string(),
             })
             .collect();
-        let page_cases: Vec<_> = session_pages(&many, true, true, true)
+        let page_cases: Vec<_> = session_pages(&many, true, true, true, true)
             .iter()
             .map(|m| json!({"message": message_json(m), "hex": hex(&m.encode().unwrap())}))
             .collect();
@@ -3014,11 +3091,11 @@ mod tests {
                        "maxRowsBody":MAX_ROWS_BODY,"maxLabel":MAX_LABEL,"maxCwd":MAX_CWD,"maxSessions":MAX_SESSIONS,"maxMessage":MAX_MESSAGE,"recordPayload":RECORD_PAYLOAD,"maxBuffer":MAX_BUFFER,
                        "version":VERSION,"minVersion":MIN_VERSION,"cwdVersion":CWD_VERSION,"keyVersion":KEY_VERSION,
                        "resizeVersion":RESIZE_VERSION,"streamVersion":STREAM_VERSION,"lineVersion":STREAM_LINE_VERSION,
-                       "originVersion":ORIGIN_VERSION,"ownerVersion":OWNER_VERSION,
+                       "originVersion":ORIGIN_VERSION,"ownerVersion":OWNER_VERSION,"shellVersion":SHELL_VERSION,
                        "maxKeys":MAX_KEYS,"unsupportedAllV1":unsupported::ALL_V1,
                        "recordFloor":ldmux_mesh::constants::RECORD_FLOOR,"recordMax":ldmux_mesh::constants::RECORD_MAX,"creditWindow":ldmux_mesh::constants::CREDIT_WINDOW},
             "messages": msg_cases,
-            "sessionPages": {"input": many.iter().map(|(i,l,p,by,held)| json!({"id":i,"label":l,"cwd":p,"origin":by,"owner":held})).collect::<Vec<_>>(), "pages": page_cases},
+            "sessionPages": {"input": many.iter().map(|s| json!({"id":s.id,"label":s.label,"cwd":s.cwd,"origin":s.origin,"owner":s.owner,"shell":s.shell})).collect::<Vec<_>>(), "pages": page_cases},
             "script": steps,
             "streams": streams,
         })
