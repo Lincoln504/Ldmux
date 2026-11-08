@@ -178,6 +178,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 scripts/android.sh test           # the Kotlin JVM suite, including the wire fixture
 scripts/android.sh build          # debug APK
 scripts/android.sh install        # build, then adb install -r
+scripts/android.sh lint           # Android lint; the bar is zero errors
 scripts/android.sh release|bundle # signed APK / AAB, needs the signing inputs
 ```
 

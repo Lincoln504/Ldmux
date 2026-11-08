@@ -1,5 +1,6 @@
 package io.ldmux.mobile.mesh
 
+import android.annotation.SuppressLint
 import android.Manifest
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
@@ -368,6 +369,10 @@ class AndroidRadioLink(
         // before `connectToDevice` expires during the one moment a brand-new radio is being set
         // up - and then reports "the radio did not answer APP_START", which names the wrong thing.
         // Unbonded devices get a deadline that covers the prompt; the sentence says what to do.
+        // `bondState` needs BLUETOOTH_CONNECT, which `hasConnectPermission()` above has already
+        // checked (a denial threw before this line), and the read is also in `runCatching` for
+        // the revocation that lands between the check and the call.
+        @SuppressLint("MissingPermission")
         val bonded = runCatching { device.bondState == BluetoothDevice.BOND_BONDED }.getOrDefault(false)
         val deadline = if (bonded) CONNECT_TIMEOUT_MS else BOND_CONNECT_TIMEOUT_MS
         if (!bonded) _lastProblem.value = "accept the Bluetooth pairing request"

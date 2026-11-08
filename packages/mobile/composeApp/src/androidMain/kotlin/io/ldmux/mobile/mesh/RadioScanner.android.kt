@@ -1,6 +1,7 @@
 package io.ldmux.mobile.mesh
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.ScanCallback
@@ -178,6 +179,11 @@ actual object RadioScanner {
         }, SCAN_MS)
     }
 
+    // Every Bluetooth read below runs after a permission check and inside `runCatching`, because
+    // a revocation between the two raises `SecurityException` rather than returning a value. Lint
+    // asks for the check or the catch; it cannot see either through `runCatching`, so the reason is
+    // written here instead of the whole file being silenced.
+    @SuppressLint("MissingPermission")
     private fun record(result: ScanResult, generation: Int) {
         if (finished || generation != scanGeneration) return
         val device = result.device ?: return
@@ -198,6 +204,7 @@ actual object RadioScanner {
      * a device that advertises without the service UUID, and it is deliberately the only rule —
      * offering every bonded accessory as a "radio" would be a list of wrong answers.
      */
+    @SuppressLint("MissingPermission") // `hasScanPermissions` above, and each read in `runCatching`
     actual fun bonded(): List<RadioDevice> {
         val context = AndroidApp.context
         if (!context.packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE)) {
@@ -220,6 +227,7 @@ actual object RadioScanner {
             .sortedBy { it.name }
     }
 
+    @SuppressLint("MissingPermission") // the scan only exists when it was permitted; the stop is guarded
     private fun stopScan() {
         val le = scanner
         val cb = callback

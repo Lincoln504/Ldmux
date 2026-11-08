@@ -21,8 +21,9 @@
   What this file does add over the old app-wide `usesCleartextTraffic="true"`: the
   platform's trust anchors only (no user-installed CAs), stated rather than defaulted.
 -->
-<network-security-config>
-    <base-config cleartextTrafficPermitted="true">
+<network-security-config xmlns:tools="http://schemas.android.com/tools">
+    <!-- The comment above is the reason; lint's check cannot read a comment, so it is told here. -->
+    <base-config cleartextTrafficPermitted="true" tools:ignore="InsecureBaseConfiguration">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>

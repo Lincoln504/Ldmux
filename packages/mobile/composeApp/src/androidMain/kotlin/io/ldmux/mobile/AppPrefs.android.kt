@@ -1,5 +1,6 @@
 package io.ldmux.mobile
 
+import android.annotation.SuppressLint
 import android.content.Context
 import io.ldmux.mobile.mesh.KeystoreBlob
 import io.ldmux.mobile.mesh.MeshInputMode
@@ -18,6 +19,11 @@ import io.ldmux.mobile.mesh.meshRouteFromStored
  * rooted device or `adb run-as` on a debuggable build. A token written by an older build is
  * read once, re-encrypted, and removed from the plaintext key.
  */
+// **The application context, which is the one Context that must outlive everything.** Android's
+// lint flags any static Context; this one is `applicationContext`, set once in `Application.onCreate`,
+// and it lives exactly as long as the process. It is not an Activity, a Service or a View, so
+// nothing here can hold one of those alive.
+@SuppressLint("StaticFieldLeak")
 object AndroidApp {
     lateinit var context: Context
 }

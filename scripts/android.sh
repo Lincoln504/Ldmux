@@ -11,6 +11,8 @@
 #   scripts/android.sh release           native, then the signed APK (needs the signing inputs)
 #   scripts/android.sh bundle            native, then the signed App Bundle Play wants
 #   scripts/android.sh native-test       the shim's own host tests (no device, daemon or emulator)
+#   scripts/android.sh lint              Android lint over the app (0 errors is the bar; the release
+#                                        verbs do not run it, so it is its own command)
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -26,6 +28,11 @@ gradle_in_mobile() { (cd "$mobile" && ./gradlew "$@"); }
 
 case "$cmd" in
   native) native "$@" ;;
+  # Lint is not in the gate because its version-update warnings change with the calendar, not with
+  # the code. Its *errors* are real, and the bar is zero: the Bluetooth reads are silenced in place
+  # with the reason, which is what this command exists to keep true.
+  lint) gradle_in_mobile :composeApp:lintDebug ;;
+
   build) native "$@"; gradle_in_mobile :composeApp:assembleDebug ;;
   install)
     native "$@"; gradle_in_mobile :composeApp:assembleDebug
