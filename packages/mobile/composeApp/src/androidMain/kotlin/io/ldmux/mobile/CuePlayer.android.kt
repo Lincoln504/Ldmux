@@ -88,10 +88,10 @@ internal fun cueResources(theme: LdmuxTheme): Map<Cue, Int> = when (theme) {
         Cue.LinkDown to R.raw.daybreak_link_down,
         Cue.Attention to R.raw.daybreak_attention,
     )
-    LdmuxTheme.Gruvbox -> mapOf(
-        Cue.LinkUp to R.raw.gruvbox_link_up,
-        Cue.LinkDown to R.raw.gruvbox_link_down,
-        Cue.Attention to R.raw.gruvbox_attention,
+    LdmuxTheme.Umber -> mapOf(
+        Cue.LinkUp to R.raw.umber_link_up,
+        Cue.LinkDown to R.raw.umber_link_down,
+        Cue.Attention to R.raw.umber_attention,
     )
     LdmuxTheme.Nerv -> mapOf(
         Cue.LinkUp to R.raw.nerv_link_up,

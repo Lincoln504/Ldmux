@@ -298,7 +298,9 @@ fn print_mesh_status(v: &serde_json::Value) {
         // too, and they cannot be refused, so an hour can end with less than the arithmetic
         // promised.
         Some(left) => println!("records  {left} left this hour, by ldmux's own count"),
-        None => println!("records  not reported yet"),
+        // **No allowance is not "not reported".** Outside a duty-cycled band there is nothing to run
+        // out of, so nothing is refused and the counter above is a measurement.
+        None => println!("records  no limit in this band (the count is a measurement)"),
     }
     let radio = match v.get("radioState").and_then(serde_json::Value::as_u64) {
         Some(0) => "connected",

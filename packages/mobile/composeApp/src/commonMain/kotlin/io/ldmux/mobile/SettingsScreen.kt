@@ -411,7 +411,6 @@ private fun PanelSide(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
     // (`OrientationPolicy.Portrait` for the launcher and every dialog opened from it), so a press
     // here changes nothing on this screen. Saying so is the difference between "the app ignored
     // me" and "turn the phone".
-    SettingsNote("key panel side, in landscape")
 }
 
 /**
@@ -430,7 +429,6 @@ private fun Notifications(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
         // operator asked to be managed automatically instead of drawn. The mark square stays,
         // because the list still carries it.
         SettingsRow("notifications", summary = "off · tailnet only")
-        SettingsNote("row square appears anyway")
         return
     }
     SettingRow("notifications") {
@@ -441,7 +439,6 @@ private fun Notifications(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
             if (!current.notifyMarks) onSave(current.copy(notifyMarks = true))
         }
     }
-    SettingsNote("one-off notification when a shell finishes · row square appears anyway")
 }
 
 /**
@@ -492,7 +489,6 @@ private fun Theme(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
             }
         }
     }
-    SettingsNote("dark is the quiet one · the others have their own sound")
 }
 
 /**
@@ -516,7 +512,6 @@ private fun Sounds(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
             if (!current.sounds) onSave(current.copy(sounds = true))
         }
     }
-    SettingsNote("a tone when a session comes up, drops, or needs you")
 }
 
 @Composable
@@ -768,7 +763,6 @@ private fun DiagnosticsLog() {
     if (!open) return
     val shown = logTail(lines, DIAGNOSTIC_LINES)
     if (shown.isEmpty()) {
-        SettingsNote("nothing yet · in memory, empty each launch")
         return
     }
     Text(
@@ -778,6 +772,5 @@ private fun DiagnosticsLog() {
         fontFamily = MonoFont,
         modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
     )
-    SettingsNote("copy takes every kept line")
 }
 

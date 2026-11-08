@@ -14,6 +14,7 @@ import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
@@ -151,19 +152,17 @@ class MeshTermCodecTest {
         val host = eu.groupValues[1].replace("_", "").toDouble()
         assertEquals(host, RadioAirtime.BUDGET_MS_PER_HOUR, 1e-9,
             "the phone meters ${RadioAirtime.BUDGET_MS_PER_HOUR} ms/hour in the EU sub-band and the host $host")
-        // **The band decides, and both ends have to agree about which band.** Outside
-        // 869.4-869.65 MHz there is no duty cycle to comply with, so the allowance is ten percent;
-        // the phone's own copy is held to the host's literal for the same reason as above.
-        val open = Regex("const OPEN_BAND_AIRTIME_BUDGET_MS: f64 = ([0-9_.]+);").find(text)
-        assertNotNull(open, "OPEN_BAND_AIRTIME_BUDGET_MS is no longer a literal this test can read")
-        val hostOpen = open.groupValues[1].replace("_", "").toDouble()
-        assertEquals(hostOpen, RadioAirtime.OPEN_BAND_BUDGET_MS_PER_HOUR, 1e-9,
-            "the phone meters ${RadioAirtime.OPEN_BAND_BUDGET_MS_PER_HOUR} ms/hour outside the EU sub-band")
-        // ...and the rule itself: 910.525 (the MeshCore US preset) is the open band, 869.525 is not.
+        // **The law, or nothing.** The host no longer carries an "open band" courtesy cap at all,
+        // and the phone must not invent one: 910.525 (the MeshCore US preset) has no duty cycle for
+        // this transmitter, so it has no allowance, while 869.525 keeps its band's 1 %.
+        assertFalse(
+            text.contains("OPEN_BAND_AIRTIME_BUDGET_MS"),
+            "an open-band cap was reintroduced: the allowance is the law or nothing",
+        )
         val euPreset = RadioPreset(869.525, 250.0, 11, 5, 14, 1)
         val usPreset = RadioPreset(910.525, 62.5, 7, 5, 22, 1)
-        assertEquals(RadioAirtime.BUDGET_MS_PER_HOUR, RadioAirtime.budgetMsPerHour(euPreset), 1e-9)
-        assertEquals(RadioAirtime.OPEN_BAND_BUDGET_MS_PER_HOUR, RadioAirtime.budgetMsPerHour(usPreset), 1e-9)
+        assertEquals(RadioAirtime.BUDGET_MS_PER_HOUR, RadioAirtime.budgetMsPerHour(euPreset))
+        assertNull(RadioAirtime.budgetMsPerHour(usPreset), "no duty cycle means no allowance")
     }
 
     @Test

@@ -32,11 +32,12 @@ Three facts are worth stating plainly, because they are the reason the mode exis
   almost cannot run. The table used to apply 1 % only inside 869.4-869.65 and 10 % everywhere else,
   which metered the 1 % window at ten times its legal duty cycle; no shipped preset sits there, but
   `ldmux mesh preset 868.1 …` is one command away.
-- **Everywhere else: ten percent, 360 s an hour.** 902-928 MHz, where the MeshCore US/Canada preset
-  sits, has no duty cycle for this kind of transmitter; the firmware itself permits a 50 % duty
-  cycle (`getAirtimeBudgetFactor()` returns 1.0) and the Meshtastic ecosystem caps a node at 25 %.
-  A tenth is a fifth of the firmware's ceiling and under half that cap. At 62.5 kHz it is **597
-  records**.
+- **Everywhere else: no limit at all.** 902-928 MHz, where the MeshCore US/Canada preset sits, has
+  no duty cycle for this kind of transmitter, so there is **no allowance to enforce**: the record
+  counter is a measurement and nothing is refused. A "ten percent courtesy cap" was invented here
+  and removed on 2026-11-08 — it stopped a session at a fifth of what the firmware permits
+  (`getAirtimeBudgetFactor()` returns 1.0) while looking like a legal rule about a band that has
+  none. **The allowance is the law, or nothing.**
 
 The wire carries the countdown in one byte, so a host reports at most 255 whatever the policy
 allows; the spend itself is counted exactly.

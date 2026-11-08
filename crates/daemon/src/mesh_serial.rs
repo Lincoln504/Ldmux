@@ -505,34 +505,27 @@ impl ScopeChoice {
     }
 }
 
-/// The airtime allowance this daemon holds itself to, in milliseconds per hour, for a frequency.
+/// The airtime allowance this daemon holds itself to, in milliseconds per hour: the law, or nothing.
 ///
-/// **One percent is law in one sub-band and policy everywhere else.** 869.4-869.65 MHz is the
-/// European non-specific SRD band, where a 10 % duty cycle is a condition of use and 1 % is the
-/// figure ldmux has always applied inside it. 902-928 MHz — where the MeshCore US/Canada preset
-/// sits, at 910.525 MHz — has no duty-cycle rule at all for this kind of transmitter, the firmware
-/// itself is willing to run a 50 % duty cycle (`getAirtimeBudgetFactor()` returns 1.0,
-/// `Dispatcher.cpp:34-36`), and the Meshtastic ecosystem caps a node at 25 %. ldmux's own 1 %
-/// therefore made one typed command line the whole hour at 62.5 kHz, which is a courtesy nobody
-/// asked for that turned the product's own link into a dead end.
+/// **The allowance is the law, or nothing at all.**
 ///
-/// Ten percent outside that sub-band is the policy: a fifth of what the firmware allows, half the
-/// Meshtastic cap, and enough that a session's discovery, handshake and a few screens do not
-/// consume the hour before the operator has typed anything.
-fn airtime_budget_ms(freq_mhz: f64) -> f64 {
+/// Inside a European sub-band with a duty cycle, the meter is on and the figure is that band's own
+/// limit — for 869.4-869.65, a tenth of its 10 % because that band is shared with alarms and ldmux
+/// would rather be a quiet neighbour than a compliant one. Outside every such window there is no
+/// limit to enforce, so there is **no allowance at all**: the record counter is kept as a
+/// measurement and nothing is refused. A "ten percent courtesy cap" was invented here and it was
+/// wrong in both directions — it stopped a US session at a fifth of what the firmware permits while
+/// the operator believed it was a rule, and it read as a legal statement about a band that has no
+/// such rule.
+fn airtime_budget_ms(freq_mhz: f64) -> Option<f64> {
     match freq_mhz {
-        // **868.0-868.6 MHz is one percent by law** (ERC/REC 70-03 Annex 1, h1.3.1) — not ten. The
-        // table used to apply one percent only inside 869.4-869.65 and ten everywhere else, which
-        // metered this window at ten times its legal duty cycle. No shipped preset sits here, but
-        // `ldmux mesh preset 868.1 ...` is one command away and the firmware accepts it.
-        f if (868.0..=868.6).contains(&f) => ONE_PERCENT_MS,
-        // **869.4-869.65 is the ten-percent window**, and ldmux holds itself to a tenth of it.
-        f if (869.4..=869.65).contains(&f) => AIRTIME_BUDGET_MS,
-        // **868.7-869.2 is a tenth of one percent** — the alarm band. A session almost cannot run
-        // there (one 62.5 kHz record is 0.6 s against a 3.6 s hour), and pretending otherwise would
-        // be the unsafe direction to be wrong in.
-        f if (868.7..=869.2).contains(&f) => TENTH_PERCENT_MS,
-        _ => OPEN_BAND_AIRTIME_BUDGET_MS,
+        // 868.0-868.6 MHz: 1 % by law (ERC/REC 70-03 Annex 1, h1.3.1).
+        f if (868.0..=868.6).contains(&f) => Some(ONE_PERCENT_MS),
+        // 869.4-869.65: the law allows 10 %, and ldmux holds itself to a tenth of it.
+        f if (869.4..=869.65).contains(&f) => Some(AIRTIME_BUDGET_MS),
+        // 868.7-869.2: a tenth of one percent — the alarm band, 3.6 s an hour.
+        f if (868.7..=869.2).contains(&f) => Some(TENTH_PERCENT_MS),
+        _ => None,
     }
 }
 
@@ -546,9 +539,6 @@ const ONE_PERCENT_MS: f64 = 36_000.0;
 
 /// The allowance inside 868.7-869.2 MHz: a tenth of one percent, which is the law there.
 const TENTH_PERCENT_MS: f64 = 3_600.0;
-
-/// The allowance outside the European sub-band: ten percent of an hour. See [`airtime_budget_ms`].
-const OPEN_BAND_AIRTIME_BUDGET_MS: f64 = 360_000.0;
 
 /// The one command the loop has for the radio.
 enum Command {
@@ -1355,7 +1345,7 @@ fn serve_loop<L: ByteLink>(
                     if (peer_path.is_none() || route_stale)
                         && let Some(peer) = peer_radio
                         && last_ping.is_none_or(|t| t.elapsed() >= PEER_PING_FLOOR)
-                        && left(budget, sent) > 0
+                        && left(budget, sent) != Some(0)
                     {
                         last_ping = Some(Instant::now());
                         let ok = send_route_request(
@@ -1506,7 +1496,7 @@ fn serve_loop<L: ByteLink>(
                     // 62.5 kHz left `records 0 left this hour` with 14 records pending, and the
                     // broadcast would otherwise have kept spending a band the daemon had already
                     // declared exhausted.
-                    let advert_ok = left(budget, sent) > 0 && companion.send_self_advert(true).is_ok();
+                    let advert_ok = left(budget, sent) != Some(0) && companion.send_self_advert(true).is_ok();
                     if trace_on() {
                         eprintln!("ldmuxd: trace advert scheduled ok={advert_ok}");
                     }
@@ -1675,7 +1665,7 @@ fn serve_loop<L: ByteLink>(
                         }
                     }
                     if last_reply.is_none_or(|t| t.elapsed() >= ROUTE_REPLY_FLOOR)
-                        && left(budget, sent) > 0
+                        && left(budget, sent) != Some(0)
                     {
                         last_reply = Some(Instant::now());
                         let ok = send_route_reply(&mut companion, &req);
@@ -1741,7 +1731,7 @@ fn serve_loop<L: ByteLink>(
                         // amplifier.
                         if peer_path.is_none()
                             && last_ping.is_none_or(|t| t.elapsed() >= PEER_PING_FLOOR)
-                            && left(budget, sent) > 0
+                            && left(budget, sent) != Some(0)
                         {
                             last_ping = Some(Instant::now());
                             let ok = send_route_request(
@@ -1995,22 +1985,29 @@ fn refused(e: &SessionError) -> SendOutcome {
 /// against is the policy's own: at 62.5 kHz SF7 a ten-percent hour is 597 records, and clamping the
 /// counter at 255 stopped the link at 43 % of its allowance while `mesh status` said "0 left" beside
 /// an airtime figure that had minutes to run.
-fn budget_per_hour(airtime_ms: f64, freq_mhz: f64) -> u32 {
+fn budget_per_hour(airtime_ms: f64, freq_mhz: f64) -> Option<u32> {
+    let allowance = airtime_budget_ms(freq_mhz)?;
     if airtime_ms <= 0.0 {
-        return u32::MAX;
+        return None;
     }
-    let n = (airtime_budget_ms(freq_mhz) / airtime_ms).floor();
-    u32::try_from(n as u64).unwrap_or(u32::MAX).max(1)
+    let n = (allowance / airtime_ms).floor();
+    Some(u32::try_from(n as u64).unwrap_or(u32::MAX).max(1))
 }
 
 /// What is left of the hour, in the one byte the contract carries: capped, never zeroed by the cap.
-fn left(budget: u32, sent: u32) -> u8 {
-    u8::try_from(budget.saturating_sub(sent)).unwrap_or(u8::MAX)
+///
+/// `None` means there is no allowance to spend — an unregulated band — and it is published as
+/// `None` too, because "no limit" and "no records left" are opposite facts.
+fn left(budget: Option<u32>, sent: u32) -> Option<u8> {
+    // `None` is "this band has no duty cycle", which is not the same fact as "zero left": the
+    // session must be free to send, and the phone must not print a countdown for a limit that does
+    // not exist.
+    budget.map(|b| u8::try_from(b.saturating_sub(sent)).unwrap_or(u8::MAX))
 }
 
 /// The status a serial radio actually knows: no RSSI or battery reading, and a
 /// budget computed from its own preset rather than reported by a gateway.
-fn status(settings: &Settings, budget: u32, sent: u32) -> Status {
+fn status(settings: &Settings, budget: Option<u32>, sent: u32) -> Status {
     let left = left(budget, sent);
     let tenths = (f64::from(sent) * settings.airtime_ms / 100.0).round();
     Status {
@@ -2018,7 +2015,7 @@ fn status(settings: &Settings, budget: u32, sent: u32) -> Status {
         rssi: UNKNOWN_RSSI,
         battery_percent: UNKNOWN_BATTERY,
         tx_airtime_tenths_this_hour: u16::try_from(tenths as u64).unwrap_or(u16::MAX),
-        ops_left_this_hour: Some(left),
+        ops_left_this_hour: left,
     }
 }
 
@@ -2521,24 +2518,27 @@ mod tests {
 
     #[test]
     fn the_budget_comes_from_the_preset_and_the_band() {
-        // **One percent where the law says so, ten where it does not.** The EU sub-band keeps the
-        // 36 s an hour a 10 % duty cycle leaves room for at 1 %; the US band, where the MeshCore
-        // preset sits, gets ten times that because there is no duty cycle to comply with.
         let eu = 869.525;
         let us = 910.525;
-        assert!(airtime_budget_ms(eu) < airtime_budget_ms(us));
-        // **The policy figure, not the wire's.** At 62.5 kHz/SF7 a record is ≈603 ms, so ten
-        // percent is 597 records an hour — far past the one byte the contract publishes, which is
-        // exactly why the counter this end charges must not be the published one.
-        assert_eq!(budget_per_hour(602.6, us), 597);
-        assert_eq!(budget_per_hour(602.6, eu), 59);
-        assert_eq!(budget_per_hour(75.3, us), 4_780);
+        // **The law where there is one, and nothing where there is not.** The US band, where the
+        // MeshCore preset sits, has no duty cycle for this transmitter, so it has no allowance to
+        // spend either — the meter is a measurement there, not a gate.
+        assert_eq!(airtime_budget_ms(us), None);
+        assert_eq!(airtime_budget_ms(eu), Some(36_000.0));
+        // **The allowance is the law, or nothing.** 910.525 MHz is in no duty-cycled window, so
+        // there is no cap at all; the European windows keep their own limits.
+        assert_eq!(budget_per_hour(602.6, us), None);
+        assert_eq!(budget_per_hour(75.3, us), None);
+        assert_eq!(budget_per_hour(602.6, eu), Some(59));
+        assert_eq!(budget_per_hour(602.6, 868.1), Some(59), "1 % by law");
+        assert_eq!(budget_per_hour(602.6, 868.9), Some(5), "0.1 % by law");
         // The published byte saturates without ever looking spent.
-        assert_eq!(left(budget_per_hour(602.6, us), 0), 255);
-        assert_eq!(left(budget_per_hour(602.6, us), 500), 97);
-        assert_eq!(left(budget_per_hour(602.6, us), 597), 0);
-        // Twice the airtime is half the records.
-        assert!(budget_per_hour(7_315.5, us) < budget_per_hour(602.6, us));
+        assert_eq!(left(Some(597), 0), Some(255));
+        assert_eq!(left(Some(597), 500), Some(97));
+        assert_eq!(left(Some(597), 597), Some(0));
+        assert_eq!(left(None, 12_345), None, "no limit is not a countdown");
+        // Twice the airtime is half the records, in a band that has a limit.
+        assert!(budget_per_hour(7_315.5, eu) < budget_per_hour(602.6, eu));
     }
 
     #[test]
@@ -2889,7 +2889,7 @@ mod tests {
                         hash_size: 1,
                     },
                 };
-        let status = status(&settings, 255, 0);
+        let status = status(&settings, Some(255), 0);
         assert_eq!(status.ops_left_this_hour, Some(255));
         assert_eq!(status.radio_state, RadioState::Connected);
     }

@@ -347,7 +347,8 @@ private fun MeshRadioFacts(
         // beside a 36 s figure, which claimed a rule the app was not enforcing.
         SettingsRow(
             "airtime limit",
-            summary = "on · ${allowanceSeconds(preset)} s/h · a tenth of this band's 10 %",
+            summary = allowanceSeconds(preset)?.let { "on · $it s/h · this band's duty cycle" }
+                ?: "on · this band's duty cycle",
         )
     } else {
         SettingsToggle(
@@ -358,10 +359,13 @@ private fun MeshRadioFacts(
             // **Both units, because a reader cannot do the arithmetic in their head.** 360 s/h is
             // 10 % of the hour and 36 s/h is 1 %; the seconds are what the meter counts in, and the
             // percentage is what the band talks about.
-            summary = if (openAirtime) {
-                "off · the meter is a courtesy, not a rule here"
-            } else {
-                "on · ${allowanceSeconds(preset)} s/h · ${percentOfHour(preset)} % of the hour"
+            // **The meter follows the band, and outside a duty-cycled band it has nothing to
+            // enforce.** "Off · no limit" is the honest default there; the countdown is still
+            // printed as a measurement.
+            summary = when {
+                openAirtime -> "off · no limit"
+                else -> allowanceSeconds(preset)?.let { "on · $it s/h · this band's duty cycle" }
+                    ?: "off · no limit"
             },
             onChange = { metered -> onBudget(if (metered) RadioBudgetMode.Metered else RadioBudgetMode.Open) },
         )
@@ -369,13 +373,9 @@ private fun MeshRadioFacts(
     SettingsNote(airtimeLine(status, preset))
 }
 
-/** The hourly allowance for a preset, in whole seconds, as the settings row says it. */
-internal fun allowanceSeconds(preset: RadioPreset?): Int =
-    ((preset?.let { RadioAirtime.budgetMsPerHour(it) } ?: RadioAirtime.BUDGET_MS_PER_HOUR) / 1000.0).toInt()
-
-/** The same allowance as a percentage of the hour, whole where it is whole: 1 % or 10 %. */
-internal fun percentOfHour(preset: RadioPreset?): Int =
-    (allowanceSeconds(preset) / 36.0).toInt()
+/** The band's allowance in whole seconds, or null when the band has none. */
+internal fun allowanceSeconds(preset: RadioPreset?): Int? =
+    preset?.let { RadioAirtime.budgetMsPerHour(it) }?.let { (it / 1000.0).toInt() }
 
 /**
  * The hour's airtime and what is left of the budget, in the radio's own units.
@@ -393,8 +393,12 @@ internal fun airtimeLine(status: MeshStatus?, preset: RadioPreset?): String {
     if (status == null) return "not read"
     val used = status.txAirtimeTenthsThisHour / 10.0
     val left = status.opsLeftThisHour
-    if (left == null) return "%.1f s this hour · the meter is off".format(used)
-    val budget = (preset?.let { RadioAirtime.budgetMsPerHour(it) } ?: RadioAirtime.BUDGET_MS_PER_HOUR) / 1000.0
+    val allowance = preset?.let { RadioAirtime.budgetMsPerHour(it) }?.let { (it / 1000.0) }
+    if (left == null || allowance == null) {
+        // No duty cycle in this band: a measurement with no denominator, and no countdown, because
+        // a countdown would claim a limit that does not exist.
+        return "%.1f s this hour · no limit in this band".format(used)
+    }
     val records = if (left >= 255) "255+ records left" else "$left records left"
-    return "%.1f of %.0f s used this hour · %s".format(used, budget, records)
+    return "%.1f of %.0f s used this hour · %s".format(used, allowance, records)
 }

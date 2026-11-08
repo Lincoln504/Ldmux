@@ -74,7 +74,7 @@ private val facesByTheme: Map<LdmuxTheme, Faces> by lazy {
                     Font(R.font.chakra_petch_bold, FontWeight.Bold),
                 ),
             )
-            LdmuxTheme.Gruvbox -> Faces(
+            LdmuxTheme.Umber -> Faces(
                 // Geist Mono: clean geometric strokes that sit well beside gruvbox's flat,
                 // warm surfaces without imitating the scheme's own paper-like fonts.
                 mono = FontFamily(
@@ -146,7 +146,7 @@ private fun loadTypeface(theme: LdmuxTheme, bold: Boolean): android.graphics.Typ
             if (bold) R.font.source_code_pro_bold else R.font.source_code_pro_regular
         }
         LdmuxTheme.Nerv -> if (bold) R.font.cascadia_code_bold else R.font.cascadia_code_regular
-        LdmuxTheme.Gruvbox -> if (bold) R.font.geist_mono_bold else R.font.geist_mono_regular
+        LdmuxTheme.Umber -> if (bold) R.font.geist_mono_bold else R.font.geist_mono_regular
     }
     return AndroidApp.context.resources.getFont(res)
 }

@@ -20,7 +20,7 @@ real instrument does, rather than in a set of unrelated beeps:
   daybreak    a dry electrical blip: a square with a 1.5 ms attack, no material at all, mid register.
   nerv        a hard terminal beep: gated sine at 1.9 kHz with a second partial at 3.6 kHz and a
               3 ms noise tick at the onset, held flat rather than decaying.
-  gruvbox     a paper tick and a retro two-note tone: band-passed noise with a 3.2 kHz resonance for
+  umber       a paper tick and a retro two-note tone: band-passed noise with a 3.2 kHz resonance for
               the tick, a square pair for the tones.
 
 Dark is absent on purpose: it is the quiet theme, and silence there is the design (see
@@ -72,7 +72,7 @@ PEAK_BY_THEME = {
     "air": 0.50,
     "daybreak": 0.63,
     "nerv": 0.79,
-    "gruvbox": 0.66,
+    "umber": 0.66,
 }
 
 
@@ -308,7 +308,7 @@ def nerv(cue: str) -> list[float]:
     return buf
 
 
-def gruvbox(cue: str) -> list[float]:
+def umber(cue: str) -> list[float]:
     """A paper tick for attention, a retro two-note square pair for the link."""
     if cue == "attention":
         buf = [0.0] * int(0.09 * RATE)
@@ -331,7 +331,7 @@ THEMES = {
     "air": air,
     "daybreak": daybreak,
     "nerv": nerv,
-    "gruvbox": gruvbox,
+    "umber": umber,
 }
 CUES = ("link_up", "link_down", "attention")
 

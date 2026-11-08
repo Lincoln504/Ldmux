@@ -50,8 +50,8 @@ enum class LdmuxTheme(
         label = "nerv",
         sounds = true,
     ),
-    Gruvbox(
-        label = "gruvbox",
+    Umber(
+        label = "umber",
         sounds = true,
     ),
     ;
@@ -63,7 +63,7 @@ enum class LdmuxTheme(
             Air -> AirPalette
             Daybreak -> DaybreakPalette
             Nerv -> NervPalette
-            Gruvbox -> GruvboxPalette
+            Umber -> UmberPalette
         }
 
     /** True for the two themes whose ground is light: the system bars invert and the window is white. */
@@ -327,43 +327,37 @@ internal object ThemeState {
  */
 internal expect fun applyWindowTheme(theme: LdmuxTheme)
 /**
- * **Gruvbox dark, exactly.** The ground is dark0 #282828 at gruvbox's medium contrast level, the
- * surfaces are dark1..dark4, the text is light1..light4 and the accents are the bright cuts, all
- * from the scheme's own published palette (`morhetz/gruvbox`).
+ * **Umber: gruvbox's browns, not its greys.** The family's default ground is a neutral #282828,
+ * which is what the theme system already has; what makes gruvbox read warm is the *brown* half of
+ * its palette — the `dark0_soft`/`dark1` surfaces, `gruvbox-baby`'s "milk" foreground and
+ * `gruvbox-material`'s softened cream and orange. This theme is that half, so the ground is brown
+ * rather than grey and nothing else in the app is.
  *
- * Two choices are the scheme's own rather than mine: **body text is fg1 #ebdbb2, not fg0 #fbf1c7**
- * — gruvbox pairs bg0 with fg1 and keeps light0 for emphasised text — and the terminal's cursor is
- * the bright yellow it uses for its search highlight. Contrast, measured on #282828: fg 10.75:1,
- * dim (light2) 8.59:1, muted (light4) 5.30:1, accent (bright yellow) 8.69:1, warn (bright orange)
- * 5.84:1, and bright red for danger at 4.29:1 — gruvbox's own error colour, a tenth under the floor
- * for body text, so it is only ever drawn with an icon and a word and never as a paragraph.
+ * The literals are the family's own: milk #E7D7AD for body text (`gruvbox-baby`), fg_greyer
+ * #C5B18D for the second voice and light4 #A89984 for a note (`gruvbox-material` and gruvbox),
+ * orange #E78A4E for the accent, yellow #D8A657 for a warning, red #EA6962 for danger and the
+ * material aqua #89B482 for a chosen state. Contrast on the page: 11.72:1 body, 8.00:1 second
+ * voice, 6.01:1 note, 6.48:1 accent, 7.57:1 warn, 5.33:1 danger — all clear of their floors, and
+ * the third voice is still a tier below the second rather than a shade off it.
  */
-private val GruvboxPalette = Palette(
-    base = Color(0xFF282828),
-    // dark0_soft for the panel and dark1 for the raised step: gruvbox's own two nearest layers, and
-    // the pairing that keeps `muted` (light4, 4.2:1 on dark1) legible where a note is drawn on a
-    // raised fill. dark2 at the raised step measured 3.2:1, under the exception's own bound.
-    surface = Color(0xFF32302F),
-    raised = Color(0xFF3C3836),
-    line = Color(0xFF504945),
-    edge = Color(0xFF928374),
-    fg = Color(0xFFEBDBB2),
-    dim = Color(0xFFD5C4A1),
+private val UmberPalette = Palette(
+    base = Color(0xFF211D1B),
+    surface = Color(0xFF2B2521),
+    raised = Color(0xFF38312B),
+    line = Color(0xFF4A403A),
+    edge = Color(0xFF8C7F73),
+    fg = Color(0xFFE7D7AD),
+    dim = Color(0xFFC5B18D),
     muted = Color(0xFFA89984),
-    accent = Color(0xFFB8BB26),
-    chosen = Color(0xFF8EC07C),
-    // **Bright orange, not bright red, for danger.** gruvbox's red (#FB4934) measures 4.29:1 on the
-    // page and 4.02:1 on its own panel — under the floor for a label — and the app draws a
-    // destructive word, not a diff marker. Orange is gruvbox's other warning colour, clears the
-    // floor on every ground (5.84:1 on the page), and the red still appears where gruvbox uses it:
-    // as the terminal's own error colour, which the host's programs choose.
-    danger = Color(0xFFFE8019),
-    warn = Color(0xFFFABD2F),
+    accent = Color(0xFFE78A4E),
+    chosen = Color(0xFF89B482),
+    danger = Color(0xFFEA6962),
+    warn = Color(0xFFD8A657),
     onAccent = Color(0xFF282828),
     terminal = TerminalPalette(
-        background = Color(0xFF282828),
-        foreground = Color(0xFFEBDBB2),
-        cursor = Color(0xFFFABD2F),
-        selection = Color(0x33FABD2F),
+        background = Color(0xFF211D1B),
+        foreground = Color(0xFFE7D7AD),
+        cursor = Color(0xFFE78A4E),
+        selection = Color(0x33E78A4E),
     ),
 )

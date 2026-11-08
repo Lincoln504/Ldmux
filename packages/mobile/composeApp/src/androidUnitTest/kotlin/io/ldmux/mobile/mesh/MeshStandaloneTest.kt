@@ -195,7 +195,16 @@ class MeshStandaloneTest {
         val narrowMs = RadioAirtime.timeOnAirMs(narrow, 172)
         assertTrue(wideMs > 0.0)
         assertTrue(narrowMs > wideMs, "62.5 kHz should cost more airtime")
-        assertTrue(RadioAirtime.opsPerHour(wide, 172) > RadioAirtime.opsPerHour(narrow, 172))
+        // **910.525 MHz has no duty cycle, so it has no count.** The allowance is the law or
+        // nothing, and a countdown there would claim a limit that does not exist.
+        assertNull(RadioAirtime.opsPerHour(wide, 172))
+        assertNull(RadioAirtime.opsPerHour(narrow, 172))
+        // In a band that does have one, a wider channel fits more records in the same allowance.
+        val euWide = wide.copy(frequencyMhz = 869.525)
+        val euNarrow = narrow.copy(frequencyMhz = 869.525)
+        val wideOps = RadioAirtime.opsPerHour(euWide, 172) ?: 0
+        val narrowOps = RadioAirtime.opsPerHour(euNarrow, 172) ?: 0
+        assertTrue(wideOps > narrowOps)
     }
 
     @Test

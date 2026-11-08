@@ -1024,7 +1024,11 @@ class AndroidRadioLink(
             airtimeUsedMs = 0.0
             saveAirtime()
         }
-        return (RadioAirtime.budgetMsPerHour(currentPreset()) - airtimeUsedMs).coerceAtLeast(0.0)
+        // **No allowance is not zero allowance.** A band with no duty cycle has no limit to run out
+        // of, so the remaining figure is infinite rather than empty — the meter's only job there is
+        // the measurement it publishes.
+        val allowance = RadioAirtime.budgetMsPerHour(currentPreset()) ?: return Double.POSITIVE_INFINITY
+        return (allowance - airtimeUsedMs).coerceAtLeast(0.0)
     }
 
     private fun recordAirtime(otaBytes: Int) {

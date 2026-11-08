@@ -396,29 +396,33 @@ enum class RadioBudgetMode { Metered, Open }
  */
 object RadioAirtime {
     /**
-     * The legal duty cycle of the European sub-band, as an allowance: one percent of an hour.
+     * The allowance inside `869.4-869.65 MHz`: one percent of an hour.
      *
-     * 869.4-869.65 MHz allows a 10 % duty cycle, and ldmux holds itself to a tenth of that inside it.
+     * The band's own rule is 10 %, and ldmux holds itself to a tenth of it because that window is
+     * shared with alarms.
      */
     const val BUDGET_MS_PER_HOUR = 36_000.0
 
     /**
-     * The allowance everywhere else: ten percent of an hour.
+     * **The allowance is the law, or nothing at all.**
      *
-     * **Outside 869.4-869.65 MHz there is no duty-cycle rule to comply with.** 902-928 MHz, where
-     * MeshCore's US/Canada preset sits (910.525 MHz), has none for this kind of transmitter; the
-     * firmware itself will run a 50 % duty cycle (`getAirtimeBudgetFactor()` = 1.0), and the
-     * Meshtastic ecosystem caps a node at 25 %. At one percent a single typed command line at
-     * 62.5 kHz was the whole hour, so the meter turned the product's own link into a dead end for
-     * a courtesy nobody required. Ten percent is a fifth of the firmware's ceiling and less than
-     * half the Meshtastic cap.
+     * The European sub-bands carry duty cycles; everything else — including 902-928 MHz, where
+     * MeshCore's US/Canada preset sits at 910.525 MHz — has none for this kind of transmitter, so
+     * there is **no limit to enforce**. A "ten percent courtesy cap" used to exist here, and it was
+     * wrong twice over: it stopped a US session at a fifth of what the firmware permits
+     * (`getAirtimeBudgetFactor()` returns 1.0) while reading as a legal rule about a band that has
+     * no such rule.
+     *
+     * `null` is therefore not "no data" — it is "this band has no duty cycle", and the meter is a
+     * measurement rather than a gate.
      */
-    const val OPEN_BAND_BUDGET_MS_PER_HOUR = 360_000.0
-
-    /** The allowance for a preset: law in the European sub-band, policy everywhere else. */
-    fun budgetMsPerHour(preset: RadioPreset): Double =
-        if (preset.frequencyMhz >= 869.4 && preset.frequencyMhz <= 869.65) BUDGET_MS_PER_HOUR
-        else OPEN_BAND_BUDGET_MS_PER_HOUR
+    fun budgetMsPerHour(preset: RadioPreset): Double? = when {
+        preset.frequencyMhz in 868.0..868.6 -> BUDGET_MS_PER_HOUR
+        preset.frequencyMhz in 869.4..869.65 -> BUDGET_MS_PER_HOUR
+        // A tenth of one percent: the alarm band, where one 62.5 kHz record is most of the hour.
+        preset.frequencyMhz in 868.7..869.2 -> 3_600.0
+        else -> null
+    }
 
     fun timeOnAirMs(preset: RadioPreset, payloadBytes: Int): Double {
         val bwHz = preset.bandwidthKhz * 1000.0
@@ -436,8 +440,8 @@ object RadioAirtime {
     fun opsPerHour(
         preset: RadioPreset,
         payloadBytes: Int = 172,
-        budgetMs: Double = budgetMsPerHour(preset),
-    ): Int = max(0, (budgetMs / timeOnAirMs(preset, payloadBytes)).toInt())
+        budgetMs: Double? = budgetMsPerHour(preset),
+    ): Int? = budgetMs?.let { max(0, (it / timeOnAirMs(preset, payloadBytes)).toInt()) }
 }
 
 /**

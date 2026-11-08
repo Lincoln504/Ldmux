@@ -335,12 +335,13 @@ by the host radio, by the app before it retunes, and by every budget below.
 - **The allowance is band-aware, per ETSI window.** `869.4-869.65 MHz` allows 10 % and ldmux holds
   itself to **1 %** there (36 s an hour), and the app will not let that meter be turned off.
   `868.0-868.6 MHz` is **1 % by law**, and `868.7-869.2 MHz` is **0.1 %** (the alarm band: 3.6 s an
-  hour, where a single 62.5 kHz record is 0.6 s). Everywhere else — including 902-928 MHz, where
-  MeshCore's US/Canada preset sits — there is no duty cycle to comply with, so the allowance is
-  **10 %** (360 s an hour): a fifth of what the firmware permits and less than half the Meshtastic
-  cap. At 1 % a single typed command line at 62.5 kHz was the whole hour, which made the meter, not
-  the radio, the thing that ended a session. The table used to meter `868.0-868.6` at 10 %, ten
-  times its legal duty cycle, and no shipped preset reaches it — but `ldmux mesh preset` does.
+  hour, where a single 62.5 kHz record is 0.6 s). **Everywhere else there is no limit**: 902-928 MHz,
+  where MeshCore's US/Canada preset sits, has no duty cycle for this transmitter, so nothing is
+  refused and the counter is a measurement. A "ten percent courtesy cap" existed here until
+  2026-11-08 and was wrong twice — it stopped a session at a fifth of what the firmware permits
+  (`getAirtimeBudgetFactor()` returns 1.0) while reading as a legal rule. **The allowance is the
+  law, or nothing.** The table once metered `868.0-868.6` at 10 %, ten times its legal duty cycle;
+  no shipped preset reaches it, but `ldmux mesh preset` does.
 - One screen update or one keystroke is one record. A record that does not fit waits
   for the next one.
 - Batch mode exists because a public channel turns every keystroke into a broadcast.
@@ -385,7 +386,7 @@ by the host radio, by the app before it retunes, and by every budget below.
 The Android client has **six themes**, and they are a contract rather than a decoration: one
 `Palette` of thirteen tokens plus a terminal palette, one monospace and one proportional face per
 theme, and — for all but the first — three session cues. `Dark` is the default and is silent on
-purpose; `Forest`, `Air`, `Daybreak`, `Nerv` and `Gruvbox` each answer a session event in one
+purpose; `Forest`, `Air`, `Daybreak`, `Nerv` and `Umber` each answer a session event in one
 *material*.
 
 - **The tokens are the API.** `Bg`, `Surface`, `Raised`, `Line`, `Edge`, `Fg`, `Dim`, `Muted`,
