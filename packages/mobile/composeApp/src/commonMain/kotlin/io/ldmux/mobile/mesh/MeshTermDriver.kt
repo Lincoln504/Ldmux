@@ -503,8 +503,12 @@ class MeshTermDriver(
         gateway.radioPublicKey?.let { key ->
             val hint = RouteHint.record(key)
             if (hint != null) {
-                repeat(HINT_TRIES) {
-                    if (gateway.send(hint).outcome == MeshSendOutcome.SentDirect) return@repeat
+                // **A loop, not `repeat`.** `return@repeat` continues the iteration loop, so the
+                // hint was sent three times on every connect — three records of airtime for a
+                // message that had already arrived. Measured on the device 2026-11-08: three
+                // `route hint` lines in the host's log for one connect.
+                for (attempt in 0 until HINT_TRIES) {
+                    if (gateway.send(hint).outcome == MeshSendOutcome.SentDirect) break
                     delay(HINT_RETRY_MS)
                 }
             }

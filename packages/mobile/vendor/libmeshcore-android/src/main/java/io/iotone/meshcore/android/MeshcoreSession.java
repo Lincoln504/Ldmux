@@ -803,10 +803,15 @@ public final class MeshcoreSession {
             @NonNull byte[] frame,
             @NonNull RawSendCallback callback) {
         synchronized (trackedLock) {
-            if (pendingTracked != 0) {
-                // A config/contact/device answer could still be in flight.
-                // Without a sequence number it would be indistinguishable from
-                // the raw command's answer, so the raw send waits for quiet.
+            expireTrackedLocked();
+            // **Only a bare `OK`/`ERR` answer can be confused with this send's.** A typed answer
+            // (a contact dump, an advert path, a device query) carries its own frame, so a raw send
+            // beside it is unambiguous — and refusing those refused the very records that matter:
+            // `connect()` reads three typed answers and then sends the route hint and the first
+            // handshake message, both of which were dropped with `err -1` and only retried a whole
+            // ladder rung later. Queued commands cannot interleave either: `pumpTracked` will not
+            // write one while `pendingRaw` is set.
+            if (trackedInFlight && awaitsOkOrError(trackedFrame)) {
                 callback.onResult(false, -1);
                 return false;
             }

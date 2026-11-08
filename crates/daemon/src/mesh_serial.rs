@@ -308,6 +308,24 @@ fn frame_route_request(frame: &[u8], own_key: &[u8; 32]) -> Option<RouteRequest>
     parse_route_request(frame.get(3..)?, own_key)
 }
 
+/// Whether a candidate route should replace the one in hand.
+///
+/// **Shortest wins; stale is no route at all.** A flood is re-forwarded by every repeater in range,
+/// so this radio sees the same request arrive again by longer paths — measured on the bench
+/// 2026-11-08: a request from a phone in the same room logged at 0, then 1, then 4 hops. Each copy
+/// is a route that works, and taking the last one made every reply take a four-repeater detour.
+/// A route older than [`PEER_ROUTE_STALE`] is replaced by anything, so a phone that moved is not
+/// pinned to the old chain by a shorter-but-dead one.
+fn prefer_route(current: Option<&PeerPath>, heard: Option<Instant>, candidate: &PeerPath) -> bool {
+    let Some(current) = current else {
+        return true;
+    };
+    if heard.is_none_or(|t| t.elapsed() >= PEER_ROUTE_STALE) {
+        return true;
+    }
+    candidate.hops <= current.hops
+}
+
 /// The largest record this link can carry **now**, given the path it is using.
 ///
 /// The sender's ceiling is `RECORD_MAX - path` — a raw send is
@@ -343,24 +361,27 @@ fn refresh_peer_route<L: ByteLink>(
     match companion.get_advert_path(key) {
         Ok(path) => {
             let age = unix_now().saturating_sub(u64::from(path.received_at));
-            // **A zero-hop answer clears the route.** The phone coming back into earshot advertises
-            // with no path, and keeping the last repeater route would send every reply into a chain
-            // that no longer reaches it: the phone would work at range, come home, and go deaf until
-            // the daemon restarted.
-            *peer_path = PeerPath::reversed(
-                usize::from(path.hash_size),
-                usize::from(path.hops),
-                &path.bytes,
-            );
-            // The radio stamps the entry when the advert was heard. A clock that was never set
-            // answers in boot-seconds, so an implausible stamp counts as old rather than fresh.
-            let now_unix = unix_now();
-            let plausible = u64::from(path.received_at) + 86_400 > now_unix;
-            *peer_path_heard = if plausible {
+            // The radio stamps the entry when the advert was **heard**, and the clock was set at
+            // open so that stamp is a wall clock. An implausible one — a radio that never took the
+            // time — counts as old rather than fresh.
+            let plausible = u64::from(path.received_at) + 86_400 > unix_now();
+            let heard = if plausible {
                 Instant::now().checked_sub(Duration::from_secs(age))
             } else {
                 None
             };
+            if let Some(candidate) = PeerPath::reversed(
+                usize::from(path.hash_size),
+                usize::from(path.hops),
+                &path.bytes,
+            ) && prefer_route(peer_path.as_ref(), *peer_path_heard, &candidate)
+            {
+                // **A zero-hop answer is a route, and the shortest one.** The phone coming back
+                // into earshot advertises with no path, and keeping the last repeater chain would
+                // send every reply into a link that no longer reaches it.
+                *peer_path = Some(candidate);
+                *peer_path_heard = heard;
+            }
             if *peer_path != before {
                 route_log(&format!("cache answer hops={} age={age}s", path.hops));
             }
@@ -1492,12 +1513,17 @@ fn serve_loop<L: ByteLink>(
                     // **A peer asking where we are.** The request is a flood, so its path is what it
                     // crossed to reach us; reversed, that is our route to the peer, which means
                     // neither end has to read the radio's advert cache to hold one.
-                    peer_path = PeerPath::reversed(
+                    let candidate = PeerPath::reversed(
                         usize::from(req.path.hash_size),
                         usize::from(req.path.hops),
                         &req.path.bytes,
-                    )
-                    .or(peer_path);
+                    );
+                    if let Some(candidate) = candidate
+                        && prefer_route(peer_path.as_ref(), peer_path_heard, &candidate)
+                    {
+                        peer_path = Some(candidate);
+                        peer_path_heard = Some(Instant::now());
+                    }
                     peer_radio = Some(req.peer_key);
                     route_log(&format!(
                         "request from {} hops={}",
@@ -1524,14 +1550,17 @@ fn serve_loop<L: ByteLink>(
                         }
                     }
                 } else if let Some(path) = parse_advert_path(&frame) {
-                    // A late answer to a request that timed out. Assigned the same way
-                    // `refresh_peer_route` does, including the clear: two paths to one field that
-                    // disagree about a zero-hop answer is how a stale route survives.
-                    peer_path = PeerPath::reversed(
+                    // A late answer to a request that timed out, under the same rule as every other
+                    // candidate: the shortest path wins, and a zero-hop answer is the shortest.
+                    if let Some(candidate) = PeerPath::reversed(
                         usize::from(path.hash_size),
                         usize::from(path.hops),
                         &path.bytes,
-                    );
+                    ) && prefer_route(peer_path.as_ref(), peer_path_heard, &candidate)
+                    {
+                        peer_path = Some(candidate);
+                        peer_path_heard = Some(Instant::now());
+                    }
                 } else if let Some(incoming) = incoming_record(&frame) {
                     // The peer announcing which radio it is, so the route above can be looked up.
                     if let Some(key) = route_hint(&incoming.record) {
@@ -1590,8 +1619,10 @@ fn serve_loop<L: ByteLink>(
                         // one round trip, and the session's own records can follow.
                         let hops = reply.hops;
                         route_log(&format!("reply received hops={hops}"));
-                        peer_path = Some(reply);
-                        peer_path_heard = Some(Instant::now());
+                        if prefer_route(peer_path.as_ref(), peer_path_heard, &reply) {
+                            peer_path = Some(reply);
+                            peer_path_heard = Some(Instant::now());
+                        }
                     } else {
                         // **Learn the route again whenever the peer talks.** A link that is up can
                         // still hold a stale path: the phone walks, the session survives on

@@ -935,6 +935,14 @@ class AndroidRadioLink(
      * contact path carries none, because on this transport it is never fresh information.
      */
     private fun adoptRoute(path: RadioRoute.Path, source: String, heardAt: Long = System.currentTimeMillis()) {
+        // **An older source must not age a newer route.** The advert-path cache answers on a timer
+        // with whatever advert it holds, and a reply to our own request can be a second old: letting
+        // the cache overwrite it made `routeIsFresh` false immediately, so every retry asked again
+        // and spent airtime re-proving a route it already had.
+        if (heardAt < routeHeardAt && advertPath != null) {
+            appLog("mesh $source route ignored: older than the one in hand")
+            return
+        }
         advertPath = RadioPath(path.encoded, path.bytes)
         routeHeardAt = heardAt
         appLog(
