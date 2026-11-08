@@ -27,8 +27,9 @@ tailnet, or a pair of LoRa radios when there is no internet at all.
 - **One owner per shell.** A second device is told who holds it and offered a takeover, never
   displaced silently.
 - **LoRa stays affordable.** Batch mode sends forty keystrokes as one transmission on `sync`, so a
-  command costs a fraction of the air typing it live would, and the 1 % allowance a European band
-  requires is enforced on both ends ([`docs/AIRTIME.md`](docs/AIRTIME.md)).
+  command costs a fraction of the air typing it live would, and an hourly allowance is enforced on
+  both ends — a tenth of the band's legal duty cycle inside the European sub-band, ten percent
+  elsewhere ([`docs/AIRTIME.md`](docs/AIRTIME.md)).
 - **A shell can say it is done.** `ldmux buzz` marks a shell in the app's list — finished a turn, or
   waiting for the operator — and the mark is cleared by opening it. A notification is optional and off
   by default, and only the tailnet route can reach a phone that is away;
@@ -168,9 +169,11 @@ desktop radio's tuple, so the app compares it with its own radio and matches it 
 `ldmux mesh status` prints the tuple, the path width and the power; `ldmux mesh preset <MHz> <kHz>
 <SF> <CR> [--path N] [--power dBm]` sets them. Power is its own register on the radio, not part of
 the channel, so it is optional and left alone when unmentioned. Across
-repeaters the desktop advertises itself on open and every five minutes (`LDMUX_MESH_ADVERT_SECS`),
-the phone reads the route out of the advert it heard, and every reply follows the path the request
-arrived by (`docs/ARCHITECTURE.md` §11).
+repeaters the two radios **ask each other for a route**: a flooded request, answered with a direct
+reply carrying the path, so a link comes up in one round trip across whatever distance the mesh
+carries. An advert is a maintenance broadcast (hourly by default, `LDMUX_MESH_ADVERT_SECS`) rather
+than the way a peer is found, because a repeater drops one after eight hops. Every reply follows
+the path the request arrived by (`docs/ARCHITECTURE.md` §11, ADR-0032).
 
 ## Build and test
 

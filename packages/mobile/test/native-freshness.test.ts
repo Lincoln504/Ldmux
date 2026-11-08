@@ -41,20 +41,31 @@ function nativeSources(): string[] {
 }
 
 /**
- * Sources that are deliberately in no packaged library.
+ * Sources beside the shim that are deliberately **not** in the packaged terminal library.
  *
- * `test_engine.c` is the *host* suite: `scripts/test-native.sh` compiles it
- * against the portable core and runs it here. It is linked into no Android
- * library anywhere. The stamp used to be a glob of `*.c *.h`, so editing it
- * declared the packaged `.so` stale and demanded a full NDK rebuild to clear a
- * warning about a file that is not in the artefact.
+ * Three reasons, all of them honest ones:
  *
- * It stays in this list rather than being ignored, because the rule that matters
- * is the one below it: every source file has to be accounted for. A file that is
- * neither stamped nor named here is a file somebody added and did not classify,
- * and that is exactly when silence is expensive.
+ * - `test_engine.c` is the *host* suite: `scripts/test-native.sh` compiles it against the portable
+ *   core and runs it here. It is linked into no Android library anywhere.
+ * - `test_jni.c` is the same idea for the shim.
+ * - `ldmux_session.h` and `ldmux_session_jni.c` belong to the **second** library,
+ *   `libldmux_session.so` (Rust session plus its JNI shim, `native/build-session.sh`), which is
+ *   built separately so a session change does not rebuild libghostty (`docs/ARCHITECTURE.md` §3).
+ *
+ * The stamp used to be a glob of `*.c *.h`, so editing one of these declared the packaged `.so`
+ * stale and demanded a full NDK rebuild to clear a warning about a file that is not in the
+ * artefact.
+ *
+ * They stay in this list rather than being ignored, because the rule that matters is the one below
+ * it: every source file has to be accounted for. A file that is neither stamped nor named here is a
+ * file somebody added and did not classify, and that is exactly when silence is expensive.
  */
-const HOST_ONLY = new Set(["test_engine.c", "test_jni.c"]);
+const NOT_IN_TERMINAL_LIB = new Set([
+  "test_engine.c",
+  "test_jni.c",
+  "ldmux_session.h",
+  "ldmux_session_jni.c",
+]);
 
 /** The libraries Gradle will package, one per ABI. */
 function packagedLibs(): string[] {
@@ -111,7 +122,7 @@ test("every packaged .so was built from the current shim sources", () => {
     const stamped = new Set(recorded.map((l) => l.slice(l.indexOf("  ") + 2)));
     const unclassified = nativeSources()
       .map((s) => basename(s))
-      .filter((f) => !stamped.has(f) && !HOST_ONLY.has(f))
+      .filter((f) => !stamped.has(f) && !NOT_IN_TERMINAL_LIB.has(f))
       .sort();
     assert.deepEqual(
       unclassified,
@@ -187,7 +198,7 @@ test("every native method Kotlin declares is defined in the packaged .so", () =>
     "src",
     "androidMain",
     "kotlin",
-    "dev",
+    "io",
     "ldmux",
     "mobile",
     "term",

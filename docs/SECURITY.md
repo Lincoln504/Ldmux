@@ -38,13 +38,17 @@ What each route protects, what it does not, and where the secrets live. The desi
 - **Accepted trade-offs**: an unauthenticated flood costs one HMAC before any Diffie-Hellman
   (the 16-byte filter tag, a WireGuard-like addition on top of Noise); and records are not padded,
   because padding spends the same airtime as text and the medium already reveals volume.
-- **The phone's radio advertises while it is trying to reach the host.** A route back cannot be
-  learned any other way (`docs/ARCHITECTURE.md` §11), so the phone floods a MeshCore advert — its
-  node name, its radio public key, and the route the advert took — while nothing has been heard from
-  the host for two minutes. Every node in range, and every repeater, learns that this radio exists;
-  the terminal's contents stay sealed, and the advert stops as soon as the link is carrying records.
-  The one lever is the host's own `LDMUX_MESH_ADVERT_SECS=0`, which turns the whole route off: without
-  an advert from the host there is no route to learn, so the phone has nothing to answer.
+- **Both radios ask each other for a route over a flood** (ADR-0032). A request is a MeshCore `REQ`
+  carrying four marker bytes and the requester's **radio** public key — not the session key, and
+  nothing secret: every advert publishes that key already. It is a broadcast, so every node in range
+  repeats and sees that this radio exists and that it is asking a particular peer for a route. A
+  route request is unauthenticated, like the advert it replaced: a forged one can only change where
+  a reply is *sent*, and everything inside the session is sealed by Noise above it. Both ends rate
+  limit (one reply per 5 s, one request per 10 s) so a peer cannot use either as an amplifier.
+- **The phone's radio also advertises while it is trying to reach the host**, once when the link
+  binds and then at most every three minutes while nothing has been heard, which publishes its node
+  name and public key to the mesh. `LDMUX_MESH_ADVERT_SECS=0` on the host turns the host's own
+  adverts off; discovery then rests on the route request alone.
 
 ## Secrets
 

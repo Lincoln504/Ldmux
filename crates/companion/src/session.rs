@@ -207,10 +207,28 @@ impl<L: ByteLink> Companion<L> {
     /// received it": delivery is the session layer's problem, above this one.
     pub fn send_raw(&mut self, hash_size: u8, path: &[u8], record: &[u8]) -> Result<(), SessionError> {
         let packet = build_raw_direct(hash_size, path, record)?;
+        self.send_packet(&packet)
+    }
+
+    /// Transmit a packet we built, whatever its route and payload type.
+    ///
+    /// **This is what makes an on-demand route request possible.** A raw record can only be direct
+    /// (`Mesh.cpp`, `case PAYLOAD_TYPE_RAW_CUSTOM`), so a route request has to be a different
+    /// payload type with the FLOOD route, and `CMD_SEND_RAW_PACKET` takes a whole packet: the
+    /// firmware parses it with `tryParsePacket` and queues it without looking at the payload
+    /// (`MyMesh.cpp:2003-2016`, `Dispatcher::sendPacket`). The frame ceiling is the firmware's
+    /// own: two bytes of command and priority out of `MAX_FRAME_SIZE` 176, so 174 of packet.
+    pub fn send_packet(&mut self, packet: &[u8]) -> Result<(), SessionError> {
+        if packet.len() > crate::codec::PACKET_MAX {
+            return Err(SessionError::Codec(crate::codec::CodecError::TooLong {
+                len: packet.len(),
+                max: crate::codec::PACKET_MAX,
+            }));
+        }
         let mut payload = Vec::with_capacity(2 + packet.len());
         payload.push(commands::SEND_RAW_PACKET);
         payload.push(0); // priority
-        payload.extend_from_slice(&packet);
+        payload.extend_from_slice(packet);
         self.request(&payload, codes::OK, Duration::from_secs(10))?;
         Ok(())
     }

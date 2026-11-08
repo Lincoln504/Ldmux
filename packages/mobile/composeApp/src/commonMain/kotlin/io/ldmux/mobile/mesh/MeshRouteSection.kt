@@ -347,24 +347,31 @@ private fun MeshRadioFacts(
         SettingsToggle(
             "airtime limit",
             checked = !openAirtime,
-            summary = if (openAirtime) "off · no hourly limit" else "on · 36 s per hour",
+            // **The allowance is the band's**, so the sentence is too: 36 s inside the European
+            // sub-band, 360 s outside it, where there is no duty cycle to comply with.
+            summary = if (openAirtime) "off · no hourly limit" else "on · ${allowanceSeconds(preset)} s per hour",
             onChange = { metered -> onBudget(if (metered) RadioBudgetMode.Metered else RadioBudgetMode.Open) },
         )
     }
-    SettingsNote(airtimeLine(status))
+    SettingsNote(airtimeLine(status, preset))
 }
+
+/** The hourly allowance for a preset, in whole seconds, as the settings row says it. */
+internal fun allowanceSeconds(preset: RadioPreset?): Int =
+    ((preset?.let { RadioAirtime.budgetMsPerHour(it) } ?: RadioAirtime.BUDGET_MS_PER_HOUR) / 1000.0).toInt()
 
 /**
  * The hour's airtime and what is left of the budget, in the radio's own units.
  *
- * `txAirtimeTenthsThisHour` is tenths of a second, and the app's own budget is
- * [RadioAirtime.BUDGET_MS_PER_HOUR] (36 s, the 1 % duty cycle). The records figure is null when
- * the budget is open, which is a different fact from "zero left" and is said as such.
+ * `txAirtimeTenthsThisHour` is tenths of a second, and the app's own budget is the band's
+ * ([RadioAirtime.budgetMsPerHour]): 36 s where a 10 % duty cycle is a condition of use, 360 s where
+ * there is none. The records figure is null when the budget is open, which is a different fact from
+ * "zero left" and is said as such.
  */
-internal fun airtimeLine(status: MeshStatus?): String {
+internal fun airtimeLine(status: MeshStatus?, preset: RadioPreset?): String {
     if (status == null) return "not read"
     val used = status.txAirtimeTenthsThisHour / 10.0
-    val budget = RadioAirtime.BUDGET_MS_PER_HOUR / 1000.0
+    val budget = (preset?.let { RadioAirtime.budgetMsPerHour(it) } ?: RadioAirtime.BUDGET_MS_PER_HOUR) / 1000.0
     val left = status.opsLeftThisHour
     val records = when {
         left == null -> "no hourly cap"

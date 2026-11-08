@@ -199,7 +199,7 @@ internal val SettingsSectionGap = 20.dp
  * A value in a row: the thing the label names.
  *
  * One line by default, because a name is a name and a wrapped name makes the row two rows. A row
- * whose value is a *measurement* (`914.25 MHz  500.0 kHz  SF8  CR5`, `0.0 s of 36 s this hour`)
+ * whose value is a *measurement* (`914.25 MHz  500.0 kHz  SF8  CR5`, `0.0/360 s this hour`)
  * asks for two lines instead: truncating a fact to `914.25 MHz  500.0 kHz  SF8 …` hides the part
  * the user opened the screen to read, and the row has no control that would justify the cut.
  */

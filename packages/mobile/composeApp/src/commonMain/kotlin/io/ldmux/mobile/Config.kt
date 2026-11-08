@@ -76,7 +76,7 @@ data class LdmuxConfig(
     /** The advertised name of that radio, for the Settings row. Not a secret. */
     val meshRadioName: String = "",
     /**
-     * Data records are metered at 36 s/hour by default only when this is false.
+     * Data records are metered at the band's allowance by default only when this is false.
      * LDMUX defaults to a private tuple, which is not a public MeshCore channel,
      * so the app budget starts open. The radio's own duty cycle still applies.
      */

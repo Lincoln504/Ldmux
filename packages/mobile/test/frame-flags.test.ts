@@ -32,7 +32,7 @@ function kotlinFlagBit(source: string, name: string): number {
 
 test("selection flag bit agrees between the C core and the client", () => {
   const header = read("native/ldmux_terminal.h");
-  const frame = read("composeApp/src/commonMain/kotlin/dev/ldmux/mobile/term/TerminalFrame.kt");
+  const frame = read("composeApp/src/commonMain/kotlin/io/ldmux/mobile/term/TerminalFrame.kt");
   assert.equal(cFlagBit(header, "LDMUX_FLAG_SELECTED"), kotlinFlagBit(frame, "FLAG_SELECTED"));
 });
 
@@ -43,7 +43,7 @@ test("every style flag bit agrees between the C core and the client", () => {
   // shift them inline in the encoder, which is why this could only assert on the
   // block's boundary before.
   const header = read("native/ldmux_terminal.h");
-  const frame = read("composeApp/src/commonMain/kotlin/dev/ldmux/mobile/term/TerminalFrame.kt");
+  const frame = read("composeApp/src/commonMain/kotlin/io/ldmux/mobile/term/TerminalFrame.kt");
   const pairs: [string, string][] = [
     ["LDMUX_FLAG_BOLD", "FLAG_BOLD"],
     ["LDMUX_FLAG_ITALIC", "FLAG_ITALIC"],
@@ -76,7 +76,7 @@ test("every style flag bit agrees between the C core and the client", () => {
 
 test("the underline style field, frame version and cluster cap agree", () => {
   const header = read("native/ldmux_terminal.h");
-  const frame = read("composeApp/src/commonMain/kotlin/dev/ldmux/mobile/term/TerminalFrame.kt");
+  const frame = read("composeApp/src/commonMain/kotlin/io/ldmux/mobile/term/TerminalFrame.kt");
   const num = (src: string, re: RegExp, what: string): number => {
     const m = src.match(re);
     assert.ok(m, `${what} not found`);
@@ -111,7 +111,7 @@ test("the frame header size agrees", () => {
   // from 40 to 48 bytes for the cursor byte, and a one-sided move would decode the
   // first cell record as the last header byte without either test suite noticing.
   const header = read("native/ldmux_terminal.h");
-  const frame = read("composeApp/src/commonMain/kotlin/dev/ldmux/mobile/term/TerminalFrame.kt");
+  const frame = read("composeApp/src/commonMain/kotlin/io/ldmux/mobile/term/TerminalFrame.kt");
   const c = header.match(/#define\s+LDMUX_FRAME_HEADER\s+(\d+)/);
   assert.ok(c, "LDMUX_FRAME_HEADER not found in the C header");
   const kt = frame.match(/const val\s+HEADER_SIZE\s*=\s*(\d+)/);

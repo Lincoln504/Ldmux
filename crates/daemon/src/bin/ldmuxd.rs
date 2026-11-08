@@ -181,6 +181,9 @@ fn main() {
             // been decided once (see `mesh_serial::prepare`).
             c.width_marker = Some(state_dir.join("mesh-width"));
             c.airtime_record = Some(state_dir.join("mesh-airtime"));
+            // The peer's radio key, learned on the first contact and kept so a restart can address
+            // a route request to it without waiting for an advert (see `mesh_serial::prepare`).
+            c.peer_record = Some(state_dir.join("mesh-peer"));
             c
         }),
         Err(e) => {

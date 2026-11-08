@@ -31,8 +31,13 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ldmux_companion::codec::parse_advert_path;
-use ldmux_companion::{ByteLink, Companion, RAW_CUSTOM_DIRECT_HEADER, SerialLink, SessionError};
+use ldmux_companion::codec::{
+    parse_advert_path, parse_packet, parse_route_reply, parse_route_request,
+};
+use ldmux_companion::{
+    ByteLink, Companion, RouteRequest, SerialLink, SessionError,
+    build_route_reply, build_route_request,
+};
 use ldmux_mesh::carrier::{Bound, Budget, Carrier, Event};
 use ldmux_mesh::constants::{RECORD_MAX, RadioState, SendOutcome, UNKNOWN_BATTERY, UNKNOWN_RSSI};
 use ldmux_mesh::error::MeshError;
@@ -62,23 +67,29 @@ const MAX_PATH_SIZE: usize = 64;
 
 /// How often this radio floods an advert, or `None` when adverts are off.
 ///
-/// **An advert is how a peer learns a path to us.** A raw record is a direct packet, and a direct
-/// packet with no path reaches only as far as the sender's antenna. The phone's radio learns the
-/// route from the advert's accumulated path (`CMD_GET_ADVERT_PATH`), so this interval is the
-/// worst case for "arrived somewhere new, opened the app": five minutes.
+/// **An advert is no longer how a peer learns a route.** That job belongs to the on-demand route
+/// request (`ROUTE_FLOOD_HEADER` in `ldmux_companion::codec`), which is answered in one round trip
+/// and crosses the mesh's real distance; an advert is a *broadcast* that every repeater in range
+/// repeats, and a repeater drops it after `flood_max_advert` hops — **8 by default**
+/// (`examples/simple_repeater/MyMesh.cpp:907`) — so an advert-only design cannot reach a peer nine
+/// hops away at all.
 ///
-/// **Why minutes and not half an hour.** The interval was 1800 s, which is fine for a peer that
-/// stays in one place and wrong for a phone: a route heard an hour ago belongs to wherever the
-/// phone was an hour ago, and the first thing a moved phone does is fail on it. One advert is
-/// ≈0.3 s of air at 62.5 kHz SF7, so five minutes costs ≈1/10 of a percent of a
-/// 1 % allowance, and MeshCore treats adverts as unacknowledged broadcasts, so this is the only
-/// lever there is. `LDMUX_MESH_ADVERT_SECS=0` turns them off for an operator who does not want the
-/// node visible on the mesh at all.
+/// **So this is now a maintenance broadcast, and the community's own cadence applies to it.** The
+/// MeshCore firmware ships repeaters at a 12-hour flood advert interval and companions at *never*
+/// (`flood.advert.interval` 3-168 h, `advert.interval` 60-240 min, default 0), and the regional
+/// guides push it further out — Switzerland recommends 49 hours, CT Mesh and Ottawa 47 — because
+/// an advert is airtime every node in range pays for. ldmux used to advertise every five minutes,
+/// 564 times that cadence, which was a bad neighbour on a shared band even before it failed to
+/// solve the problem it was there for. One hour is a compromise: the node stays visible in other
+/// operators' contact lists without paying for it repeatedly.
+///
+/// `LDMUX_MESH_ADVERT_SECS=0` turns adverts off entirely, which is what the firmware's own
+/// companion default is.
 fn advert_interval() -> Option<Duration> {
     let secs = std::env::var("LDMUX_MESH_ADVERT_SECS")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(300);
+        .unwrap_or(3_600);
     (secs > 0).then(|| Duration::from_secs(secs))
 }
 
@@ -117,16 +128,83 @@ const PEER_ROUTE_RETRY: Duration = Duration::from_secs(15);
 /// spending the radio's single answer window on route questions.
 const ROUTE_REASK_FLOOR: Duration = Duration::from_secs(2);
 
-/// The least time between two adverts triggered by a route hint.
+/// The least time between two **route replies** to the same peer.
 ///
-/// A hint is 36 bytes and an advert is ≈0.3 s of air at 62.5 kHz, so a peer that repeats hints
-/// is an amplifier. Three minutes caps that at twenty adverts an hour (six seconds, ≈1/6 of
-/// a 1 % allowance) and only while this radio has no route to the peer at all, which is the moment
-/// the phone actually needs to hear us.
-const HINT_ADVERT_FLOOR: Duration = Duration::from_secs(180);
+/// A request is ~40 bytes and a reply ~40 bytes plus the path, so answering every request is cheap;
+/// the floor is what stops a peer (or a spoofed source) from turning this radio into a responder
+/// that repeats itself. A peer asks again on its own ladder, so one floor per five seconds is far
+/// below anything a working connection needs.
+const ROUTE_REPLY_FLOOR: Duration = Duration::from_secs(5);
+
+/// The least time between two **route requests** sent to the same peer.
+///
+/// A request is a broadcast, so every repeater in range forwards it: ten seconds is the shortest
+/// gap that still lets a moved peer be found within a couple of attempts, and the longest rate a
+/// failing connection can spend air on discovery is bounded by it.
+const PEER_PING_FLOOR: Duration = Duration::from_secs(10);
 
 /// The four bytes that mark a record as a **route hint** rather than a session message.
 const ROUTE_HINT_MAGIC: &[u8; 4] = b"LDRH";
+
+/// **Route events are logged always, and packets only on request.**
+///
+/// The field failure this change came from could not be diagnosed: the daemon knew whether the
+/// peer's advert had been heard and at how many hops, and said nothing. A route exchange is a
+/// handful of lines per connection, so they go to the journal unconditionally; `LDMUX_MESH_TRACE=1`
+/// additionally logs every received packet, which is 1000x more lines and belongs to a bench.
+fn route_log(message: &str) {
+    eprintln!("ldmuxd: route {message}");
+}
+
+/// The same, at most once a minute: a failing link asks every 10 s and would otherwise write 360
+/// identical lines an hour, which buries the one line that changed.
+fn route_log_rare(last: &mut Option<Instant>, message: &str) {
+    if last.is_none_or(|t| t.elapsed() >= Duration::from_secs(60)) {
+        *last = Some(Instant::now());
+        route_log(message);
+    }
+}
+
+fn trace_on() -> bool {
+    std::env::var_os("LDMUX_MESH_TRACE").is_some()
+}
+
+fn trace_rx(frame: &[u8]) {
+    const NAMES: [&str; 16] = [
+        "REQ", "RESP", "TXT", "ACK", "ADVERT", "GRP_TXT", "GRP_DATA", "ANON_REQ", "PATH",
+        "TRACE", "MULTI", "CONTROL", "?12", "?13", "?14", "RAW_CUSTOM",
+    ];
+    if frame.first() != Some(&0x88) || frame.len() < 5 {
+        return;
+    }
+    let packet = &frame[3..];
+    let header = packet[0];
+    let route = header & 0x03;
+    let ty = usize::from((header >> 2) & 0x0F);
+    let mut off = 1;
+    if route == 0 || route == 3 {
+        off += 4;
+    }
+    let Some(&plen) = packet.get(off) else { return };
+    off += 1;
+    let width = usize::from((plen >> 6) + 1);
+    let hops = usize::from(plen & 0x3F);
+    let body = off + hops * width;
+    let mut extra = String::new();
+    if ty == 4
+        && let Some(key) = packet.get(body..body + 32)
+    {
+        let hex: String = key.iter().take(8).map(|b| format!("{b:02x}")).collect();
+        extra = format!(" key={hex}");
+    }
+    eprintln!(
+        "ldmuxd: trace rx route={route} type={} hops={hops} w={width} len={} snr={} rssi={}{extra}",
+        NAMES.get(ty).copied().unwrap_or("?"),
+        packet.len(),
+        i8::try_from(frame[1]).unwrap_or(0) as f32 / 4.0,
+        frame[2] as i8,
+    );
+}
 
 /// `[LDRH][32-byte radio public key]`: the peer telling this radio which node it is.
 ///
@@ -144,6 +222,70 @@ fn route_hint(record: &[u8]) -> Option<[u8; 32]> {
     record.get(4..).and_then(|k| k.try_into().ok())
 }
 
+/// Send a **flooded route request** for `peer`: one packet, every repeater in range forwards it.
+///
+/// This is the on-demand half of route discovery, and the reason it exists is measured: a repeater
+/// drops an advert after `flood_max_advert` hops — 8 by default — while `REQ` floods were seen
+/// arriving at 18-29 hops on this machine's local mesh (2026-11-08). A peer further than eight hops
+/// away can therefore never learn a route from an advert, and the app waits for one for ever.
+///
+/// The peer answers with a direct `LDRR` record carrying the path it used, and both ends then hold a
+/// route. It needs no contact, no telemetry permission and no firmware change — the envelope is a
+/// `REQ`, which is the same payload type MeshCore's own `sendRequest` uses when the path is unknown.
+fn send_route_request<L: ByteLink>(
+    companion: &mut Companion<L>,
+    own_key: &[u8; 32],
+    hash_size: u8,
+    peer: &[u8; 32],
+) -> bool {
+    let Ok(packet) = build_route_request(hash_size, peer, own_key) else {
+        return false;
+    };
+    companion.send_packet(&packet).is_ok()
+}
+
+/// Answer one route request: the **path this end uses to reach the requester**, so the requester can
+/// reverse it and hold a route of its own.
+///
+/// One rule serves both directions: a reply carries the sender's sending-order path and the reader
+/// reverses it. Getting that backwards would produce a route that is the mirror of the truth, which
+/// on a single-repeater path is indistinguishable from a dead link.
+fn send_route_reply<L: ByteLink>(companion: &mut Companion<L>, req: &RouteRequest) -> bool {
+    let Some(send) = PeerPath::reversed(
+        usize::from(req.path.hash_size),
+        usize::from(req.path.hops),
+        &req.path.bytes,
+    ) else {
+        return false;
+    };
+    let Ok(record) = build_route_reply(send.hash_size, send.hops, &send.bytes) else {
+        return false;
+    };
+    companion.send_raw(send.hash_size, &send.bytes, &record).is_ok()
+}
+
+/// The route a peer's `LDRR` reply names: the path it uses towards us, reversed into ours.
+fn route_reply(record: &[u8]) -> Option<PeerPath> {
+    let path = parse_route_reply(record)?;
+    PeerPath::reversed(
+        usize::from(path.hash_size),
+        usize::from(path.hops),
+        &path.bytes,
+    )
+}
+
+/// A flooded route request in a receive-log frame, when it is addressed to `own_key`.
+///
+/// The log frame is `[0x88][snr×4][rssi][packet]` (`MyMesh.cpp:286-296`), which is the same view the
+/// records come from; a request is recognised by its route (flood), its payload type (`REQ`), and the
+/// destination hash naming this radio.
+fn frame_route_request(frame: &[u8], own_key: &[u8; 32]) -> Option<RouteRequest> {
+    if frame.first() != Some(&ldmux_companion::codes::LOG_RX_DATA) {
+        return None;
+    }
+    parse_route_request(frame.get(3..)?, own_key)
+}
+
 /// Ask the radio for the route to `peer_radio`, and keep it when the answer has one.
 ///
 /// **This is a serial command, not a transmission**, so it can be asked as often as is useful; what
@@ -159,8 +301,10 @@ fn refresh_peer_route<L: ByteLink>(
     let Some(key) = peer_radio else {
         return false;
     };
+    let before = peer_path.clone();
     match companion.get_advert_path(key) {
         Ok(path) => {
+            let age = unix_now().saturating_sub(u64::from(path.received_at));
             // **A zero-hop answer clears the route.** The phone coming back into earshot advertises
             // with no path, and keeping the last repeater route would send every reply into a chain
             // that no longer reaches it: the phone would work at range, come home, and go deaf until
@@ -170,8 +314,14 @@ fn refresh_peer_route<L: ByteLink>(
                 usize::from(path.hops),
                 &path.bytes,
             );
+            if *peer_path != before {
+                route_log(&format!("cache answer hops={} age={age}s", path.hops));
+            }
             true
         }
+        // **A failed read never invalidates a working route.** The cache is 16 slots in RAM and
+        // evicts by age, so `ERR_CODE_NOT_FOUND` for a node heard a minute ago is normal on a busy
+        // channel; the route in hand is kept and the request path is what re-establishes one.
         Err(_) => false,
     }
 }
@@ -185,8 +335,35 @@ fn refresh_peer_route<L: ByteLink>(
 /// and the app's own "path N B" readout.
 pub const DEFAULT_PATH_HASH_MODE: u8 = 1;
 
-/// The self-imposed airtime policy, in milliseconds per hour: one percent.
+/// The airtime allowance this daemon holds itself to, in milliseconds per hour, for a frequency.
+///
+/// **One percent is law in one sub-band and policy everywhere else.** 869.4-869.65 MHz is the
+/// European non-specific SRD band, where a 10 % duty cycle is a condition of use and 1 % is the
+/// figure ldmux has always applied inside it. 902-928 MHz — where the MeshCore US/Canada preset
+/// sits, at 910.525 MHz — has no duty-cycle rule at all for this kind of transmitter, the firmware
+/// itself is willing to run a 50 % duty cycle (`getAirtimeBudgetFactor()` returns 1.0,
+/// `Dispatcher.cpp:34-36`), and the Meshtastic ecosystem caps a node at 25 %. ldmux's own 1 %
+/// therefore made one typed command line the whole hour at 62.5 kHz, which is a courtesy nobody
+/// asked for that turned the product's own link into a dead end.
+///
+/// Ten percent outside that sub-band is the policy: a fifth of what the firmware allows, half the
+/// Meshtastic cap, and enough that a session's discovery, handshake and a few screens do not
+/// consume the hour before the operator has typed anything.
+fn airtime_budget_ms(freq_mhz: f64) -> f64 {
+    if (869.4..=869.65).contains(&freq_mhz) {
+        AIRTIME_BUDGET_MS
+    } else {
+        OPEN_BAND_AIRTIME_BUDGET_MS
+    }
+}
+
+/// The European sub-band's allowance: one percent of an hour. Also the figure the app meters with
+/// while the phone owns the radio, and a test on the phone's side reads this literal to keep the
+/// two languages in step.
 const AIRTIME_BUDGET_MS: f64 = 36_000.0;
+
+/// The allowance outside the European sub-band: ten percent of an hour. See [`airtime_budget_ms`].
+const OPEN_BAND_AIRTIME_BUDGET_MS: f64 = 360_000.0;
 
 /// The one command the loop has for the radio.
 enum Command {
@@ -229,10 +406,12 @@ impl SerialCarrier {
         device: &str,
         width_marker: Option<std::path::PathBuf>,
         window_record: Option<std::path::PathBuf>,
+        peer_record: Option<std::path::PathBuf>,
     ) -> Result<(Self, Bound, RadioPreset), MeshError> {
         let path = device.to_owned();
-        let prepared =
-            tokio::task::spawn_blocking(move || prepare(&path, width_marker, window_record))
+        let prepared = tokio::task::spawn_blocking(move || {
+            prepare(&path, width_marker, window_record, peer_record)
+        })
             .await
             .map_err(|e| MeshError::Io(std::io::Error::other(e.to_string())))?;
         let (companion, bound, settings) = prepared?;
@@ -388,6 +567,17 @@ struct Settings {
     /// mismatch looked exactly like being out of range. The user needs to be able to compare the
     /// two numbers.
     preset: RadioPreset,
+    /// Where the **peer's radio key** is remembered, so a restarted daemon can still ask the peer
+    /// for a route.
+    ///
+    /// **This used to be learned only from a route hint and lost on every restart.** The hint is a
+    /// direct record, so it arrives only when the peer already has a route to us; a daemon that
+    /// restarted on a phone that had moved could not address anything to it and fell back to
+    /// waiting for an advert, which is exactly the five-minute wait this change removes.
+    peer_record: Option<std::path::PathBuf>,
+    /// The peer's radio key as the record held it at open, or `None` when this radio has never
+    /// heard from that peer.
+    peer_key: Option<[u8; 32]>,
     /// Where the hour's spend is recorded, so the allowance survives a daemon restart.
     ///
     /// **The window was per process.** `sent` started at zero whenever the worker started, so a
@@ -453,6 +643,30 @@ fn save_window(path: &std::path::Path, start_unix: u64, sent: u32) {
     let _ = std::fs::write(path, format!("{start_unix} {sent}"));
 }
 
+/// The peer's radio key as the state directory holds it, or `None` when absent or malformed.
+///
+/// Held as 64 hex characters, the same shape as the width record, because a person may have to read
+/// it out of a state directory on a host whose phone is not with them.
+fn load_peer(path: &std::path::Path) -> Option<[u8; 32]> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let text = text.trim();
+    if text.len() != 64 {
+        return None;
+    }
+    let mut key = [0u8; 32];
+    for (i, byte) in key.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(text.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    }
+    Some(key)
+}
+
+/// Remember the peer's radio key. Best effort, like the other state records: a state directory that
+/// cannot be written must not stop the radio from working, it only means the next restart has to
+/// learn the key again.
+fn save_peer(path: &std::path::Path, key: &[u8; 32]) {
+    let _ = std::fs::write(path, hex_key(key));
+}
+
 /// Record that this radio's path width has been decided, so a later bind does not overrule it.
 pub(crate) fn record_width(marker: &std::path::Path, key: &[u8; 32]) {
     // Best effort: a state directory that cannot be written must not stop the radio from opening.
@@ -472,6 +686,7 @@ fn prepare(
     device: &str,
     width_marker: Option<std::path::PathBuf>,
     window_record: Option<std::path::PathBuf>,
+    peer_record: Option<std::path::PathBuf>,
 ) -> Result<(Companion<SerialLink>, Bound, Settings), MeshError> {
     let link = SerialLink::open(device).map_err(MeshError::Io)?;
     link.lock_exclusive().map_err(|e| {
@@ -558,6 +773,10 @@ fn prepare(
         public_key: self_info.public_key,
         hash_size,
     };
+    let peer_key = peer_record
+        .as_deref()
+        .and_then(load_peer)
+        .filter(|key| *key != self_info.public_key);
     Ok((
         companion,
         bound,
@@ -566,6 +785,8 @@ fn prepare(
             airtime_ms,
             preset,
             window_record,
+            peer_record,
+            peer_key,
         },
     ))
 }
@@ -591,7 +812,7 @@ fn serve_loop<L: ByteLink>(
 ) {
     // Recomputed on a retune: a budget is records per hour at *this* tuple's airtime, so a
     // radio moved to a slower spreading factor can spend fewer records than this number said.
-    let mut budget = budget_per_hour(settings.airtime_ms);
+    let mut budget = budget_per_hour(settings.airtime_ms, settings.preset.freq_mhz);
     // **The allowance belongs to the hour, not to this process.** A restart used to hand out a
     // fresh 36 s; the spend is now read back from the state directory and the window resumes where
     // the previous process left it, as long as it is still the same hour.
@@ -617,9 +838,15 @@ fn serve_loop<L: ByteLink>(
     // packets append one hash per repeater (`Mesh::routeRecvPacket`), and is read back out of the
     // radio's advert-path cache.
     let mut peer_path: Option<PeerPath> = None;
-    // Which radio the peer is, learned from its route hint. Without it there is no prefix to look a
-    // route up by, so replies stay zero-hop.
-    let mut peer_radio: Option<[u8; 32]> = None;
+    // Which radio the peer is: from the state record, a route hint or a route request. Without it
+    // there is no prefix to look a route up by, and nothing to address a route request to.
+    let mut peer_radio: Option<[u8; 32]> = settings.peer_key;
+    // When the last route request went out, and when the last reply was sent, so neither mechanism
+    // can be turned into an amplifier by a peer that repeats itself.
+    let mut last_ping: Option<Instant> = None;
+    // When the "request sent" line last went to the journal, so a failing link cannot flood it.
+    let mut last_ping_log: Option<Instant> = None;
+    let mut last_reply: Option<Instant> = None;
     // When the peer's route was last asked for, so a quiet link does not ask on every tick.
     let mut last_route_ask: Option<Instant> = None;
     // When the last advert went out; `None` means none yet, so the first idle moment sends one.
@@ -728,7 +955,7 @@ fn serve_loop<L: ByteLink>(
                     );
                     // The report was computed from the old airtime, so it kept saying the old
                     // tuple's allowance while the meter below it measured the new one.
-                    budget = budget_per_hour(settings.airtime_ms);
+                    budget = budget_per_hour(settings.airtime_ms, settings.preset.freq_mhz);
                 }
                 let _ = reply.send(result);
                 let _ = events.blocking_send(Ok(Event::Status(status(
@@ -789,6 +1016,33 @@ fn serve_loop<L: ByteLink>(
                 if peer_radio.is_some() && due {
                     last_route_ask = Some(Instant::now());
                     refresh_peer_route(&mut companion, peer_radio.as_ref(), &mut peer_path);
+                    // **The cache is a shortcut, not the mechanism.** When it has nothing, ask the
+                    // peer for a route: the reply is one direct record and it crosses whatever
+                    // distance the mesh actually carries, which an advert does not (a repeater
+                    // drops an advert after 8 hops by default).
+                    if peer_path.is_none()
+                        && let Some(peer) = peer_radio
+                        && last_ping.is_none_or(|t| t.elapsed() >= PEER_PING_FLOOR)
+                        && budget.saturating_sub(u8::try_from(sent).unwrap_or(u8::MAX)) > 0
+                    {
+                        last_ping = Some(Instant::now());
+                        let ok = send_route_request(
+                            &mut companion,
+                            &settings.preset.public_key,
+                            settings.hash_size,
+                            &peer,
+                        );
+                        route_log_rare(
+                            &mut last_ping_log,
+                            &format!("request sent (no route) ok={ok}"),
+                        );
+                        if ok {
+                            sent = sent.saturating_add(1);
+                            if let Some(path) = settings.window_record.as_deref() {
+                                save_window(path, window_start_unix, sent);
+                            }
+                        }
+                    }
                 }
                 // The countdown, refreshed while the link is idle. Not a transmission: it is a
                 // message to this process only, and it is what lets the session see the hour roll
@@ -871,9 +1125,12 @@ fn serve_loop<L: ByteLink>(
                     // 62.5 kHz left `records 0 left this hour` with 14 records pending, and the
                     // broadcast would otherwise have kept spending a band the daemon had already
                     // declared exhausted.
-                    if budget.saturating_sub(u8::try_from(sent).unwrap_or(u8::MAX)) > 0
-                        && companion.send_self_advert(true).is_ok()
-                    {
+                    let advert_ok = budget.saturating_sub(u8::try_from(sent).unwrap_or(u8::MAX)) > 0
+                        && companion.send_self_advert(true).is_ok();
+                    if trace_on() {
+                        eprintln!("ldmuxd: trace advert scheduled ok={advert_ok}");
+                    }
+                    if advert_ok {
                         sent = sent.saturating_add(1);
                         if let Some(path) = settings.window_record.as_deref() {
                             save_window(path, window_start_unix, sent);
@@ -890,7 +1147,45 @@ fn serve_loop<L: ByteLink>(
 
         match companion.next_push(Duration::from_millis(1)) {
             Ok(Some(frame)) => {
-                if let Some(path) = parse_advert_path(&frame) {
+                if trace_on() {
+                    trace_rx(&frame);
+                }
+                if let Some(req) = frame_route_request(&frame, &settings.preset.public_key) {
+                    // **A peer asking where we are.** The request is a flood, so its path is what it
+                    // crossed to reach us; reversed, that is our route to the peer, which means
+                    // neither end has to read the radio's advert cache to hold one.
+                    peer_path = PeerPath::reversed(
+                        usize::from(req.path.hash_size),
+                        usize::from(req.path.hops),
+                        &req.path.bytes,
+                    )
+                    .or(peer_path);
+                    peer_radio = Some(req.peer_key);
+                    route_log(&format!(
+                        "request from {} hops={}",
+                        &hex_key(&req.peer_key)[..8],
+                        req.path.hops
+                    ));
+                    if settings.peer_key != Some(req.peer_key) {
+                        settings.peer_key = Some(req.peer_key);
+                        if let Some(record) = settings.peer_record.as_deref() {
+                            save_peer(record, &req.peer_key);
+                        }
+                    }
+                    if last_reply.is_none_or(|t| t.elapsed() >= ROUTE_REPLY_FLOOR)
+                        && budget.saturating_sub(u8::try_from(sent).unwrap_or(u8::MAX)) > 0
+                    {
+                        last_reply = Some(Instant::now());
+                        let ok = send_route_reply(&mut companion, &req);
+                        route_log(&format!("reply sent ok={ok}"));
+                        if ok {
+                            sent = sent.saturating_add(1);
+                            if let Some(path) = settings.window_record.as_deref() {
+                                save_window(path, window_start_unix, sent);
+                            }
+                        }
+                    }
+                } else if let Some(path) = parse_advert_path(&frame) {
                     // A late answer to a request that timed out. Assigned the same way
                     // `refresh_peer_route` does, including the clear: two paths to one field that
                     // disagree about a zero-hop answer is how a stale route survives.
@@ -902,33 +1197,61 @@ fn serve_loop<L: ByteLink>(
                 } else if let Some(incoming) = incoming_record(&frame) {
                     // The peer announcing which radio it is, so the route above can be looked up.
                     if let Some(key) = route_hint(&incoming.record) {
-                        // **The phone has just said hello, so answer in kind.** Its route to us is
-                        // the advert it heard; ours to it is the advert it is about to hear, so one
-                        // is flooded now rather than at the next scheduled interval. Then the
-                        // cache is asked straight away, because the handshake's own record is the
-                        // next thing to send and it needs a route.
                         peer_radio = Some(key);
-                        // One advert per three minutes, and only while there is no route to the
-                        // peer: a phone whose session keeps failing sends a hint on every attempt,
-                        // and each advert is a broadcast on a band other people are using. Once a
-                        // route exists the hint costs no air at all.
+                        route_log(&format!(
+                            "hint from {} route={}",
+                            &hex_key(&key)[..8],
+                            peer_path.is_some()
+                        ));
+                        // **The peer has just said hello, so ask it for a route.** A hint is a
+                        // direct record: it arrives only when the peer already reaches us, and it
+                        // leaves us holding nothing to answer with. A flooded route request costs
+                        // one broadcast and comes back as one direct reply carrying the route in
+                        // both directions — where an advert would be a broadcast every repeater in
+                        // range repeats, and would not cross more than eight hops anyway.
+                        //
+                        // Once a route exists the hint costs no air at all, which is what stops a
+                        // peer whose session keeps failing from turning this radio into an
+                        // amplifier.
                         if peer_path.is_none()
-                            && last_advert.is_none_or(|t| t.elapsed() >= HINT_ADVERT_FLOOR)
-                            // Spent is spent: a hint is the peer asking, and an advert floods to
-                            // everyone in range on a band the allowance covers.
+                            && last_ping.is_none_or(|t| t.elapsed() >= PEER_PING_FLOOR)
                             && budget.saturating_sub(u8::try_from(sent).unwrap_or(u8::MAX)) > 0
                         {
-                            if companion.send_self_advert(true).is_ok() {
+                            last_ping = Some(Instant::now());
+                            let ok = send_route_request(
+                                &mut companion,
+                                &settings.preset.public_key,
+                                settings.hash_size,
+                                &key,
+                            );
+                            route_log_rare(
+                                &mut last_ping_log,
+                                &format!("request sent (hint) ok={ok}"),
+                            );
+                            if ok {
                                 sent = sent.saturating_add(1);
-                        if let Some(path) = settings.window_record.as_deref() {
-                            save_window(path, window_start_unix, sent);
-                        }
+                                if let Some(path) = settings.window_record.as_deref() {
+                                    save_window(path, window_start_unix, sent);
+                                }
                             }
-                            last_advert = Some(Instant::now());
+                        }
+                        // Remember who the peer is, so a restarted daemon can address it.
+                        if settings.peer_key != Some(key) {
+                            settings.peer_key = Some(key);
+                            if let Some(record) = settings.peer_record.as_deref() {
+                                save_peer(record, &key);
+                            }
                         }
                         if refresh_peer_route(&mut companion, peer_radio.as_ref(), &mut peer_path) {
                             last_route_ask = Some(Instant::now());
                         }
+                    } else if let Some(reply) = route_reply(&incoming.record) {
+                        // **The answer to our own route request.** It carries the path the peer
+                        // uses towards us, so reversing it gives ours; both ends hold a route after
+                        // one round trip, and the session's own records can follow.
+                        let hops = reply.hops;
+                        route_log(&format!("reply received hops={hops}"));
+                        peer_path = Some(reply);
                     } else {
                         // **Learn the route again whenever the peer talks.** A link that is up can
                         // still hold a stale path: the phone walks, the session survives on
@@ -1071,17 +1394,11 @@ impl PeerPath {
 }
 
 /// One received packet, reduced to the record inside it.
-#[derive(Debug, PartialEq, Eq)]
-struct Incoming {
-    record: Vec<u8>,
-}
-
-/// One received packet, reduced to the record inside it.
 ///
 /// The guard is the header: only a packet LDMUX itself built (DIRECT with payload RAW_CUSTOM) can
-/// be a record. Everything else on the air — adverts, trace routes, another network's channel
-/// traffic — is not ours and is ignored rather than handed to the session, which would have to
-/// reject it and would show the rejection as a defect.
+/// be a record. Everything else on the air — adverts, route requests, trace routes, another
+/// network's channel traffic — is not ours and is ignored rather than handed to the session, which
+/// would have to reject it and would show the rejection as a defect.
 ///
 /// **A flooded `RAW_CUSTOM` cannot be one of ours**: the firmware drops flood-routed raw packets
 /// before the application sees them (`Mesh.cpp`, `case PAYLOAD_TYPE_RAW_CUSTOM` accepts only
@@ -1089,37 +1406,36 @@ struct Incoming {
 ///
 /// **The path on a direct packet is consumed, not accumulated.** Each repeater removes its own hash
 /// before retransmitting (`Mesh::removeSelfFromPath`), so a record that crossed any number of them
-/// arrives with an empty path, and the field is skipped rather than read as a route. That is why the
-/// reply route comes from the peer's advert (flooded packets *append* a hash per repeater,
-/// `Mesh::routeRecvPacket`) and not from an arriving record.
-fn incoming_record(frame: &[u8]) -> Option<Incoming> {
-    const PUSH_LOG_RX: u8 = 0x88;
+/// arrives with an empty path and teaches no route. That is why a route comes from a *flood*: the
+/// peer's advert, or the route request and reply that replaced it for anything the advert cannot
+/// reach.
+#[derive(Debug, PartialEq, Eq)]
+struct Incoming {
+    record: Vec<u8>,
+}
 
-    if frame.first() != Some(&PUSH_LOG_RX) || frame.len() < 5 {
-        return None;
-    }
-    // `MyMesh.cpp:286-296`: `[0x88][snr*4][rssi][packet]`. The packet starts at 3.
-    let packet = &frame[3..];
-    if packet.len() < 2 || packet[0] & 0x3F != RAW_CUSTOM_DIRECT_HEADER & 0x3F {
-        return None;
-    }
-    // Route type in the low two bits: 0 and 3 carry four bytes of transport codes before the path.
-    let route = packet[0] & 0x03;
-    let mut offset = 1;
-    if route == 0 || route == 3 {
-        offset += 4;
-    }
-    let path_byte = *packet.get(offset)?;
-    offset += 1;
-    let hash = usize::from((path_byte >> 6) + 1); // the two bits can name 4; reserved, so unused
-    let hops = usize::from(path_byte & 0x3F);
-    let body = offset.checked_add(hops.saturating_mul(hash))?;
-    if body > packet.len() {
+fn incoming_record(frame: &[u8]) -> Option<Incoming> {
+    let view = frame_packet(frame)?;
+    // Route DIRECT only: a flooded `RAW_CUSTOM` is dropped by every receiver before the application
+    // sees it, so a flood-routed one cannot be a record.
+    if view.route != 2 || view.payload_type != 0x0F {
         return None;
     }
     Some(Incoming {
-        record: packet[body..].to_vec(),
+        record: view.payload.to_vec(),
     })
+}
+
+/// The packet inside a receive-log frame, or `None` when the frame is not one.
+///
+/// `MyMesh.cpp:286-296`: `[0x88][snr×4][rssi][packet]`. **The receive log is the only view that
+/// carries the path**: the decoded pushes describe a contact or a message and drop the accumulated
+/// route, which is exactly what a reply needs.
+fn frame_packet(frame: &[u8]) -> Option<ldmux_companion::PacketView<'_>> {
+    if frame.first() != Some(&ldmux_companion::codes::LOG_RX_DATA) || frame.len() < 5 {
+        return None;
+    }
+    parse_packet(frame.get(3..)?)
 }
 
 /// A carrier-level failure, as the loop's error type.
@@ -1139,15 +1455,16 @@ fn refused(e: &SessionError) -> SendOutcome {
     }
 }
 
-/// Records of the full size that fit a one-percent airtime budget in an hour.
-fn budget_per_hour(airtime_ms: f64) -> u8 {
+/// Records of the full size that fit the allowance in an hour, capped by the one-byte wire field.
+///
+/// The cap is what the contract can say, not what the policy allows: at 500 kHz/SF7 ten percent is
+/// ≈4770 records, and every tuple above that says 255. The daemon still counts the real spend
+/// (`sent`), it simply cannot publish a number above 255.
+fn budget_per_hour(airtime_ms: f64, freq_mhz: f64) -> u8 {
     if airtime_ms <= 0.0 {
         return u8::MAX;
     }
-    // The contract carries the budget in one byte, so anything above 255 is
-    // reported as 255. On this bench's preset the true figure is ≈261 an hour
-    // and the cap is what the wire can say, not what the policy allows.
-    let n = (AIRTIME_BUDGET_MS / airtime_ms).floor();
+    let n = (airtime_budget_ms(freq_mhz) / airtime_ms).floor();
     u8::try_from(n as u64).unwrap_or(u8::MAX).max(1)
 }
 
@@ -1342,6 +1659,79 @@ mod tests {
         assert_eq!((path.hash_size, path.hops), (2, 2));
     }
 
+    /// **A route request is answered with the path this end uses, and both ends end up holding
+    /// one.** This is the mechanism that replaced "flood an advert and hope", so what it writes has
+    /// to be exact: a direct `RAW_CUSTOM` record on the reversed path, carrying that same path.
+    #[test]
+    fn a_route_request_is_answered_along_the_path_it_arrived_by() {
+        let peer = [0x42u8; 32];
+        let own = [0x91u8; 32];
+        // The peer's request arrived through two repeaters, one-byte hashes: 0x11 nearest the peer.
+        let mut packet = build_route_request(1, &own, &peer).unwrap();
+        packet[1] = ldmux_companion::codec::path_byte(1, 2).unwrap();
+        packet.splice(2..2, [0x11, 0x22]);
+        let req = frame_route_request(&log_frame(&packet), &own).expect("addressed to us");
+
+        let mut link = MemoryLink::new();
+        link.push_payload(&[0x00]); // the radio answers OK
+        let mut companion = Companion::new(link);
+        assert!(send_route_reply(&mut companion, &req));
+
+        // The frame the radio is handed: `[0x3C][u16 n][0x41][0][header][path byte][path][record]`.
+        let written = companion.link_mut().written.clone();
+        let body = &written[3..];
+        assert_eq!(body[0], ldmux_companion::commands::SEND_RAW_PACKET);
+        assert_eq!(body[1], 0, "priority");
+        let view = parse_packet(&body[2..]).expect("a whole packet");
+        assert_eq!(view.route, 2, "direct: the request told us the way");
+        assert_eq!(view.payload_type, 0x0F, "RAW_CUSTOM, the record type");
+        assert_eq!(view.path.hops, 2);
+        assert_eq!(view.path.bytes, vec![0x22, 0x11], "reversed into sending order");
+        let reply = parse_route_reply(view.payload).expect("a route reply");
+        assert_eq!(reply.hops, 2);
+        assert_eq!(reply.bytes, vec![0x22, 0x11], "the path we used, for the peer to reverse");
+    }
+
+    /// **One rule for both directions.** The reply carries the sender's sending-order path and the
+    /// reader reverses it, so a reply from the phone yields the host's route to it exactly as a
+    /// reply from the host yields the phone's.
+    #[test]
+    fn a_route_reply_becomes_the_route_to_the_peer() {
+        // What the peer wrote: the path it uses towards us, in sending order.
+        let record = ldmux_companion::build_route_reply(1, 2, &[0x22, 0x11]).unwrap();
+        let path = route_reply(&record).expect("a route");
+        assert_eq!(path.bytes, vec![0x11, 0x22], "ours is the reverse");
+        assert_eq!((path.hash_size, path.hops), (1, 2));
+        // ...and a session record is not a route reply.
+        assert!(route_reply(&[0x13, 1, 2, 3, 4, 5]).is_none());
+    }
+
+    /// A request that names another radio is not ours: answering it would flood a reply for a peer
+    /// that never asked us, from every node in range at once.
+    #[test]
+    fn a_route_request_for_another_radio_is_not_ours() {
+        let packet = build_route_request(1, &[0x42; 32], &[0x91; 32]).unwrap();
+        assert!(frame_route_request(&log_frame(&packet), &[0x43; 32]).is_none());
+        assert!(frame_route_request(&log_frame(&packet), &[0x42; 32]).is_some());
+    }
+
+    /// **The peer's key outlives a restart.** It is learned from a hint, a request or a reply, and
+    /// without it a restarted daemon cannot address anything to the phone, so it falls back to
+    /// waiting for an advert — which is the five-minute wait this change exists to remove.
+    #[test]
+    fn the_peers_radio_key_is_remembered_across_a_restart() {
+        let dir = std::env::temp_dir().join(format!("ldmux-peer-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mesh-peer");
+        assert!(load_peer(&path).is_none(), "nothing recorded yet");
+        let key = [0x5Au8; 32];
+        save_peer(&path, &key);
+        assert_eq!(load_peer(&path), Some(key), "what the last contact learned");
+        std::fs::write(&path, "not a key").unwrap();
+        assert!(load_peer(&path).is_none(), "a malformed record is no key");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_route_hint_names_the_peers_radio() {
         let mut record = ROUTE_HINT_MAGIC.to_vec();
@@ -1373,14 +1763,22 @@ mod tests {
     }
 
     #[test]
-    fn the_budget_comes_from_the_preset_not_a_constant() {
-        // 500 kHz / SF8: ≈127 ms for 172 bytes, so a one-percent hour is ≈283 records
-        // and the one-byte wire field reports that as its 255 ceiling. The faster deployed tuple
-        // (SF7, 69 ms) would allow 520 and is also capped by the field, not by the policy.
-        let fast = budget_per_hour(137.9);
-        assert_eq!(fast, u8::MAX);
-        // Twice the airtime is half the records, and it fits below the cap.
-        assert!(budget_per_hour(275.8) < fast);
+    fn the_budget_comes_from_the_preset_and_the_band() {
+        // **One percent where the law says so, ten where it does not.** The EU sub-band keeps the
+        // 36 s an hour a 10 % duty cycle leaves room for at 1 %; the US band, where the MeshCore
+        // preset sits, gets ten times that because there is no duty cycle to comply with.
+        let eu = 869.525;
+        let us = 910.525;
+        assert!(airtime_budget_ms(eu) < airtime_budget_ms(us));
+        // At 62.5 kHz/SF7 a record is ≈603 ms, so even ten percent fits below the wire's ceiling
+        // only just; at 500 kHz/SF7 (≈75 ms) the policy figure is far above it and 255 is the
+        // number the contract can carry.
+        assert_eq!(budget_per_hour(602.6, us), u8::MAX);
+        assert_eq!(budget_per_hour(602.6, eu), 59);
+        assert_eq!(budget_per_hour(75.3, us), u8::MAX);
+        assert_eq!(budget_per_hour(75.3, eu), u8::MAX);
+        // Twice the airtime is half the records wherever the cap does not hide it.
+        assert!(budget_per_hour(7_315.5, us) < budget_per_hour(602.6, us));
     }
 
     #[test]
@@ -1423,7 +1821,7 @@ mod tests {
         // SAFETY: this key is read only by `advert_interval`, and this test is the only place in
         // the binary that writes it, so there is nothing to race with.
         unsafe { std::env::remove_var("LDMUX_MESH_ADVERT_SECS") };
-        assert_eq!(advert_interval(), Some(Duration::from_secs(300)), "the default");
+        assert_eq!(advert_interval(), Some(Duration::from_secs(3_600)), "the default");
         // SAFETY: as above; this test owns the key for its whole body.
         unsafe { std::env::set_var("LDMUX_MESH_ADVERT_SECS", "0") };
         assert_eq!(advert_interval(), None, "off means off");
@@ -1433,7 +1831,7 @@ mod tests {
         // SAFETY: as above. A malformed value falls back to the default rather than turning
         // adverts off, because "off" is a decision the operator makes on purpose.
         unsafe { std::env::set_var("LDMUX_MESH_ADVERT_SECS", "often") };
-        assert_eq!(advert_interval(), Some(Duration::from_secs(300)));
+        assert_eq!(advert_interval(), Some(Duration::from_secs(3_600)));
         // SAFETY: as above.
         unsafe { std::env::remove_var("LDMUX_MESH_ADVERT_SECS") };
     }
@@ -1454,6 +1852,8 @@ mod tests {
                     hash_size: 1,
                     airtime_ms: 137.9,
                     window_record: None,
+                    peer_record: None,
+                    peer_key: None,
                 preset: RadioPreset {
                         freq_mhz: 914.25,
                         bw_khz: 500.0,
@@ -1499,6 +1899,8 @@ mod tests {
                     hash_size: 1,
                     airtime_ms: 137.9,
                     window_record: None,
+                    peer_record: None,
+                    peer_key: None,
                 preset: RadioPreset {
                         freq_mhz: 914.25,
                         bw_khz: 500.0,
@@ -1558,6 +1960,8 @@ mod tests {
                     hash_size: 1,
                     airtime_ms: 137.9,
                     window_record: None,
+                    peer_record: None,
+                    peer_key: None,
                 preset: RadioPreset {
                         freq_mhz: 914.25,
                         bw_khz: 500.0,
@@ -1605,6 +2009,8 @@ mod tests {
                     hash_size: 1,
                     airtime_ms: 137.9,
                     window_record: None,
+                    peer_record: None,
+                    peer_key: None,
                 preset: RadioPreset {
                         freq_mhz: 914.25,
                         bw_khz: 500.0,
@@ -1631,6 +2037,8 @@ mod tests {
                     hash_size: 1,
                     airtime_ms: 137.9,
                     window_record: None,
+                    peer_record: None,
+                    peer_key: None,
                 preset: RadioPreset {
                         freq_mhz: 914.25,
                         bw_khz: 500.0,

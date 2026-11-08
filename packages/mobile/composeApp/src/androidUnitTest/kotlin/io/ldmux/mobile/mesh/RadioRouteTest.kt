@@ -138,4 +138,83 @@ class RadioRouteTest {
         val frame = byteArrayOf(0x16, 0x04, 0x03, 0x02, 0x01, 0x02, 0xAA.toByte())
         assertTrue(MeshcoreFrameCodec.decode(frame) is DecodeFailure)
     }
+
+    // ── the on-demand route request, and the reply that answers it ───────────────────────────
+
+    /**
+     * **The request is a `REQ` flood addressed by the host's key hash.** A raw record cannot be
+     * flooded, so this is the only way a companion can ask; if the header or the hashes are wrong
+     * the mesh either drops it or some other node's hash matches and answers it.
+     */
+    @Test
+    fun `a route request is a flood addressed to the host`() {
+        val host = ByteArray(32) { (it + 1).toByte() }
+        val own = ByteArray(32) { (it + 0x40).toByte() }
+        val packet = RadioRoute.routeRequest(2, host, own)
+        assertNotNull(packet)
+        packet!!
+        // header: route FLOOD (1), payload type REQ (0), version 0.
+        assertEquals(0x01, packet[0].toInt() and 0xFF)
+        assertEquals(1, packet[0].toInt() and 0x03) // route FLOOD
+        assertEquals(0, (packet[0].toInt() shr 2) and 0x0F)
+        // path byte: two-byte hashes, no hops yet.
+        assertEquals(0x40, packet[1].toInt() and 0xFF)
+        // payload: host hash, own hash, LDRQ, own key.
+        assertEquals(host[0], packet[2])
+        assertEquals(own[0], packet[3])
+        assertArrayEquals("LDRQ".toByteArray(), packet.copyOfRange(4, 8))
+        assertArrayEquals(own, packet.copyOfRange(8, 40))
+        assertEquals(40, packet.size)
+    }
+
+    /** A key that is not 32 bytes cannot name a radio, so no request is built for it. */
+    @Test
+    fun `a route request needs two public keys`() {
+        assertNull(RadioRoute.routeRequest(1, ByteArray(31), ByteArray(32)))
+        assertNull(RadioRoute.routeRequest(1, ByteArray(32), ByteArray(0)))
+        assertNull(RadioRoute.routeRequest(4, ByteArray(32), ByteArray(32)))
+    }
+
+    /**
+     * **One rule for both directions.** The reply carries the path the host uses towards us; our
+     * route to the host is the reverse of it, by hop group.
+     */
+    @Test
+    fun `a route reply becomes the reverse path`() {
+        // Two one-byte hops in the host's sending order: 0x22 nearest us, 0x11 nearest it.
+        val record = byteArrayOf(0x4C, 0x44, 0x52, 0x52, 0x02, 0x22, 0x11)
+        val route = RadioRoute.routeReply(record)
+        assertNotNull(route)
+        assertEquals(2, route!!.encoded and 0x3F)
+        assertArrayEquals(byteArrayOf(0x11, 0x22), route.bytes)
+        // Not a reply, a ragged one, and a reserved width are all refused.
+        assertNull(RadioRoute.routeReply(byteArrayOf(0x13, 0x01, 0x02, 0x03, 0x04)))
+        assertNull(RadioRoute.routeReply(byteArrayOf(0x4C, 0x44, 0x52, 0x52, 0xC1.toByte(), 0x00)))
+        assertNull(RadioRoute.routeReply(byteArrayOf(0x4C, 0x44, 0x52, 0x52, 0x42, 0x00)))
+    }
+
+    /**
+     * **The advert as it arrived, not as the cache remembers it.** A `0x88` log line carries the
+     * whole packet with its path, so the route is learned on the event instead of on the next
+     * `GET_ADVERT_PATH` — which, with a route in hand, was five minutes apart.
+     */
+    @Test
+    fun `an advert heard on the air names the host route`() {
+        val host = ByteArray(32) { (it + 7).toByte() }
+        // header FLOOD|ADVERT, path byte three one-byte hops, path, payload starts with the key.
+        val raw = byteArrayOf(0x11, 0x03, 0x0A, 0x0B, 0x0C) + host + ByteArray(4)
+        val route = RadioRoute.heardAdvert(raw, host)
+        assertNotNull(route)
+        assertArrayEquals(byteArrayOf(0x0C, 0x0B, 0x0A), route!!.bytes)
+        // A **scoped** advert is a transport-coded flood: four bytes of region codes before the
+        // path byte, so the path starts at 6 and not at 2.
+        val scoped = byteArrayOf(0x10, 0, 0, 0, 0, 0x02, 0x0B, 0x0C) + host + ByteArray(4)
+        val scopedRoute = RadioRoute.heardAdvert(scoped, host)
+        assertNotNull(scopedRoute)
+        assertArrayEquals(byteArrayOf(0x0C, 0x0B), scopedRoute!!.bytes)
+        // Another node's advert, a direct packet, and a truncated payload are not the host's.
+        assertNull(RadioRoute.heardAdvert(raw, ByteArray(32) { (it + 8).toByte() }))
+        assertNull(RadioRoute.heardAdvert(byteArrayOf(0x12, 0x00) + host, host))
+        assertNull(RadioRoute.heardAdvert(raw.copyOfRange(0, 20), host))
+    }
 }

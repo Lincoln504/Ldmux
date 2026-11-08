@@ -166,6 +166,207 @@ pub fn build_raw_direct(hash_size: u8, path: &[u8], record: &[u8]) -> Result<Vec
     Ok(out)
 }
 
+/// Header byte for a flooded packet whose payload is a *route request*: `route = 1` (FLOOD),
+/// `payload_type = 0` (REQ), version 0.
+///
+/// **Why `REQ`, and why a flood from a companion at all.** A raw record cannot be flooded: the
+/// firmware delivers `RAW_CUSTOM` only on a direct route (`Mesh.cpp`, `case PAYLOAD_TYPE_RAW_CUSTOM`
+/// accepts only `isRouteDirect()`), and a repeater does not forward one either (the same case never
+/// calls `routeRecvPacket`). Every other payload type *is* flood-routed, and `REQ` is the one
+/// MeshCore itself uses for an on-demand route request: `sendRequest` sends a `REQ` as a flood when
+/// the peer's path is unknown (`BaseChatMesh.cpp:632-660`). So the route request below is a `REQ`
+/// whose "encrypted" tail is ldmux's own four-byte marker plus the requester's radio key — no
+/// contact, no telemetry permission, and no firmware change, which is what makes it work on a stock
+/// radio.
+///
+/// **Why this is needed at all.** An advert is the only other flood ldmux can send, and a repeater
+/// drops an advert once it has travelled `flood_max_advert` hops — **8 by default**
+/// (`examples/simple_repeater/MyMesh.cpp:907`, upstream PR #2702 in v1.16.0). Measured on this
+/// machine's local mesh 2026-11-08: adverts arrive at 4, 5, 6 and **8** hops, while `REQ` floods
+/// arrive at 18-29 hops. Two radios more than eight hops apart therefore cannot exchange adverts at
+/// all, so a route learned only from adverts is unreachable at city distance.
+pub const ROUTE_FLOOD_HEADER: u8 = 0x01;
+
+/// The four bytes that mark a flooded **route request**.
+pub const ROUTE_REQUEST_MAGIC: &[u8; 4] = b"LDRQ";
+
+/// The four bytes that mark a direct **route reply**, carried as a `RAW_CUSTOM` record.
+pub const ROUTE_REPLY_MAGIC: &[u8; 4] = b"LDRR";
+
+/// One received packet, split into the fields a route or a record needs.
+///
+/// `path` is in **travel order**: a flooded packet accumulates one hash per repeater, so the hops
+/// read in the order they were crossed. Sending back along it reverses the hop *groups*
+/// (`PeerPath::reversed`, `RadioRoute.reversed`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PacketView<'a> {
+    /// `ROUTE_TYPE_*` from the low two bits of the header.
+    pub route: u8,
+    /// `PAYLOAD_TYPE_*` from the header.
+    pub payload_type: u8,
+    /// The packet's path, with the encoding the wire carried.
+    pub path: AdvertPath,
+    /// Everything after the path.
+    pub payload: &'a [u8],
+}
+
+impl PacketView<'_> {
+    /// Whether repeaters flood-routed this packet to us, as opposed to it arriving direct.
+    #[must_use]
+    pub fn is_flood(&self) -> bool {
+        self.route == 0x01 || self.route == 0x00
+    }
+}
+
+/// Split one packet (`[header][transport codes?][path byte][path][payload]`) into its fields.
+///
+/// The layout is the firmware's own (`Packet::readFrom`, `src/Packet.cpp:65-85`), and the path width
+/// comes from the packet rather than from any radio's setting: forwarding is width-agnostic from
+/// v1.14, so a one-byte phone and a two-byte repeater are both on the same air.
+#[must_use]
+pub fn parse_packet(packet: &[u8]) -> Option<PacketView<'_>> {
+    let header = *packet.first()?;
+    let route = header & 0x03;
+    let payload_type = (header >> 2) & 0x0F;
+    let mut i = 1;
+    // ROUTE_TYPE_TRANSPORT_FLOOD (0) and ROUTE_TYPE_TRANSPORT_DIRECT (3) carry two 16-bit codes
+    // before the path (`Packet::readFrom`).
+    if route == 0 || route == 3 {
+        i += 4;
+    }
+    let encoded = *packet.get(i)?;
+    i += 1;
+    let hash_size = (encoded >> 6) + 1;
+    if hash_size == 4 {
+        return None;
+    }
+    let hops = encoded & 0x3F;
+    let want = usize::from(hops) * usize::from(hash_size);
+    if want > MAX_PATH_SIZE {
+        return None;
+    }
+    let bytes = packet.get(i..i + want)?.to_vec();
+    i += want;
+    Some(PacketView {
+        route,
+        payload_type,
+        path: AdvertPath {
+            received_at: 0,
+            hash_size,
+            hops,
+            bytes,
+        },
+        payload: packet.get(i..)?,
+    })
+}
+
+/// Build the flooded packet that asks a peer for its route to us.
+///
+/// Payload, which is the whole of what the far end reads: `[dest hash][src hash][LDRQ][key]`. The
+/// hashes are the firmware's own: the first byte of each public key (`PATH_HASH_SIZE` is 1,
+/// `MeshCore.h:18`, and payload hashes are one byte at `PAYLOAD_VER_1` whatever the path width is).
+/// The key is the requester's **radio** key, so the peer can answer without a separate hint record
+/// and can persist who it is talking to.
+pub fn build_route_request(
+    hash_size: u8,
+    peer_key: &[u8; 32],
+    own_key: &[u8; 32],
+) -> Result<Vec<u8>, CodecError> {
+    if !(1..=3).contains(&hash_size) {
+        return Err(CodecError::BadHashSize(hash_size));
+    }
+    let mut out = Vec::with_capacity(2 + ROUTE_REQUEST_MAGIC.len() + 34);
+    out.push(ROUTE_FLOOD_HEADER);
+    out.push(path_byte(hash_size, 0)?);
+    out.push(peer_key[0]);
+    out.push(own_key[0]);
+    out.extend_from_slice(ROUTE_REQUEST_MAGIC);
+    out.extend_from_slice(own_key);
+    Ok(out)
+}
+
+/// A route request that was addressed to this radio, and the route it arrived by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteRequest {
+    /// The requester's radio key, from the payload.
+    pub peer_key: [u8; 32],
+    /// The path the request took to arrive, in travel order.
+    pub path: AdvertPath,
+}
+
+/// Read a flooded route request addressed to `own_key`.
+///
+/// The destination hash is checked against our own key's first byte rather than being trusted from
+/// the payload, so a request addressed to another node is never answered by us. A malformed length
+/// is a refusal, not a guess: the request is small and fixed-shape, so anything else is not ours.
+#[must_use]
+pub fn parse_route_request(packet: &[u8], own_key: &[u8; 32]) -> Option<RouteRequest> {
+    let view = parse_packet(packet)?;
+    if !view.is_flood() || view.payload_type != 0 {
+        return None;
+    }
+    let payload = view.payload;
+    if payload.len() != 2 + ROUTE_REQUEST_MAGIC.len() + 32 {
+        return None;
+    }
+    if payload[0] != own_key[0] || payload.get(2..6)? != ROUTE_REQUEST_MAGIC.as_slice() {
+        return None;
+    }
+    let peer_key: [u8; 32] = payload.get(6..38)?.try_into().ok()?;
+    Some(RouteRequest {
+        peer_key,
+        path: view.path,
+    })
+}
+
+/// Build the direct record that answers a route request: the path **this end used**, so the
+/// requester can reverse it and hold a route of its own.
+///
+/// The reply is a `RAW_CUSTOM` record exactly like a session record, because that is the one packet
+/// whose contents reach this application on both ends; it is recognised by its marker before the
+/// session ever sees it (`mesh_serial::route_reply`, `AndroidRadioLink.onRawData`).
+pub fn build_route_reply(hash_size: u8, hops: u8, path: &[u8]) -> Result<Vec<u8>, CodecError> {
+    if !(1..=3).contains(&hash_size) {
+        return Err(CodecError::BadHashSize(hash_size));
+    }
+    if path.len() != usize::from(hops) * usize::from(hash_size) {
+        return Err(CodecError::RaggedPath {
+            len: path.len(),
+            hash: hash_size,
+        });
+    }
+    let mut out = Vec::with_capacity(5 + path.len());
+    out.extend_from_slice(ROUTE_REPLY_MAGIC);
+    out.push(path_byte(hash_size, hops)?);
+    out.extend_from_slice(path);
+    Ok(out)
+}
+
+/// Read a route reply's path: the route to the peer that sent it, already in travel order.
+#[must_use]
+pub fn parse_route_reply(record: &[u8]) -> Option<AdvertPath> {
+    if record.get(..4)? != ROUTE_REPLY_MAGIC.as_slice() {
+        return None;
+    }
+    let encoded = *record.get(4)?;
+    let hash_size = (encoded >> 6) + 1;
+    if hash_size == 4 {
+        return None;
+    }
+    let hops = encoded & 0x3F;
+    let want = usize::from(hops) * usize::from(hash_size);
+    if want > MAX_PATH_SIZE {
+        return None;
+    }
+    let bytes = record.get(5..5 + want)?.to_vec();
+    Some(AdvertPath {
+        received_at: 0,
+        hash_size,
+        hops,
+        bytes,
+    })
+}
+
 /// A route read out of the radio's advert-path cache.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdvertPath {
@@ -270,12 +471,23 @@ pub fn time_on_air_ms(bw_khz: f64, sf: u8, cr: u8, payload_len: usize) -> f64 {
         return 0.0;
     }
     let sf_f = f64::from(sf);
-    let cr_f = f64::from(cr).max(1.0);
-    // Header is explicit in MeshCore; CRC on. Preamble 32 symbols below SF8.
-    let preamble = if sf < 8 { 8.0 } else { 16.0 };
+    // The firmware's coding rate is the denominator index RadioLib reads it as: 5 is 4/5, and the
+    // symbol multiplier is that number, which is the datasheet's `CR + 4` with CR counted from 1.
+    let cr_f = f64::from(cr).clamp(5.0, 8.0);
     let symbol_ms = (2f64.powf(sf_f)) / bw_hz * 1000.0;
+    // **32 preamble symbols at SF8 and below**, 16 above: `preambleLengthForSF` in the
+    // firmware (`src/helpers/radiolib/RadioLibWrappers.h:56`). It was 8 here, which understated a
+    // record by ≈50 ms at 62.5 kHz — an 8 % error in the hour's allowance, and the phone's own
+    // arithmetic already used 32, so the two ends disagreed about what an hour buys.
+    let preamble = if sf <= 8 { 32.0 } else { 16.0 };
+    // Low-data-rate optimization is automatic in RadioLib: it is on once a symbol is 16 ms or
+    // longer (`SX126x::setModulationParams`, `SX126x_commands.cpp:220-228`), and it halves the
+    // denominator in the payload-symbol count.
+    let de = if symbol_ms >= 16.0 { 1.0 } else { 0.0 };
+    // Explicit header, CRC on, 20 header symbols folded into the +28 (the firmware's own
+    // `sfCoeff2 + N_symbol_header`, `SX126x.cpp:755-759`).
     let numerator = 8.0 * payload_len as f64 - 4.0 * sf_f + 28.0 + 16.0;
-    let denominator = 4.0 * (sf_f - 2.0 * 0.0);
+    let denominator = 4.0 * (sf_f - 2.0 * de);
     let payload_symbols = 8.0 + (numerator / denominator).ceil().max(0.0) * cr_f;
     (preamble + 4.25 + payload_symbols) * symbol_ms
 }
@@ -498,6 +710,91 @@ mod tests {
         // 21 hops at three bytes is 63, inside the ceiling, and still encodable.
         let fits = vec![0u8; 3 * 21];
         assert!(build_raw_direct(3, &fits, &[0u8; 8]).is_ok());
+    }
+
+    #[test]
+    fn a_route_request_round_trips_for_the_key_it_names() {
+        let peer = [0xABu8; 32];
+        let own = [0x11u8; 32];
+        let packet = build_route_request(1, &peer, &own).expect("builds");
+        // Route flood, payload REQ, no hops: the requester does not know the route yet.
+        assert_eq!(packet[0], ROUTE_FLOOD_HEADER);
+        assert_eq!(packet[0] & 0x03, 0x01);
+        assert_eq!((packet[0] >> 2) & 0x0F, 0x00);
+        assert_eq!(packet[1], 0x00);
+        let req = parse_route_request(&packet, &peer).expect("addressed to the peer");
+        assert_eq!(req.peer_key, own);
+        assert_eq!(req.path.hops, 0);
+    }
+
+    /// **Addressed, not broadcast.** A request names one key; another radio must not answer it,
+    /// or every node in range would flood a reply to a packet that was never for it.
+    #[test]
+    fn another_radios_key_does_not_parse_as_the_destination() {
+        let packet = build_route_request(1, &[0xAB; 32], &[0x11; 32]).unwrap();
+        assert!(parse_route_request(&packet, &[0xCD; 32]).is_none());
+    }
+
+    /// Two radios on one desk still pass through repeaters on a real mesh, and a request that has
+    /// travelled carries its path; the reply needs that path intact and reversed by hop group.
+    #[test]
+    fn a_request_that_travelled_keeps_its_hops() {
+        let peer = [0x5Au8; 32];
+        let own = [0x77u8; 32];
+        let mut packet = build_route_request(2, &peer, &own).unwrap();
+        // Pretend two repeaters appended their two-byte hashes on the way here.
+        packet[1] = path_byte(2, 2).unwrap();
+        packet.splice(2..2, [0xA1, 0xA2, 0xB1, 0xB2]);
+        let req = parse_route_request(&packet, &peer).expect("parses with a path");
+        assert_eq!(req.path.hash_size, 2);
+        assert_eq!(req.path.hops, 2);
+        assert_eq!(req.path.bytes, vec![0xA1, 0xA2, 0xB1, 0xB2]);
+    }
+
+    /// A packet that is not flood-routed never reaches us through a repeater, so it cannot be a
+    /// request; and a truncated one is a refusal rather than a half-read.
+    #[test]
+    fn a_direct_or_truncated_request_is_refused() {
+        let peer = [0x5Au8; 32];
+        let own = [0x77u8; 32];
+        let mut direct = build_route_request(1, &peer, &own).unwrap();
+        direct[0] = 0x02; // DIRECT, REQ
+        assert!(parse_route_request(&direct, &peer).is_none());
+        let mut short = build_route_request(1, &peer, &own).unwrap();
+        short.truncate(short.len() - 1);
+        assert!(parse_route_request(&short, &peer).is_none());
+    }
+
+    #[test]
+    fn a_route_reply_round_trips_and_refuses_a_ragged_path() {
+        let record = build_route_reply(2, 1, &[0x12, 0x34]).expect("builds");
+        assert_eq!(&record[..4], ROUTE_REPLY_MAGIC);
+        let path = parse_route_reply(&record).expect("parses");
+        assert_eq!(path.hash_size, 2);
+        assert_eq!(path.hops, 1);
+        assert_eq!(path.bytes, vec![0x12, 0x34]);
+        // One and a half hashes is not a path.
+        assert!(build_route_reply(2, 1, &[0x12]).is_err());
+        assert!(parse_route_reply(&[0x4C, 0x44, 0x52, 0x52, 0x41, 0x00]).is_none());
+    }
+
+    /// The path width travels **in the packet**, because forwarding is width-agnostic and the two
+    /// ends need not agree on their own advert width.
+    #[test]
+    fn a_packet_view_reads_the_width_the_wire_carried() {
+        let packet = build_route_request(2, &[0x01; 32], &[0x02; 32]).unwrap();
+        let view = parse_packet(&packet).expect("parses");
+        assert_eq!(view.route, 0x01);
+        assert_eq!(view.payload_type, 0);
+        assert_eq!(view.path.hash_size, 2);
+        assert!(view.is_flood());
+        // A transport-coded flood carries four bytes of codes before the path byte.
+        let mut coded = packet.clone();
+        coded[0] = 0x00; // ROUTE_TYPE_TRANSPORT_FLOOD
+        coded.splice(1..1, [0u8; 4]);
+        let view = parse_packet(&coded).expect("parses with transport codes");
+        assert_eq!(view.path.hash_size, 2);
+        assert_eq!(view.payload.len(), 38);
     }
 
     #[test]

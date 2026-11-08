@@ -376,7 +376,7 @@ internal fun envelopeOf(region: RadioRegion): RadioEnvelope = when (region) {
 fun dutyCycleRequired(preset: RadioPreset): Boolean =
     preset.frequencyMhz in 869.4..869.65
 
-/** Whether data records are metered against the 36 s/hour courtesy budget. */
+/** Whether data records are metered against the band's hourly allowance. */
 enum class RadioBudgetMode { Metered, Open }
 
 /**
@@ -385,12 +385,36 @@ enum class RadioBudgetMode { Metered, Open }
  * inferred from it.
  */
 object RadioAirtime {
+    /**
+     * The legal duty cycle of the European sub-band, as an allowance: one percent of an hour.
+     *
+     * 869.4-869.65 MHz allows a 10 % duty cycle, and ldmux holds itself to a tenth of that inside it.
+     */
     const val BUDGET_MS_PER_HOUR = 36_000.0
+
+    /**
+     * The allowance everywhere else: ten percent of an hour.
+     *
+     * **Outside 869.4-869.65 MHz there is no duty-cycle rule to comply with.** 902-928 MHz, where
+     * MeshCore's US/Canada preset sits (910.525 MHz), has none for this kind of transmitter; the
+     * firmware itself will run a 50 % duty cycle (`getAirtimeBudgetFactor()` = 1.0), and the
+     * Meshtastic ecosystem caps a node at 25 %. At one percent a single typed command line at
+     * 62.5 kHz was the whole hour, so the meter turned the product's own link into a dead end for
+     * a courtesy nobody required. Ten percent is a fifth of the firmware's ceiling and less than
+     * half the Meshtastic cap.
+     */
+    const val OPEN_BAND_BUDGET_MS_PER_HOUR = 360_000.0
+
+    /** The allowance for a preset: law in the European sub-band, policy everywhere else. */
+    fun budgetMsPerHour(preset: RadioPreset): Double =
+        if (preset.frequencyMhz >= 869.4 && preset.frequencyMhz <= 869.65) BUDGET_MS_PER_HOUR
+        else OPEN_BAND_BUDGET_MS_PER_HOUR
 
     fun timeOnAirMs(preset: RadioPreset, payloadBytes: Int): Double {
         val bwHz = preset.bandwidthKhz * 1000.0
         val tsymMs = (1 shl preset.spreadingFactor) / bwHz * 1000.0
-        val de = if (tsymMs > 16.0) 1 else 0
+        // RadioLib turns low-data-rate optimisation on at 16 ms per symbol (`>=`), not above it.
+        val de = if (tsymMs >= 16.0) 1 else 0
         val preamble = if (preset.spreadingFactor <= 8) 32 else 16
         val cr = preset.codingRate.coerceIn(5, 8)
         val numerator = 8.0 * payloadBytes - 4.0 * preset.spreadingFactor + 28.0 + 16.0
@@ -399,8 +423,11 @@ object RadioAirtime {
         return (preamble + 4.25 + payloadSymbols) * tsymMs
     }
 
-    fun opsPerHour(preset: RadioPreset, payloadBytes: Int = 172, budgetMs: Double = BUDGET_MS_PER_HOUR): Int =
-        max(0, (budgetMs / timeOnAirMs(preset, payloadBytes)).toInt())
+    fun opsPerHour(
+        preset: RadioPreset,
+        payloadBytes: Int = 172,
+        budgetMs: Double = budgetMsPerHour(preset),
+    ): Int = max(0, (budgetMs / timeOnAirMs(preset, payloadBytes)).toInt())
 }
 
 /**

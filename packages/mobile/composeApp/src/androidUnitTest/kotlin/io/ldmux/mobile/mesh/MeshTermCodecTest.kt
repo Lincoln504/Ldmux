@@ -144,11 +144,25 @@ class MeshTermCodecTest {
     fun theAirtimeBudgetIsTheHostsBudget() {
         val rust = java.io.File("../../../crates/daemon/src/mesh_serial.rs")
         assertTrue(rust.exists(), "the host constant is missing: ${rust.absolutePath}")
-        val m = Regex("const AIRTIME_BUDGET_MS: f64 = ([0-9_.]+);").find(rust.readText())
-        assertNotNull(m, "AIRTIME_BUDGET_MS is no longer a literal this test can read")
-        val host = m.groupValues[1].replace("_", "").toDouble()
+        val text = rust.readText()
+        val eu = Regex("const AIRTIME_BUDGET_MS: f64 = ([0-9_.]+);").find(text)
+        assertNotNull(eu, "AIRTIME_BUDGET_MS is no longer a literal this test can read")
+        val host = eu.groupValues[1].replace("_", "").toDouble()
         assertEquals(host, RadioAirtime.BUDGET_MS_PER_HOUR, 1e-9,
-            "the phone meters ${RadioAirtime.BUDGET_MS_PER_HOUR} ms/hour and the host $host")
+            "the phone meters ${RadioAirtime.BUDGET_MS_PER_HOUR} ms/hour in the EU sub-band and the host $host")
+        // **The band decides, and both ends have to agree about which band.** Outside
+        // 869.4-869.65 MHz there is no duty cycle to comply with, so the allowance is ten percent;
+        // the phone's own copy is held to the host's literal for the same reason as above.
+        val open = Regex("const OPEN_BAND_AIRTIME_BUDGET_MS: f64 = ([0-9_.]+);").find(text)
+        assertNotNull(open, "OPEN_BAND_AIRTIME_BUDGET_MS is no longer a literal this test can read")
+        val hostOpen = open.groupValues[1].replace("_", "").toDouble()
+        assertEquals(hostOpen, RadioAirtime.OPEN_BAND_BUDGET_MS_PER_HOUR, 1e-9,
+            "the phone meters ${RadioAirtime.OPEN_BAND_BUDGET_MS_PER_HOUR} ms/hour outside the EU sub-band")
+        // ...and the rule itself: 910.525 (the MeshCore US preset) is the open band, 869.525 is not.
+        val euPreset = RadioPreset(869.525, 250.0, 11, 5, 14, 1)
+        val usPreset = RadioPreset(910.525, 62.5, 7, 5, 22, 1)
+        assertEquals(RadioAirtime.BUDGET_MS_PER_HOUR, RadioAirtime.budgetMsPerHour(euPreset), 1e-9)
+        assertEquals(RadioAirtime.OPEN_BAND_BUDGET_MS_PER_HOUR, RadioAirtime.budgetMsPerHour(usPreset), 1e-9)
     }
 
     @Test

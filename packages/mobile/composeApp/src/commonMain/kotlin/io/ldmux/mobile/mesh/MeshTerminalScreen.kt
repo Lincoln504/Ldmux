@@ -382,6 +382,12 @@ fun MeshTerminalScreen(
         onDispose { BackgroundSession.setActive(false, "") }
     }
     val attemptNo by conn.driver.attempt.collectAsState()
+    // **A spent allowance is the answer, when it is the answer.** `no answer from host` was true and
+    // useless in the field: the phone had spent its whole hour (`0 records left`), so nothing it
+    // sent could reach the host and no retry could change that. The radio's own status carries the
+    // count, so the wait line can say which of the two it is.
+    val radioStatus by conn.radio.status.collectAsState()
+    val spent = radioStatus?.opsLeftThisHour == 0
     LaunchedEffect(view) { if (view is MeshTermView.Live) rebuilds = 0 }
     val shells by conn.driver.shells.collectAsState()
     // The marks the host replayed with this attach: drawn beside the rows, gone once the shell is
@@ -1220,14 +1226,23 @@ fun MeshTerminalScreen(
                     // taken. A dead link or a closed shell is the header's line and its refresh square.
                     val waiting = when (v) {
                         MeshTermView.Idle -> "starting"
-                        MeshTermView.Handshaking -> "handshaking"
-                        MeshTermView.NoAnswer -> "no answer from host"
+                        MeshTermView.Handshaking -> if (spent) "airtime spent" else "handshaking"
+                        MeshTermView.NoAnswer -> if (spent) "airtime spent" else "no answer from host"
                         MeshTermView.ProfileMissing -> "host has no terminal yet"
                         MeshTermView.Listing -> "asking host for shells"
                         else -> null
                     }
                     if (waiting != null) {
                         WaitingLine(waiting, attemptNo)
+                        if (spent) {
+                            // The cure is time, not a retry: say the one thing that helps.
+                            MeshBodyBlock(
+                                MeshBody(
+                                    "airtime spent",
+                                    "this hour's allowance is used · nothing can be sent until it comes back",
+                                ),
+                            )
+                        }
                     } else {
                         // Every other state says what is wrong. A radio that just refused the record,
                         // or a host that stopped answering, is a fresh-connection case; a missing

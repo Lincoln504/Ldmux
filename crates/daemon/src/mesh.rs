@@ -85,6 +85,9 @@ pub struct MeshConfig {
     pub width_marker: Option<std::path::PathBuf>,
     /// Where the hour's spent airtime is recorded, so a restart resumes the same hour.
     pub airtime_record: Option<std::path::PathBuf>,
+    /// Where the **peer's radio key** is remembered, so a restarted daemon can ask the phone for a
+    /// route instead of waiting for its next advert.
+    pub peer_record: Option<std::path::PathBuf>,
 }
 
 impl MeshConfig {
@@ -113,6 +116,7 @@ impl MeshConfig {
                 // The daemon adds the state directory's records; a bare config has none.
                 width_marker: None,
                 airtime_record: None,
+                peer_record: None,
             })),
         }
     }
@@ -700,6 +704,7 @@ async fn link(
             &cfg.serial,
             cfg.width_marker.clone(),
             cfg.airtime_record.clone(),
+            cfg.peer_record.clone(),
         ),
     )
     .await
@@ -1181,6 +1186,7 @@ mod tests {
             serial: "/dev/null".to_owned(),
             width_marker: None,
             airtime_record: None,
+            peer_record: None,
         };
         MeshRuntime {
             pairing_keys: None,
@@ -1646,6 +1652,7 @@ mod tests {
             serial: "/dev/ttyACM0".to_owned(),
             width_marker: None,
             airtime_record: None,
+            peer_record: None,
         };
         let snapshot = MeshSnapshot::new(&cfg);
         let json = snapshot.to_json();

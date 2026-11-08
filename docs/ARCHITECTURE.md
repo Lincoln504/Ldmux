@@ -319,41 +319,45 @@ ADR-0010 is the decision. The practice:
 ## 9. Airtime
 
 **One number, computed from the tuple the radio reports.** At the deployed tuple
-(910.525 MHz, 500 kHz, SF7, CR5) a full 172-byte record is **69.2 ms** on air, and a
-one-percent duty cycle buys about **520** of them an hour. The wire carries the budget in
-one byte, so a host reports at most 255; `ldmux mesh status` therefore reads `255` on a
-fresh link and counts down as records go out. Two other tuples for scale: 62.5 kHz at SF7
-is 553 ms, and 250 kHz at SF11 is 1542 ms — the same code, so a different preset is a
-different budget, and nothing here is a constant.
+(910.525 MHz, 500 kHz, SF7, CR5) a full 172-byte record is **75.3 ms** on air; at the
+MeshCore public preset's 62.5 kHz/SF7 it is **602.6 ms**, and at 250 kHz/SF11 it is
+**3.66 s** — the same code, so a different preset is a different budget, and nothing here is a
+constant. The firmware's own formula is the one used: 32 preamble symbols at SF8 and below
+(`preambleLengthForSF`, `src/helpers/radiolib/RadioLibWrappers.h:56`), 20 explicit-header symbols,
+CRC on, and low-data-rate optimisation once a symbol is 16 ms or longer.
 
 The figure lives in one function, `time_on_air_ms` (`crates/companion/src/codec.rs`), used
 by the host radio, by the app before it retunes, and by every budget below.
 
+- **The allowance is band-aware.** In 869.4-869.65 MHz a 10 % duty cycle is a condition of use, so
+  ldmux holds itself to **1 %** there (36 s an hour) and the app will not let that meter be turned
+  off. Everywhere else — including 902-928 MHz, where MeshCore's US/Canada preset sits — there is no
+  duty cycle to comply with, so the allowance is **10 %** (360 s an hour): a fifth of what the
+  firmware permits and less than half the Meshtastic cap. At 1 % a single typed command line at
+  62.5 kHz was the whole hour, which made the meter, not the radio, the thing that ended a session.
 - One screen update or one keystroke is one record. A record that does not fit waits
   for the next one.
-- The app applies its own 36 second per hour meter by default, with a checkbox in
-  settings. In 869.4 to 869.65 MHz the meter is a condition of use, not a
-  preference: the app turns it on and says so.
 - Batch mode exists because a public channel turns every keystroke into a broadcast.
 - The bridge coalesces screen updates and lets input echo through ahead of them.
-- **The host advertises what it is.** A flooded self-advert goes out when the link opens and every
-  `LDMUX_MESH_ADVERT_SECS` (default five minutes), because a peer behind a repeater cannot learn a
-  route to this radio any other way. An advert is one record of ≈130 bytes: ≈0.1 % of a
-  1 % allowance at the deployed tuple. Five minutes rather than half an hour because the interval
-  is the worst case for a phone that has moved: a route heard an hour ago belongs to wherever the
-  phone was an hour ago. **An advert is charged to the meter too.** It was unmetered, so the hour's
-  countdown only covered the records the daemon was asked to send and the broadcasts were free on
-  paper while they spent the band; one record's worth is charged per advert, which over-counts
-  (an advert is smaller than a record at every tuple) and keeps the operator's usable records
-  honest.
+- **An advert is a maintenance broadcast, not the way a peer finds us** (ADR-0032). One flooded
+  self-advert goes out when the link opens and then every `LDMUX_MESH_ADVERT_SECS` (default one
+  hour; `0` turns them off, which is the firmware's own companion default). The community's
+  guidance is far longer still — repeaters are told 47 hours — because an advert is airtime every
+  node in range pays for. A route is requested on demand instead: a flooded `REQ` of ≈40 bytes and
+  a direct reply of ≈40 bytes plus the path, once per attempt rather than once per interval.
+- **Every broadcast is charged to the meter.** An advert and a route request are each counted as one
+  record; an advert is smaller than a record at every tuple, so this over-counts rather than
+  under-counts.
 - **The host gates on the countdown it computed, not on the firmware's limiter.** MeshCore's
   `Dispatcher` charges measured airtime against a budget, but its factor is 1.0, which is a 50 %
-  duty cycle (`getAirtimeBudgetFactor()`, `meshcore/src/Dispatcher.cpp`) — not the 1 % a European
-  band allows. So the serial carrier computes the hour's allowance from the tuple the radio
-  reports, publishes it as `recordsLeftThisHour`, and the session loop charges it per new record
-  (`poll_budget`, `crates/daemon/src/mesh.rs`). The ARQ's limit is per poll, so a count that was
-  not decremented would have allowed that many records every pass. Acks and retransmissions are
-  not charged: they are what keeps the link alive. `ldmux mesh status` shows the countdown.
+  duty cycle (`getAirtimeBudgetFactor()`, `meshcore/src/Dispatcher.cpp`). So the serial carrier
+  computes the hour's allowance from the tuple and the frequency, publishes it as
+  `recordsLeftThisHour`, and the session loop charges it per new record (`poll_budget`,
+  `crates/daemon/src/mesh.rs`). The wire carries the count in one byte, so the published figure caps
+  at 255 even when the policy allows more (at 500 kHz/SF7 ten percent is ≈4770 records); the spend
+  itself is counted exactly. The ARQ's limit is per poll, so a count that was not decremented would
+  have allowed that many records every pass. Acks and retransmissions are not charged: they are what
+  keeps the link alive. `ldmux mesh status` shows the countdown and the tuple it came from.
 
 ## 10. Platforms
 
@@ -455,78 +459,87 @@ when its route is direct (`Mesh.cpp`, `case PAYLOAD_TYPE_RAW_CUSTOM`: it checks
 `pkt->isRouteDirect()` and the flood branch is commented out), so a flooded raw record would
 be transmitted and then ignored by every receiver. Direct means the sender must know a path.
 
-1. **The host makes itself known.** A companion does not advertise by itself, so the daemon floods
-   a self-advert (`CMD_SEND_SELF_ADVERT` with mode 1) when the link opens and every
-   `LDMUX_MESH_ADVERT_SECS` (default 300; `0` turns adverts off). Repeaters forward it and its path
-   accumulates.
-2. **The phone reads the route off the advert.** An advert does not teach the *radio* a route
-   (`BaseChatMesh::onAdvertRecv` never touches `out_path`), but the firmware keeps every advert's
-   accumulated path in an advert-path cache, keyed by the first seven bytes of the originator's key
-   (`onDiscoveredContact` → `advert_paths[]`). `CMD_GET_ADVERT_PATH` (0x2A) reads it back — the request
-   carries the **whole 32-byte key**, because the firmware's guard is `len >= PUB_KEY_SIZE + 2` even
-   though only seven bytes are compared — and the
-   app reverses the hop groups into sending order (`RadioRoute.reversed`, mirroring the desktop's
-   `PeerPath::reversed`). **This needs no contact on either radio and no decrypted exchange**, so
-   it works on firmware as shipped. The route is validated before use: a length byte that
-   disagrees with the bytes, or a path wider than the firmware's 64, is refused and treated as no
-   route. **The heard route wins over a stored one.** The firmware's contact record (`out_path`)
-   is a snapshot only a path return replaces, and a companion never receives one, so on this
-   transport it is either absent or stale; the advert-path cache is re-read from the radio's own
-   "most recently heard" state. The app therefore sends through the advert path when it has one and
-   falls back to the contact path only when the cache cannot answer (`RadioRoute.preferHeard`).
-   The other route — a **path return** from a flooded request (`CMD_SEND_PATH_DISCOVERY_REQ`, 0x34,
-   answered by `createPathReturn`) — is not used, because it needs the host in the radio's contact
-   table and the host's telemetry permission to allow the request (`telemetry_mode_base` defaults
-   to deny), so a stock radio would answer nothing.
-3. **The host needs the phone's route the same way, and cannot read it off a record.** A direct
-   packet loses one hash per repeater (`Mesh::removeSelfFromPath`), so a record that crossed any
-   number of them arrives with an **empty** path: the receiver never learns a route from traffic it
-   receives. The phone therefore announces itself (a flooded advert, once when the link binds and then
-   at most every three minutes while the host has been silent for two), and tells the host which radio
-   it is with a **route hint** — a 36-byte record, `LDRH` and the phone's public key, sent before the
-   session handshake because the handshake's own answer is the first thing that needs a route. The host
-   then reads the phone's advert path out of its own radio's cache (the same `CMD_GET_ADVERT_PATH`) —
-   at once on the hint, every 15 s while no route is known, and about once every two minutes once one
-   is (not gated on hearing the phone: the case this covers is "we hear them, they cannot hear us") —
-   and floods one advert of its own when the hint arrives **while it has no route to the phone**,
-   at most every three minutes, so the phone's next read finds a fresh path instead of waiting out the
-   scheduled interval. A hint is 36 bytes and an advert is a broadcast, so that floor is what keeps a
-   peer that repeats hints from using the host as an amplifier.
+0. **An advert cannot be the mechanism.** A repeater drops an advert once it has travelled
+   `flood_max_advert` hops — **8 by default** (`examples/simple_repeater/MyMesh.cpp:907`, upstream
+   PR #2702 in v1.16.0). Measured on this machine's local mesh 2026-11-08 from the host radio's own
+   receive log: adverts arrive at 4, 5, 6 and **8** hops, while `REQ` floods arrive at **18-29** in
+   the same window. Two radios further apart than eight hops therefore cannot exchange adverts at
+   all, and the community's own guidance keeps them rare anyway (repeaters are told 47 hours,
+   companions never). So an advert is a **maintenance broadcast**: one every
+   `LDMUX_MESH_ADVERT_SECS` (default 3600; `0` turns them off, which is the firmware's own
+   companion default), plus a path source when it happens to arrive. The route comes from the
+   request below (ADR-0032).
+1. **A route is asked for, over a flood.** A raw record cannot be flooded, so the request rides a
+   payload type repeaters already forward: `REQ` (0), the one MeshCore's own flooded path request
+   uses. The packet is `[header 0x01][path byte][dest hash 1][src hash 1][LDRQ][requester key 32]` —
+   destination addressed by the first byte of the peer's public key (`PATH_HASH_SIZE` is 1), a
+   four-byte marker, and the requester's radio key. The firmware never reads the tail: with no
+   matching contact the `REQ` fails its MAC and is ignored, and a repeater forwards it by route and
+   hop limit alone. `CMD_SEND_RAW_PACKET` (0x41) transmits it as built, so a stock radio works.
+2. **The peer answers with its own path, direct.** A request arrives with the hops it crossed, in
+   travel order (flooded packets *append* one hash per repeater, `Mesh::routeRecvPacket`), so the
+   receiver reverses the hop groups and replies with a `RAW_CUSTOM` record: `[LDRR][path byte][path]`,
+   carrying **the path it used towards the requester**. One rule serves both directions — the reply
+   names the sender's sending-order path and the reader reverses it — so after one round trip both
+   ends hold a route. Nothing here needs a contact, a telemetry permission or a firmware change.
+   The reply is consumed on both ends before the session can see it (`mesh_serial::route_reply`,
+   `AndroidRadioLink.onRawData`): it arrives before the session exists and would otherwise fail a
+   tag and be counted as noise.
+3. **A route heard on the air is adopted on the event.** Both ends receive
+   `PUSH_CODE_LOG_RX_DATA` (0x88) for every packet their radio hears, path included, so an advert
+   from the peer updates the route the moment it arrives. The radio's own advert-path cache is
+   still read (`CMD_GET_ADVERT_PATH` 0x2A) as a fallback — it needs the **whole 32-byte key**,
+   because the firmware's guard is `len >= PUB_KEY_SIZE + 2` even though it compares seven bytes —
+   and the contact's `out_path` is a last resort (`RadioRoute.preferHeard`). A route older than two
+   minutes is treated as unknown for a *new* connection, because a phone that moved holds a
+   well-formed route to where it used to be and nothing refuses it.
+   The contact-based **path return** (`CMD_SEND_PATH_DISCOVERY_REQ`, 0x34) is not used: it needs
+   the peer in the radio's contact table and the responder's BASE telemetry permission, which
+   defaults to deny (`telemetry_mode_base`, `NodePrefs.h:24`).
+3. **A direct record teaches no route.** A direct packet loses one hash per repeater
+   (`Mesh::removeSelfFromPath`), so a record that crossed any number of them arrives with an **empty**
+   path. That is why the request is a flood and the reply carries its path explicitly.
+   **Who knows what, and when.** The phone knows the host's radio key from the pairing code, so it can
+   address a request before anything has ever connected. The host learns the phone's radio key from a
+   request, a reply or the 36-byte **route hint** (`LDRH` and the phone's public key, sent before the
+   session handshake), and **remembers it** in `<state>/mesh-peer` — without that, a daemon restarted
+   while the phone had moved could not address anything to it and could only wait for an advert.
+   Either end that lacks a route floods a request: at most every 10 s, and the host answers at most one
+   per 5 s, so neither can be turned into an amplifier by a peer that repeats itself.
 4. **Every reply follows the reverse of the path that was learned.** `PeerPath::reversed` flips the
    hop groups (per `hash_size` bytes, not per byte) and the radio thread sends every record along it.
    With no route, records go zero-hop, which reaches only the radios in earshot.
    **Zero hops is a route, not the absence of one.** "The peer is adjacent" and "no route is known
    yet" are different answers on the wire — an empty path is exactly what a direct send to a radio
    in the same room means — and collapsing them made the periodic read stay on its 15 s retry
-   cadence for ever on a bench, and let a route hint from an adjacent peer look like a peer with no
-   route and trigger an advert it did not need. A zero-hop `PeerPath` is kept, and the read settles
-   to its two-minute refresh.
+   cadence for ever on a bench. A zero-hop `PeerPath` is kept.
+   A route request's path and a reply's path are already absolute: a request that arrives with no
+   hops came from an adjacent peer, and that is the route.
 
 Consequences worth knowing:
 
-- **Timing follows airtime.** One record at 62.5 kHz SF7 is 553 ms, and each repeater holds a
-  packet for a random delay of up to two airtimes, so the session's first retry is
+- **Timing follows airtime.** One 172-byte record at 62.5 kHz SF7 is 603 ms (the firmware's own
+  formula: 32 preamble symbols below SF9, `preambleLengthForSF`), and each repeater holds a packet
+  for a random delay of up to two airtimes, so the session's first retry is
   `max(2 s, 6 x airtime)` (`Config::with_airtime`), handed to the session by the carrier
   (`Bound::airtime_ms`) and by the app (`ldmux_session_set_airtime`). A fixed two-second retry
   would duplicate records the peer already has and spend the hour's allowance doing it.
-- **Paths move.** The phone asks its radio for a route every 45 s while it has none and every 10
-  minutes once it has one, alternating between the advert path and the contact so neither source can
-  starve the other (the maintenance tick is half the interval, because each tick asks one of the two),
-  so a host that becomes reachable mid-session becomes reachable without a reconnect. It also
-  announces once, at the moment the link binds, because the host's route back exists only in its
-  advert-path cache and waiting for the first tick delayed that by 45 s on the connection that needs
-  it most. A route that turns out to be stale is dropped by the app (the radio refuses the direct
-  send), which retries zero-hop and asks for a fresh route at once instead of waiting out the retry
-  window. On the host side a route is re-read from the cache on the same cadence whatever is arriving,
-  and **a zero-hop answer clears it**: the phone back in earshot advertises with no path, and keeping
-  the last repeater chain would send every reply into a route that no longer reaches it.
-- **What is proven and what is not.** The reverse-path reply, the zero-hop fallback, the
-  per-`hash_size` hop reversal (both directions: `PeerPath::reversed` and `RadioRoute.reversed`),
-  the advert-path decoding and the airtime-scaled timers are unit-tested. Nothing in this tree has
-  yet run through a real repeater: the two radios on the bench hear each other directly, so the
-  path is always empty there, and the advert-path answer on a bench is a zero-hop path. The first
-  on-air test — two radios far enough apart that a public repeater is the only way between them —
-  is what proves the route-learning step end to end.
+- **Paths move.** The phone floods a route request whenever the route it holds is older than two
+  minutes — on every connect attempt, when a shell is opened, and on a 10 s timer while it has
+  nothing usable (`ROUTE_FRESH_MS`, `ROUTE_REQUEST_FLOOR_MS`) — and reads its radio's cache as a
+  fallback every 60 s once it has one. The host asks the phone the same way while it has no route,
+  and re-reads the cache whenever a record arrives (floored at 2 s). A route that turns out to be
+  stale is dropped by the app, which retries zero-hop and asks again; on the host side **a zero-hop
+  answer clears it**, because the phone back in earshot has no path and keeping the last repeater
+  chain would send every reply into a route that no longer reaches it.
+- **What is proven and what is not.** The route request and reply, the reverse-path rule, the
+  zero-hop fallback, the per-`hash_size` hop reversal (both directions: `PeerPath::reversed` and
+  `RadioRoute.reversed`), the advert-path decoding and the airtime-scaled timers are unit-tested.
+  **Nothing in this tree has yet run through a real repeater**: the two radios on the bench hear each
+  other directly, so the path is always empty there. The first on-air test — two radios far enough
+  apart that a public repeater is the only way between them — is what proves the route-learning step
+  end to end, and the diagnostics for it are the daemon log's `route` lines (`journalctl --user -u
+  ldmux | grep route`) and the app's `mesh … route: N hop(s)` log entries.
 - **Two bytes per path hop, and that is ldmux's default.** The firmware ships at mode 0, one byte:
   254 usable hashes, and 0x00 and 0xFF are reserved. At ≈20 co-channel repeaters a one-byte
   prefix collides with coin-flip probability, and a collision is not cosmetic — two repeaters with

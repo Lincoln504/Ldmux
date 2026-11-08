@@ -464,12 +464,6 @@ class MeshTermDriver(
 
     /** Begin: needs a bound gateway. Sends handshake message 1 as the first record. */
     suspend fun start() = lock.withLock {
-        // **A shell being opened is a reason to ask where the host is.** The session survives a
-        // walk on retransmissions, so a link that is "up" can be holding a route that no longer
-        // exists; the maintenance loop would notice within a minute, and the first record of this
-        // shell is what is being sent now. Two serial reads, no airtime, and nothing is refused if
-        // they fail.
-        runCatching { gateway.refreshRoute() }
         check(handshake == null && session == null) { "already started" }
         // A new connection gets a full set of handshake re-asks. `connect` itself is also the
         // retry path inside one connection, which is why it does not reset this.
@@ -487,6 +481,12 @@ class MeshTermDriver(
         if (g != MeshLinkState.Bound) {
             failed(g); publish(); return
         }
+        // **Every attempt asks where the host is, not just the first.** A retry is the moment the
+        // route matters most: the previous attempt's records went somewhere and nothing came back,
+        // and the route the phone is holding was learned wherever it was before. The refresh is a
+        // serial read plus, at most, one flooded request — no more than the record the retry is
+        // about to spend on a path that may no longer exist.
+        runCatching { gateway.refreshRoute() }
         val h = try { begin() } catch (e: MeshSessionException) {
             failed(e.state); publish(); return
         }

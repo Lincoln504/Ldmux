@@ -128,6 +128,8 @@ public final class MeshcoreSession {
             new java.util.ArrayDeque<>();
     private int pendingTracked;
     private boolean trackedInFlight;
+    /** The frame in flight, so a caller can tell what answer it is waiting for. */
+    private byte[] trackedFrame;
     /** When the in-flight tracked command was written, for the lost-answer deadline. */
     private long trackedSentAtNanos;
     /**
@@ -602,6 +604,55 @@ public final class MeshcoreSession {
     }
 
     /**
+     * True when a raw send may be written **without risking its answer**.
+     *
+     * <p>Only a tracked command that the firmware answers with a bare {@code OK}/{@code ERR} makes a
+     * concurrent raw send unsafe: the frame carries no command id, so that answer would be handed to
+     * the raw send's callback. A command answered with its own typed frame — a contact dump, an
+     * advert path, a device query, a channel, a battery read — cannot be confused with it at all,
+     * and refusing to send while one is in flight turned a few milliseconds of bookkeeping into a
+     * lost record.</p>
+     *
+     * <p>**That refusal is what made a healthy link look like a failing one.** `connect()` reads the
+     * contact, the advert path and the device info, and then sends the route hint and the first
+     * handshake message; every one of those sends was refused while a typed read was still settling,
+     * and a refused handshake record is not retried until the next rung of the ladder — eight,
+     * sixteen, thirty-two seconds. Measured on the device 2026-11-08: "handshaking" for 24-29
+     * seconds at a metre from the host.</p>
+     */
+    public boolean canSendRaw() {
+        synchronized (trackedLock) {
+            expireTrackedLocked();
+            if (draining || pendingRaw.get() != null) return false;
+            if (!trackedInFlight) return true;
+            return !awaitsOkOrError(trackedFrame);
+        }
+    }
+
+    /**
+     * Whether this tracked command's answer is a bare {@code OK}/{@code ERR}.
+     *
+     * <p>The typed answers are named rather than the OK ones: a command this list does not know is
+     * treated as unsafe, which keeps a future addition from silently racing a raw send.</p>
+     */
+    private static boolean awaitsOkOrError(byte[] frame) {
+        if (frame == null || frame.length == 0) return true;
+        switch (frame[0] & 0xFF) {
+            case 0x04: // GET_CONTACTS -> CONTACTS_START / CONTACT / END_OF_CONTACTS
+            case 0x1E: // GET_CONTACT_BY_KEY -> CONTACT / END_OF_CONTACTS
+            case 0x2A: // GET_ADVERT_PATH -> ADVERT_PATH
+            case 0x16: // DEVICE_QUERY -> DEVICE_INFO
+            case 0x1F: // GET_CHANNEL -> CHANNEL_INFO
+            case 0x14: // GET_BATTERY_STORAGE -> BATT_AND_STORAGE
+            case 0x05: // GET_DEVICE_TIME -> CURRENT_TIME
+            case 0x28: // GET_CUSTOM_VARS -> CUSTOM_VARS
+                return false;
+            default:
+                return true;
+        }
+    }
+
+    /**
      * How long a tracked command may hold the one answer slot before it is abandoned.
      *
      * <p>The companion protocol has no sequence number and no per-command timeout, so a lost
@@ -626,6 +677,7 @@ public final class MeshcoreSession {
         if (!trackedInFlight || trackedSentAtNanos == 0) return;
         if (System.nanoTime() - trackedSentAtNanos < TRACKED_DEADLINE_NANOS) return;
         trackedInFlight = false;
+        trackedFrame = null;
         trackedSentAtNanos = 0;
         if (pendingTracked > 0) pendingTracked--;
     }
@@ -759,6 +811,7 @@ public final class MeshcoreSession {
             trackedQueue.clear();
             pendingTracked = 0;
             trackedInFlight = false;
+            trackedFrame = null;
         }
         setState(SessionState.DISCONNECTED);
         try {
@@ -1005,6 +1058,7 @@ public final class MeshcoreSession {
             if (pendingTracked == 0 || !trackedInFlight) return;
             pendingTracked--;
             trackedInFlight = false;
+            trackedFrame = null;
             trackedSentAtNanos = 0;
         }
         pumpTracked();
@@ -1022,6 +1076,7 @@ public final class MeshcoreSession {
             next = trackedQueue.pollFirst();
             if (next == null) return;
             trackedInFlight = true;
+            trackedFrame = next;
             trackedSentAtNanos = System.nanoTime();
         }
         if (!send(next)) trackedAnswered();

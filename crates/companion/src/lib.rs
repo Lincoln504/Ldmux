@@ -31,8 +31,10 @@ pub mod link;
 pub mod session;
 
 pub use codec::{
-    APP_TARGET_VERSION, AdvertPath, DeviceInfo, RAW_CUSTOM_DIRECT_HEADER, SelfInfo, build_raw_direct,
-    codes, commands, parse_advert_path,
+    APP_TARGET_VERSION, AdvertPath, DeviceInfo, PacketView, RAW_CUSTOM_DIRECT_HEADER,
+    ROUTE_FLOOD_HEADER, ROUTE_REPLY_MAGIC, ROUTE_REQUEST_MAGIC, RouteRequest, SelfInfo,
+    build_raw_direct, build_route_reply, build_route_request, codes, commands, parse_advert_path,
+    parse_packet, parse_route_reply, parse_route_request,
 };
 pub use framing::{FrameReader, MAX_PAYLOAD, encode};
 pub use link::{ByteLink, MemoryLink, SerialLink};
