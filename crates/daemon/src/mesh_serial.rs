@@ -784,8 +784,41 @@ pub struct RadioPreset {
 ///
 /// The record holds the radio's own public key, so moving the serial device to a different radio
 /// does not inherit the previous one's decision.
+/// Whether this marker was written for **this** radio.
+///
+/// The file is `<key>` on the first format and `<key> <width>` from the second, so a marker written
+/// before the width was recorded still matches — it simply has no width to report.
 fn marker_matches(marker: &std::path::Path, key: &[u8; 32]) -> bool {
-    std::fs::read_to_string(marker).is_ok_and(|t| t.trim() == hex_key(key))
+    marker_lines(marker).is_some_and(|(k, _)| k == hex_key(key))
+}
+
+/// The path-hash mode this marker recorded for the radio, when it recorded one.
+///
+/// **The width is the whole point of writing the marker a second time.** It said only "this radio
+/// has been decided", so an attempt the radio *refused* was remembered as done: measured
+/// 2026-11-08, every start logged `host radio path hashes: 1 byte(s)` with no attempt to raise it,
+/// because a refusal had been recorded as a success.
+fn marker_width(marker: &std::path::Path) -> Option<u8> {
+    marker_lines(marker).and_then(|(_, width)| width)
+}
+
+fn marker_lines(marker: &std::path::Path) -> Option<(String, Option<u8>)> {
+    let text = std::fs::read_to_string(marker).ok()?;
+    let mut it = text.split_whitespace();
+    let key = it.next()?.to_owned();
+    let width = it.next().and_then(|w| w.parse::<u8>().ok());
+    Some((key, width))
+}
+
+/// Whether the radio's own answer should be raised to ldmux's default width.
+///
+/// **Mode 0 is two different facts.** It is the firmware default (one byte, which collides at
+/// about twenty co-channel repeaters) *and* the width an operator gets after deliberately choosing
+/// one byte in their app — the firmware cannot tell them apart. The marker is the only memory, so:
+/// raise when nothing has been recorded, never raise when the last attempt left the radio at one
+/// byte (that attempt is the evidence), and never raise a radio that already answers two or three.
+fn should_raise(reported: Option<u8>, recorded: Option<u8>) -> bool {
+    reported == Some(0) && recorded != Some(1)
 }
 
 fn unix_now() -> u64 {
@@ -835,9 +868,13 @@ fn save_peer(path: &std::path::Path, key: &[u8; 32]) {
 }
 
 /// Record that this radio's path width has been decided, so a later bind does not overrule it.
-pub(crate) fn record_width(marker: &std::path::Path, key: &[u8; 32]) {
+pub(crate) fn record_width(marker: &std::path::Path, key: &[u8; 32], width: Option<u8>) {
     // Best effort: a state directory that cannot be written must not stop the radio from opening.
-    let _ = std::fs::write(marker, hex_key(key));
+    let body = match width {
+        Some(w) => format!("{} {w}", hex_key(key)),
+        None => hex_key(key),
+    };
+    let _ = std::fs::write(marker, body);
 }
 
 fn hex_key(key: &[u8; 32]) -> String {
@@ -890,43 +927,49 @@ fn prepare(
     // default" after every restart, which silently reverted a width the phone had just matched to.
     // The upgrade therefore happens **once per radio** and is recorded next to the state it
     // protects; after that the radio's own answer is the truth.
-    let already_configured = width_marker
+    let marker = width_marker
         .as_deref()
-        .is_some_and(|m| marker_matches(m, &self_info.public_key));
-    let raise = reported_mode == Some(0) && !already_configured;
-    // Said out loud, because the width is a fact about this radio that decides how many neighbours
-    // it can name without ambiguity, and nothing else in the system reports it.
-    eprintln!(
-        "ldmuxd: host radio path hashes: {} byte(s){}",
-        match reported_mode {
-            Some(0) | None if raise => DEFAULT_PATH_HASH_MODE + 1,
-            Some(m) => m.saturating_add(1).clamp(1, 3),
-            None => DEFAULT_PATH_HASH_MODE + 1,
-        },
-        if raise { " (was 1: raised to the default, once)" } else { "" },
-    );
-    if raise {
-        // A refusal is not a failure: the radio keeps its mode and ldmux still sends two-byte
-        // paths, which is what our own packets carry.
-        let _ = companion.set_path_hash_mode(DEFAULT_PATH_HASH_MODE);
-        if let Some(marker) = width_marker.as_deref() {
-            record_width(marker, &self_info.public_key);
+        .filter(|m| marker_matches(m, &self_info.public_key));
+    let recorded_width = marker.and_then(marker_width);
+    let raise = should_raise(reported_mode, recorded_width);
+    // **A refusal is recorded as a refusal.** The radio answers `OK` when it took the width and
+    // `ILLEGAL_ARG` when it did not, and the published width follows that answer rather than the
+    // request: publishing two bytes for a radio that kept one made the phone "match" a width the
+    // host did not have.
+    let width_after = if raise {
+        match companion.set_path_hash_mode(DEFAULT_PATH_HASH_MODE) {
+            Ok(()) => Some(DEFAULT_PATH_HASH_MODE),
+            Err(e) => {
+                eprintln!(
+                    "ldmuxd: the radio kept one-byte paths: its firmware refused the width change ({e})"
+                );
+                reported_mode
+            }
         }
-    } else if let Some(marker) = width_marker.as_deref() {
-        // Remember the key even when nothing was raised, so a radio swapped onto this port later
-        // is still judged on its own answer rather than on the previous radio's record.
-        record_width(marker, &self_info.public_key);
-    }
-    // **The width this radio now has**, not the width ldmux would like it to have: when the raise
-    // happened it is the default, and when the radio already carried a width the radio's answer is
-    // the truth. Reading `DEFAULT_PATH_HASH_MODE` here unconditionally published two bytes for a
-    // radio on one, which the phone then "matched" into a loop.
-    let hash_size = if raise {
-        DEFAULT_PATH_HASH_MODE + 1
     } else {
         reported_mode
-            .map_or(DEFAULT_PATH_HASH_MODE + 1, |m| m.saturating_add(1).clamp(1, 3))
     };
+    // Recorded whether or not anything changed, and for whichever radio is on this port now, so a
+    // swapped radio is judged on its own answer rather than on the previous radio's record.
+    if let Some(marker) = width_marker.as_deref() {
+        record_width(marker, &self_info.public_key, width_after);
+    }
+    // **The width this radio has**, not the width ldmux would like it to have.
+    let hash_size = width_after.map_or(DEFAULT_PATH_HASH_MODE + 1, |m| m.saturating_add(1).clamp(1, 3));
+    // Said out loud, because the width decides how many neighbours this radio can name without
+    // ambiguity and nothing else in the system reports it — and because "we tried and it said no"
+    // is a different fact from "nobody ever asked".
+    eprintln!(
+        "ldmuxd: host radio path hashes: {hash_size} byte(s){}",
+        match (raise, recorded_width, reported_mode) {
+            (true, _, Some(0)) if width_after == Some(DEFAULT_PATH_HASH_MODE) => {
+                " (was 1: raised to the default, once)"
+            }
+            (true, _, _) => " (asked for two, the radio kept one)",
+            (false, Some(1), _) => " (one was tried once and the radio kept it)",
+            _ => "",
+        }
+    );
     let airtime_ms = self_info.time_on_air_ms(RECORD_MAX);
     let bound = Bound {
         // No route yet, so no path bytes are spent: the receiver's cap is the whole answer until
@@ -1911,7 +1954,7 @@ mod tests {
         let key = [7u8; 32];
         let other = [9u8; 32];
         assert!(!marker_matches(&marker, &key), "nothing recorded yet");
-        record_width(&marker, &key);
+        record_width(&marker, &key, Some(1));
         assert!(marker_matches(&marker, &key), "the radio that was recorded");
         assert!(
             !marker_matches(&marker, &other),

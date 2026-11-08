@@ -177,13 +177,15 @@ fn main() {
     // say why it is off and start the rest.
     let mesh_cfg = match ldmux_daemon::mesh::MeshConfig::from_env() {
         Ok(cfg) => cfg.map(|mut c| {
-            // Beside the other state: the record of whether this radio's path width has already
-            // been decided once (see `mesh_serial::prepare`).
-            c.width_marker = Some(state_dir.join("mesh-width"));
-            c.airtime_record = Some(state_dir.join("mesh-airtime"));
-            // The peer's radio key, learned on the first contact and kept so a restart can address
-            // a route request to it without waiting for an advert (see `mesh_serial::prepare`).
-            c.peer_record = Some(state_dir.join("mesh-peer"));
+            // **In the persist dir, not the state dir.** All three are facts that must outlive a
+            // reboot: the state dir is `$XDG_RUNTIME_DIR`, a tmpfs, so a marker written there was
+            // gone at the next boot and the daemon then overruled an operator's one-byte width
+            // choice every single boot — the very thing the marker exists to prevent. The hour's
+            // spend went with it, so a reboot handed the radio a fresh allowance, and the peer's
+            // key had to be learned again (see `mesh_serial::prepare`).
+            c.width_marker = Some(persist_dir.join("mesh-width"));
+            c.airtime_record = Some(persist_dir.join("mesh-airtime"));
+            c.peer_record = Some(persist_dir.join("mesh-peer"));
             c
         }),
         Err(e) => {

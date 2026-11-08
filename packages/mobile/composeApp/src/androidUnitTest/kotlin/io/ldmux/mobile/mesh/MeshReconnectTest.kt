@@ -78,3 +78,33 @@ class MeshSilenceBoundTest {
         assertEquals(60_000L, silenceFailureMs(1_000), "a nonsense hop count cannot hang the page")
     }
 }
+
+/**
+ * A record's size is a property of the path, and the session is sealed at the handshake.
+ *
+ * Walking out of direct range onto a repeater chain shrinks what the link can carry while the
+ * session keeps sealing at the old size, so every record is refused by the packet builder and the
+ * session retries the same oversized record until the silence bound ends it. The rule is a value a
+ * test can hold: a smaller link needs a re-seal, a larger one does not, and no answer is no reason
+ * to handshake again.
+ */
+class MeshSessionResizeTest {
+    @Test
+    fun a_shrinking_route_needs_a_new_session() {
+        assertTrue(needsResize(171, 148))
+        assertTrue(needsResize(171, 122))
+    }
+
+    @Test
+    fun a_growing_route_does_not() {
+        // A record sealed for a longer path still fits a shorter one, so nothing is re-sealed.
+        assertFalse(needsResize(122, 171))
+        assertFalse(needsResize(171, 171))
+    }
+
+    @Test
+    fun no_answer_is_not_a_reason_to_handshake() {
+        assertFalse(needsResize(171, 0))
+        assertFalse(needsResize(0, 171), "a session that was never sealed has nothing to re-seal")
+    }
+}

@@ -354,6 +354,11 @@ class MeshTermDriver(
     /** When a dead session is tried again, and how long to wait after the next failure. */
     private var recoverAt = 0L
     private var recoverDelayMs = FIRST_RECOVERY_MS
+
+    /** The record size this session was sealed at, and when the last resize re-handshake ran. */
+    private var sessionLimit = 0
+    private var lastResizeAt = 0L
+
     private val decoder = TermDecoder()
     private var mirror = RowMirror()
     private var held = ArrayList<TermMessage.Rows>()
@@ -594,6 +599,26 @@ class MeshTermDriver(
         publish()
     }
 
+    /**
+     * Re-handshake when the route has grown, because a record's size is a property of the path.
+     *
+     * **The sealed record size is fixed at the handshake**, and a raw send carries the path inside
+     * the same frame, so walking out of direct range onto a repeater chain shrinks what the link can
+     * carry while the session keeps sealing at the old size. The packet builder then refuses every
+     * record (`TooLong`), each one is reported as a refusal, and the session retries the same
+     * oversized record until the silence bound ends it — a rebuild that would have happened at once
+     * had the size been re-read. A session that grew is left alone: a smaller record still fits.
+     */
+    private fun resizeIfRouteGrew(health: SessionHealth) {
+        val now = gateway.uplinkRecordMax
+        if (!needsResize(sessionLimit, now)) return
+        if (health.pending > 0) return
+        if (clock() - lastResizeAt < RESIZE_FLOOR_MS) return
+        lastResizeAt = clock()
+        sessionLimit = now
+        rekey()
+    }
+
     /** One record from the gateway's `RECV`. */
     suspend fun onRecord(record: ByteArray) = lock.withLock {
         if (terminalView is MeshTermView.HostClosed) return@withLock
@@ -606,6 +631,7 @@ class MeshTermDriver(
                 failed(e.state); publish(); return@withLock
             }
             session = s
+            sessionLimit = gateway.uplinkRecordMax
             handshakeTries = 0
             // A session is up: the next handshake (after a drop) starts its own clock.
             handshakeBeganAt = 0L
@@ -671,6 +697,7 @@ class MeshTermDriver(
             // A session that has spent its nonce budget starts a new one. Nothing is wrong with
             // the link, so this is not [failed]: the screen stays up and only the keys change.
             if (h.needsRekey && terminalView == null) rekey()
+            if (terminalView == null) resizeIfRouteGrew(h)
             if (h.failed && terminalView == null) failed(MeshLinkState.SessionFailed)
             // **A record the host never answers is a dead link, and the screen must say so.** With
             // nothing outstanding an idle shell is silent by design, so silence alone proves
@@ -1517,6 +1544,22 @@ class MeshTermDriver(
         const val HINT_RETRY_MS = 250L
     }
 }
+
+/**
+ * Whether the session must be re-sealed because the route now carries less than it was built for.
+ *
+ * Pure and separate so the rule is a value a test holds: a link that answers a *larger* record than
+ * the session uses is left alone (the smaller record still fits), and a link that answers nothing at
+ * all is not a reason to handshake again.
+ */
+/**
+ * The least gap between two resize re-handshakes: a route that flaps between a direct link and one
+ * repeater must not cost a handshake on every tick.
+ */
+private const val RESIZE_FLOOR_MS = 30_000L
+
+internal fun needsResize(sessionLimit: Int, linkLimit: Int): Boolean =
+    linkLimit > 0 && sessionLimit > 0 && linkLimit < sessionLimit
 
 /**
  * How long an unanswered record may wait before this route calls the link dead, for a route of
