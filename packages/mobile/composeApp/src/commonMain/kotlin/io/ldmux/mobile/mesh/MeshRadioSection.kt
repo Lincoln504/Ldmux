@@ -265,16 +265,28 @@ internal fun RadioPresetPanel(
     }
     LaunchedEffect(current, device) {
         val c = current ?: return@LaunchedEffect
-        if (seeded) return@LaunchedEffect
-        original = c
-        // The user's choice wins over the arrival: they may have started choosing while the
-        // radio was still answering, and a dialog that silently undid that would be worse than
-        // one that opened on a proposal.
-        if (!userTouched) {
+        if (!seeded) {
+            original = c
+            // The user's choice wins over the arrival: they may have started choosing while the
+            // radio was still answering, and a dialog that silently undid that would be worse than
+            // one that opened on a proposal.
+            if (!userTouched) {
+                region = regionOfPreset(c)
+                selected = c
+            }
+            seeded = true
+            return@LaunchedEffect
+        }
+        // **The radio moving is news, not a proposal.** A `match` pressed in the settings row
+        // changes the radio while this dialog is open, and the dialog used to keep showing the
+        // tuple it opened with: "preset" said one byte more than "current", and the next `apply`
+        // would have put the old tuple back. Following the radio keeps the two lines honest; a
+        // proposal the user has started is still left alone. `original` is deliberately not moved:
+        // it is what `restore` returns to, and that must stay the tuple the dialog opened on.
+        if (!userTouched && selected != c) {
             region = regionOfPreset(c)
             selected = c
         }
-        seeded = true
     }
     // **Capture the link, do not read the state in `onDispose`.** `link` is a delegated state
     // property, so a closure that reads it inside `onDispose` reads the value *at dispose time* —
