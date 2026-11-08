@@ -17,9 +17,10 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use crate::codec::{
-    APP_TARGET_VERSION, AdvertPath, CodecError, DeviceInfo, FloodScope, SelfInfo,
-    build_default_flood_scope, build_raw_direct, codes, commands, parse_advert_path,
-    parse_default_flood_scope, parse_device_info, parse_self_info,
+    APP_TARGET_VERSION, AdvertPath, CodecError, CoreStats, DeviceInfo, FloodScope, RadioStats,
+    SelfInfo, build_default_flood_scope, build_raw_direct, codes, commands, parse_advert_path,
+    parse_core_stats, parse_default_flood_scope, parse_device_info, parse_radio_stats,
+    parse_self_info,
 };
 use crate::framing::{FrameError, FrameReader, encode};
 use crate::link::ByteLink;
@@ -160,6 +161,31 @@ impl<L: ByteLink> Companion<L> {
         let info = parse_device_info(&reply).ok_or(SessionError::Malformed("device info"))?;
         self.device_info = Some(info.clone());
         Ok(info)
+    }
+
+    /// What the radio measured on the air, and what it has spent there.
+    ///
+    /// **The only ground truth about the link.** A serial companion reports the noise floor, the
+    /// RSSI and SNR of the last packet it heard, and its own airtime counters — so "is this link
+    /// reaching" is answered by the radio instead of guessed from the application's records, and the
+    /// daemon's own meter has something to be checked against. One serial command, no airtime.
+    pub fn radio_stats(&mut self) -> Result<RadioStats, SessionError> {
+        let reply = self.request(
+            &[commands::GET_STATS, codes::STATS_TYPE_RADIO],
+            codes::STATS,
+            Duration::from_millis(1_500),
+        )?;
+        parse_radio_stats(&reply).map_err(|_| SessionError::Malformed("radio stats"))
+    }
+
+    /// The radio's battery, uptime, error flags and outbound queue depth.
+    pub fn core_stats(&mut self) -> Result<CoreStats, SessionError> {
+        let reply = self.request(
+            &[commands::GET_STATS, codes::STATS_TYPE_CORE],
+            codes::STATS,
+            Duration::from_millis(1_500),
+        )?;
+        parse_core_stats(&reply).map_err(|_| SessionError::Malformed("core stats"))
     }
 
     /// Emit this radio's advert, flooded so repeaters forward it.

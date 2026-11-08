@@ -43,6 +43,37 @@ pub enum Event {
     /// different scopes hear each other's *direct* records but cannot discover each other at all,
     /// because the discovery floods are dropped by the first repeater that does not carry the scope.
     Scope(Option<ScopeInfo>),
+    /// **What the radio measured on the air**, and what it has spent there.
+    ///
+    /// A serial companion reports the noise floor, the RSSI and SNR of the last packet *it heard*,
+    /// and its own transmit and receive airtime. Nothing else on this side of the link can say
+    /// whether a request is reaching the radio at all — the session only knows that no answer came
+    /// back — so this is what turns "it does not work" into "it is not being heard" or "it is being
+    /// heard at 6 dB above the noise floor". Polled on the idle path, so it costs airtime nothing.
+    Signal(Signal),
+}
+
+impl Signal {
+    /// The SNR in dB, for display.
+    pub fn snr_db(&self) -> f32 {
+        f32::from(self.snr_quarter_db) / 4.0
+    }
+}
+
+/// A radio's own reading of the air.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Signal {
+    /// The receiver's noise floor in dBm, a negative number.
+    pub noise_floor_dbm: i16,
+    /// The last packet's RSSI in dBm, or `None` when the radio has heard nothing since it booted.
+    pub rssi_dbm: Option<i8>,
+    /// The last packet's SNR in **quarters of a dB**, which is how the firmware reports it: an
+    /// integer keeps this comparable (`Event` is `Eq`), and the quarter is enough precision for a
+    /// reading that moves by whole dB in practice.
+    pub snr_quarter_db: i8,
+    /// The radio's own transmit and receive airtime since boot, in seconds.
+    pub tx_air_secs: u32,
+    pub rx_air_secs: u32,
 }
 
 /// What a carrier promised at connect time.

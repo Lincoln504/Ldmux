@@ -315,6 +315,7 @@ ADR-0010 is the decision. The practice:
 | the app is backgrounded | pages detach after the platform grace, the shell stays in the keeper, and returning re-attaches |
 | the radio's airtime allowance runs out | the host stops sending **new** records until the hour refills (`records_left` from the carrier's countdown), while acks and retransmissions still go, so the link stays alive and the pane stops updating; a record the firmware itself refuses is handed back to the retry ladder so it does not count as a lost attempt, and `last_error` says what happened |
 | a record is larger than the path leaves room for | the limit is `min(171, 172 − path)`, advertised on bind and revised when the route changes; a chunk queued at the old size is refused by the builder, its attempt is given back, and the reconnect re-sizes |
+| nothing is heard and nothing answers | the radio's own stats (`CMD_GET_STATS`) report the noise floor, and the RSSI and SNR of the last packet it heard: `mesh status` prints them, so "nothing heard yet" is a measurement rather than a missing feature, and a reading is what distinguishes "not being heard" from "heard and not answered" |
 | a scoped mesh drops our floods | the session still works wherever a direct route exists, because scoping gates floods only; discovery needs the region, so `ldmux mesh status` prints the scope and the log names a scope learned from the air (ADR-0033) |
 | a mesh setting is malformed | the mesh link is disabled with a message and the daemon keeps running, because a bad key must not kill the shells |
 

@@ -38,7 +38,7 @@ use ldmux_companion::{
     ByteLink, Companion, FloodScope, KNOWN_SCOPE_TAGS, RouteRequest, SerialLink, SessionError,
     build_route_request_in_scope, identify_scope,
 };
-use ldmux_mesh::carrier::{Bound, Budget, Carrier, Event};
+use ldmux_mesh::carrier::{Bound, Budget, Carrier, Event, Signal};
 use ldmux_mesh::constants::{
     RECORD_MAX, RECORD_RECEIVED_MAX as RECEIVED_RECORD_MAX, RadioState, SendOutcome,
     UNKNOWN_BATTERY, UNKNOWN_RSSI,
@@ -1383,6 +1383,29 @@ fn serve_loop<L: ByteLink>(
                                 budget_per_hour(settings.airtime_ms, settings.preset.freq_mhz);
                             if events
                                 .blocking_send(Ok(Event::Status(status(&settings, budget, sent))))
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        // **What the radio measured, from the radio.** One serial command on the
+                        // idle path, no airtime: the noise floor and the RSSI/SNR of the last packet
+                        // it heard are the only honest answer to "is this link reaching", and the
+                        // radio's own airtime counters are the check on our meter.
+                        if let Ok(stats) = companion.radio_stats() {
+                            let rssi = if stats.has_signal() {
+                                Some(stats.last_rssi)
+                            } else {
+                                None
+                            };
+                            if events
+                                .blocking_send(Ok(Event::Signal(Signal {
+                                    noise_floor_dbm: stats.noise_floor_dbm,
+                                    rssi_dbm: rssi,
+                                    snr_quarter_db: stats.last_snr_quarter_db,
+                                    tx_air_secs: stats.tx_air_secs,
+                                    rx_air_secs: stats.rx_air_secs,
+                                })))
                                 .is_err()
                             {
                                 return;

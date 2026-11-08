@@ -308,17 +308,34 @@ fn print_mesh_status(v: &serde_json::Value) {
         _ => "unknown",
     };
     println!("link     {radio}");
-    let rssi = v.get("rssi").and_then(serde_json::Value::as_i64);
     let battery = v.get("batteryPercent").and_then(serde_json::Value::as_u64);
-    let signal = match rssi {
-        Some(-128) | None => "no reading".to_owned(),
-        Some(dbm) => format!("{dbm} dBm"),
-    };
     let charge = match battery {
         Some(255) | None => "not reported".to_owned(),
         Some(percent) => format!("{percent}%"),
     };
-    println!("signal   {signal}, battery {charge}");
+    // **The radio's own reading of the air.** A serial companion reports the noise floor and the
+    // RSSI and SNR of the last packet it heard, and nothing else can say whether a request is
+    // reaching it — the session only knows that no answer came back. "Nothing heard yet" is a
+    // measurement, not a missing feature.
+    let rssi = v.get("radioRssi").and_then(serde_json::Value::as_i64);
+    let snr = v.get("snrDb").and_then(serde_json::Value::as_f64);
+    let noise = v.get("noiseFloorDbm").and_then(serde_json::Value::as_i64);
+    match (rssi, snr, noise) {
+        (Some(rssi), Some(snr), Some(noise)) => println!(
+            "signal   {rssi} dBm, SNR {snr:.2} dB over a {noise} dBm noise floor (last packet heard), battery {charge}"
+        ),
+        (None, Some(snr), Some(noise)) => println!(
+            "signal   nothing heard yet (SNR {snr:.2} dB, noise floor {noise} dBm), battery {charge}"
+        ),
+        _ => println!("signal   no reading yet, battery {charge}"),
+    }
+    if let (Some(tx), Some(rx)) = (
+        v.get("radioTxSecs").and_then(serde_json::Value::as_u64),
+        v.get("radioRxSecs").and_then(serde_json::Value::as_u64),
+    ) {
+        // The radio's own counters since boot, which is the check on this host's meter above.
+        println!("radio    {tx} s transmitted, {rx} s received since the radio booted");
+    }
     if let Some(tenths) = v.get("txAirtimeTenths").and_then(serde_json::Value::as_u64) {
         println!(
             "airtime  {:.1} s this hour (records sent x one record's air here)",

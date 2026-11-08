@@ -29,6 +29,14 @@ pub mod codes {
     /// The reply to [`commands::GET_DEFAULT_FLOOD_SCOPE`]: `name 31`, `key 16`, or the code alone
     /// when the radio has no default scope (`MyMesh.cpp:1964-1972`).
     pub const DEFAULT_FLOOD_SCOPE: u8 = 0x1C;
+    /// The reply to [`commands::GET_STATS`]: `type u8`, then that type's fields.
+    pub const STATS: u8 = 0x18;
+    /// The stats sub-types, sent as the request's and the reply's second byte.
+    pub const STATS_TYPE_CORE: u8 = 0;
+    pub const STATS_TYPE_RADIO: u8 = 1;
+    /// The firmware's "no reading" RSSI. A radio that has heard nothing reports this rather than a
+    /// plausible number, so a link is never credited with a reading it does not have.
+    pub const UNKNOWN_RSSI: i8 = i8::MIN;
 }
 
 /// Command codes this crate sends.
@@ -65,6 +73,14 @@ pub mod commands {
     /// "is this route still true" question has no answer. The firmware accepts a time only if it is
     /// not in the past (`MyMesh.cpp:1247-1256`), which a wall clock always is.
     pub const SET_DEVICE_TIME: u8 = 0x06;
+
+    /// `CMD_GET_STATS`, whose second byte selects what to ask for (firmware v8+).
+    ///
+    /// **The radio's own counters are the only ground truth about the air.** `STATS_RADIO` reports
+    /// the noise floor, the RSSI and SNR of the last packet *it heard*, and its own transmit and
+    /// receive airtime — so a link can be judged on what the radio measured rather than on what the
+    /// application hoped, and the daemon's own meter has something to be checked against.
+    pub const GET_STATS: u8 = 0x38;
     /// Read the radio's **default flood scope**: no argument, and the answer is
     /// [`codes::DEFAULT_FLOOD_SCOPE`] with the name and the 16-byte key, or the code alone when the
     /// radio has none (`MyMesh.cpp:1964-1972`).
@@ -765,6 +781,8 @@ pub enum CodecError {
     WrongResponse { want: u8, got: u8 },
     /// A region name the radio's 31-byte field cannot hold (1..=30 bytes).
     ScopeName { len: usize },
+    /// A reply shorter than the fields it claims to carry.
+    Truncated,
 }
 
 impl std::fmt::Display for CodecError {
@@ -781,6 +799,7 @@ impl std::fmt::Display for CodecError {
             CodecError::WrongResponse { want, got } => {
                 write!(f, "expected response {want:#04x}, got {got:#04x}")
             }
+            CodecError::Truncated => write!(f, "the radio's answer is shorter than the frame it claims"),
             CodecError::ScopeName { len } => {
                 write!(f, "a {len}-byte region name does not fit the radio's 30-byte field")
             }
@@ -859,6 +878,106 @@ pub struct DeviceInfo {
     pub firmware_version: String,
     pub repeat_enabled: Option<bool>,
     pub path_hash_mode: Option<u8>,
+}
+
+/// What the radio measured on the air, and what it spent there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RadioStats {
+    /// The receiver's noise floor, in dBm. A negative number, and the floor a link must clear.
+    pub noise_floor_dbm: i16,
+    /// RSSI of the last packet the radio heard, in dBm. [`codes::UNKNOWN_RSSI`] when none yet.
+    pub last_rssi: i8,
+    /// SNR of that packet in **quarters of a dB**, which is the firmware's own scale: an integer
+    /// keeps the reading comparable, and a quarter of a dB is finer than the measurement is.
+    pub last_snr_quarter_db: i8,
+    /// The radio's own transmit airtime since boot.
+    pub tx_air_secs: u32,
+    /// The radio's own receive airtime since boot.
+    pub rx_air_secs: u32,
+}
+
+/// The radio's battery, uptime, error flags and outbound queue depth.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CoreStats {
+    pub battery_mv: u16,
+    pub uptime_secs: u32,
+    pub err_flags: u16,
+    pub queue_len: u8,
+}
+
+
+impl RadioStats {
+    /// Whether the radio has heard anything since it booted.
+    pub fn has_signal(&self) -> bool {
+        self.last_rssi != codes::UNKNOWN_RSSI
+    }
+
+    /// The SNR in dB, for display.
+    pub fn last_snr_db(&self) -> f32 {
+        f32::from(self.last_snr_quarter_db) / 4.0
+    }
+}
+
+/// Parse `RESP_STATS` for `STATS_TYPE_RADIO`.
+pub fn parse_radio_stats(payload: &[u8]) -> Result<RadioStats, CodecError> {
+    match payload.first() {
+        Some(&codes::STATS) => {}
+        Some(&got) => {
+            return Err(CodecError::WrongResponse {
+                want: codes::STATS,
+                got,
+            });
+        }
+        None => return Err(CodecError::Truncated),
+    }
+    if payload.get(1) != Some(&codes::STATS_TYPE_RADIO) {
+        return Err(CodecError::WrongResponse {
+            want: codes::STATS_TYPE_RADIO,
+            got: payload.get(1).copied().unwrap_or(0),
+        });
+    }
+    let noise = payload.get(2..4).ok_or(CodecError::Truncated)?;
+    let rssi = *payload.get(4).ok_or(CodecError::Truncated)?;
+    let snr = *payload.get(5).ok_or(CodecError::Truncated)?;
+    let tx = payload.get(6..10).ok_or(CodecError::Truncated)?;
+    let rx = payload.get(10..14).ok_or(CodecError::Truncated)?;
+    Ok(RadioStats {
+        noise_floor_dbm: i16::from_le_bytes([noise[0], noise[1]]),
+        last_rssi: rssi as i8,
+        last_snr_quarter_db: snr as i8,
+        tx_air_secs: u32::from_le_bytes([tx[0], tx[1], tx[2], tx[3]]),
+        rx_air_secs: u32::from_le_bytes([rx[0], rx[1], rx[2], rx[3]]),
+    })
+}
+
+/// Parse `RESP_STATS` for `STATS_TYPE_CORE`.
+pub fn parse_core_stats(payload: &[u8]) -> Result<CoreStats, CodecError> {
+    match payload.first() {
+        Some(&codes::STATS) => {}
+        Some(&got) => {
+            return Err(CodecError::WrongResponse {
+                want: codes::STATS,
+                got,
+            });
+        }
+        None => return Err(CodecError::Truncated),
+    }
+    if payload.get(1) != Some(&codes::STATS_TYPE_CORE) {
+        return Err(CodecError::WrongResponse {
+            want: codes::STATS_TYPE_CORE,
+            got: payload.get(1).copied().unwrap_or(0),
+        });
+    }
+    let batt = payload.get(2..4).ok_or(CodecError::Truncated)?;
+    let uptime = payload.get(4..8).ok_or(CodecError::Truncated)?;
+    let flags = payload.get(8..10).ok_or(CodecError::Truncated)?;
+    let queue = *payload.get(10).ok_or(CodecError::Truncated)?;
+    Ok(CoreStats {
+        battery_mv: u16::from_le_bytes([batt[0], batt[1]]),
+        uptime_secs: u32::from_le_bytes([uptime[0], uptime[1], uptime[2], uptime[3]]),
+        err_flags: u16::from_le_bytes([flags[0], flags[1]]),
+        queue_len: queue,
+    })
 }
 
 /// Parse `RESP_SELF_INFO`, stopping at whatever the frame length allows.
@@ -1284,5 +1403,70 @@ mod tests {
         assert!(sf9 > sf8, "one spreading factor step doubles the symbol time");
         assert!(slow.time_on_air_ms(50) < sf9 * 2.0);
         assert!(sf8 > 10.0 && sf8 < 500.0, "a 172-byte frame is tens to hundreds of ms");
+    }
+}
+
+#[cfg(test)]
+mod stats_tests {
+    use super::*;
+
+    /// The frame the firmware writes for `STATS_TYPE_RADIO`: noise floor, RSSI, SNR scaled by four,
+    /// then the radio's own transmit and receive airtime.
+    #[test]
+    fn the_radio_stats_are_read_from_the_frame_the_firmware_writes() {
+        let mut frame = vec![codes::STATS, codes::STATS_TYPE_RADIO];
+        frame.extend_from_slice(&(-117i16).to_le_bytes());
+        frame.push(0xD0); // -48 dBm, as a signed byte
+        frame.push(0x0E); // 3.5 dB
+        frame.extend_from_slice(&1_234u32.to_le_bytes());
+        frame.extend_from_slice(&5_678u32.to_le_bytes());
+        let stats = parse_radio_stats(&frame).expect("parses");
+        assert_eq!(stats.noise_floor_dbm, -117);
+        assert_eq!(stats.last_rssi, -48);
+        assert!(
+            (stats.last_snr_db() - 3.5).abs() < f32::EPSILON,
+            "quarter-dB scale"
+        );
+        assert_eq!(stats.tx_air_secs, 1_234);
+        assert_eq!(stats.rx_air_secs, 5_678);
+        assert!(stats.has_signal());
+    }
+
+    /// **A radio that has heard nothing says so, and that is not an error.** The firmware reports the
+    /// unknown-RSSI sentinel rather than a plausible-looking number, so a link is never credited with
+    /// a reading it does not have.
+    #[test]
+    fn a_radio_that_has_heard_nothing_is_not_credited_with_a_reading() {
+        let mut frame = vec![codes::STATS, codes::STATS_TYPE_RADIO];
+        frame.extend_from_slice(&(-119i16).to_le_bytes());
+        frame.push(codes::UNKNOWN_RSSI as u8);
+        frame.push(0);
+        frame.extend_from_slice(&0u32.to_le_bytes());
+        frame.extend_from_slice(&0u32.to_le_bytes());
+        let stats = parse_radio_stats(&frame).expect("parses");
+        assert!(!stats.has_signal());
+    }
+
+    #[test]
+    fn the_core_stats_carry_the_battery_and_the_queue() {
+        let mut frame = vec![codes::STATS, codes::STATS_TYPE_CORE];
+        frame.extend_from_slice(&4_012u16.to_le_bytes());
+        frame.extend_from_slice(&90_000u32.to_le_bytes());
+        frame.extend_from_slice(&0u16.to_le_bytes());
+        frame.push(3);
+        let stats = parse_core_stats(&frame).expect("parses");
+        assert_eq!(stats.battery_mv, 4_012);
+        assert_eq!(stats.uptime_secs, 90_000);
+        assert_eq!(stats.queue_len, 3);
+    }
+
+    /// Asking for one stats type and being answered with the other is a protocol fault, not a
+    /// reading: a silent mix-up would publish a noise floor as a battery voltage.
+    #[test]
+    fn the_wrong_stats_type_is_refused() {
+        let frame = vec![codes::STATS, codes::STATS_TYPE_CORE, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert!(parse_radio_stats(&frame).is_err());
+        let frame = vec![codes::STATS, codes::STATS_TYPE_RADIO, 0, 0, 0];
+        assert!(parse_core_stats(&frame).is_err());
     }
 }

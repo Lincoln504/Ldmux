@@ -293,6 +293,13 @@ pub struct MeshSnapshot {
     pub records_left: Option<u8>,
     /// How many repeaters the route to the peer uses, when one is known.
     pub peer_hops: Option<u8>,
+    /// The radio's own reading of the air: noise floor, last packet's SNR and RSSI, and its
+    /// transmit/receive airtime since boot.
+    pub snr_quarter_db: Option<i8>,
+    pub noise_floor_dbm: Option<i16>,
+    pub radio_rssi: Option<i8>,
+    pub radio_tx_secs: Option<u32>,
+    pub radio_rx_secs: Option<u32>,
     pub radio_state: Option<RadioState>,
     /// `-128` is the contract's "no reading".
     pub rssi: i8,
@@ -325,6 +332,11 @@ impl MeshSnapshot {
             uplink_record_max: None,
             records_left: None,
             peer_hops: None,
+            snr_quarter_db: None,
+            noise_floor_dbm: None,
+            radio_rssi: None,
+            radio_tx_secs: None,
+            radio_rx_secs: None,
             radio_state: None,
             rssi: ldmux_mesh::UNKNOWN_RSSI,
             battery_percent: ldmux_mesh::UNKNOWN_BATTERY,
@@ -344,6 +356,11 @@ impl MeshSnapshot {
             "uplinkRecordMax": self.uplink_record_max,
             "recordsLeft": self.records_left,
             "peerHops": self.peer_hops,
+            "snrDb": self.snr_quarter_db.map(|q| f32::from(q) / 4.0),
+            "noiseFloorDbm": self.noise_floor_dbm,
+            "radioRssi": self.radio_rssi,
+            "radioTxSecs": self.radio_tx_secs,
+            "radioRxSecs": self.radio_rx_secs,
             "radioState": self.radio_state.map(|s| s.code()),
             // The tuple the host's own radio reported (or was retuned to). Absent before the
             // radio has been identified.
@@ -683,6 +700,12 @@ async fn supervise(cfg: MeshConfig, mut setup: Option<SessionSetup>, runtime: Me
             s.reconnects = reconnects;
             s.records_left = None;
             s.peer_hops = None;
+            // A reading belongs to the radio that was open; a reopen has to measure again.
+            s.snr_quarter_db = None;
+            s.noise_floor_dbm = None;
+            s.radio_rssi = None;
+            s.radio_tx_secs = None;
+            s.radio_rx_secs = None;
             // The scope belongs to the radio that was open; a reopen has to report it again before
             // `mesh status` claims one.
             s.flood_scope = None;
@@ -928,6 +951,18 @@ async fn session<C: Carrier>(
             event = carrier.recv() => {
                 last_carrier = Instant::now();
                 match event? {
+                    Event::Signal(reading) => {
+                        // **What the radio measured**, kept in the snapshot so `mesh status` prints a
+                        // reading instead of "no reading": the noise floor, the last packet's RSSI
+                        // and SNR, and the radio's own airtime counters.
+                        set(snapshot, |s| {
+                            s.snr_quarter_db = Some(reading.snr_quarter_db);
+                            s.noise_floor_dbm = Some(reading.noise_floor_dbm);
+                            s.radio_rssi = reading.rssi_dbm;
+                            s.radio_tx_secs = Some(reading.tx_air_secs);
+                            s.radio_rx_secs = Some(reading.rx_air_secs);
+                        });
+                    }
                     Event::Limit { record_max: limit, hops } => {
                         // **The record size follows the path.** A raw send carries the path inside
                         // the same 176-byte frame as the record, so a repeater's hops come out of
