@@ -31,3 +31,4 @@ One file per decision, oldest first. A record says what was decided, what it cos
 - `0027-credentials-live-outside-the-runtime-dir.md` — Credentials live outside the runtime directory.
 - `0028-the-desk-surface.md` — The desk surface: attach in your own terminal, and spawn only when ldmux must.
 - `0029-the-session-rides-raw-custom.md` — Our session layer rides MeshCore's `RAW_CUSTOM` payload.
+- `0031-a-keeper-restart-can-keep-the-shells.md` — A keeper restart can keep the shells: fd custody and a terminal snapshot. **Proposed.**
