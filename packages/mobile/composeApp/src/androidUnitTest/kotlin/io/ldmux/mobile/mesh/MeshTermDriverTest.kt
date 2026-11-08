@@ -28,6 +28,7 @@ class MeshTermDriverTest {
         override val received = MutableSharedFlow<ByteArray>(extraBufferCapacity = 8)
         override var uplinkRecordMax = 172
         val sent = ArrayList<ByteArray>()
+        var routeRefreshes = 0
         var outcome = MeshSendOutcome.SentDirect
         /** A gateway that takes the record and never answers. */
         var silent = false
@@ -35,6 +36,9 @@ class MeshTermDriverTest {
             sent += record
             if (silent) kotlinx.coroutines.awaitCancellation()
             return MeshSendResult(0, outcome)
+        }
+        override suspend fun refreshRoute() {
+            routeRefreshes++
         }
     }
 
@@ -111,6 +115,21 @@ class MeshTermDriverTest {
         now += 40_000
         d.tick()
         assertTrue(gw.sent.size > asked, "the retrying continues behind the verdict")
+    }
+
+    /**
+     * **A shell being opened asks where the host is.**
+     *
+     * The session survives a walk on retransmissions, so a link that is up can be holding a route
+     * that no longer exists; the maintenance loop would notice within a minute, and the first record
+     * of this shell is what is being sent now. The ask happens before that record, and once.
+     */
+    @Test
+    fun opening_a_shell_re_reads_the_route_first(): Unit = runBlocking {
+        val d = driver()
+        d.start()
+        assertEquals(1, gw.routeRefreshes, "one re-read per open, before the first record")
+        assertIs<MeshTermView.Handshaking>(d.view.value, "the open carried on past the re-read")
     }
 
     /** An unanswered handshake is asked again in seconds, not waited out. */

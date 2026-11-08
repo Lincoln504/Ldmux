@@ -1089,6 +1089,25 @@ mod tests {
     }
 
     #[test]
+    fn the_width_record_names_one_radio_and_survives_a_missing_file() {
+        // **The record is what stops the bind from overruling a width an operator chose**, so it
+        // has to be readable, tied to a specific radio, and harmless when absent.
+        let dir = std::env::temp_dir().join(format!("ldmux-width-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("mesh-width");
+        let key = [7u8; 32];
+        let other = [9u8; 32];
+        assert!(!marker_matches(&marker, &key), "nothing recorded yet");
+        record_width(&marker, &key);
+        assert!(marker_matches(&marker, &key), "the radio that was recorded");
+        assert!(
+            !marker_matches(&marker, &other),
+            "a different radio on the same port is judged on its own answer"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn dropping_a_carrier_whose_thread_is_slow_does_not_block_the_loop() {
         // A real radio that keeps the port open and stops draining is not reproducible here,
         // so the shape is: a thread that has not signalled it stopped. `drop` must return
