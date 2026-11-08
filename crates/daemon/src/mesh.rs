@@ -89,7 +89,7 @@ pub struct MeshConfig {
     ///
     /// Filled by the daemon rather than read from the environment, because it must sit beside the
     /// state it protects. `None` in a test that drives the radio directly.
-    pub width_marker: Option<std::path::PathBuf>,
+
     /// Where the hour's spent airtime is recorded, so a restart resumes the same hour.
     pub airtime_record: Option<std::path::PathBuf>,
     /// Where the **peer's radio key** is remembered, so a restarted daemon can ask the phone for a
@@ -121,7 +121,7 @@ impl MeshConfig {
             Some(device) => Ok(Some(Self {
                 serial: device.trim().to_owned(),
                 // The daemon adds the state directory's records; a bare config has none.
-                width_marker: None,
+
                 airtime_record: None,
                 peer_record: None,
             })),
@@ -752,7 +752,6 @@ async fn link(
         CARRIER_TIMEOUT,
         crate::mesh_serial::SerialCarrier::open(
             &cfg.serial,
-            cfg.width_marker.clone(),
             cfg.airtime_record.clone(),
             cfg.peer_record.clone(),
         ),
@@ -1268,7 +1267,7 @@ mod tests {
     fn test_runtime() -> MeshRuntime {
         let cfg = MeshConfig {
             serial: "/dev/null".to_owned(),
-            width_marker: None,
+
             airtime_record: None,
             peer_record: None,
         };
@@ -1734,7 +1733,6 @@ mod tests {
     fn a_snapshot_serialises_every_field_the_cli_prints() {
         let cfg = MeshConfig {
             serial: "/dev/ttyACM0".to_owned(),
-            width_marker: None,
             airtime_record: None,
             peer_record: None,
         };

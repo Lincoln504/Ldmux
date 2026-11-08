@@ -221,6 +221,9 @@ struct Attached {
     /// When the last screen update for this shell went out. Pacing needs it to know how long a
     /// coalesced change has been waiting.
     last_push: Option<Instant>,
+    /// A frame held until this instant: set once, on attach, so the phone's own grid can arrive
+    /// before the pane is drawn at whatever geometry the desk left behind. See [`Attached::due`].
+    hold: Option<Instant>,
     /// The phone typed into this shell and has not yet been told the pane settled.
     ///
     /// The marker exists for a wait on an *answer*, and an answer follows input: a repaint nobody
@@ -310,6 +313,16 @@ impl Attached {
     /// is the largest single saving available, and a record that carries the present screen is
     /// worth more than several that each carry a moment that has already passed.
     fn due(&self, now: Instant) -> bool {
+        // **An attach waits a moment for the phone's grid.** The pane's pty is whatever the desk
+        // left it at — measured 158x82 — and a full frame of that is about eighty records, which at
+        // the public tuple is a minute and a half of nothing on screen before the phone's `Resize`
+        // is even read. The phone now sends its grid with the attach; this gives those two records
+        // time to arrive before the first frame is drawn, so the frame that is *actually sent* is
+        // the one at the phone's size (about seven records). A phone that sends no resize waits this
+        // out and gets its screen a second later, which is what it always did.
+        if self.hold.is_some_and(|until| now < until) {
+            return false;
+        }
         if self.echo || !self.changed_last_tick {
             return true;
         }
@@ -323,6 +336,8 @@ impl Attached {
     /// would be pacing a burst that has already ended.
     fn resync(&mut self) {
         self.differ.reset();
+        // A resize is the answer the grace was waiting for, so it ends the hold too.
+        self.hold = None;
         self.last_push = None;
         self.changed_last_tick = false;
         self.echo = false;
@@ -431,6 +446,42 @@ impl<H: Host, L: Link> Bridge<H, L> {
         self.shells.contains_key(&shell)
     }
 
+/// Replace a frame's `Rows`/`Commit` run with **one compressed `Frame`**, keeping a leading
+/// `Profile` (and anything after the rows) outside it.
+///
+/// Below [`ldmux_protocol::mesh_term::FRAME_COMPRESS_MIN`] nothing is compressed: deflate's own
+/// header and the length field cost more than the text repeats, and a one-row echo must stay one
+/// record. A non-contiguous run is left alone too — a message that must be read in order after the
+/// rows (a `Closed`, say) would change meaning inside a frame.
+fn pack_frame(messages: &[Message]) -> Vec<Message> {
+    use ldmux_protocol::mesh_term::{FRAME_COMPRESS_MIN, FRAME_MAX_INFLATED, Message as M};
+    let is_screen = |m: &Message| matches!(m, M::Rows { .. } | M::Commit { .. });
+    let Some(start) = messages.iter().position(&is_screen) else {
+        return messages.to_vec();
+    };
+    let end = messages
+        .iter()
+        .rposition(&is_screen)
+        .map_or(start, |i| i + 1);
+    if messages[start..end].iter().any(|m| !is_screen(m)) {
+        return messages.to_vec();
+    }
+    let mut inner = Vec::new();
+    for m in &messages[start..end] {
+        let Ok(bytes) = m.encode() else {
+            return messages.to_vec();
+        };
+        inner.extend_from_slice(&bytes);
+    }
+    if inner.len() < FRAME_COMPRESS_MIN || inner.len() > FRAME_MAX_INFLATED {
+        return messages.to_vec();
+    }
+    let mut out: Vec<Message> = messages[..start].to_vec();
+    out.push(M::Frame { inner });
+    out.extend_from_slice(&messages[end..]);
+    out
+}
+
     fn reply(&mut self, shell: u8, messages: &[Message]) -> bool {
         // **Messages share a record when they fit.** The phone's decoder is a stream decoder
         // (`TermDecoder` in MeshTerm.kt), so a record may carry several messages, and the
@@ -445,6 +496,19 @@ impl<H: Host, L: Link> Bridge<H, L> {
             .get(&shell)
             .map(|s| s.version >= STREAM_VERSION)
             .unwrap_or(false);
+        // **A big frame is compressed as one frame, not one record at a time.** A record is 143 B
+        // and one screen is 900, so compressing a record saves nothing (the record still goes out
+        // whole). Compressing the frame is 1.7x to 8x on real terminal text — measured, raw deflate:
+        // a build log 936 → 554, a TUI 971 → 413, a code listing 894 → 112 — which is seven records
+        // becoming three to one. `Profile` stays outside it: the phone must know the grid before the
+        // rows mean anything, and it is 16 bytes.
+        let version = self.shells.get(&shell).map(|s| s.version).unwrap_or(0);
+        let framed: Vec<Message> = if streamed && version >= ldmux_protocol::mesh_term::FRAME_VERSION {
+            Self::pack_frame(messages)
+        } else {
+            messages.to_vec()
+        };
+        let messages: &[Message] = &framed;
         let mut ok = true;
         let mut record: Vec<u8> = Vec::with_capacity(ldmux_protocol::mesh_term::RECORD_PAYLOAD);
         let flush =
@@ -483,6 +547,19 @@ impl<H: Host, L: Link> Bridge<H, L> {
                 if !ok {
                     break;
                 }
+            }
+            // **A message bigger than a record is carried across records.** The phone's decoder
+            // reassembles by length, so nothing about a message's meaning depends on it fitting one
+            // record - and a compressed frame (a few hundred bytes for a screen that was seven
+            // records) is exactly such a message.
+            if bytes.len() > ldmux_protocol::mesh_term::RECORD_PAYLOAD {
+                record.extend_from_slice(&bytes);
+                flush(&mut record, &mut ok, &mut self.link, &mut self.stats);
+                if !ok {
+                    break;
+                }
+                packed += 1;
+                continue;
             }
             record.extend_from_slice(&bytes);
             packed += 1;
@@ -856,6 +933,9 @@ impl<H: Host, L: Link> Bridge<H, L> {
                                 version,
                                 geometry: None,
                                 last_push: None,
+                                hold: Some(
+                                    Instant::now() + ATTACH_GRACE,
+                                ),
                                 changed_last_tick: false,
                                 echo: false,
                                 original,
@@ -1510,6 +1590,10 @@ pub const PENDING_LIMIT: usize = 8;
 /// between the screen being usable and the queue never draining. It is also the hard bound on
 /// staleness: nothing coalesced waits longer than this.
 pub const BURST_GAP: Duration = Duration::from_millis(1000);
+
+/// How long the first frame after an attach waits for the phone's grid (two records at the public
+/// tuple, with a little room): the difference between drawing a 158x82 pane and a 46x17 one.
+const ATTACH_GRACE: Duration = Duration::from_millis(1_400);
 
 /// Wait until either the link has something to say or the cadence expires.
 ///
@@ -2843,8 +2927,11 @@ mod tests {
             },
         );
         b.tick().await;
-        // The attach's full screen is a push like any other; start the test after the window it
-        // opened has closed, so "a step after quiet" is what the first change really is.
+        // **The attach holds its first frame briefly** so the phone's own grid can arrive (see
+        // [`ATTACH_GRACE`]), and then its full screen is a push like any other. Start the test after
+        // both windows have closed, so "a step after quiet" is what the first change really is.
+        clock.advance(ATTACH_GRACE.as_millis() as u64 + 50);
+        b.tick().await;
         clock.advance(2_000);
         b.tick().await;
         (b, host, link, clock)
@@ -2852,6 +2939,92 @@ mod tests {
 
     fn sent_records(link: &FakeLink) -> usize {
         link.0.lock().unwrap().sent.len()
+    }
+
+    /// **A big frame goes compressed, and the phone still sees the same screen.**
+    ///
+    /// One full screen is about 900 bytes of text on a 143-byte record — seven records — and raw
+    /// deflate on real terminal text is 1.7x to 8x, which is three records or fewer. A one-row echo
+    /// must stay uncompressed: below [`ldmux_protocol::mesh_term::FRAME_COMPRESS_MIN`] the deflate
+    /// header costs more than the text repeats.
+    #[tokio::test]
+    async fn a_big_frame_is_compressed_and_decodes_to_the_same_screen() {
+        let (mut b, host, link) = setup();
+        let clock = FakeClock::new();
+        b.clock = clock.reader();
+        let wide: Vec<String> = (0..17)
+            .map(|i| format!("row {i:02} {}", "x".repeat(24)))
+            .collect();
+        let refs: Vec<&str> = wide.iter().map(String::as_str).collect();
+        paced(&host, &refs);
+        b.tick().await;
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: "abcd-1".into(),
+            },
+        );
+        b.tick().await;
+        clock.advance(ATTACH_GRACE.as_millis() as u64 + 50);
+        b.tick().await;
+        clock.advance(100);
+        b.tick().await;
+        // **Records, not messages: the decoder makes a frame transparent**, so the assertion is on
+        // what the air carried. This screen is ~527 bytes of rows (615 with the messages' own
+        // headers), which uncompressed is five records; compressed it is two or three.
+        let records = link
+            .0
+            .lock()
+            .unwrap()
+            .sent
+            .iter()
+            .filter(|(s, _)| *s == 1)
+            .count();
+        assert!(
+            records <= 3,
+            "a 527-byte screen took {records} records; compression did not happen"
+        );
+        // The phone's decode of what was sent is still the screen itself.
+        assert_eq!(phone_view(&link, 1).lines, wide);
+    }
+
+    /// **An attach does not draw the desk's grid.** The pane's pty is whatever a desk window left
+    /// it at — measured 158x82 — and a full frame of that is about eighty records, which at the
+    /// public tuple is a minute and a half of blank screen before the phone's `Resize` is even read.
+    /// The first frame is held for [`ATTACH_GRACE`] so the grid can arrive first, and a phone that
+    /// sends no resize still gets its screen when the grace ends.
+    #[tokio::test]
+    async fn an_attach_waits_for_the_phone_grid_before_drawing_the_desk_one() {
+        let (mut b, host, link) = setup();
+        let clock = FakeClock::new();
+        b.clock = clock.reader();
+        b.tick().await;
+        paced(&host, &["a desk frame", ""]);
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+            },
+        );
+        b.tick().await;
+        // Inside the grace: the pane is attached, the phone has been answered, and nothing of the
+        // screen has been sent yet.
+        clock.advance(200);
+        b.tick().await;
+        assert!(
+            phone_view(&link, 1).lines.is_empty() || phone_view(&link, 1).lines == [""],
+            "no screen before the phone's grid can arrive"
+        );
+        // The phone's grid, then the frame: at the grid it asked for, not the desk's.
+        phone_says(&link, 1, &Message::Resize { cols: 46, rows: 17 });
+        b.tick().await;
+        clock.advance(100);
+        b.tick().await;
+        assert_eq!(phone_view(&link, 1).lines.first().map(String::as_str), Some("a desk frame"));
     }
 
     #[tokio::test]

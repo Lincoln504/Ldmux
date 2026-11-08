@@ -170,6 +170,10 @@ class MeshTermCodecTest {
         val cases = fixture["messages"]!!.jsonArray
         assertTrue(cases.size >= 14)
         for (c in cases) {
+            // **A compressed frame has no phone-side encoder.** Deflate bytes are not a
+            // cross-language contract (any level 6 encoder produces different bytes for the same
+            // input), so the frame case is checked by decoding, below, not by re-encoding.
+            if (c.jsonObject["message"]!!.jsonObject["kind"]!!.jsonPrimitive.content == "frame") continue
             val m = message(c.jsonObject["message"]!!)
             assertEquals(c.jsonObject["hex"]!!.jsonPrimitive.content, hex(m.encode()), "encode $m")
         }
@@ -178,6 +182,7 @@ class MeshTermCodecTest {
     @Test
     fun everyRustMessageDecodesBackToTheSameMessage() {
         for (c in fixture["messages"]!!.jsonArray) {
+            if (c.jsonObject["message"]!!.jsonObject["kind"]!!.jsonPrimitive.content == "frame") continue
             val want = message(c.jsonObject["message"]!!)
             val got = decodeAll(unhex(c.jsonObject["hex"]!!.jsonPrimitive.content))
             assertEquals(listOf<TermItem>(TermItem.Message(want)), got)
@@ -281,7 +286,13 @@ class MeshTermCodecTest {
         val all = fixture["messages"]!!.jsonArray.map { it.jsonObject["hex"]!!.jsonPrimitive.content }
             .joinToString("").let(::unhex)
         val want = decodeAll(all)
-        assertEquals(fixture["messages"]!!.jsonArray.size, want.size)
+        // **A compressed frame carries more than one message**, so the decoded count is the fixture's
+        // count plus one per frame; the point of the test is that any split yields the same list.
+        val frames = fixture["messages"]!!.jsonArray.count {
+            it.jsonObject["message"]!!.jsonObject["kind"]!!.jsonPrimitive.content == "frame"
+        }
+        assertTrue(frames >= 1, "the fixture must carry a compressed frame")
+        assertEquals(fixture["messages"]!!.jsonArray.size + frames, want.size)
         for (chunk in listOf(1, 2, 3, 5, 7, 11, 144)) {
             val d = TermDecoder()
             val got = ArrayList<TermItem>()
@@ -379,5 +390,29 @@ class MeshTermCodecTest {
     @Test
     fun inputBytesKeepControlCharacters() {
         assertContentEquals(byteArrayOf(0x02, 0x01, 0x03), TermMessage.Input(byteArrayOf(3)).encode())
+    }
+
+    /**
+     * **A compressed frame decodes to exactly the messages it carries.**
+     *
+     * The host compresses a whole frame — one full screen is about 900 bytes of text, which is seven
+     * records — and the phone inflates it and splices the bytes back into its own decoder. This is
+     * the wire-format pin: the fixture's inner stream is decoded directly and through the frame, and
+     * both must produce the same messages in the same order.
+     */
+    @Test
+    fun aCompressedFrameInflatesToTheMessagesItCarries() {
+        val case = fixture["messages"]!!.jsonArray.firstOrNull {
+            it.jsonObject["message"]!!.jsonObject["kind"]!!.jsonPrimitive.content == "frame"
+        }
+        assertNotNull(case, "the fixture must carry a compressed frame")
+        val inner = case.jsonObject["message"]!!.jsonObject["inner"]!!.jsonPrimitive.content
+        val declared = case.jsonObject["message"]!!.jsonObject["uncompressed"]!!.jsonPrimitive.int
+        assertEquals(inner.length / 2, declared, "the declared size is the inner stream's")
+        val direct = decodeAll(unhex(inner))
+        val viaFrame = decodeAll(unhex(case.jsonObject["hex"]!!.jsonPrimitive.content))
+        assertTrue(direct.isNotEmpty(), "the inner stream carries messages")
+        assertEquals(direct, viaFrame, "a frame is transparent to the messages inside it")
+        assertTrue(viaFrame.none { it is TermItem.Malformed }, "nothing malformed")
     }
 }

@@ -464,6 +464,17 @@ the old size is refused by the packet builder, its attempt is given back, and th
 to what the route actually leaves. A **fixed** 172 was the old answer, and it was refused by
 ldmux's own builder at the first path byte — so a full record only ever worked at zero hops.
 
+**A big frame is compressed, a record is not.** A record is 143 bytes of payload after the L3
+headers, and a full screen is about 900 bytes of text, so compressing a *record* saves nothing — the
+record goes out whole either way (measured: a 114-byte `Rows` compresses to 80 and is still one
+record). Compressing the *frame* is what pays: raw deflate at level 9 turns a realistic 46x17
+`ldmux mesh status` screen from **933 bytes into 427**, which is seven records becoming three. The
+comparison was measured, not assumed: zstd -19 gives 440 bytes on the same screen and xz -9e gives
+532, so deflate wins here as well as being the only choice with no new dependency (Android's
+`java.util.zip.Inflater`, and `flate2`/`miniz_oxide` on the host, which ADR-0019 already allows).
+Robustness is the reason it is a *frame* rather than a stream: a frame that will not inflate is one
+lost frame, not a corrupt stream, so the phone asks for the screen again.
+
 **One radio per side, each configured by the device that owns it.** The host radio
 stays plugged into the host over USB, where the daemon drives it and can retune it.
 The phone radio is powered anywhere and belongs to the phone over Bluetooth LE,

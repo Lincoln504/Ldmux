@@ -649,7 +649,7 @@ class MeshTermDriver(
             // has to name it to the screen, and the screen needs it to offer `take it back`; the
             // empty-selector case learns its id from `Profile`, this one already has it.
             if (selector.isNotEmpty()) attempted = selector
-            queue(TermMessage.Attach(MeshTerm.VERSION, selector))
+            queueAttach(selector)
             pump()
             return@withLock
         }
@@ -908,7 +908,7 @@ class MeshTermDriver(
         // now in front of the operator.
         if (_marks.value.containsKey(id)) _marks.value = _marks.value - id
         publishShells()
-        queue(TermMessage.Attach(MeshTerm.VERSION, id))
+        queueAttach(id)
         pump(); publish()
         true
     }
@@ -1171,6 +1171,27 @@ class MeshTermDriver(
     private var resyncRetryMs = RESYNC_FIRST_RETRY_MS
     private var resyncAskedAt = Long.MIN_VALUE
 
+    /**
+     * Ask at once, because the host has named a gap.
+     *
+     * **Not gated on the session being idle.** A lost commit is exactly the case where the session
+     * still owes records — that is what loss looks like — so the speculative guard would suppress the
+     * one ask that is certainly needed. Rate-limited so a burst of frames cannot turn it into a
+     * storm.
+     */
+    // Null, not zero: a clock that starts at zero (as a test's does) would otherwise treat its first
+    // ask as one that happened a moment ago and suppress it.
+    private var lastGapAskAt: Long? = null
+
+    private fun askResyncNow() {
+        val now = clock()
+        if (lastGapAskAt?.let { now - it < GAP_ASK_FLOOR_MS } == true) return
+        lastGapAskAt = now
+        resyncing = true
+        resyncAskedAt = now
+        queue(TermMessage.Resync)
+    }
+
     private fun requestResync() {
         val now = clock()
         // **A busy link is not a lost request.** With records still owed, the answer is already on
@@ -1227,7 +1248,24 @@ class MeshTermDriver(
             }
             // Before a profile there is no screen to paint into: these are the previous shell's
             // last updates arriving after a switch, and must not be answered with a Resync.
-            is TermMessage.Rows, is TermMessage.Commit -> if (mirror.profile != null) handleScreen(m)
+            is TermMessage.Rows, is TermMessage.Commit ->
+                if (mirror.profile != null) {
+                    handleScreen(m)
+                } else {
+                    // **Rows for a screen we do not know the size of.** The host sends a `Profile`
+                    // with the first frame after an attach, so a commit here means the host thinks
+                    // this phone is attached while the phone has no grid — the frame was missed, or
+                    // the mirror was reset by a re-show the host never heard about. The rows are
+                    // discarded (they name rows of an unknown grid) and the *retry is shortened*
+                    // rather than fired here: the tick asks, and asking is silent while a switch's
+                    // own attach is still in flight. Without this the phone sat on a blank screen
+                    // for up to the backoff's sixty seconds with a cursor placed from a grid it did
+                    // not have.
+                    if (m is TermMessage.Commit) {
+                        resyncRetryMs = RESYNC_FIRST_RETRY_MS
+                        resyncAskedAt = 0L
+                    }
+                }
             is TermMessage.Closed -> when {
                 // **"Several shells" is the answer to an unnamed attach, not an ending.** It means
                 // "name one", so the screen goes to the list it should have been on. It is keyed on
@@ -1292,7 +1330,7 @@ class MeshTermDriver(
                     held.clear(); lastEpoch = null; painted = false; resyncing = false; unsupported = 0
                     attachedId = m.id
                     publishShells()
-                    queue(TermMessage.Attach(MeshTerm.VERSION, m.id))
+                    queueAttach(m.id)
                     // **And ask for the list, because the row set on the phone is now wrong.**
                     // The host answers `Created` with the id and nothing else, so the shell this
                     // phone just started was absent from its own list until a manual refresh: the
@@ -1388,7 +1426,7 @@ class MeshTermDriver(
                 pick = Pick.Attached
                 attachedId = all[0].id
                 attempted = all[0].id
-                queue(TermMessage.Attach(MeshTerm.VERSION, all[0].id))
+                queueAttach(all[0].id)
             }
             else -> { pick = Pick.Choosing; choices = all }
         }
@@ -1403,18 +1441,44 @@ class MeshTermDriver(
         val full = rows.any { it.full }
         val last = lastEpoch
         val inOrder = last != null && m.epoch == ((last + 1) and 0xffff)
+        // **A commit with no rows is legitimate**: a cursor or a flag changed and nothing on the
+        // screen did, so there is nothing to carry. A commit *out of order* is the case that is not
+        // legitimate, and it is asked for at once rather than on the tick's speculative timer.
         if (!full && !inOrder) {
             // A diff against a base we do not hold: discard it and ask for the whole screen.
-            requestResync()
+            askResyncNow()
             return
         }
         for (r in rows) mirror.apply(r)
         mirror.apply(m)
         lastEpoch = m.epoch
-        painted = true
+        // **Painted means there is something to paint.** A commit over an empty mirror left
+        // `painted` true, so the page drew an empty grid with a cursor in it and never asked again.
+        painted = mirror.lines.isNotEmpty()
         if (m.flags and MeshTerm.CommitFlags.IDLE != 0) onIdle?.invoke()
         if (full) resyncing = false
         appLog("mesh commit epoch ${m.epoch} full=$full rows=${mirror.lines.size} cols=${mirror.profile?.cols}")
+    }
+
+    /**
+     * Queue an `Attach` **with the phone's grid**, and remember that the fit is already asked for.
+     *
+     * **The host's pty is whatever a desk window left it at** — measured 158x82 against a phone's
+     * 46x17 — and a full frame of that is about eighty records, which at the public tuple is a
+     * minute and a half of blank screen *before* the phone's `Resize` is even read. `fitHost()`
+     * cannot send it earlier because it needs the host's `Profile` to compare against, so the grid
+     * goes with the attach: one extra record against eighty saved, and the host's `ATTACH_GRACE`
+     * then does what it was added for (the resize arrives inside it, so the first frame is drawn at
+     * the phone's size rather than the desk's).
+     */
+    private fun queueAttach(selector: String) {
+        queue(TermMessage.Attach(MeshTerm.VERSION, selector))
+        val (cols, rows) = wantedGrid ?: return
+        // A host that predates `Resize` ignores the message and answers `Profile` with the flag
+        // clear; the version is not known on the first attach, so it is sent and judged by the
+        // answer rather than by a guess.
+        requestedFit = Triple(selector, cols, rows)
+        queue(TermMessage.Resize(cols, rows))
     }
 
     private suspend fun pump() {
@@ -1588,6 +1652,9 @@ private const val RESIZE_FLOOR_MS = 30_000L
 
 /** The first wait before a resync is asked again; each ask doubles it, to a minute. */
 private const val RESYNC_FIRST_RETRY_MS = 4_000L
+
+/** The least gap between two "the host named a gap" asks, so a burst cannot become a storm. */
+private const val GAP_ASK_FLOOR_MS = 1_500L
 
 internal fun needsResize(sessionLimit: Int, linkLimit: Int): Boolean =
     linkLimit > 0 && sessionLimit > 0 && linkLimit < sessionLimit

@@ -188,6 +188,11 @@ async fn the_profile_names_the_shell_the_host_chose() {
         },
     );
     bridge.tick().await;
+    // **An attach holds its first frame briefly** so the phone's own grid can arrive before the pane
+    // is drawn at whatever geometry a desk window left behind (`ATTACH_GRACE`). This rig is real
+    // time, so the wait is real: without it the attach is answered and the screen is not yet due.
+    tokio::time::sleep(std::time::Duration::from_millis(1_600)).await;
+    bridge.tick().await;
     let sent = link.0.lock().unwrap().sent.clone();
     // The profile, not "the first record": a version-9 phone is also sent the mark table, and that
     // page is a record of its own.

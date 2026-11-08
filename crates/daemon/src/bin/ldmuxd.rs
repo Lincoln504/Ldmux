@@ -183,7 +183,6 @@ fn main() {
             // choice every single boot — the very thing the marker exists to prevent. The hour's
             // spend went with it, so a reboot handed the radio a fresh allowance, and the peer's
             // key had to be learned again (see `mesh_serial::prepare`).
-            c.width_marker = Some(persist_dir.join("mesh-width"));
             c.airtime_record = Some(persist_dir.join("mesh-airtime"));
             c.peer_record = Some(persist_dir.join("mesh-peer"));
             c

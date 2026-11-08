@@ -24,7 +24,7 @@ object MeshTerm {
      * Version 6 adds a shell's working directory to each `Sessions` entry, so the picker shows the
      * folder instead of the id it would send.
      */
-    const val VERSION = 10
+    const val VERSION = 11
     const val MIN_VERSION = 1
     /** The first version that has `Key` and the shell id in `Profile`. */
     const val KEY_VERSION = 2
@@ -165,6 +165,22 @@ object MeshTerm {
      */
     const val SHELL_VERSION = 10
     internal const val T_PROFILE = 0x81
+    /**
+     * A **compressed group of screen messages** (version 11).
+     *
+     * A record is 143 bytes and one screen is ~900, so a *record* cannot be compressed usefully
+     * (it goes out whole either way); a *frame* can, and 1.7x to 8x is measured on real terminal
+     * text. The body is `uncompressed_len u16 LE` then raw deflate; the inner bytes are ordinary
+     * messages, so they are spliced back into this same decoder.
+     */
+    internal const val T_FRAME = 0x8A
+
+    /** Below this many uncompressed bytes a frame is not worth compressing (deflate header > gain). */
+    const val FRAME_COMPRESS_MIN = 200
+
+    /** The largest a frame may inflate to: a bound on a corrupt or hostile length. */
+    const val FRAME_MAX_INFLATED = 8_192
+
     internal const val T_ROWS = 0x82
     internal const val T_COMMIT = 0x83
     internal const val T_CLOSED = 0x84
@@ -574,6 +590,28 @@ class TermDecoder {
             }
             if (buf.size - pos < head + len) break
             val body = buf.copyOfRange(pos + head, pos + head + len)
+            if (tag == MeshTerm.T_FRAME) {
+                // **Inflat and splice, so the inner messages are decoded by this same loop.** The
+                // frame is opaque to everything else: a frame that will not inflate is one lost
+                // frame, reported as a malformed message, never as a corrupt stream.
+                val want = if (body.size >= 3) {
+                    (body[0].toInt() and 0xff) or ((body[1].toInt() and 0xff) shl 8)
+                } else {
+                    -1
+                }
+                val inner = if (want in 1..MeshTerm.FRAME_MAX_INFLATED) {
+                    inflateFrame(body.copyOfRange(2, body.size), want)
+                } else {
+                    null
+                }
+                if (inner == null) {
+                    out += TermItem.Malformed(tag)
+                    pos += head + len
+                } else {
+                    buf = buf.copyOfRange(0, pos) + inner + buf.copyOfRange(pos + head + len, buf.size)
+                }
+                continue
+            }
             pos += head + len
             when (val r = parse(tag, body)) {
                 Parsed.Unknown -> {}

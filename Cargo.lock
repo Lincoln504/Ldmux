@@ -382,6 +382,7 @@ version = "0.1.0"
 name = "ldmux-protocol"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "ldmux-mesh",
  "nix",
  "serde",
