@@ -137,7 +137,9 @@ fun parseScannedPairing(link: String): Pairing? {
  */
 internal fun parseHostPreset(text: String): RadioPreset? {
     val n = text.split(',').map { it.trim() }
-    if (n.size != 4) return null
+    // Four numbers, or five when the host also said its path hash width in bytes. A host that
+    // predates the fifth cannot have one, and its channel is ldmux's own two-byte default.
+    if (n.size != 4 && n.size != 5) return null
     val freqKhz = n[0].toIntOrNull() ?: return null
     val bwHz = n[1].toIntOrNull() ?: return null
     val sf = n[2].toIntOrNull() ?: return null
@@ -145,12 +147,15 @@ internal fun parseHostPreset(text: String): RadioPreset? {
     if (freqKhz !in 150_000..2_500_000) return null
     if (bwHz !in 7_000..500_000) return null
     if (sf !in 5..12 || cr !in 5..8) return null
+    val path = n.getOrNull(4)?.let { it.toIntOrNull() ?: return null }
+    if (path != null && path !in 1..3) return null
     return RadioPreset(
         frequencyMhz = freqKhz / 1000.0,
         bandwidthKhz = bwHz / 1000.0,
         spreadingFactor = sf,
         codingRate = cr,
         txPowerDbm = 22,
+        pathHashSize = path ?: 2,
     )
 }
 

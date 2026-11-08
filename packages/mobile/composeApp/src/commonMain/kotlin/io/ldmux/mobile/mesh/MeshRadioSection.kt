@@ -516,7 +516,12 @@ internal fun presetLine(p: RadioPreset): String =
  * did not choose. Comparing and applying both take only the four channel fields for that reason.
  */
 internal fun RadioPreset.channelOf(local: RadioPreset): RadioPreset =
-    copy(txPowerDbm = local.txPowerDbm, pathHashSize = local.pathHashSize)
+    // **The width travels with the channel, the power does not.** A radio's transmit power is its
+    // own business (a regional limit, a battery), but the path hash width is the network's: on
+    // MeshCore's public presets a repeater's hash is one byte, so a phone that matched the
+    // frequency and kept its own two-byte width would match half a channel and only notice once a
+    // repeater was in the way.
+    copy(txPowerDbm = local.txPowerDbm)
 
 /** The channel as one line: the four numbers that have to match, and nothing local. */
 internal fun channelLine(p: RadioPreset): String =

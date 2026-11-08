@@ -562,13 +562,23 @@ pub fn pairing_json() -> Result<serde_json::Value, String> {
     // other, and the phone had no way to learn the host's: a mismatch was silent and looked like
     // being out of range.
     let host_preset = runtime.snapshot().radio_preset;
+    // **The width rides with the tuple.** A phone that matches the frequency and keeps its own path
+    // width matches half a channel: on MeshCore's public presets a repeater's hash is one byte, so
+    // a two-byte reader cannot follow the route a public repeater built — and the mismatch only
+    // shows up once a repeater is in the way. Sent as a fifth element, so a phone that predates it
+    // reads four and carries on.
+    let host_path = runtime.snapshot().path_hash_size;
     Ok(serde_json::json!({
         "hostKey": hex(&keys.host_key),
         "psk": hex(&keys.psk),
         "hostRadio": host_radio.map(|r| hex(&r)),
-        "hostPreset": host_preset.map(|(f, b, sf, cr)| vec![
-            u64::from(f), u64::from(b), u64::from(sf), u64::from(cr)
-        ]),
+        "hostPreset": host_preset.map(|(f, b, sf, cr)| {
+            let mut v = vec![u64::from(f), u64::from(b), u64::from(sf), u64::from(cr)];
+            if let Some(width) = host_path {
+                v.push(u64::from(width));
+            }
+            v
+        }),
     }))
 }
 

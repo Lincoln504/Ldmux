@@ -155,9 +155,10 @@ two apart, but a network does not: MeshCore's public presets name neighbours in 
 repeater's hash is one byte, and a node that names them in two cannot read a path that repeater
 built. ldmux's own channel is two bytes on both ends, because two bytes per hop is its default and
 one byte collides at about twenty co-channel repeaters; the public channel is one byte by the
-community's convention. The phone takes the width from its preset and the host from this flag. A direct
-zero-hop packet carries no path, which is why a width mismatch is invisible until a repeater is in
-the way.
+community's convention. The phone takes the width from its preset and the host from this flag, and
+the host publishes it in the pairing code (`hostPreset`'s fifth number), so the phone's one-press
+`match` copies the whole channel and keeps only its own transmit power. A direct zero-hop packet
+carries no path, which is why a width mismatch is invisible until a repeater is in the way.
 
 **A newline in `Input` is a paste, and the host decides what it means.** The pane is the only place
 that knows whether it negotiated bracketed paste (`CSI ? 2004 h`), so `Profile` carries that flag

@@ -170,10 +170,11 @@ fn mesh_keys_from_json(v: &serde_json::Value) -> Option<ldmux_protocol::pairing:
         None | Some(serde_json::Value::Null) => None,
         Some(_) => Some(key(v, "hostRadio")?),
     };
-    // The host's tuple, when the daemon reports one: four numbers, and a shape this CLI will not
-    // guess at. A malformed value is left out rather than sent as a wrong frequency.
+    // The host's tuple, when the daemon reports one: four numbers and, when the daemon was asked
+    // for it, a fifth that is the path hash width. A shape this CLI will not guess at is left out
+    // rather than sent as a wrong frequency.
     let host_preset = v.get("hostPreset").and_then(|p| p.as_array()).and_then(|p| {
-        if p.len() != 4 {
+        if p.len() != 4 && p.len() != 5 {
             return None;
         }
         Some(ldmux_protocol::pairing::HostPreset {
@@ -181,6 +182,7 @@ fn mesh_keys_from_json(v: &serde_json::Value) -> Option<ldmux_protocol::pairing:
             bw_hz: u32::try_from(p[1].as_u64()?).ok()?,
             sf: u8::try_from(p[2].as_u64()?).ok()?,
             cr: u8::try_from(p[3].as_u64()?).ok()?,
+            path_bytes: p.get(4).and_then(|v| v.as_u64()).map(|v| v as u8),
         })
     });
     Some(ldmux_protocol::pairing::MeshKeys {

@@ -140,10 +140,13 @@ class ConfigStore(
         // comparing two screens by eye into one press — and a mismatch into a sentence instead of a
         // link that never comes up. A code without it clears the old value rather than keeping a
         // stale one: the desktop may since have been retuned.
+        // The width is written as a fifth number, because it is part of the channel: a phone that
+        // matches the frequency and keeps its own width cannot follow a route a public repeater
+        // built. Kept as text so the settings row can show the host's channel without a migration.
         val preset = p.mesh?.hostPreset
         val text = preset?.let {
             "${(it.frequencyMhz * 1000).toInt()},${(it.bandwidthKhz * 1000).toInt()}," +
-                "${it.spreadingFactor},${it.codingRate}"
+                "${it.spreadingFactor},${it.codingRate},${it.pathHashSize}"
         } ?: ""
         if (text != _config.value.meshHostPreset) update(_config.value.copy(meshHostPreset = text))
         return outcome

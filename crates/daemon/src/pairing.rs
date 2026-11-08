@@ -265,6 +265,7 @@ mod tests {
                 bw_hz: 500_000,
                 sf: 7,
                 cr: 5,
+                path_bytes: Some(2),
             }),
         };
         let (pairing, link) =

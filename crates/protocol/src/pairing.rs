@@ -56,12 +56,26 @@ pub struct HostPreset {
     pub bw_hz: u32,
     pub sf: u8,
     pub cr: u8,
+    /// The host radio's path hash width in **bytes**, when the host knows it.
+    ///
+    /// It belongs with the channel, not with the radio: MeshCore's public presets name neighbours
+    /// in one byte, so a repeater's hash is one byte, and a node that names them in two cannot read
+    /// a path that public repeater built. A phone that matches the host's tuple but keeps its own
+    /// width therefore matches the *frequency* and not the *channel*, and the mismatch only shows
+    /// up once a repeater is in the way.
+    pub path_bytes: Option<u8>,
 }
 
 impl HostPreset {
-    /// `freq_khz,bw_hz,sf,cr` — four numbers, no text.
+    /// `freq_khz,bw_hz,sf,cr[,path_bytes]` — numbers, no text.
     fn encode(self) -> String {
-        format!("{},{},{},{}", self.freq_khz, self.bw_hz, self.sf, self.cr)
+        match self.path_bytes {
+            Some(b) => format!(
+                "{},{},{},{},{}",
+                self.freq_khz, self.bw_hz, self.sf, self.cr, b
+            ),
+            None => format!("{},{},{},{}", self.freq_khz, self.bw_hz, self.sf, self.cr),
+        }
     }
 
     fn decode(text: &str) -> Option<Self> {
@@ -70,9 +84,20 @@ impl HostPreset {
         let bw_hz = it.next()?.parse().ok()?;
         let sf = it.next()?.parse().ok()?;
         let cr = it.next()?.parse().ok()?;
-        if it.next().is_some() {
-            return None;
-        }
+        // A fifth number is the path width; a code from a host that predates it has four.
+        let path_bytes = match it.next() {
+            None => None,
+            Some(v) => {
+                let b: u8 = v.parse().ok()?;
+                if !(1..=3).contains(&b) {
+                    return None;
+                }
+                if it.next().is_some() {
+                    return None;
+                }
+                Some(b)
+            }
+        };
         // The firmware's own bounds: anything outside them would be refused by the radio, and a
         // code that carries it is not a code this phone should act on.
         let sane = (150_000..=2_500_000).contains(&freq_khz)
@@ -84,6 +109,7 @@ impl HostPreset {
             bw_hz,
             sf,
             cr,
+            path_bytes,
         })
     }
 }
@@ -607,6 +633,11 @@ mod tests {
                     bw_hz: u32::try_from(n.get(1)?.as_u64()?).ok()?,
                     sf: u8::try_from(n.get(2)?.as_u64()?).ok()?,
                     cr: u8::try_from(n.get(3)?.as_u64()?).ok()?,
+                    // The fifth element is the path width, when the host sent one.
+                    path_bytes: n
+                        .get(4)
+                        .and_then(|v| v.as_u64())
+                        .and_then(|v| u8::try_from(v).ok()),
                 })
             }),
         }
@@ -723,6 +754,7 @@ mod tests {
                 bw_hz: 62_500,
                 sf: 7,
                 cr: 5,
+                path_bytes: Some(1),
             }),
         };
         let shown = format!("{k:?}");
