@@ -301,7 +301,7 @@ private fun MeshRadioFacts(
     // comparing two screens by eye and guessing which of five numbers was wrong.
     val mine = preset
     var matchProblem by remember(address) { mutableStateOf<String?>(null) }
-    if (hostPreset != null && mine != null && !sameTuple(mine, hostPreset)) {
+    if (hostPreset != null && mine != null && !sameChannel(mine, hostPreset)) {
         SettingsRow("desktop's radio") {
             // Only the four numbers that have to match. The row used to print the host's power and
             // path width too, which are not part of the channel and are not applied.

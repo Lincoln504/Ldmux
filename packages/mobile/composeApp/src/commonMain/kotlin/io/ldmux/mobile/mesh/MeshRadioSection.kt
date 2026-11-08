@@ -557,34 +557,23 @@ internal fun RadioPresetPanel(
  * path width gets a word, because `1B` alone reads as a unit with no quantity.
  */
 /**
- * Whether two radios are on the same **channel**.
+ * Whether two radios are on the same **channel** — the four numbers that decide whether they hear
+ * each other, and nothing else.
  *
- * The four numbers the firmware validates, and the path-hash width. The width is not local: a
- * repeater's hash is one byte on MeshCore's public presets, so a phone on two bytes cannot follow a
- * route a public repeater built — and comparing only the four numbers hid exactly that, with the
- * settings row staying silent while the link could not work (measured 2026-11-07: host one byte,
- * phone two, no warning). Transmit power is still local and still not compared: a phone in Europe
- * is limited to 14 dBm and that is nobody else's business.
+ * **The path-hash width is not one of them.** A comparison that included it produced a row that
+ * could never be satisfied: the host reports the width of *its* radio, a phone that deliberately
+ * keeps one byte (the width every public MeshCore preset uses) is then permanently "different", and
+ * applying the host's channel keeps the phone's width — so the warning survived the fix it
+ * recommended. Widths interoperate: each packet's path byte says how wide its own hops are, and a
+ * repeater matches with the sender's width, so a one-byte phone and a two-byte host hear each other
+ * on the same four numbers. Transmit power is local for the same reason (a regional limit), which is
+ * why [`RadioPreset.channelOf`] keeps it too.
  */
-/** Whether two radios are on the same **channel**: the four numbers that decide if they hear each
- * other at all. A difference here really does leave the link down until both ends move. */
 internal fun sameChannel(a: RadioPreset, b: RadioPreset): Boolean =
     (a.frequencyMhz - b.frequencyMhz).let { kotlin.math.abs(it) < 0.01 } &&
         (a.bandwidthKhz - b.bandwidthKhz).let { kotlin.math.abs(it) < 0.1 } &&
         a.spreadingFactor == b.spreadingFactor &&
         a.codingRate == b.codingRate
-
-/**
- * Whether two radios are on the same channel **and** the same path width.
- *
- * The row that offers `match` wants this: a width difference is worth naming, because a repeater's
- * hash is one byte on MeshCore's public presets and a two-byte reader cannot follow the route it
- * built. It is *not* a link failure, though — two radios on the same four numbers hear each other
- * whatever their widths — and the preset panel said "apply leaves link down" and offered
- * `apply anyway?` for exactly that difference (seen on the device, 2026-11-07).
- */
-internal fun sameTuple(a: RadioPreset, b: RadioPreset): Boolean =
-    sameChannel(a, b) && a.pathHashSize == b.pathHashSize
 
 internal fun presetLine(p: RadioPreset): String =
     "${p.frequencyMhz} MHz  ${p.bandwidthKhz} kHz  SF${p.spreadingFactor}  CR${p.codingRate}  ${p.txPowerDbm} dBm  path ${p.pathHashSize}B"

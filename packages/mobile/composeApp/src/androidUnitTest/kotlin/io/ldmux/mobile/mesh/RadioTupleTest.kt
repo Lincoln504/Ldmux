@@ -91,18 +91,19 @@ class RadioTupleTest {
     fun `two tuples match on the four numbers and the path width, not on power`() {
         val a = RadioPreset(910.525, 500.0, 7, 5, 22, 1)
         // Power is the radio's own business (a regional limit), so it is not part of the channel.
-        assertTrue(sameTuple(a, a.copy(txPowerDbm = 14)))
-        assertFalse(sameTuple(a, a.copy(frequencyMhz = 914.25)))
-        assertFalse(sameTuple(a, a.copy(bandwidthKhz = 62.5)))
-        assertFalse(sameTuple(a, a.copy(spreadingFactor = 8)))
-        assertFalse(sameTuple(a, a.copy(codingRate = 8)))
-        // **The width is** part of the *row's* comparison: a phone on two bytes cannot follow a
-        // route a one-byte public repeater built, so a host of one byte and a phone of two is a
-        // mismatch the row must name.
-        assertFalse(sameTuple(a, a.copy(pathHashSize = 2)))
-        assertFalse(sameTuple(a, a.copy(pathHashSize = 3)))
-        // ...but it is **not** a channel difference, and the panel must not say the link dies for
-        // it: two radios on the same four numbers hear each other whatever their widths.
+        assertTrue(sameChannel(a, a.copy(txPowerDbm = 14)))
+        assertFalse(sameChannel(a, a.copy(frequencyMhz = 914.25)))
+        assertFalse(sameChannel(a, a.copy(bandwidthKhz = 62.5)))
+        assertFalse(sameChannel(a, a.copy(spreadingFactor = 8)))
+        assertFalse(sameChannel(a, a.copy(codingRate = 8)))
+        // **The width is not a mismatch.** It was compared, and the row then nagged for ever: the
+        // host reports its own width, a phone on the public preset keeps one byte, and applying the
+        // host's channel keeps the phone's — so the warning outlived its own fix. Widths
+        // interoperate (each packet's path byte says how wide its hops are), and power is local.
+        // One comparison, one name: `sameTuple` was a second spelling of this function.
+        assertTrue(sameChannel(a, a.copy(pathHashSize = 2)))
+        assertTrue(sameChannel(a, a.copy(pathHashSize = 3)))
+        assertTrue(sameChannel(a, a.copy(txPowerDbm = 14)))
         assertTrue(sameChannel(a, a.copy(pathHashSize = 3)))
         assertFalse(sameChannel(a, a.copy(frequencyMhz = 914.25)))
     }
