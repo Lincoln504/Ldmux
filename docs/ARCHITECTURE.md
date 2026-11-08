@@ -332,12 +332,15 @@ CRC on, and low-data-rate optimisation once a symbol is 16 ms or longer.
 The figure lives in one function, `time_on_air_ms` (`crates/companion/src/codec.rs`), used
 by the host radio, by the app before it retunes, and by every budget below.
 
-- **The allowance is band-aware.** In 869.4-869.65 MHz a 10 % duty cycle is a condition of use, so
-  ldmux holds itself to **1 %** there (36 s an hour) and the app will not let that meter be turned
-  off. Everywhere else — including 902-928 MHz, where MeshCore's US/Canada preset sits — there is no
-  duty cycle to comply with, so the allowance is **10 %** (360 s an hour): a fifth of what the
-  firmware permits and less than half the Meshtastic cap. At 1 % a single typed command line at
-  62.5 kHz was the whole hour, which made the meter, not the radio, the thing that ended a session.
+- **The allowance is band-aware, per ETSI window.** `869.4-869.65 MHz` allows 10 % and ldmux holds
+  itself to **1 %** there (36 s an hour), and the app will not let that meter be turned off.
+  `868.0-868.6 MHz` is **1 % by law**, and `868.7-869.2 MHz` is **0.1 %** (the alarm band: 3.6 s an
+  hour, where a single 62.5 kHz record is 0.6 s). Everywhere else — including 902-928 MHz, where
+  MeshCore's US/Canada preset sits — there is no duty cycle to comply with, so the allowance is
+  **10 %** (360 s an hour): a fifth of what the firmware permits and less than half the Meshtastic
+  cap. At 1 % a single typed command line at 62.5 kHz was the whole hour, which made the meter, not
+  the radio, the thing that ended a session. The table used to meter `868.0-868.6` at 10 %, ten
+  times its legal duty cycle, and no shipped preset reaches it — but `ldmux mesh preset` does.
 - One screen update or one keystroke is one record. A record that does not fit waits
   for the next one.
 - Batch mode exists because a public channel turns every keystroke into a broadcast.

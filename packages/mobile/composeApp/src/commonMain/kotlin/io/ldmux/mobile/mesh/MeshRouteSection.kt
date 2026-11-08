@@ -342,14 +342,27 @@ private fun MeshRadioFacts(
         LaunchedEffect(mustMeter, openAirtime) {
             if (openAirtime) onBudget(RadioBudgetMode.Metered)
         }
-        SettingsRow("airtime limit", summary = "on · band requires 10 % duty cycle")
+        // The law here is a 10 % duty cycle; ldmux holds itself to a tenth of it, so the row says
+        // what is applied and what it is a tenth of. It used to say "band requires 10 % duty cycle"
+        // beside a 36 s figure, which claimed a rule the app was not enforcing.
+        SettingsRow(
+            "airtime limit",
+            summary = "on · ${allowanceSeconds(preset)} s/h · a tenth of this band's 10 %",
+        )
     } else {
         SettingsToggle(
             "airtime limit",
             checked = !openAirtime,
             // **The allowance is the band's**, so the sentence is too: 36 s inside the European
             // sub-band, 360 s outside it, where there is no duty cycle to comply with.
-            summary = if (openAirtime) "off · no hourly limit" else "on · ${allowanceSeconds(preset)} s per hour",
+            // **Both units, because a reader cannot do the arithmetic in their head.** 360 s/h is
+            // 10 % of the hour and 36 s/h is 1 %; the seconds are what the meter counts in, and the
+            // percentage is what the band talks about.
+            summary = if (openAirtime) {
+                "off · the meter is a courtesy, not a rule here"
+            } else {
+                "on · ${allowanceSeconds(preset)} s/h · ${percentOfHour(preset)} % of the hour"
+            },
             onChange = { metered -> onBudget(if (metered) RadioBudgetMode.Metered else RadioBudgetMode.Open) },
         )
     }
@@ -360,23 +373,28 @@ private fun MeshRadioFacts(
 internal fun allowanceSeconds(preset: RadioPreset?): Int =
     ((preset?.let { RadioAirtime.budgetMsPerHour(it) } ?: RadioAirtime.BUDGET_MS_PER_HOUR) / 1000.0).toInt()
 
+/** The same allowance as a percentage of the hour, whole where it is whole: 1 % or 10 %. */
+internal fun percentOfHour(preset: RadioPreset?): Int =
+    (allowanceSeconds(preset) / 36.0).toInt()
+
 /**
  * The hour's airtime and what is left of the budget, in the radio's own units.
  *
- * `txAirtimeTenthsThisHour` is tenths of a second, and the app's own budget is the band's
- * ([RadioAirtime.budgetMsPerHour]): 36 s where a 10 % duty cycle is a condition of use, 360 s where
- * there is none. The records figure is null when the budget is open, which is a different fact from
- * "zero left" and is said as such.
+ * `txAirtimeTenthsThisHour` is tenths of a second, and the app's own allowance is the band's
+ * ([RadioAirtime.budgetMsPerHour]): 36 s in the European sub-band, 360 s outside it — which is what
+ * the figure means, not a cap the app invents.
+ *
+ * **A denominator is only shown when there is something to be a fraction of.** With the meter off,
+ * the old line read `37.4/360 s this hour · no hourly cap`: a fraction whose second half is not a
+ * limit, beside the words "no cap", which is three statements where there is one fact. Metering off
+ * now says what was spent and says the meter is off.
  */
 internal fun airtimeLine(status: MeshStatus?, preset: RadioPreset?): String {
     if (status == null) return "not read"
     val used = status.txAirtimeTenthsThisHour / 10.0
-    val budget = (preset?.let { RadioAirtime.budgetMsPerHour(it) } ?: RadioAirtime.BUDGET_MS_PER_HOUR) / 1000.0
     val left = status.opsLeftThisHour
-    val records = when {
-        left == null -> "no hourly cap"
-        left >= 255 -> "255+ records left"
-        else -> "$left records left"
-    }
-    return "%.1f/%.0f s this hour · %s".format(used, budget, records)
+    if (left == null) return "%.1f s this hour · the meter is off".format(used)
+    val budget = (preset?.let { RadioAirtime.budgetMsPerHour(it) } ?: RadioAirtime.BUDGET_MS_PER_HOUR) / 1000.0
+    val records = if (left >= 255) "255+ records left" else "$left records left"
+    return "%.1f of %.0f s used this hour · %s".format(used, budget, records)
 }

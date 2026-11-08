@@ -1,6 +1,8 @@
 package io.ldmux.mobile
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -24,7 +26,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
@@ -114,7 +118,12 @@ internal fun SettingsScreen(
             .imePadding(),
     ) {
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = LocalTouch.current.rowPad * 3, vertical = LocalTouch.current.rowPad * 2),
+            Modifier
+                .fillMaxWidth()
+                .padding(
+                    horizontal = Rhythm.contentPad(LocalTouch.current),
+                    vertical = LocalTouch.current.rowPad * 2,
+                ),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             MiniTextButton(onClick = onBack) { Text("\u2039 back", color = Accent, fontSize = 14.sp) }
@@ -122,7 +131,7 @@ internal fun SettingsScreen(
             // Lowercase, like every other label in the app and unlike a document title. The
             // screen said `Settings` while its own three headings said `link`, `pairing` and
             // `display`, so one screen carried two capitalisation rules.
-            Text("settings", color = Fg, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+            Text("settings", color = Fg, fontSize = 20.sp, fontWeight = FontWeight.Normal)
         }
         val scroll = rememberScrollState()
         Column(Modifier.weight(1f).fillMaxWidth()) {
@@ -131,8 +140,8 @@ internal fun SettingsScreen(
                     .weight(1f)
                     .fillMaxWidth()
                     .verticalScroll(scroll)
-                    .padding(horizontal = LocalTouch.current.rowPad * 3),
-                verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad * 2),
+                    .padding(horizontal = Rhythm.contentPad(LocalTouch.current)),
+                verticalArrangement = Arrangement.spacedBy(Rhythm.rowGap(LocalTouch.current)),
             ) {
             // The order lives in [settingsGroups], not here: it was `host`, `link`,
             // `display`, so a person reading top-down met the machine before the choice of
@@ -208,6 +217,8 @@ internal fun SettingsScreen(
                         SettingsGroup.Diagnostics -> Diagnostics(current, radioPaired)
                         SettingsGroup.Shells -> Notifications(current, onSave)
                         SettingsGroup.Display -> {
+                            Theme(current, onSave)
+                            Sounds(current, onSave)
                             PanelSide(current, onSave)
                             ControlSize(current, onSave)
                             TextSize(current, onSave)
@@ -220,10 +231,10 @@ internal fun SettingsScreen(
                 // separating "pairing" from "display" was a heading. Twenty-four is a break
                 // the eye can see without a heavier rule.
                 if (group != groups.last()) {
-                    Spacer(Modifier.height(SettingsSectionGap))
+                    Spacer(Modifier.height(Rhythm.sectionBreak(LocalTouch.current)))
                 }
             }
-                Spacer(Modifier.height(SettingsSectionGap))
+                Spacer(Modifier.height(Rhythm.sectionBreak(LocalTouch.current)))
             }
             // Says the list continues, and how far down it the reader is: see [ScrollProgress].
             ScrollProgress(scroll)
@@ -431,6 +442,81 @@ private fun Notifications(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
         }
     }
     SettingsNote("one-off notification when a shell finishes · row square appears anyway")
+}
+
+/**
+ * The five looks, as five rows rather than a dropdown.
+ *
+ * **A row per theme, with its own sentence.** A "theme: dark" row that opens a list is two taps to
+ * find out what the options are; the whole choice is five words, and one of them is the reason the
+ * operator came to this screen. Each label is set in the theme's *own* monospace face and ground, so
+ * the list is a preview rather than a vocabulary test — the thing a swatch would do, without
+ * inventing a swatch that the app never draws.
+ *
+ * The choice applies on the tap. There is nothing to confirm and no draft to lose: the screen is
+ * behind a modal, and the theme is the same screen's own colours.
+ */
+@Composable
+private fun Theme(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
+    SettingsRow("theme")
+    // **Every row is drawn in the theme that is applied**, one line each: the name, and the word
+    // "chosen" in the accent on the one in use. It was five portraits — each row in its own palette
+    // and its own mono face, with a sentence of description — and the effect was a page that looked
+    // like five unrelated apps stacked, with the font changing under the reader's eye while they
+    // were comparing fonts. Choosing is the only thing the rows are for, so nothing else varies.
+    for (theme in LdmuxTheme.entries) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(min = LocalTouch.current.min)
+                .clip(RadiusMedium)
+                .background(if (theme == current.theme) Surface else Bg)
+                .toggleable(
+                    value = theme == current.theme,
+                    role = Role.RadioButton,
+                    onValueChange = { on -> if (on && theme != current.theme) onSave(current.copy(theme = theme)) },
+                )
+                .padding(horizontal = LocalTouch.current.pad, vertical = LocalTouch.current.rowPad),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                theme.label,
+                color = Fg,
+                fontFamily = MonoFont,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Normal,
+                modifier = Modifier.weight(1f),
+            )
+            if (theme == current.theme) {
+                Text("chosen", color = Accent, fontFamily = MonoFont, fontSize = 11.sp)
+            }
+        }
+    }
+    SettingsNote("dark is the quiet one · the others have their own sound")
+}
+
+/**
+ * The session cues, on or off — and **not drawn in the theme that has none**.
+ *
+ * Dark is silent by construction, so a switch there would be a switch that does nothing: exactly
+ * the kind of control the operator asked to have managed rather than drawn. The row says why
+ * instead.
+ */
+@Composable
+private fun Sounds(current: LdmuxConfig, onSave: (LdmuxConfig) -> Unit) {
+    if (!current.theme.sounds) {
+        SettingsRow("sounds", summary = "none · this theme is silent")
+        return
+    }
+    SettingRow("sounds") {
+        OptionButton("off", selected = !current.sounds) {
+            if (current.sounds) onSave(current.copy(sounds = false))
+        }
+        OptionButton("on", selected = current.sounds) {
+            if (!current.sounds) onSave(current.copy(sounds = true))
+        }
+    }
+    SettingsNote("a tone when a session comes up, drops, or needs you")
 }
 
 @Composable

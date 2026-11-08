@@ -356,6 +356,13 @@ impl<L: ByteLink> Companion<L> {
     /// Frequencies are in kHz and bandwidths in Hz, which is what the command carries; the
     /// firmware's own bounds (150000..2500000 kHz, 7000..500000 Hz, SF 5..12, CR 5..8) are its
     /// business, and a refusal comes back as an error rather than a silently unchanged radio.
+    /// Tune the radio, **keeping the client-repeat flag it already has**.
+    ///
+    /// The command's sixth optional byte is persisted as `_prefs.setRepeatEn(repeat != 0)`
+    /// (`MyMesh.cpp:1397-1410`), so a frame that stops after the coding rate silently clears an
+    /// operator's repeat setting on every preset write. `repeat` is that byte: `None` leaves the
+    /// firmware's stored value alone, `Some` sets it, and the caller passes what
+    /// [`crate::codec::DeviceInfo::repeat_enabled`] reported — see [`Self::set_radio_params_keeping`].
     pub fn set_radio_params(
         &mut self,
         freq_khz: u32,
@@ -363,17 +370,53 @@ impl<L: ByteLink> Companion<L> {
         sf: u8,
         cr: u8,
     ) -> Result<(), SessionError> {
-        let mut payload = Vec::with_capacity(11);
+        self.set_radio_params_keeping(freq_khz, bw_hz, sf, cr, None)
+    }
+
+    /// The same, with the radio's client-repeat flag carried through the write.
+    pub fn set_radio_params_keeping(
+        &mut self,
+        freq_khz: u32,
+        bw_hz: u32,
+        sf: u8,
+        cr: u8,
+        repeat: Option<bool>,
+    ) -> Result<(), SessionError> {
+        let mut payload = Vec::with_capacity(12);
         payload.push(commands::SET_RADIO_PARAMS);
         payload.extend_from_slice(&freq_khz.to_le_bytes());
         payload.extend_from_slice(&bw_hz.to_le_bytes());
         payload.push(sf);
         payload.push(cr);
+        if let Some(repeat) = repeat {
+            payload.push(u8::from(repeat));
+        }
         self.request(&payload, codes::OK, Duration::from_secs(10))?;
         Ok(())
     }
 
-    /// The next asynchronous frame, if one arrives within `timeout`.
+    /// Whether `code` is a response this crate reads, wherever it is expected or not.
+    ///
+    /// Used to tell "a late answer to an earlier command" (keep it, it is a fact about the radio)
+    /// from "the firmware is speaking a protocol this client does not know" (a real framing fault).
+    fn is_known_response(code: u8) -> bool {
+    matches!(
+            code,
+            codes::OK
+                | codes::SELF_INFO
+                | codes::DEVICE_INFO
+                | codes::ADVERT_PATH
+                | codes::DEFAULT_FLOOD_SCOPE
+                | codes::STATS
+                | codes::CONTACT_START
+                | codes::NO_MORE_MESSAGES
+                | codes::CHANNEL_MSG_RECV
+                | codes::CHANNEL_MSG_RECV_V3
+        )
+    }
+
+
+/// The next asynchronous frame, if one arrives within `timeout`.
     ///
     /// Pushes are the receive log (`0x88`) and the advert/ack/status family. A
     /// caller that only wants packets calls this in a loop and ignores the rest.
@@ -436,6 +479,15 @@ impl<L: ByteLink> Companion<L> {
                         // caller and keep waiting.
                         pushes.push(frame);
                         heard_anything = true;
+                    }
+                    // **A late reply belongs to a command that already gave up, and it must not
+                    // abort this one.** The advert-path read has a 1.5 s deadline; a radio that
+                    // answers at 1.6 s used to make the *next* command (a record send) fail with
+                    // "unexpected response", which cost an ARQ attempt and its airtime for a frame
+                    // nobody was waiting for any more. A code this crate reads is kept for
+                    // `next_push`; only a code nothing here understands is still a framing fault.
+                    Some(got) if Self::is_known_response(got) => {
+                        pushes.push(frame);
                     }
                     Some(got) => {
                         outcome = Some(Err(SessionError::Unexpected { got }));

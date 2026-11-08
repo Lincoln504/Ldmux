@@ -1,12 +1,15 @@
 package io.ldmux.mobile
 
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
@@ -19,106 +22,177 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 
-/** The whole palette. Minimal, dark, one accent — no decoration. */
-// Greyscale, deliberately. There is no accent *colour*: the only thing a hue
-// could mean here is "this is the important one", and on a screen that is
-// otherwise a terminal's own output, that is a claim worth making in weight and
-// contrast instead. The one exception is the close confirmation, where the red is
-// a warning rather than decoration.
-val Bg = Color(0xFF0A0A0A)
-
-val Fg = Color(0xFFEDEDED)
+/**
+ * The palette, as every screen reads it: **five themes, one set of names.**
+ *
+ * These were five literals and are now five lookups into [`ThemeState`]. The names are unchanged
+ * because the names are the API — about two hundred call sites say `color = Bg` or
+ * `border(1.dp, Line)`, and a theme that needed each of them rewritten is a theme that would have
+ * reached most of the app and not all of it. The colour each name resolves to, and the contrast
+ * floor it is held to, is in [`Palette`]; the literals are in `Themes.kt`, with the Radix steps
+ * they were taken from.
+ *
+ * Reading snapshot state from a top-level property is what makes the switch live: a read during
+ * composition is tracked exactly like a `CompositionLocal`, so every screen that touched a token
+ * recomposes when the theme changes.
+ */
+val Bg: Color get() = ThemeState.theme.palette.base
 
 /**
- * Secondary text and glyphs: quieter than [Fg], and quiet enough to read.
+ * Body text: the app's one type colour, and the thing every other token is a relationship to.
  *
- * #8C8C8C measured 5.18:1 on [Surface] and 4.04:1 on [Raised] — under the 4.5:1 floor for body
- * text on the filled icon buttons. #A0A0A0 measures 6.66:1 and 5.19:1, so "dim" is a relationship
- * rather than a risk. It stays 2.2:1 below [Fg], which is what "dim" has to mean to be seen as
- * dim at all.
+ * 16.14:1 on [Bg] in Dark and 16.39:1 in Air — the floor is 4.5:1, and the headroom is the point:
+ * a terminal is read at arm's length in bad light, and this is the colour that does most of the
+ * reading.
  */
-val Dim = Color(0xFFA0A0A0)
+val Fg: Color get() = ThemeState.theme.palette.fg
+
+/**
+ * The page's own surface: a card, a modal, a row that sits above the ground.
+ *
+ * Body text on it ([Fg]) clears 14.7:1 in Dark and 15.6:1 in Air; the floor is 4.5:1.
+ */
+val Surface: Color get() = ThemeState.theme.palette.surface
+
+/**
+ * The fill for a control that is *on*: the menu button that says you are in a shell, and the mark
+ * that says a window is out on the desktop.
+ *
+ * It used to be [Accent], the brightest value in the palette, so the menu button was a near-white
+ * block in an app whose whole idea is that importance lives in weight and contrast rather than in
+ * a hue. A tone above [Surface] says the same thing without shouting, and leaves [Accent] meaning
+ * the one primary action on a screen. On the light themes it is the *lower* step instead — a light
+ * ground raises a control by cutting into it, not out of it.
+ */
+val Raised: Color get() = ThemeState.theme.palette.raised
+
+/**
+ * [Fg]'s quieter sibling: labels, secondary text, glyphs.
+ *
+ * "Dim" is a relationship rather than a risk — 8.26:1 on [Surface] in Dark, 5.65:1 in Air, both
+ * well clear of the 4.5:1 floor — and it stays visibly below [Fg] so that the word means something
+ * on a screen where everything is compared with everything.
+ */
+val Dim: Color get() = ThemeState.theme.palette.dim
 
 /**
  * The quiet end of the palette, and it is a **colour, not [Dim] with an alpha**.
  *
- * Explanatory lines and field placeholders used `Dim.copy(alpha = 0.6f)` and `0.7f`,
- * which over `Bg` works out to ≈2.8:1 and 3.6:1 — under the 4.5:1 that body text
- * needs, on a screen that is otherwise high contrast. A faded colour is also not a
- * value anyone can look up.
- *
- * **#787878 was chosen against [Bg] and then used on [Surface], where it is not enough.**
- * Measured: 4.48:1 on `Bg` (already under the 4.5:1 floor, so the comment claiming "4.5:1,
- * which is the floor" was optimistic) and 3.94:1 on `Surface` — and `Surface` is where the
- * explanatory text lives: modal cards, placeholders, the radio dialog's success line, the
- * link diagnostics. #888888 measures 5.58:1 on `Bg` and 4.91:1 on `Surface`, and stays
- * visibly quieter than [Dim]. Never drawn on [Raised] (the filled icon button's fill); if
- * it ever is, it needs a lighter value again.
+ * Explanatory lines and field placeholders used `Dim.copy(alpha = 0.6f)` and `0.7f`, which works
+ * out to under 4.5:1 on a ground this dark — on a screen that is otherwise high contrast. A faded
+ * colour is also not a value anyone can look up. This one is the darker second grey: 5.30:1 on
+ * [Surface] in Dark, 4.58:1 in Air, and 4.41:1 on [Raised] in Dark, which is why **nothing draws it
+ * on [Raised]** — that fill carries [Fg].
  */
-val Muted = Color(0xFF888888)
+val Muted: Color get() = ThemeState.theme.palette.muted
 
 /**
  * The one destructive colour: ending something.
  *
- * It lived as a literal in the close dialog, which is how a palette quietly grows a
- * second definition of its own warning.
+ * It lived as a literal in the close dialog, which is how a palette quietly grows a second
+ * definition of its own warning. 7.72:1 on [Surface] in Dark (5.0:1 in Air) — a destructive control
+ * is a thing to read clearly, not a mood.
  */
-val Danger = Color(0xFFE08A8A)
+val Danger: Color get() = ThemeState.theme.palette.danger
 
 /**
- * An anomaly, not a mood: the amber the app uses to say something is wrong but
- * recoverable. A shell with no window is the one such state a row can show, and
- * it should be rare enough that the eye stops on it.
+ * An anomaly, not a mood: the amber the app uses to say something is wrong but recoverable. A shell
+ * with no window is the one such state a row can show, and it should be rare enough that the eye
+ * stops on it.
  */
-val Warn = Color(0xFFE0B080)
+val Warn: Color get() = ThemeState.theme.palette.warn
 
-/** Nothing is tinted; "accent" is simply the lightest thing on screen. */
-val Accent = Color(0xFFD0D0D0)
+/**
+ * The one primary action on a screen.
+ *
+ * In Dark it is simply the lightest thing on screen, and there is no hue at all; in the four
+ * coloured themes it is the theme's own accent, at the step that palette reserves for text so it is
+ * legible as a label rather than only as a fill (4.77:1 on white in Air, 4.98:1 in Vermillion,
+ * 8.70:1 in Forest, 8.83:1 in NERV). [OnAccent] is the text drawn on a solid [Accent] fill.
+ */
+val Accent: Color get() = ThemeState.theme.palette.accent
+
+/**
+ * The text drawn on a solid [Accent] fill.
+ *
+ * It exists because "the accent is a fill" and "the accent is a label" are two roles with two
+ * answers: on a light theme the accent is dark and its text is white, and on a dark theme with a
+ * bright accent the text is the ground. Drawing [Fg] there instead was invisible on exactly the
+ * themes where the accent is weakest.
+ */
+val OnAccent: Color get() = ThemeState.theme.palette.onAccent
 
 /**
  * The outline of a control that is *chosen*.
  *
- * Deliberately not [Accent]. A checkmark outline is a state, not an action, and at
- * `#D0D0D0` it read as the brightest thing on the launcher — brighter than the rows
- * it was describing. This is one clear step down: still unambiguous, no longer
- * competing with the one primary action on the screen.
+ * Deliberately not [Accent]. A checkmark outline is a state, not an action, and at the accent's
+ * value it read as the brightest thing on the launcher — brighter than the rows it was describing.
+ * This is one clear step down: still unambiguous at 3:1 (the floor for a non-text boundary), no
+ * longer competing with the one primary action on the screen.
  */
-val Chosen = Color(0xFF9A9A9A)
+val Chosen: Color get() = ThemeState.theme.palette.chosen
 
 /**
- * The fill for a control that is *on*: the menu button that says you are in a shell, and
- * the mark that says a window is out on the desktop.
+ * Dividers and rules: the subtle end, and **not** a control's edge.
  *
- * It used to be [Accent], the brightest value in the palette, so the menu button was a
- * near-white block in an app whose whole idea is that importance lives in weight and
- * contrast rather than in a hue. That reads as a light rather than as a state, and it
- * put the brightest thing in sight in the corner of every screen.
+ * 1.50:1 against [Surface] in Dark and 1.49:1 in Air. That is right for a line between two rows — a
+ * divider is meant to be barely there — and wrong for the outline of a control: WCAG 1.4.11 wants
+ * 3:1 for the boundary of something you press. The theme used one value for both, so every
+ * "outlined" button was outlined in a colour that is not visible; [Edge] is the second value that
+ * fixes it without brightening every divider in the app.
  *
- * A raised tone says the same thing without shouting. Deliberately not *barely* a
- * difference: `Bg` is #0A0A0A and this is #2E2E2E, which is better than four times the
- * luminance of the button beside it, so it reads as raised at a glance and still leaves
- * [Accent] meaning the one primary action on a screen.
+ * On the two light themes the rule is the *silver* in "silver lining": Air's is a pale blue-grey
+ * (Radix slate step 7), Vermillion's a warm one (olive step 6).
  */
-val Raised = Color(0xFF2E2E2E)
-
-val Surface = Color(0xFF1A1A1A)
+val Line: Color get() = ThemeState.theme.palette.line
 
 /**
- * The palette, as Material sees it.
+ * The edge of a control: an outline you can see.
  *
- * A scheme existed before this, but it was built inline inside the overflow menu and
- * wrapped only that menu (deleted 2026-11-04: it had one item), so it was the single
- * place in the app where Material's defaults applied and everywhere else took a
- * platform fallback. The same scheme, named once and hoisted to the root.
+ * 3.39:1 against [Bg] and 3.09:1 against [Surface] in Dark — the floor for a non-text boundary, and
+ * still quieter than [Chosen], which is the outline of a control that is *chosen* rather than
+ * merely pressable. The light themes need a darker edge for the same 3:1, because there is no
+ * lighter direction to spend.
  */
-internal val LdmuxColors = darkColorScheme(
-    surface = Surface,
-    onSurface = Fg,
-    onSurfaceVariant = Dim,
-    background = Bg,
-    onBackground = Fg,
-    primary = Accent,
-)
+val Edge: Color get() = ThemeState.theme.palette.edge
+
+/**
+ * The shell's own colours: its ground, its default text, its cursor and the wash over a selection.
+ *
+ * **The terminal used to be black whatever the app was.** The cell grid arrives with the host's
+ * default background as its default cells, and painting that made the shell a separate room from
+ * the rest of the app: on a light theme the lower half of the screen went dark. The painter maps
+ * the *default* cells to these values and leaves every cell a program coloured explicitly alone —
+ * an explicit colour is the program's, a default is the terminal's, and this is the terminal's.
+ */
+val TerminalColors: TerminalPalette get() = ThemeState.theme.palette.terminal
+
+/**
+ * The palette, as Material sees it, for the theme that is active.
+ *
+ * A scheme existed before this, but it was built inline inside the overflow menu and wrapped only
+ * that menu (deleted 2026-11-04: it had one item), so it was the single place in the app where
+ * Material's defaults applied and everywhere else took a platform fallback. It is built from the
+ * same tokens as everything else, and it is *light* or *dark* according to the theme's ground —
+ * Material's own light scheme would otherwise put dark-on-dark where it computes a colour itself.
+ */
+@Composable
+internal fun ldmuxColors(): ColorScheme {
+    val p = ThemeState.theme.palette
+    val scheme = if (ThemeState.theme.lightGround) lightColorScheme() else darkColorScheme()
+    return scheme.copy(
+        primary = p.accent,
+        onPrimary = p.onAccent,
+        surface = p.surface,
+        onSurface = p.fg,
+        onSurfaceVariant = p.dim,
+        background = p.base,
+        onBackground = p.fg,
+        outline = p.edge,
+        error = p.danger,
+        onError = p.base,
+    )
+}
 
 /**
  * The smallest a control may be, in either direction.
@@ -251,20 +325,3 @@ internal val RadiusLarge = RoundedCornerShape(4.dp)
  */
 internal val LocalTouch = staticCompositionLocalOf { ThinTouch }
 
-/**
- * Dividers and rules: the subtle end, and **not** a control's edge.
- *
- * At #2A2A2A this is 1.21:1 against [Surface] and 1.38:1 against [Bg]. That is right for a line
- * between two rows — a divider is meant to be barely there — and wrong for the outline of a
- * control: WCAG 1.4.11 wants 3:1 for the boundary of something you press. The theme used one value
- * for both, so every "outlined" button was outlined in a colour that is not visible; [Edge] is the
- * second value that fixes it without brightening every divider in the app.
- */
-val Line = Color(0xFF2A2A2A)
-
-/**
- * The edge of a control: an outline you can see. #686868 measures 3.55:1 against [Bg] and 3.12:1
- * against [Surface] — the floor for a non-text boundary, and still quieter than [Chosen], which is
- * the outline of a control that is *chosen* rather than merely pressable.
- */
-val Edge = Color(0xFF686868)

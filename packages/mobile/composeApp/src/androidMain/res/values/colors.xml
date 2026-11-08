@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- The app's own background, so the icon and the app agree. -->
+    <!-- The launcher icon's ground. Unchanged by the theme work on purpose: an icon is a brand mark,
+         and a theme is a preference inside the app. -->
     <color name="ic_launcher_background">#0A0A0A</color>
-    <!-- The app's background, `Bg` in Theme.kt. Named here so the launch window and the icon are
-         the same value as the first Compose frame. -->
-    <color name="app_background">#0A0A0A</color>
+    <!-- The **dark** theme's background (`DarkPalette.base` in Themes.kt), named here so the launch
+         window and the first Compose frame are the same value. A light theme does not use this
+         file: the window is repainted from the persisted setting before the first frame. -->
+    <color name="app_background">#111112</color>
 </resources>

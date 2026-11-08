@@ -9,6 +9,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.ui.graphics.toArgb
 import io.ldmux.mobile.mesh.RadioScanner
 import io.ldmux.mobile.voice.Dictation
 
@@ -23,14 +24,22 @@ class MainActivity : ComponentActivity() {
         CodeScanner.attachHost(this)
         RadioScanner.attachHost(this)
         ScreenOrientation.attachHost(this)
+        // **The window is the persisted theme's ground before the first frame.** The static
+        // `app_background` is the dark theme's; a white theme over it flashed near-black at every
+        // launch, which is the one flash a theme cannot undo after the fact.
+        runCatching { AppPrefs.load().theme }.getOrDefault(LdmuxTheme.Dark).let { theme ->
+            window?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(theme.palette.base.toArgb()))
+            applyWindowTheme(theme)
+        }
         // **The system bars are told which palette this app is, not asked to guess.**
         // `enableEdgeToEdge()` with no arguments picks light or dark bar *icons* from the phone's
-        // own light/dark setting — and this app is dark-only. On a phone set to light mode the
-        // clock, the battery and the gesture pill were drawn dark on a near-black app: invisible.
-        // `SystemBarStyle.dark` keeps them light whatever the system theme says.
+        // own light/dark setting, which is wrong for every one of the five themes: the app's ground
+        // is its own, not the system's. `applyWindowTheme` above set them from the persisted theme
+        // (dark icons on white, light icons on near-black), and it runs again from the root whenever
+        // the theme changes — this call is the fallback for a build where that one could not run.
         enableEdgeToEdge(
-            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
-            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            statusBarStyle = SystemBarStyle.auto(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.auto(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
         )
         // A cold start from a pairing link: held in the inbox until the UI reads it.
         // Not on a restore — the link was already handled by the instance that saw it.

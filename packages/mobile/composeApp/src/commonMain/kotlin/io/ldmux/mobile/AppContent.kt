@@ -457,6 +457,15 @@ internal fun AppContent(
         if (gone.isNotEmpty()) pageOrder = pageOrder - gone.toSet()
     }
 
+    // **The link's voice, said where the link's state is already read.** A cue is a session event,
+    // so it needs the previous state as well as this one; the first composition records and plays
+    // nothing, because opening the app is not a link coming up.
+    var lastLinkCue by remember { mutableStateOf(link) }
+    LaunchedEffect(link) {
+        cueForTailnet(lastLinkCue, link)?.let { playCue(it) }
+        lastLinkCue = link
+    }
+
     // **A dead link is a reason to go home, not a notice over a frozen screen.**
     //
     // The terminal already says "offline · input is not being sent", and that is exactly the

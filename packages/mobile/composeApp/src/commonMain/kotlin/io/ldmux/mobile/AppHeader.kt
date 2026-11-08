@@ -58,7 +58,16 @@ internal fun AppHeader(
             // the body already says: a wait has its own screen, and a failure has its sentence.
             // It also held the height of a line even when empty, which is the sort of thing that
             // looks like a layout bug.
-            Text(title, color = Fg, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+            // **The wordmark is the app's name in the theme's monospace face.** It is the one
+            // piece of type that is the app talking rather than a program's output, and a
+            // proportional name over a monospaced terminal read as two different applications. The
+            // face is the active theme's own mono, so the header changes character with the theme
+            // while the measure of the line stays one advance per character.
+            // **Regular weight.** A heavier wordmark in a bundled mono is a synthetic cut, and next
+            // to a screen of regular text it reads as bold for boldness's sake. The name already leads
+            // by size (20sp against 11-13sp) and by being the only thing in `Fg` at that size, which
+            // is emphasis enough — the same reason Blender's own chrome is nearly weight-flat.
+            Text(title, color = Fg, fontFamily = MonoFont, fontSize = 20.sp, fontWeight = FontWeight.Normal)
         }
         if (onRefresh != null) {
             HeaderIcon(label = if (refreshing) "refreshing" else "refresh", onClick = onRefresh) {

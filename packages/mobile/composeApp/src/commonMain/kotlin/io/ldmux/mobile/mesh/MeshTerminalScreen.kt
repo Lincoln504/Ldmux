@@ -50,6 +50,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.ldmux.mobile.Accent
 import io.ldmux.mobile.Bg
+import io.ldmux.mobile.Cue
+import io.ldmux.mobile.cueForMesh
+import io.ldmux.mobile.playCue
 import io.ldmux.mobile.Dim
 import io.ldmux.mobile.Fg
 import io.ldmux.mobile.LdmuxConfig
@@ -676,6 +679,24 @@ fun MeshTerminalScreen(
     }
 
     val terminalLive = live != null || (view is MeshTermView.ProfileMissing && shells.entries.isNotEmpty())
+    // **The radio route's voice.** `LinkUp` is a *terminal* coming live (a handshake finished), not
+    // the radio binding — the carrier's `Bound` says the radio answered `APP_START`, which is
+    // seconds to minutes before a session exists on a LoRa link. The failures are the carrier's own
+    // states, mapped by [cueForMesh]; the previous state is remembered because a cue is a change,
+    // and the first composition is not one.
+    var lastLiveCue by remember { mutableStateOf(terminalLive) }
+    var lastMeshState by remember { mutableStateOf(MeshLinkState.Idle) }
+    LaunchedEffect(terminalLive, view) {
+        val down = view as? MeshTermView.LinkDown
+        val now = down?.link ?: if (terminalLive) MeshLinkState.Bound else lastMeshState
+        // **Leaving a shell is not a link going down.** Navigating back to the launcher also makes
+        // `terminalLive` false, and a tone there would mean "the link died" every time an operator
+        // pressed back. A dead link is a `LinkDown` view, and that is what the second line reads.
+        if (terminalLive && !lastLiveCue) playCue(Cue.LinkUp)
+        if (down != null) cueForMesh(lastMeshState, down.link)?.let { playCue(it) }
+        lastLiveCue = terminalLive
+        lastMeshState = now
+    }
     // **Landing on the launcher always asks the host again.** One `ListRequest` on entering the
     // screen, on returning to the app while it is shown, and when the link is rebuilt; the rows are
     // the host's answer rather than a picture from before. Without it a homepage reached with

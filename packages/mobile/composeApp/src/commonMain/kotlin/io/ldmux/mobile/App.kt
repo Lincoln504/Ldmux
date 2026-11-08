@@ -47,9 +47,23 @@ fun App() {
     // itself about the same control in two places.
     val store = remember { ConfigStore(AppPrefs.load(), MeshEnrollment(meshSessionKeyStore(), ::libraryKeypair), AppPrefs::save) }
     val config by store.config.collectAsState()
-    MaterialTheme(colorScheme = LdmuxColors) {
+    // **The theme is applied before the first thing that reads a token.** `config` is the persisted
+    // setting and the only writer of the holder; writing the same value back is a no-op, and the
+    // snapshot state is what makes a switch redraw every screen that touched a colour.
+    ThemeState.theme = config.theme
+    // The player reads the switch without a composition, because a cue can be due from a coroutine
+    // that has no screen to ask (`MeshTerminalScreen`'s link watcher). The config is still the one
+    // source of truth; this is its copy.
+    CuePrefs.sounds = config.sounds
+    // The window and its bar icons follow a light or a dark ground; Compose cannot do either.
+    LaunchedEffect(config.theme) { applyWindowTheme(config.theme) }
+    MaterialTheme(colorScheme = ldmuxColors()) {
         CompositionLocalProvider(
-            LocalTextStyle provides BodyStyle,
+            // **The sans face is the theme's, applied to the app's default text style.** Every
+            // `Text` that does not name a family takes this one, which is exactly the split the app
+            // already had between monospaced slots (keys, ids, the header, the terminal) and
+            // everything else — the split stays, only the faces change per theme.
+            LocalTextStyle provides BodyStyle.copy(fontFamily = SansFont),
             LocalTouch provides touchFor(config.compact),
         ) {
             // The mesh route replaces the whole terminal surface, not a part of it: it is a different,

@@ -8,10 +8,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.ldmux.mobile.Accent
+import io.ldmux.mobile.Danger
 import io.ldmux.mobile.Surface
 import io.ldmux.mobile.MonoFont
 
@@ -95,10 +95,12 @@ internal fun VoiceBanner(state: VoiceState, modifier: Modifier) {
         is VoiceState.Partial -> if (state.cloud) "\u2601 ${state.text}" else state.text
         is VoiceState.Failed -> "voice: ${state.reason}"
     }
-    // The one place a hue is allowed, because these are the states a user has to
-    // act on rather than a decoration: desaturated, but unmistakably not grey.
+    // The one place a hue is allowed, because these are the states a user has to act on rather than
+    // a decoration — and it is the *theme's* destructive colour, not a literal. A hard-coded red was
+    // the last colour in the app that did not belong to a palette, so it stayed a bright salmon on a
+    // navy theme and a white page alike.
     val accent = when (state) {
-        is VoiceState.Failed, VoiceState.Denied, VoiceState.Unavailable -> Color(0xFFFF6B6B)
+        is VoiceState.Failed, VoiceState.Denied, VoiceState.Unavailable -> Danger
         else -> Accent
     }
     Box(

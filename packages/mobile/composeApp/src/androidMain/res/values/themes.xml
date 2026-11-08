@@ -1,11 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- Minimal dark theme; the Compose surface draws everything else.
-         `windowBackground` is the app's own background (#0A0A0A), not pure black: the window is
-         drawn before the first frame, and in the recents thumbnail, so a 10/255 step between it and
-         every screen was a visible flash at launch. The system bar colours are not set here because
-         `enableEdgeToEdge` overrides them to transparent and chooses the bar icons from the app's
-         own palette (see MainActivity). -->
+         `windowBackground` is the **dark** theme's ground (#111112), not pure black: the window is
+         drawn before the first frame, in the recents thumbnail, and during the launch animation, so
+         a step between it and every screen was a visible flash at launch. It is the *static*
+         fallback only: a light theme repaints the window from the persisted setting in
+         `MainActivity` before the first frame (see `applyWindowTheme`), because a white theme opening
+         over a near-black window is the same flash in the other direction. -->
     <style name="Theme.Ldmux" parent="@android:style/Theme.Material.NoActionBar">
         <item name="android:windowBackground">@color/app_background</item>
     </style>

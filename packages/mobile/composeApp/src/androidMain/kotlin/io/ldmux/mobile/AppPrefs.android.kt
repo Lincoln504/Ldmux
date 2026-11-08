@@ -68,6 +68,10 @@ actual object AppPrefs {
      * silently resets is worse than no preference.
      */
     private const val KEY_NOTIFY_MARKS = "notify_marks"
+    /** The look, stored by name — never by ordinal (see `LdmuxTheme.fromStored`). */
+    private const val KEY_THEME = "theme"
+    /** Whether a session event plays the theme's cue. Dark has none, whatever this says. */
+    private const val KEY_SOUNDS = "sounds"
 
     actual fun load(): LdmuxConfig {
         val sp = AndroidApp.context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -99,6 +103,8 @@ actual object AppPrefs {
             // value that moved would silently change the mode of every install that had saved it.
             meshHostPreset = sp.getString(KEY_MESH_HOST_PRESET, null) ?: "",
             notifyMarks = sp.getBoolean(KEY_NOTIFY_MARKS, LdmuxConfig.DEFAULT.notifyMarks),
+            theme = LdmuxTheme.fromStored(sp.getString(KEY_THEME, null)),
+            sounds = sp.getBoolean(KEY_SOUNDS, LdmuxConfig.DEFAULT.sounds),
             meshInputMode = sp.getString(KEY_MESH_INPUT_MODE, null)
                 ?.let { name -> MeshInputMode.entries.firstOrNull { it.name == name } }
                 ?: LdmuxConfig.DEFAULT.meshInputMode,
@@ -135,6 +141,8 @@ actual object AppPrefs {
             .putBoolean(KEY_MESH_OPEN_AIRTIME, config.meshOpenAirtime)
             .putBoolean(KEY_MESH_PUBLIC_CHANNEL, config.meshPublicChannel)
             .putBoolean(KEY_NOTIFY_MARKS, config.notifyMarks)
+            .putString(KEY_THEME, config.theme.name)
+            .putBoolean(KEY_SOUNDS, config.sounds)
             .putString(KEY_MESH_INPUT_MODE, config.meshInputMode.name)
             .putString(KEY_MESH_HOST_PRESET, config.meshHostPreset)
             .apply()

@@ -88,7 +88,7 @@ fun ModalCard(title: String, onDismiss: () -> Unit, content: @Composable ColumnS
                 .padding(LocalTouch.current.rowPad * 2),
             verticalArrangement = Arrangement.spacedBy(LocalTouch.current.rowPad * 2),
         ) {
-            Text(title, color = Fg, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Text(title, color = Fg, fontSize = 16.sp, fontWeight = FontWeight.Normal)
             content()
         }
     }

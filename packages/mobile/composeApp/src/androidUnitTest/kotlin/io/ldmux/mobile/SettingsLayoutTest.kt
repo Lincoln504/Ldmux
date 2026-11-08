@@ -71,3 +71,53 @@ class SettingsLayoutTest {
         assertFalse(routeConsequence(MeshRoute.Tailnet).contains("LoRa"))
     }
 }
+
+/**
+ * **The vertical rhythm is an ordering, not a set of numbers.**
+ *
+ * The screen used to run three schemes at once — a 16 dp column gap, an extra 20 dp spacer at every
+ * section (36 dp, while its comment said 24), and 8 dp of row padding — so two labels were 32 dp
+ * apart, a header sat 25 dp from its first row, and a note sat the same distance from the row it
+ * described as from the row below it. These assertions are the rules that make a group read as a
+ * group, and they hold at both densities because every value comes from the touch scale.
+ */
+class SettingsRhythmTest {
+    private val thin = touchFor(compact = true)
+    private val tall = touchFor(compact = false)
+
+    @Test
+    fun `a header is closer to its rows than two rows are to each other`() {
+        for (t in listOf(thin, tall)) {
+            assertTrue(Rhythm.headerToRows(t) < Rhythm.rowGap(t))
+        }
+    }
+
+    @Test
+    fun `a note attaches upward`() {
+        for (t in listOf(thin, tall)) {
+            assertTrue(
+                Rhythm.noteAbove(t) < Rhythm.noteBelow(t),
+                "a note must sit closer to the row above it than to the row below",
+            )
+        }
+    }
+
+    @Test
+    fun `a section break is the largest space on the screen`() {
+        for (t in listOf(thin, tall)) {
+            assertTrue(Rhythm.sectionGap(t) > Rhythm.rowGap(t) * 2)
+            assertTrue(
+                Rhythm.sectionBreak(t).value > 0f,
+                "the break has to add to the column gap",
+            )
+            assertTrue(Rhythm.contentPad(t) >= Rhythm.rowGap(t))
+        }
+    }
+
+    @Test
+    fun `the gaps grow with the density, so the setting is not half a setting`() {
+        assertTrue(Rhythm.rowGap(tall) > Rhythm.rowGap(thin))
+        assertTrue(Rhythm.sectionGap(tall) > Rhythm.sectionGap(thin))
+        assertTrue(Rhythm.contentPad(tall) > Rhythm.contentPad(thin))
+    }
+}

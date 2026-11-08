@@ -49,6 +49,23 @@ data class LdmuxConfig(
      */
     val compact: Boolean = true,
     /**
+     * Which of the five looks the app wears.
+     *
+     * A display setting beside [fontSp] and [compact], and persisted by name so that a future order
+     * change cannot restyle an install. Dark is the default: the app shipped as one quiet dark
+     * palette for its whole life, and a theme is a choice rather than an upgrade.
+     */
+    val theme: LdmuxTheme = LdmuxTheme.Dark,
+    /**
+     * Whether a session event is announced with the theme's own sound.
+     *
+     * **On by default, and meaningless in Dark** — that theme has no cues at all, so the switch is
+     * not drawn there rather than drawn and dead. A cue is a short tone at a session becoming
+     * live, at a link dropping, and at something that needs the operator; it is off in the
+     * background, because a phone face-down in a pocket should not be a speaker.
+     */
+    val sounds: Boolean = true,
+    /**
      * This install's identity, announced with `hello` (ADR-0010).
      *
      * Stable for the life of the install, generated once and kept. It is **not**

@@ -25,8 +25,13 @@ Three facts are worth stating plainly, because they are the reason the mode exis
 (32 preamble symbols at SF8 and below, 20 header symbols, CRC, low-data-rate optimisation from
 16 ms symbols), so a different preset is a different budget and nothing here is a constant.
 
-- **869.4-869.65 MHz: one percent, 36 s an hour.** A 10 % duty cycle is a condition of use in that
-  sub-band, and ldmux holds itself to a tenth of it. At 62.5 kHz that is **59 records** an hour.
+- **Every European sub-band has its own legal limit, and ldmux applies the strictest honest one.**
+  `868.0-868.6 MHz` is **1 % by law** (ERC/REC 70-03 Annex 1, h1.3.1) — 36 s an hour. `869.4-869.65`
+  is the **10 %** window, and ldmux holds itself to a tenth of it, 1 % (36 s), as policy. `868.7-869.2`
+  is **0.1 %** — the alarm band, 3.6 s an hour, where a single 62.5 kHz record is 0.6 s and a session
+  almost cannot run. The table used to apply 1 % only inside 869.4-869.65 and 10 % everywhere else,
+  which metered the 1 % window at ten times its legal duty cycle; no shipped preset sits there, but
+  `ldmux mesh preset 868.1 …` is one command away.
 - **Everywhere else: ten percent, 360 s an hour.** 902-928 MHz, where the MeshCore US/Canada preset
   sits, has no duty cycle for this kind of transmitter; the firmware itself permits a 50 % duty
   cycle (`getAirtimeBudgetFactor()` returns 1.0) and the Meshtastic ecosystem caps a node at 25 %.

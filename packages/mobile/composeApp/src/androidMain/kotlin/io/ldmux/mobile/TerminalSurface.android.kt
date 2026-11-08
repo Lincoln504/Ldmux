@@ -86,8 +86,13 @@ import kotlin.math.floor
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-/** Fallback surface colour until the engine has told us its own background. */
-private val TermBg = Color(0xFF000000)
+/**
+ * Fallback surface colour until the engine has told us its own background.
+ *
+ * The theme's shell colour rather than black: a light theme whose terminal had no frame yet opened
+ * on a black rectangle, which is the flicker this constant exists to prevent.
+ */
+private val TermBg: Color get() = TerminalColors.background
 
 /**
  * The native terminal surface: a Compose Canvas painting the libghostty-vt cell
@@ -351,7 +356,11 @@ actual fun TerminalSurfaceFor(
         }
     }
 
-    val termBg = frame?.defaultBg?.let { Color(0xFF000000.toInt() or (it and 0xFFFFFF)) } ?: TermBg
+    // **The shell's ground is the theme's, and it changes with the theme.** A frame's own default
+    // background is the *host's* terminal colour (black on the daemon's default config), so painting
+    // it verbatim put a black shell under a white page; the painter maps default cells to the
+    // theme, and this maps the surface the grid is drawn on to the same value.
+    val termBg = TerminalColors.background
 
     Box(modifier.background(termBg).onPreviewKeyEvent { event ->
         // A hardware keyboard (and some IMEs' "send key" buttons) produce key
@@ -1096,8 +1105,10 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawScrollbar(
     val pos = if (maxOffset <= 0f) 0f else (f.scrollOffset.toFloat() / maxOffset).coerceIn(0f, 1f)
     val top = (height - barH) * pos
     val x = placement.dx + placement.gridWidth - 6f
+    // The theme's foreground at a third alpha, not a hard-coded white wash: on a white page a
+    // translucent white scrollbar is a scrollbar nobody can see.
     drawRect(
-        color = Color(0x66FFFFFF),
+        color = Dim.copy(alpha = 0.45f),
         topLeft = Offset(x, top),
         size = androidx.compose.ui.geometry.Size(4f, barH),
     )

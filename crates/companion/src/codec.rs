@@ -781,6 +781,11 @@ pub enum CodecError {
     WrongResponse { want: u8, got: u8 },
     /// A region name the radio's 31-byte field cannot hold (1..=30 bytes).
     ScopeName { len: usize },
+    /// A `$`-prefixed region name is a *stored key* on the radio, never a hashtag to derive.
+    ///
+    /// The firmware treats a leading `$` as "this name is a region whose key came from somewhere
+    /// else" (`RegionMap.cpp:173-188`) and never hashes it, so deriving one would compute a key that
+    /// matches no repeater — and a wrong scope only drops floods, which makes it silent.
     /// A reply shorter than the fields it claims to carry.
     Truncated,
 }

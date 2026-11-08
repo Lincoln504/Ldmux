@@ -4,19 +4,53 @@ package io.ldmux.mobile.term
 import android.graphics.Paint
 import android.graphics.Typeface
 import io.ldmux.mobile.AndroidApp
+import io.ldmux.mobile.LdmuxTheme
 import io.ldmux.mobile.R
+import io.ldmux.mobile.TerminalColors
+import io.ldmux.mobile.ThemeState
+import io.ldmux.mobile.monoTypeface
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 /**
- * The selection wash.
+ * A cell's text colour, with the theme's own default in place of the host's.
  *
- * The system's own selection is its accent colour at partial alpha over the text; this
- * is the same idea with no hue, because the app has none. Deliberately light enough
- * that a glyph on top of it keeps its contrast, and light enough to read as "these
- * cells" rather than as a block of colour.
+ * **The attributes have to be re-applied, not the resolved value compared.** This cannot simply map
+ * `cell.drawnFg == frame.defaultFg`, because `drawnFg` is the *result* of reverse video, faint and
+ * concealment: a faint default cell resolves to a blend of the host's white and black, which is a
+ * value the frame never calls "default" — so on a white theme it survived as the host's dimmed grey
+ * and drew light text on a white page. A cell that is default-coloured is default-coloured *before*
+ * its attributes, and it is the attributes that decide what to do with the theme's value.
  */
-private const val SELECTION_WASH = 0x44EDEDED
+private fun themeForeground(
+    cell: TerminalFrame.Cell,
+    frame: TerminalFrame.Frame,
+    themeFg: Int,
+    themeBg: Int,
+): Int {
+    if (cell.fg != frame.defaultFg) return 0xFF000000.toInt() or (cell.drawnFg and 0xFFFFFF)
+    return when {
+        // Concealed: the character must not be shown, so it is painted in the background.
+        cell.invisible -> themeBg
+        // Reverse video: the cell's foreground is the terminal's background.
+        cell.inverse -> themeBg
+        // Faint: half intensity is half way to the cell's own background, per channel.
+        cell.faint -> TerminalFrame.blendTowards(themeFg, themeBg)
+        else -> themeFg
+    }
+}
+
+/**
+ * The selection wash, per theme.
+ *
+ * The system's own selection is its accent colour at partial alpha over the text; this is the same
+ * idea with the theme's own accent. Deliberately light enough that a glyph on top of it keeps its
+ * contrast, and light enough to read as "these cells" rather than as a block of colour — and on a
+ * light theme it has to be the accent rather than a pale grey, because a pale grey wash on white is
+ * invisible.
+ */
+private val selectionWash: Int get() = TerminalColors.selection.toArgb()
 
 /** Alpha of the dotted underline that marks an OSC 8 link, in the top byte. */
 private const val LINK_ALPHA = 0xA0 shl 24
@@ -25,17 +59,38 @@ private const val LINK_ALPHA = 0xA0 shl 24
 actual class TerminalPainter actual constructor(private val fontSizePx: Float) {
 
     /**
-     * Fira Mono, the app's own face, not the platform's `MONOSPACE`.
+     * The theme's own face, not the platform's `MONOSPACE`, refreshed when the theme changes and not
+     * per cell.
      *
      * A terminal's grid is one advance per character, so a face that changes with the OEM build
      * changes the grid with it — and the bundled face is what every measured layout here assumes.
      * The regular cut is used for regular cells and the bold cut for bold ones; a failed load falls
      * back to the platform face (and to a synthesised bold) rather than to nothing.
+     *
+     * The face is a per-theme choice, so it cannot be final; the paint loop sets `typeface` per cell,
+     * so it cannot be a resource lookup either. Two fields, refreshed once per theme.
      */
-    private val regularFace: Typeface =
-        AndroidApp.context.resources.getFont(R.font.fira_mono_regular)
-    private val boldFace: Typeface =
-        AndroidApp.context.resources.getFont(R.font.fira_mono_bold)
+    private var facesTheme: LdmuxTheme? = null
+    private var regularFace: Typeface = monoTypeface(ThemeState.theme, bold = false)
+    private var boldFace: Typeface = monoTypeface(ThemeState.theme, bold = true)
+
+    /**
+     * Re-point every paint at the theme's faces when the theme changed.
+     *
+     * **Both paints, or the grid lies.** The cell width comes from `measuring` and the glyphs are
+     * drawn by `fgPaint`; these faces do not all share one advance (Fira Mono, Space Mono and
+     * Cousine are 0.6 em, but nothing promises it), so a theme switch that moved only the drawing
+     * paint would draw glyphs at one pitch on a grid measured at another.
+     */
+    private fun refreshFaces() {
+        val theme = ThemeState.theme
+        if (facesTheme == theme) return
+        facesTheme = theme
+        regularFace = monoTypeface(theme, bold = false)
+        boldFace = monoTypeface(theme, bold = true)
+        measuring.typeface = regularFace
+        fgPaint.typeface = regularFace
+    }
 
     private val measuring = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         typeface = regularFace
@@ -59,6 +114,10 @@ actual class TerminalPainter actual constructor(private val fontSizePx: Float) {
 
     actual val metrics: CellMetrics
         get() {
+            // Measured with the face that is about to draw, or the grid is one theme behind: the
+            // surface reads this to decide how many cells fit and tells the pty, and a face with a
+            // different advance would then paint at one pitch inside a grid sized for another.
+            refreshFaces()
             val fm = measuring.fontMetrics
             return CellMetrics(
                 width = measuring.measureText("M"),
@@ -70,6 +129,9 @@ actual class TerminalPainter actual constructor(private val fontSizePx: Float) {
     actual fun paint(scope: DrawScope, frame: TerminalFrame.Frame) {
         val m = metrics
         if (m.width <= 0f || m.height <= 0f) return
+        refreshFaces()
+        val themeTermBg = TerminalColors.background.toArgb() and 0x00FFFFFF
+        val themeTermFg = TerminalColors.foreground.toArgb() and 0x00FFFFFF
         scope.drawIntoCanvas { canvas ->
             val nc = canvas.nativeCanvas
             val cols = frame.cols
@@ -85,7 +147,12 @@ actual class TerminalPainter actual constructor(private val fontSizePx: Float) {
                 // the hardware cursor, so before this the cursor cell was painted as
                 // ordinary text — and on a blank cell, where the `isBlank` skip below
                 // draws nothing at all, it vanished completely.
-                val bg = argb(cell.drawnBg)
+                // **A default cell is the terminal's, not the program's.** The grid arrives with
+                // the host's default colours as plain values, so a cell the program never coloured
+                // is indistinguishable from one it coloured black — until it is compared with the
+                // frame's own default, which is what marks it. Those cells take this theme's shell
+                // colours; every explicitly coloured cell is left exactly as the program asked.
+                val bg = if (cell.drawnBg == frame.defaultBg) themeTermBg else argb(cell.drawnBg)
                 // The cell's own background first, then the selection over it.
                 //
                 // This was an inversion, and an inversion of an *empty* cell's
@@ -109,13 +176,13 @@ actual class TerminalPainter actual constructor(private val fontSizePx: Float) {
                     nc.drawRect(x, y, x + span * m.width, y + m.height, bgPaint)
                 }
                 if (cell.selected) {
-                    selPaint.color = SELECTION_WASH
+                    selPaint.color = selectionWash
                     nc.drawRect(x, y, x + m.width, y + m.height, selPaint)
                 }
                 if (tailOfWide) continue
                 drawUnderline(nc, cell, x, y, span * m.width, m)
                 if (cell.text.isBlank()) continue
-                fgPaint.color = argb(cell.drawnFg)
+                fgPaint.color = themeForeground(cell, frame, themeTermFg, themeTermBg)
                 fgPaint.typeface = if (cell.bold) boldFace else regularFace
                 fgPaint.textSkewX = if (cell.italic) -0.25f else 0f
                 fgPaint.isUnderlineText = false
@@ -197,7 +264,12 @@ actual class TerminalPainter actual constructor(private val fontSizePx: Float) {
         // which is how `pi` draws its own cursor) the fill and the glyph came out the
         // same colour and the character under the cursor vanished. It also made the
         // cursor the default colour on a cell whose text is not.
-        cursorPaint.color = argb(cell?.drawnFg ?: frame.defaultFg)
+        refreshFaces()
+        val fgOfCell = cell?.drawnFg
+        cursorPaint.color = when {
+            fgOfCell == null || fgOfCell == frame.defaultFg -> TerminalColors.foreground.toArgb()
+            else -> argb(fgOfCell)
+        }
         when (frame.cursorStyle) {
             0 -> { // bar
                 val w = (m.width / 8f).coerceAtLeast(1f)

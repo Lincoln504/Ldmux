@@ -1,5 +1,7 @@
 package io.ldmux.mobile.mesh
 
+import java.util.OptionalInt
+
 import android.annotation.SuppressLint
 import android.Manifest
 import android.bluetooth.BluetoothDevice
@@ -770,11 +772,15 @@ class AndroidRadioLink(
             }
             withTimeoutOrNull(PRESET_COMMAND_WAIT_MS) { while (!s.isIdle()) delay(25) }
         }
-        val channel = RadioParams.of(
+        // **The sixth byte is the radio's own repeat flag, not a zero.** Omitting it made the
+        // firmware persist `repeat = 0`, so an operator whose companion was repeating lost that on
+        // the next preset write with no message. What the radio reported is what goes back.
+        val channel = RadioParams(
             preset.frequencyMhz,
             preset.bandwidthKhz,
             preset.spreadingFactor,
             preset.codingRate,
+            OptionalInt.of(if (oldInfo?.repeatEnabled == true) 1 else 0),
         )
         if (!s.setRadioParams(channel) && refused == null) refused = "channel"
         if (!s.setTxPower(tx) && refused == null) refused = "power"
@@ -1192,6 +1198,7 @@ class AndroidRadioLink(
         maxContacts = maxContacts(),
         maxGroupChannels = maxGroupChannels(),
         pathHashMode = pathHashMode(),
+        repeatEnabled = clientRepeat() != 0,
     )
 
     private companion object {

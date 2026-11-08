@@ -488,6 +488,14 @@ data class RadioDeviceInfo(
     /** 0 = 1-byte, 1 = 2-byte, 2 = 3-byte path hashes. */
     val pathHashMode: Int,
     /**
+     * The radio's own client-repeat setting, as the firmware reported it.
+     *
+     * **Carried into every preset write.** `CMD_SET_RADIO_PARAMS`'s sixth byte is persisted as
+     * `setRepeatEn(repeat != 0)`, and a frame that stops at the coding rate silently clears an
+     * operator's repeat setting — nothing on the radio says so afterwards.
+     */
+    val repeatEnabled: Boolean = false,
+    /**
      * The radio's own battery voltage in millivolts, or null when it has not reported one.
      *
      * **Voltage, not percent.** The companion reports millivolts (`RESP_CODE_BATT_AND_STORAGE`),

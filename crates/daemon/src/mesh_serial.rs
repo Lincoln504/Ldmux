@@ -443,6 +443,11 @@ impl ScopeChoice {
             // the hash covers the exact bytes, and a name nobody has is not a degraded scope — it is
             // a scope every repeater drops. Refusing a bad pin and staying unscoped is the safe
             // direction, and it is said out loud rather than silently ignored.
+            //
+            // **A `$`-prefixed name is refused here by the character rule**, which is the right
+            // answer for a different reason too: the firmware treats a leading `$` as a *stored key*
+            // and never hashes it (`RegionMap.cpp:173-188`), so a derived key would name a region no
+            // repeater carries and only floods would fail — silently.
             let bare = pin.trim().trim_start_matches('#');
             let valid = !bare.is_empty()
                 && bare.len() <= 30
@@ -515,17 +520,32 @@ impl ScopeChoice {
 /// Meshtastic cap, and enough that a session's discovery, handshake and a few screens do not
 /// consume the hour before the operator has typed anything.
 fn airtime_budget_ms(freq_mhz: f64) -> f64 {
-    if (869.4..=869.65).contains(&freq_mhz) {
-        AIRTIME_BUDGET_MS
-    } else {
-        OPEN_BAND_AIRTIME_BUDGET_MS
+    match freq_mhz {
+        // **868.0-868.6 MHz is one percent by law** (ERC/REC 70-03 Annex 1, h1.3.1) — not ten. The
+        // table used to apply one percent only inside 869.4-869.65 and ten everywhere else, which
+        // metered this window at ten times its legal duty cycle. No shipped preset sits here, but
+        // `ldmux mesh preset 868.1 ...` is one command away and the firmware accepts it.
+        f if (868.0..=868.6).contains(&f) => ONE_PERCENT_MS,
+        // **869.4-869.65 is the ten-percent window**, and ldmux holds itself to a tenth of it.
+        f if (869.4..=869.65).contains(&f) => AIRTIME_BUDGET_MS,
+        // **868.7-869.2 is a tenth of one percent** — the alarm band. A session almost cannot run
+        // there (one 62.5 kHz record is 0.6 s against a 3.6 s hour), and pretending otherwise would
+        // be the unsafe direction to be wrong in.
+        f if (868.7..=869.2).contains(&f) => TENTH_PERCENT_MS,
+        _ => OPEN_BAND_AIRTIME_BUDGET_MS,
     }
 }
 
-/// The European sub-band's allowance: one percent of an hour. Also the figure the app meters with
-/// while the phone owns the radio, and a test on the phone's side reads this literal to keep the
-/// two languages in step.
+/// The allowance inside 869.4-869.65 MHz: one percent of an hour, a tenth of the ten the band
+/// allows. Also the figure the app meters with while the phone owns the radio, and a test on the
+/// phone's side reads this literal to keep the two languages in step.
 const AIRTIME_BUDGET_MS: f64 = 36_000.0;
+
+/// The allowance inside 868.0-868.6 MHz: one percent, which is the law there rather than a policy.
+const ONE_PERCENT_MS: f64 = 36_000.0;
+
+/// The allowance inside 868.7-869.2 MHz: a tenth of one percent, which is the law there.
+const TENTH_PERCENT_MS: f64 = 3_600.0;
 
 /// The allowance outside the European sub-band: ten percent of an hour. See [`airtime_budget_ms`].
 const OPEN_BAND_AIRTIME_BUDGET_MS: f64 = 360_000.0;
@@ -743,6 +763,12 @@ struct Settings {
     /// The peer's radio key as the record held it at open, or `None` when this radio has never
     /// heard from that peer.
     peer_key: Option<[u8; 32]>,
+    /// The radio's own client-repeat flag, as the firmware reported it.
+    ///
+    /// Carried into every preset write because `CMD_SET_RADIO_PARAMS`'s sixth byte is *persisted* as
+    /// `setRepeatEn(repeat != 0)`: a frame that stops at the coding rate clears an operator's repeat
+    /// setting, and nothing on the radio says so afterwards.
+    repeat_enabled: Option<bool>,
     /// The flood scope this end broadcasts under, and where it came from.
     scope: ScopeChoice,
     /// Where the hour's spend is recorded, so the allowance survives a daemon restart.
@@ -971,6 +997,7 @@ fn prepare(
         }
     );
     let airtime_ms = self_info.time_on_air_ms(RECORD_MAX);
+    let repeat_enabled = device_info.repeat_enabled;
     let bound = Bound {
         // No route yet, so no path bytes are spent: the receiver's cap is the whole answer until
         // `Event::Limit` revises it as soon as a route is learned.
@@ -1003,6 +1030,7 @@ fn prepare(
         bound,
         Settings {
             hash_size,
+            repeat_enabled,
             airtime_ms,
             preset,
             window_record,
@@ -1093,6 +1121,12 @@ fn serve_loop<L: ByteLink>(
     // The least gap between two identification attempts: naming a region costs one HMAC per
     // candidate, and a busy scoped mesh would pay for it on every packet.
     let mut scope_checked: Option<Instant> = None;
+    // The radio's own client-repeat flag, as the firmware reported it, so a preset write can keep
+    // it: the command's sixth byte is persisted as `repeat != 0`, and omitting it clears the setting.
+
+    // When a request from an unpinned radio was last reported, so a mesh of strangers cannot fill
+    // the journal with the same line.
+    let mut last_stranger_log: Option<Instant> = None;
     let mut last_ping: Option<Instant> = None;
     // When the "request sent" line last went to the journal, so a failing link cannot flood it.
     let mut last_ping_log: Option<Instant> = None;
@@ -1212,8 +1246,15 @@ fn serve_loop<L: ByteLink>(
             }) => {
                 // The firmware validates the tuple and answers OK or an error, so a refusal is
                 // reported rather than leaving the radio silently where it was.
+                //
+                // **The write carries the radio's own client-repeat flag.** The command's sixth
+                // optional byte is persisted as `setRepeatEn(repeat != 0)`, so a frame that stops at
+                // the coding rate silently cleared an operator's repeat setting on every preset
+                // write. `repeat_enabled` is what the firmware reported; `None` leaves its stored
+                // value alone rather than guessing.
+                let repeat = settings.repeat_enabled;
                 let result = companion
-                    .set_radio_params(freq_khz, bw_hz, sf, cr)
+                    .set_radio_params_keeping(freq_khz, bw_hz, sf, cr, repeat)
                     .map_err(|e| format!("{e:?}"));
                 if result.is_ok() {
                     // A retune changes the tuple and nothing else: the radio keeps its key.
@@ -1370,10 +1411,13 @@ fn serve_loop<L: ByteLink>(
                             settings.preset.tx_power_dbm = seen.tx_power_dbm;
                             // The width is a register of its own on the same radio, and another app
                             // setting it is the case that cost a whole afternoon: read it too.
-                            if let Ok(info) = companion.device_query()
-                                && let Some(mode) = info.path_hash_mode
-                            {
-                                settings.preset.hash_size = mode.saturating_add(1).clamp(1, 3);
+                            if let Ok(info) = companion.device_query() {
+                                if let Some(mode) = info.path_hash_mode {
+                                    settings.preset.hash_size = mode.saturating_add(1).clamp(1, 3);
+                                }
+                                // Another app can flip repeat too, and the next preset write must
+                                // carry whatever the radio says now.
+                                settings.repeat_enabled = info.repeat_enabled;
                             }
                             // The airtime estimate follows the tuple, and so must the allowance: a
                             // radio moved from 500 kHz to 62.5 kHz inside the European sub-band
@@ -1599,13 +1643,30 @@ fn serve_loop<L: ByteLink>(
                         peer_path = Some(candidate);
                         peer_path_heard = Some(Instant::now());
                     }
-                    peer_radio = Some(req.peer_key);
+                    // **A flood is not an identity.** The request carries only the requester's
+                    // radio key and the destination is matched by one hash byte, so any node on the
+                    // mesh can send one addressed to us; taking its key as *the* peer displaced the
+                    // pinned one (and survived restarts), which is a denial of service against the
+                    // real phone and a capture of where this host sends. The key is learned only
+                    // while nothing is pinned, and a different one is answered but not adopted.
+                    let pinned = settings.peer_key;
+                    let adopt = pinned.is_none() || pinned == Some(req.peer_key);
+                    if pinned.is_some() && pinned != Some(req.peer_key) {
+                        route_log_rare(
+                            &mut last_stranger_log,
+                            &format!(
+                                "request from {} ignored for routing: the peer is pinned",
+                                &hex_key(&req.peer_key)[..8]
+                            ),
+                        );
+                    }
+                    peer_radio = pinned.or(Some(req.peer_key));
                     route_log(&format!(
                         "request from {} hops={}",
                         &hex_key(&req.peer_key)[..8],
                         req.path.hops
                     ));
-                    if settings.peer_key != Some(req.peer_key) {
+                    if adopt && settings.peer_key != Some(req.peer_key) {
                         settings.peer_key = Some(req.peer_key);
                         if let Some(record) = settings.peer_record.as_deref() {
                             save_peer(record, &req.peer_key);
@@ -1623,6 +1684,27 @@ fn serve_loop<L: ByteLink>(
                                 save_window(path, window_start_unix, sent);
                             }
                         }
+                    }
+                } else if let Some(view) = frame_packet(&frame)
+                    && view.is_flood()
+                    && view.payload_type == 0x04
+                    && peer_radio.is_some_and(|k| view.payload.starts_with(&k))
+                {
+                    // **An advert carries its own path, and the receive log shows it.** The radio's
+                    // advert cache is 16 slots of RAM and evicts by age, so a route that has been
+                    // heard can be gone by the time the daemon asks; the log fires for every packet
+                    // before any protocol handling (`Dispatcher.cpp:196-199`), so a flooded advert
+                    // from the peer is a route with no query and no eviction. Nothing is spent on
+                    // the air: this is a packet that was already received.
+                    if let Some(candidate) = PeerPath::reversed(
+                        usize::from(view.path.hash_size),
+                        usize::from(view.path.hops),
+                        &view.path.bytes,
+                    ) && prefer_route(peer_path.as_ref(), peer_path_heard, &candidate)
+                    {
+                        route_log(&format!("route from an advert hops={}", view.path.hops));
+                        peer_path = Some(candidate);
+                        peer_path_heard = Some(Instant::now());
                     }
                 } else if let Some(path) = parse_advert_path(&frame) {
                     // A late answer to a request that timed out, under the same rule as every other
@@ -2169,6 +2251,7 @@ mod tests {
                 companion,
                 Settings {
                     hash_size: 1,
+                    repeat_enabled: None,
                     airtime_ms: 602.6,
                     window_record: None,
                     peer_record: None,
@@ -2227,6 +2310,7 @@ mod tests {
                 companion,
                 Settings {
                     hash_size: 1,
+                    repeat_enabled: None,
                     airtime_ms: 602.6,
                     window_record: None,
                     peer_record: None,
@@ -2577,6 +2661,7 @@ mod tests {
                 companion,
                 Settings {
                     hash_size: 1,
+                    repeat_enabled: None,
                     airtime_ms: 137.9,
                     window_record: None,
                     peer_record: None,
@@ -2625,6 +2710,7 @@ mod tests {
                 companion,
                 Settings {
                     hash_size: 1,
+                    repeat_enabled: None,
                     airtime_ms: 602.6,
                     window_record: None,
                     peer_record: None,
@@ -2704,6 +2790,7 @@ mod tests {
                 companion,
                 Settings {
                     hash_size: 1,
+                    repeat_enabled: None,
                     airtime_ms: 137.9,
                     window_record: None,
                     peer_record: None,
@@ -2754,6 +2841,7 @@ mod tests {
                 companion,
                 Settings {
                     hash_size: 1,
+                    repeat_enabled: None,
                     airtime_ms: 137.9,
                     window_record: None,
                     peer_record: None,
@@ -2783,6 +2871,7 @@ mod tests {
     fn a_status_carries_a_budget_so_the_loop_can_send() {
         let settings = Settings {
                     hash_size: 1,
+                    repeat_enabled: None,
                     airtime_ms: 137.9,
                     window_record: None,
                     peer_record: None,

@@ -22,6 +22,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -90,7 +91,7 @@ internal fun SettingsRow(
     Row(
         modifier
             .fillMaxWidth()
-            .padding(vertical = SettingsRowPad),
+            .padding(vertical = LocalTouch.current.rowPad),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
@@ -131,7 +132,7 @@ internal fun SettingsChoice(
     Column(
         modifier
             .fillMaxWidth()
-            .padding(vertical = SettingsRowPad),
+            .padding(vertical = LocalTouch.current.rowPad),
     ) {
         Text(label, color = Fg, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         if (!summary.isNullOrEmpty()) {
@@ -165,7 +166,7 @@ internal fun SettingsToggle(
         Modifier
             .fillMaxWidth()
             .toggleable(value = checked, role = Role.Checkbox, onValueChange = onChange)
-            .padding(vertical = SettingsRowPad),
+            .padding(vertical = LocalTouch.current.rowPad),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
@@ -188,11 +189,47 @@ internal fun SettingsToggle(
     }
 }
 
-/** Vertical padding inside one row. The touch floor still comes from the control itself. */
-internal val SettingsRowPad = 8.dp
+/**
+ * **One vertical rhythm, in one place, and derived from the touch scale.**
+ *
+ * The screen had three schemes at once: the column spaced every child 16 dp, sections added another
+ * 20 dp spacer on top of that (36 dp, while the comment beside it claimed 24), and the rows carried
+ * their own 8 dp of internal padding — so two labels sat 32 dp apart, a header sat 25 dp from its
+ * first row, and a note sat 25 dp from the row it described *and* 25 dp from the row under it, which
+ * left it belonging to neither. Worse, every one of those numbers was a literal, so the thin-density
+ * setting changed the controls and left the gaps alone.
+ *
+ * The rules:
+ *
+ * - a row's own padding is [Touch.rowPad], so density moves the gaps as well as the controls;
+ * - rows inside a group are one step apart, headers are closer to their rows than that, so a group
+ *   reads as a group rather than as an even list;
+ * - a note is tighter to the row above it than to the row below, because it describes the one above;
+ * - a section is a bigger break than any of them, and it is the *total*, not an extra spacer on top
+ *   of the row gap.
+ */
+internal object Rhythm {
+    /** Between two rows of one group. */
+    fun rowGap(t: Touch): Dp = t.rowPad + 4.dp
 
-/** The gap between two sections. The break is the header's job, not a large blank. */
-internal val SettingsSectionGap = 20.dp
+    /** Between a section's header (and its rule) and its first row. */
+    fun headerToRows(t: Touch): Dp = t.rowPad + 2.dp
+
+    /** Between a row and the note that describes it. */
+    fun noteAbove(t: Touch): Dp = 2.dp
+
+    /** Between a note and the next row: tighter above, looser below, so it attaches upward. */
+    fun noteBelow(t: Touch): Dp = t.rowPad + 2.dp
+
+    /** The whole break between two sections, gap already included. */
+    fun sectionGap(t: Touch): Dp = t.rowPad * 3 + 6.dp
+
+    /** The screen's own gutter, and the left/right edge every row shares. */
+    fun contentPad(t: Touch): Dp = t.rowPad * 3
+
+    /** What a section spacer adds to the column's row gap to reach [sectionGap]. */
+    fun sectionBreak(t: Touch): Dp = (sectionGap(t) - rowGap(t)).coerceAtLeast(0.dp)
+}
 
 
 /**
@@ -238,7 +275,9 @@ internal fun SettingsNote(text: String, color: Color = Muted) {
         "- " + text,
         color = color,
         fontSize = 11.sp,
-        modifier = Modifier.fillMaxWidth().padding(bottom = SettingsRowPad),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = Rhythm.noteAbove(LocalTouch.current), bottom = Rhythm.noteBelow(LocalTouch.current)),
     )
 }
 
@@ -270,7 +309,7 @@ internal fun SettingsPanel(
     Column(
         Modifier
             .fillMaxWidth()
-            .padding(bottom = SettingsRowPad)
+            .padding(bottom = LocalTouch.current.rowPad)
             .clip(RadiusLarge)
             .background(Surface)
             .padding(16.dp),
@@ -308,7 +347,7 @@ internal fun SettingsInline(
     Row(
         modifier
             .fillMaxWidth()
-            .padding(vertical = SettingsRowPad),
+            .padding(vertical = LocalTouch.current.rowPad),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {

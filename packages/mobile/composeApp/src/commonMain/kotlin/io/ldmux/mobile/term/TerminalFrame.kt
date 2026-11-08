@@ -209,12 +209,24 @@ object TerminalFrame {
          * white-on-black and a dimmed black-on-white are the same colour, which is the property
          * this is for).
          */
-        private fun dimTowards(text: Int, back: Int): Int {
-            val r = (((text shr 16) and 0xFF) + ((back shr 16) and 0xFF)) / 2
-            val g = (((text shr 8) and 0xFF) + ((back shr 8) and 0xFF)) / 2
-            val b = ((text and 0xFF) + (back and 0xFF)) / 2
-            return (r shl 16) or (g shl 8) or b
-        }
+        private fun dimTowards(text: Int, back: Int): Int = blendTowards(text, back)
+    }
+
+    /**
+     * [text] blended halfway towards [back], per channel, in `0xRRGGBB`.
+     *
+     * The mean rather than `text + (back - text) / 2`: the two differ by one on odd sums, and the
+     * mean gives the same grey whichever way round the channels are (a dimmed white-on-black and a
+     * dimmed black-on-white are the same colour, which is the property this is for).
+     *
+     * Top level because two halves of the app need it: the cell applies it to the *host's* faint
+     * text, and the painter applies it to the theme's when it substitutes a default colour.
+     */
+    internal fun blendTowards(text: Int, back: Int): Int {
+        val r = (((text shr 16) and 0xFF) + ((back shr 16) and 0xFF)) / 2
+        val g = (((text shr 8) and 0xFF) + ((back shr 8) and 0xFF)) / 2
+        val b = ((text and 0xFF) + (back and 0xFF)) / 2
+        return (r shl 16) or (g shl 8) or b
     }
 
     class Frame(
