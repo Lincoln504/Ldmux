@@ -67,6 +67,16 @@ interface RadioLink {
     fun setBudgetMode(mode: RadioBudgetMode) {}
 
     /**
+     * How many repeaters the route to the host uses, or null when no route is known.
+     *
+     * **The one number that says how far away the host is**, and the silence bound is a function of
+     * it: a record's round trip through twenty repeaters is twenty transmissions each way, so a
+     * twenty-second verdict that fits a direct link would tear down a working long-range session and
+     * spend a handshake (a dozen records) proving it wrong.
+     */
+    val routeHops: Int? get() = null
+
+    /**
      * This radio's own public key, once the companion handshake has run.
      *
      * Null before that: the key comes from `SELF_INFO`, which is the first answer the radio gives.
@@ -519,6 +529,7 @@ class MeshRadioGateway(private val link: RadioLink) : GatewayPort {
     override val problem: String? get() = link.lastProblem.value
     override val received: Flow<ByteArray> = link.received
     override val uplinkRecordMax: Int get() = link.uplinkRecordMax
+    override val routeHops: Int? get() = link.routeHops
     override val radioPublicKey: ByteArray? get() = link.radioPublicKey
 
     override suspend fun send(record: ByteArray): MeshSendResult =

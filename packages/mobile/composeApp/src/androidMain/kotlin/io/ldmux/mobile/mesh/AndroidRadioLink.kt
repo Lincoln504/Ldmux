@@ -128,7 +128,13 @@ class AndroidRadioLink(
      * zero-hop direct send to a neighbour, but it never invents a multi-hop
      * path.
      */
-    private data class RadioPath(val encoded: Int, val bytes: ByteArray)
+    private data class RadioPath(val encoded: Int, val bytes: ByteArray) {
+        /** How many repeaters this path passes through. */
+        fun hops(): Int {
+            val width = (encoded and 0x03) + 1
+            return bytes.size / width
+        }
+    }
 
     /**
      * The route from the radio's contact record, and the one read off the host's advert.
@@ -145,6 +151,15 @@ class AndroidRadioLink(
 
     @Volatile
     private var advertPath: RadioPath? = null
+
+    /**
+     * How many repeaters the route to the host uses, or null when there is no route yet.
+     *
+     * The driver scales its silence bound by this: twenty repeaters is twenty transmissions each
+     * way, and a bound tuned for a direct link would declare a working long-range session dead.
+     */
+    override val routeHops: Int?
+        get() = (advertPath ?: contactPath)?.hops()
 
     /** Which of the two route sources the maintenance loop asks for on its next tick. */
     @Volatile

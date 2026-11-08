@@ -1084,7 +1084,10 @@ fn serve_loop<L: ByteLink>(
     // The record size for the path in hand (none yet: a bare record is the largest).
     let mut published_limit = record_limit(peer_path.as_ref());
     if events
-        .blocking_send(Ok(Event::Limit(published_limit)))
+        .blocking_send(Ok(Event::Limit {
+            record_max: published_limit,
+            hops: peer_path.as_ref().map_or(0, |p| p.hops),
+        }))
         .is_err()
     {
         return;
@@ -1422,7 +1425,13 @@ fn serve_loop<L: ByteLink>(
             // The route changed and took record bytes with it. The session is told, so a screen
             // update is split to fit instead of being refused by the packet builder.
             published_limit = limit_now;
-            if events.blocking_send(Ok(Event::Limit(limit_now))).is_err() {
+            if events
+                .blocking_send(Ok(Event::Limit {
+                    record_max: limit_now,
+                    hops: peer_path.as_ref().map_or(0, |p| p.hops),
+                }))
+                .is_err()
+            {
                 return;
             }
         }
@@ -2538,7 +2547,7 @@ mod tests {
         // ...the largest record this path allows (no path yet, so the receiver's cap), and only
         // then the answer to the record.
         match event_rx.blocking_recv() {
-            Some(Ok(Event::Limit(limit))) => {
+            Some(Ok(Event::Limit { record_max: limit, .. })) => {
                 assert_eq!(limit, RECEIVED_RECORD_MAX as u8, "a bare record, capped by the receiver")
             }
             other => panic!("expected the record limit, got {other:?}"),

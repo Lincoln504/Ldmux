@@ -291,6 +291,8 @@ pub struct MeshSnapshot {
     /// Records of the current size left in this hour's airtime budget, from a status report.
     /// `None` until the radio has reported one.
     pub records_left: Option<u8>,
+    /// How many repeaters the route to the peer uses, when one is known.
+    pub peer_hops: Option<u8>,
     pub radio_state: Option<RadioState>,
     /// `-128` is the contract's "no reading".
     pub rssi: i8,
@@ -322,6 +324,7 @@ impl MeshSnapshot {
             serial: Some(cfg.serial.clone()),
             uplink_record_max: None,
             records_left: None,
+            peer_hops: None,
             radio_state: None,
             rssi: ldmux_mesh::UNKNOWN_RSSI,
             battery_percent: ldmux_mesh::UNKNOWN_BATTERY,
@@ -340,6 +343,7 @@ impl MeshSnapshot {
             "serial": self.serial,
             "uplinkRecordMax": self.uplink_record_max,
             "recordsLeft": self.records_left,
+            "peerHops": self.peer_hops,
             "radioState": self.radio_state.map(|s| s.code()),
             // The tuple the host's own radio reported (or was retuned to). Absent before the
             // radio has been identified.
@@ -678,6 +682,7 @@ async fn supervise(cfg: MeshConfig, mut setup: Option<SessionSetup>, runtime: Me
         set(&snapshot, |s| {
             s.reconnects = reconnects;
             s.records_left = None;
+            s.peer_hops = None;
             // The scope belongs to the radio that was open; a reopen has to report it again before
             // `mesh status` claims one.
             s.flood_scope = None;
@@ -923,7 +928,7 @@ async fn session<C: Carrier>(
             event = carrier.recv() => {
                 last_carrier = Instant::now();
                 match event? {
-                    Event::Limit(limit) => {
+                    Event::Limit { record_max: limit, hops } => {
                         // **The record size follows the path.** A raw send carries the path inside
                         // the same 176-byte frame as the record, so a repeater's hops come out of
                         // the record budget: a full record built for an empty path is refused by
@@ -932,7 +937,10 @@ async fn session<C: Carrier>(
                         if let Some(h) = host.as_mut() {
                             h.set_record_limit(usize::from(limit));
                         }
-                        set(snapshot, |s| s.uplink_record_max = Some(limit));
+                        set(snapshot, |s| {
+                            s.uplink_record_max = Some(limit);
+                            s.peer_hops = Some(hops);
+                        });
                     }
                     Event::Scope(scope) => {
                         // The scope this node's floods are proved with, from the carrier: the

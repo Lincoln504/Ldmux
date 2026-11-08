@@ -53,3 +53,28 @@ class MeshReconnectTest {
         assertFalse(LdmuxConfig.DEFAULT.copy(meshPublicChannel = false).meshHoldsInput)
     }
 }
+
+/**
+ * The silence bound is a function of distance, not a constant.
+ *
+ * Twenty seconds is right for a direct link and wrong for this mesh, whose own floods were
+ * measured at 18-29 hops: a record's round trip through twenty repeaters is twenty transmissions
+ * each way at about 0.6 s apiece, so the old constant declared a working long-range session dead
+ * and rebuilt it - a handshake is a dozen records - while the answer was still on the air.
+ */
+class MeshSilenceBoundTest {
+    @Test
+    fun a_direct_link_keeps_the_short_verdict() {
+        assertEquals(20_000L, silenceFailureMs(0))
+        assertEquals(20_000L, silenceFailureMs(null), "no route yet is treated as direct")
+    }
+
+    @Test
+    fun every_hop_buys_room_for_its_round_trip() {
+        assertEquals(35_000L, silenceFailureMs(10))
+        assertEquals(50_000L, silenceFailureMs(20))
+        // The ceiling keeps a genuinely dead link from hanging for a minute and a half.
+        assertEquals(60_000L, silenceFailureMs(64))
+        assertEquals(60_000L, silenceFailureMs(1_000), "a nonsense hop count cannot hang the page")
+    }
+}

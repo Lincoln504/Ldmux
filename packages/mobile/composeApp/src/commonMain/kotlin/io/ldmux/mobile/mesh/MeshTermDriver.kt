@@ -23,6 +23,9 @@ interface GatewayPort {
     val received: Flow<ByteArray>
     val uplinkRecordMax: Int
 
+    /** Repeaters in the route to the host, or null when no route is known. */
+    val routeHops: Int? get() = null
+
     /**
      * Why the link is down, in the link's own words, or null when it has not said.
      *
@@ -647,7 +650,7 @@ class MeshTermDriver(
      * **Only meaningful with something outstanding.** An idle shell is silent by design: the diff
      * sends nothing, so "nothing heard for a minute" is the normal, correct state of a shell
      * nobody is typing into, and warning about it would train the user to ignore the line. With a
-     * record outstanding, the same silence is the preamble to [SILENCE_FAILURE_MS] - and in live
+     * record outstanding, the same silence is the preamble to [silenceFailureMs] - and in live
      * mode there is no bar between "the link stopped carrying" and "the link dropped", so the
      * screen can say it early instead of showing a screen that looks live.
      */
@@ -679,7 +682,7 @@ class MeshTermDriver(
             // arrived: silence is only evidence of a dead peer when something has been sent into
             // it and not answered.
             if (terminalView == null && h.pending > 0 &&
-                clock() - maxOf(lastInboundAt, lastCarriedAt) > SILENCE_FAILURE_MS
+                clock() - maxOf(lastInboundAt, lastCarriedAt) > silenceFailureMs(gateway.routeHops)
             ) {
                 failed(MeshLinkState.SessionFailed)
             }
@@ -1516,11 +1519,20 @@ class MeshTermDriver(
 }
 
 /**
- * How long an unanswered record may wait before this route calls the link dead. The ARQ gives up
- * on its own after its attempts; this is the shorter, user-visible bound for the case the ARQ
- * cannot see: a radio that is off the air, where nothing ever comes back at all.
+ * How long an unanswered record may wait before this route calls the link dead, for a route of
+ * `hops` repeaters.
+ *
+ * **The bound is a function of the distance, and it used to be a constant.** The ARQ gives up on
+ * its own after its attempts; this is the shorter, user-visible bound for the case the ARQ cannot
+ * see — a radio off the air, where nothing ever comes back at all. Twenty seconds fits a direct
+ * link, but a record's round trip through twenty repeaters is twenty transmissions each way at
+ * 0.6 s apiece (this mesh's own floods were measured at 18-29 hops), so a working long-range
+ * session was declared dead and rebuilt — a handshake is a dozen records — while its answer was
+ * still on the air. Each hop buys 1.5 s, and the ceiling keeps a genuinely dead link from hanging
+ * for a minute and a half.
  */
-private const val SILENCE_FAILURE_MS = 20_000L
+internal fun silenceFailureMs(hops: Int?): Long =
+    (20_000L + (hops ?: 0).coerceIn(0, 40) * 1_500L).coerceAtMost(60_000L)
 
 /**
  * A failed session is retried, not mourned.

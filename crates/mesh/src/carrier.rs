@@ -30,8 +30,11 @@ pub enum Event {
     /// by the builder as soon as one repeater is in the path. The session's record size is fixed at
     /// the handshake, so a carrier that learns a longer path must say so: this event re-sizes it.
     ///
-    /// Sent when the path is learned and whenever it changes materially.
-    Limit(u8),
+    /// Sent when the path is learned and whenever it changes materially, and it carries the hop
+    /// count beside the size because the two are one fact: a field test is read as "12 hops, so 148
+    /// bytes", and a status that printed only the size left the operator guessing whether the route
+    /// was a metre or a county away.
+    Limit { record_max: u8, hops: u8 },
     /// The **flood scope** this node's broadcasts are scoped to, or `None` when they are unscoped.
     ///
     /// Sent at open and whenever it changes — which on this carrier happens once, when a radio with

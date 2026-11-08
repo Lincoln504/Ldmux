@@ -278,6 +278,15 @@ fn print_mesh_status(v: &serde_json::Value) {
         Some(capacity) => println!("capacity {capacity} B per carrier record"),
         None => println!("capacity unknown (not bound yet)"),
     }
+    // **The route in one line, because it is the first thing a field test needs.** `capacity` alone
+    // says how large a record can be and nothing about how far away the peer is; an operator at
+    // range wants "12 hops" beside it, and a direct link wants to see the zero.
+    match v.get("peerHops").and_then(serde_json::Value::as_u64) {
+        Some(0) => println!("route    direct (no repeater in the path)"),
+        Some(1) => println!("route    1 repeater"),
+        Some(hops) => println!("route    {hops} repeaters in the path"),
+        None => println!("route    unknown (no route to the peer yet)"),
+    }
     // **Not a limit this host enforces.** The radio's firmware runs the transmitter's duty cycle,
     // and what it reports is its own count: printing it as a budget read like a gate the daemon
     // was applying, which it is not.
