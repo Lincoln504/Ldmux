@@ -661,6 +661,7 @@ class MeshTermDriver(
             is Received.Data -> {
                 lastInboundAt = clock()
                 lastCarriedAt = clock()
+                resyncMadeProgress()
                 recoverDelayMs = FIRST_RECOVERY_MS
                 for (c in r.chunks) if (c.shell == SHELL) feedStream(c.bytes)
             }
@@ -718,7 +719,15 @@ class MeshTermDriver(
             // page can only draw "waiting for shell screen" — for ever, because nothing retried a
             // resync that was lost while the session was busy. The 4 s floor in `requestResync`
             // keeps this from becoming a loop.
-            if (terminalView == null && mirror.profile != null && !painted) requestResync()
+            if (terminalView == null && mirror.profile != null && !painted) {
+                // Each unanswered ask waits longer than the last: the answer to a full screen takes
+                // seconds over a radio, and asking inside that window is what made the screen slower
+                // the longer it was waited for.
+                if (resyncing && clock() - resyncAskedAt >= resyncRetryMs) {
+                    resyncRetryMs = (resyncRetryMs * 2).coerceAtMost(60_000L)
+                }
+                requestResync()
+            }
             // **A fit the session refused to queue is asked again here.** Otherwise a resize
             // dropped on a full queue left the host's pty at the old grid for the life of the
             // page, and only leaving the shell and re-entering it could cure it. A fit already
@@ -1149,23 +1158,42 @@ class MeshTermDriver(
     }
 
     /**
-     * How long a resync may stay unanswered before the request is made again.
+     * How long a resync may stay unanswered before the request is made again, and it **doubles**.
      *
-     * `resyncing` is cleared by a full screen or by a reset, so an answer that is
-     * lost while the session stays healthy left the status line saying "resyncing
-     * the screen" indefinitely, and nothing asked again. The ARQ owns delivery, so
-     * this re-asks the request; it does not start a second optical resync.
+     * **A fixed four-second retry was a livelock over a radio.** One full screen is six or seven
+     * records and takes as many seconds at 62.5 kHz, so the phone asked again *before* the answer it
+     * was waiting for could arrive; every ask made the host render another whole screen, the host's
+     * queue filled (measured: 9 sent, 14 pending), nothing ever completed, and the silence bound then
+     * declared a link that was busy to be dead — which is the "waiting for shell screen, 65 s … then
+     * link dropped" loop. A retry now waits a full window *after the last evidence of progress* and
+     * backs off 4, 8, 16, 32, then 60 seconds.
      */
-    private val resyncRetryMs = 4_000L
+    private var resyncRetryMs = RESYNC_FIRST_RETRY_MS
     private var resyncAskedAt = Long.MIN_VALUE
 
     private fun requestResync() {
         val now = clock()
+        // **A busy link is not a lost request.** With records still owed, the answer is already on
+        // its way; asking again only adds work to the queue it has to get through.
+        if (sessionPending() > 0) return
         if (resyncing && now - resyncAskedAt < resyncRetryMs) return
         resyncing = true
         resyncAskedAt = now
         queue(TermMessage.Resync)
     }
+
+    /**
+     * The host painted something, so the request is working: wait a full first window again.
+     *
+     * Called for every frame that arrives, because "progress" and "the answer" are different facts —
+     * a screen can arrive in pieces and each piece is evidence the link is doing its job.
+     */
+    private fun resyncMadeProgress() {
+        resyncAskedAt = clock()
+        resyncRetryMs = RESYNC_FIRST_RETRY_MS
+    }
+
+    private fun sessionPending(): Int = runCatching { session?.health(clock())?.pending ?: 0 }.getOrDefault(0)
 
     private fun feedStream(bytes: ByteArray) {
         val items = try {
@@ -1558,6 +1586,9 @@ class MeshTermDriver(
  */
 private const val RESIZE_FLOOR_MS = 30_000L
 
+/** The first wait before a resync is asked again; each ask doubles it, to a minute. */
+private const val RESYNC_FIRST_RETRY_MS = 4_000L
+
 internal fun needsResize(sessionLimit: Int, linkLimit: Int): Boolean =
     linkLimit > 0 && sessionLimit > 0 && linkLimit < sessionLimit
 
@@ -1565,17 +1596,20 @@ internal fun needsResize(sessionLimit: Int, linkLimit: Int): Boolean =
  * How long an unanswered record may wait before this route calls the link dead, for a route of
  * `hops` repeaters.
  *
- * **The bound is a function of the distance, and it used to be a constant.** The ARQ gives up on
- * its own after its attempts; this is the shorter, user-visible bound for the case the ARQ cannot
- * see — a radio off the air, where nothing ever comes back at all. Twenty seconds fits a direct
- * link, but a record's round trip through twenty repeaters is twenty transmissions each way at
- * 0.6 s apiece (this mesh's own floods were measured at 18-29 hops), so a working long-range
- * session was declared dead and rebuilt — a handshake is a dozen records — while its answer was
- * still on the air. Each hop buys 1.5 s, and the ceiling keeps a genuinely dead link from hanging
- * for a minute and a half.
+ * **The bound is a function of the distance, and it is a backstop rather than a stopwatch.** The ARQ
+ * gives up on its own after its attempts; this is the user-visible verdict for the case the ARQ
+ * cannot see — a radio off the air, where nothing ever comes back at all.
+ *
+ * It began at twenty seconds, which is shorter than a *legitimate* burst: one full screen is six or
+ * seven records at 0.6 s each plus their acknowledgements, so a shell that was painting perfectly
+ * well was declared dead mid-paint, rebuilt (a handshake is a dozen records) and started again —
+ * measured 2026-11-08 as "waiting for shell screen, 65 s … then link dropped". Sixty seconds covers
+ * a full repaint at this tuple with room to spare, each hop buys 1.5 s for the round trip (this
+ * mesh's floods were measured at 18-29 hops), and the ceiling keeps a genuinely dead link from
+ * hanging for more than two minutes.
  */
 internal fun silenceFailureMs(hops: Int?): Long =
-    (20_000L + (hops ?: 0).coerceIn(0, 40) * 1_500L).coerceAtMost(60_000L)
+    (60_000L + (hops ?: 0).coerceIn(0, 40) * 1_500L).coerceAtMost(120_000L)
 
 /**
  * A failed session is retried, not mourned.

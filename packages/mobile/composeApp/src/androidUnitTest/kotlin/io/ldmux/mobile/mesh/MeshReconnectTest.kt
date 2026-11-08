@@ -64,18 +64,21 @@ class MeshReconnectTest {
  */
 class MeshSilenceBoundTest {
     @Test
-    fun a_direct_link_keeps_the_short_verdict() {
-        assertEquals(20_000L, silenceFailureMs(0))
-        assertEquals(20_000L, silenceFailureMs(null), "no route yet is treated as direct")
+    fun a_direct_link_still_has_room_for_a_full_repaint() {
+        // **Sixty seconds, not twenty.** One full screen is six or seven records plus their
+        // acknowledgements, which is more than twenty seconds at 62.5 kHz — the old bound declared a
+        // link that was painting perfectly well to be dead, mid-paint.
+        assertEquals(60_000L, silenceFailureMs(0))
+        assertEquals(60_000L, silenceFailureMs(null), "no route yet is treated as direct")
     }
 
     @Test
     fun every_hop_buys_room_for_its_round_trip() {
-        assertEquals(35_000L, silenceFailureMs(10))
-        assertEquals(50_000L, silenceFailureMs(20))
-        // The ceiling keeps a genuinely dead link from hanging for a minute and a half.
-        assertEquals(60_000L, silenceFailureMs(64))
-        assertEquals(60_000L, silenceFailureMs(1_000), "a nonsense hop count cannot hang the page")
+        assertEquals(75_000L, silenceFailureMs(10))
+        assertEquals(90_000L, silenceFailureMs(20))
+        // The ceiling keeps a genuinely dead link from hanging for more than two minutes.
+        assertEquals(120_000L, silenceFailureMs(64))
+        assertEquals(120_000L, silenceFailureMs(1_000), "a nonsense hop count cannot hang the page")
     }
 }
 
