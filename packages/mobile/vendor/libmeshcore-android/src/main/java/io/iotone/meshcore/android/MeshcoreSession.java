@@ -464,9 +464,10 @@ public final class MeshcoreSession {
      *
      * @param params the complete parameter set
      */
-    public void setRadioParams(RadioParams params) {
-        if (state.get() != SessionState.READY) return;
+    public boolean setRadioParams(RadioParams params) {
+        if (state.get() != SessionState.READY) return false;
         sendTracked(MeshcoreFrameCodec.setRadioParams(params));
+        return true;
     }
 
     /**
@@ -480,9 +481,10 @@ public final class MeshcoreSession {
      *
      * @param dbm transmit power, dBm
      */
-    public void setTxPower(int dbm) {
-        if (state.get() != SessionState.READY) return;
+    public boolean setTxPower(int dbm) {
+        if (state.get() != SessionState.READY) return false;
         sendTracked(MeshcoreFrameCodec.setRadioTxPower(dbm));
+        return true;
     }
 
     /**
@@ -636,9 +638,10 @@ public final class MeshcoreSession {
      *
      * @param mode path-hash mode (0..2)
      */
-    public void setPathHashMode(int mode) {
-        if (state.get() != SessionState.READY) return;
+    public boolean setPathHashMode(int mode) {
+        if (state.get() != SessionState.READY) return false;
         sendTracked(MeshcoreFrameCodec.setPathHashMode(mode));
+        return true;
     }
 
     /**

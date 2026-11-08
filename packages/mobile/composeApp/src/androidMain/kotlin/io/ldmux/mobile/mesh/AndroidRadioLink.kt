@@ -628,14 +628,26 @@ class AndroidRadioLink(
         // channel looked impossible. Asked separately, a refusal costs the width and nothing else,
         // and the app says which half it kept.
         val widthWanted = oldHashMode != null && oldHashMode != hashMode
+        // **A setter that cannot queue says so.** The client drops a frame when the session is not
+        // READY (and when its tracked queue is full), and it used to drop it silently: the read-back
+        // then looked like a radio refusing a value it was never sent. Each call reports whether it
+        // was queued, and the first refusal is named.
+        var refused: String? = null
         if (widthWanted) {
-            s.setPathHashMode(hashMode)
+            if (!s.setPathHashMode(hashMode)) refused = "path width"
             withTimeoutOrNull(PRESET_COMMAND_WAIT_MS) { while (!s.isIdle()) delay(25) }
         }
-        s.setRadioParams(
-            RadioParams.of(preset.frequencyMhz, preset.bandwidthKhz, preset.spreadingFactor, preset.codingRate),
+        val channel = RadioParams.of(
+            preset.frequencyMhz,
+            preset.bandwidthKhz,
+            preset.spreadingFactor,
+            preset.codingRate,
         )
-        s.setTxPower(tx)
+        if (!s.setRadioParams(channel) && refused == null) refused = "channel"
+        if (!s.setTxPower(tx) && refused == null) refused = "power"
+        if (refused != null) {
+            _lastProblem.value = "radio did not accept the change ($refused) · try again"
+        }
         // Setters are tracked commands, not fire-and-forget proof. Wait for the
         // answer window to clear before the reconnect; the read-back after it is
         // the only proof that the radio took the operating point.
