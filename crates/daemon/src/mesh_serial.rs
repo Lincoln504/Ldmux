@@ -2487,6 +2487,59 @@ mod tests {
         unsafe { std::env::remove_var("LDMUX_MESH_ADVERT_SECS") };
     }
 
+    /// **A record's size is a property of the route.** The builder needs `2 + path + record <= 174`,
+    /// and the radio does not push a frame it cannot fit in 176 bytes, so the receive ceiling is one
+    /// byte lower than the send ceiling. Both limits are pinned here because the arithmetic is the
+    /// whole reason a direct link can carry 171 and a 20-hop one only 131.
+    #[test]
+    fn the_record_limit_is_the_path_and_the_receive_ceiling() {
+        let path = |width: usize, hops: usize| PeerPath {
+            hash_size: u8::try_from(width).unwrap_or(1),
+            hops: u8::try_from(hops).unwrap_or(1),
+            bytes: vec![0x11; width * hops],
+        };
+        assert_eq!(record_limit(None), 171, "no path: the receive ceiling");
+        // One hop at one byte costs the record one byte, one at two costs two.
+        assert_eq!(record_limit(Some(&path(1, 1))), 171);
+        assert_eq!(record_limit(Some(&path(2, 1))), 170);
+        // The band this mesh actually uses: 18-29 hops at two bytes.
+        assert_eq!(record_limit(Some(&path(2, 20))), 132);
+        assert_eq!(record_limit(Some(&path(2, 29))), 114);
+        // The firmware's longest legal path is 64 bytes, which is the floor's reason to exist.
+        assert_eq!(
+            record_limit(Some(&path(2, 32))),
+            u8::try_from(ldmux_mesh::RECORD_FLOOR).unwrap_or(255)
+        );
+        // A path cannot take the record below one byte, whatever a hostile path claims.
+        assert_eq!(record_limit(Some(&path(3, 64))), 1);
+    }
+
+    /// **Shortest wins; stale is no route at all.** A flood is re-forwarded by every repeater in
+    /// range, so the same request arrives again by longer paths — measured on the bench 2026-11-08:
+    /// a phone in the same room logged at 0, then 1, then 4 hops — and taking the last one made
+    /// every reply take a four-repeater detour.
+    #[test]
+    fn a_route_is_replaced_by_a_shorter_or_a_fresher_one() {
+        let path = |hops: usize| PeerPath {
+            hash_size: 2,
+            hops: u8::try_from(hops).unwrap_or(1),
+            bytes: vec![0x22; hops * 2],
+        };
+        let now = Instant::now();
+        // Nothing in hand: anything is accepted.
+        assert!(prefer_route(None, None, &path(4)));
+        // A shorter path displaces a longer one, and equal stays.
+        assert!(prefer_route(Some(&path(4)), Some(now), &path(0)));
+        assert!(prefer_route(Some(&path(4)), Some(now), &path(4)));
+        // A longer one does not, while the route in hand is fresh.
+        assert!(!prefer_route(Some(&path(0)), Some(now), &path(4)));
+        // Stale is no route at all: a longer path is accepted once two minutes have passed.
+        let stale = now - PEER_ROUTE_STALE - std::time::Duration::from_secs(1);
+        assert!(prefer_route(Some(&path(0)), Some(stale), &path(4)));
+        // A route whose age was never recorded is treated as stale, not as fresh.
+        assert!(prefer_route(Some(&path(0)), None, &path(4)));
+    }
+
     /// **The countdown is republished while nothing is sent.** The session gates every send on it,
     /// so a status tied to transmission was a status that could never say the hour had rolled over:
     /// at zero the session polled nothing, the radio sent nothing, and the phone waited on a host
