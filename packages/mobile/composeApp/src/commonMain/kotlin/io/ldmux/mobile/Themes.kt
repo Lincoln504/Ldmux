@@ -170,24 +170,29 @@ private val DarkPalette = Palette(
  * system's notifications). 8.0:1 on the ground, 5.9:1 on a raised row.
  */
 private val ForestPalette = Palette(
-    base = Color(0xFF171918),
-    surface = Color(0xFF202221),
-    // sage-5, not sage-6: sage-6 is 1.41:1 over the panel — a jump that made a raised row look
-    // like a different surface — and it left `muted` at 3.78:1 where a note is drawn on it.
-    raised = Color(0xFF2E3130),
-    line = Color(0xFF444947),
+    // **The ground is grey; the panels carry the pine.** Sage's greys are so nearly neutral that the
+    // tint was invisible on a list row — the shade the eye spends most of its time on. These are the
+    // same luminances with the chroma moved into the range a surface can hold without becoming a
+    // colour (≈0.02, which is where a tint reads as a cast rather than as a smudge): the page stays
+    // a dark grey, and a row on it is visibly pine.
+    base = Color(0xFF121514),
+    surface = Color(0xFF1A211D),
+    raised = Color(0xFF232C27),
+    line = Color(0xFF2F3A33),
     edge = Color(0xFF7C8884),
-    fg = Color(0xFFECEEED),
-    dim = Color(0xFFADB5B2),
-    muted = Color(0xFF8D9793),
+    fg = Color(0xFFEDF2EE),
+    dim = Color(0xFFAEBBB2),
+    muted = Color(0xFF8C9A91),
     accent = Color(0xFF7FC98A),
-    chosen = Color(0xFF9AA5A0),
+    // A warm counterweight, the way a pine forest has bark: the chosen state is rust, not a second
+    // green, so "this one" is legible at a glance against a screen of greens.
+    chosen = Color(0xFFC08A6A),
     danger = Color(0xFFE58A84),
     warn = Color(0xFFE6C177),
     onAccent = Color(0xFF0E1512),
     terminal = TerminalPalette(
-        background = Color(0xFF171918),
-        foreground = Color(0xFFECEEED),
+        background = Color(0xFF121514),
+        foreground = Color(0xFFEDF2EE),
         cursor = Color(0xFF7FC98A),
         selection = Color(0x337FC98A),
     ),
