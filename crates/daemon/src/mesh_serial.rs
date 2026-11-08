@@ -66,6 +66,9 @@ const STATUS_REFRESH: Duration = Duration::from_millis(500);
 /// configured width; it is a serial command with **no airtime**, so a minute costs nothing.
 const PARAM_WATCH: Duration = Duration::from_secs(60);
 
+/// How often the radio is asked what it measured on the air.
+const STATS_WATCH: Duration = Duration::from_secs(20);
+
 /// The firmware's own ceiling for a path, in bytes (`MAX_PATH_SIZE`, `MeshCore.h`).
 const MAX_PATH_SIZE: usize = 64;
 
@@ -1138,6 +1141,10 @@ fn serve_loop<L: ByteLink>(
     // When the radio's own settings were last re-read, so a quiet link notices a retune by another
     // app within a minute rather than never.
     let mut last_params = Instant::now();
+    // A reading is wanted at once (hence `None`, which fires on the first pass) and then every twenty
+    // seconds: often enough that a walk out of range shows its effect, rare enough to be one serial
+    // frame in twenty.
+    let mut last_stats: Option<Instant> = None;
 
     // One status before anything else: the loop starts with no budget, and an
     // unknown budget is zero, so without this it would never send the first record.
@@ -1424,29 +1431,6 @@ fn serve_loop<L: ByteLink>(
                                 return;
                             }
                         }
-                        // **What the radio measured, from the radio.** One serial command on the
-                        // idle path, no airtime: the noise floor and the RSSI/SNR of the last packet
-                        // it heard are the only honest answer to "is this link reaching", and the
-                        // radio's own airtime counters are the check on our meter.
-                        if let Ok(stats) = companion.radio_stats() {
-                            let rssi = if stats.has_signal() {
-                                Some(stats.last_rssi)
-                            } else {
-                                None
-                            };
-                            if events
-                                .blocking_send(Ok(Event::Signal(Signal {
-                                    noise_floor_dbm: stats.noise_floor_dbm,
-                                    rssi_dbm: rssi,
-                                    snr_quarter_db: stats.last_snr_quarter_db,
-                                    tx_air_secs: stats.tx_air_secs,
-                                    rx_air_secs: stats.rx_air_secs,
-                                })))
-                                .is_err()
-                            {
-                                return;
-                            }
-                        }
                         // **The scope is its own register, and another app owns it too.** It is
                         // watched on every pass rather than inside the tuple branch: an operator
                         // who only clears `region default` leaves the tuple untouched, and this
@@ -1466,6 +1450,31 @@ fn serve_loop<L: ByteLink>(
                             if events.blocking_send(Ok(Event::Scope(scope.info()))).is_err() {
                                 return;
                             }
+                        }
+                    }
+                }
+
+                // **What the radio measured, from the radio.** Its own cadence rather than the
+                // settings watch's minute: the reading is the answer to "is this link reaching", and
+                // a minute of blank status after a restart is a minute the operator spends wondering
+                // whether the radio is even attached. One serial command, no airtime.
+                // **A waiting frame goes first.** The port is shared, so a stats read must not sit
+                // in front of a received packet (see `Companion::has_pending`).
+                if !companion.has_pending() && last_stats.is_none_or(|t| t.elapsed() >= STATS_WATCH) {
+                    last_stats = Some(Instant::now());
+                    if let Ok(stats) = companion.radio_stats() {
+                        let rssi = stats.has_signal().then_some(stats.last_rssi);
+                        if events
+                            .blocking_send(Ok(Event::Signal(Signal {
+                                noise_floor_dbm: stats.noise_floor_dbm,
+                                rssi_dbm: rssi,
+                                snr_quarter_db: stats.last_snr_quarter_db,
+                                tx_air_secs: stats.tx_air_secs,
+                                rx_air_secs: stats.rx_air_secs,
+                            })))
+                            .is_err()
+                        {
+                            return;
                         }
                     }
                 }
@@ -1975,6 +1984,8 @@ fn refused(e: &SessionError) -> SendOutcome {
         // record is larger than the path leaves room for — a sizing fault on this end, which the
         // retry ladder must not read as "the radio is busy" and retry unchanged for 30 s.
         SessionError::Codec(_) => SendOutcome::ErrTooLong,
+        // A radio in another state is a radio to try again, not a fault to report.
+        SessionError::Disabled => SendOutcome::ErrBusy,
         _ => SendOutcome::ErrBusy,
     }
 }
@@ -2817,7 +2828,10 @@ mod tests {
         // The opening status comes first; the record follows on the next turn of
         // the loop, without any command being sent.
         let mut record = None;
-        for _ in 0..4 {
+        // **A budget, not a contract.** One pass publishes a status, the scope and the record limit
+        // before the packet itself, and the loop refreshes a status every few seconds, so the record
+        // is a handful of events in rather than the second one.
+        for _ in 0..12 {
             match event_rx.blocking_recv() {
                 Some(Ok(Event::Recv(r))) => {
                     record = Some(r);

@@ -50,6 +50,10 @@ pub enum SessionError {
     Rejected { code: u8, meaning: &'static str },
     /// A different response arrived where the requested one was expected.
     Unexpected { got: u8 },
+    /// The firmware answered `RESP_CODE_DISABLED`: it is in another state and cannot serve this
+    /// command now (a radio mid-retune, or one whose store is busy). Not a fault in the frame, and
+    /// not a refusal of the argument either — the same command is worth retrying a moment later.
+    Disabled,
     /// A reply that should have carried the fields it was asked for did not.
     Malformed(&'static str),
 }
@@ -69,6 +73,7 @@ impl std::fmt::Display for SessionError {
                 write!(f, "radio rejected the command: {meaning} (code {code})")
             }
             SessionError::Unexpected { got } => write!(f, "unexpected reply 0x{got:02x}"),
+            SessionError::Disabled => write!(f, "the radio is in another state and cannot answer now"),
             SessionError::Malformed(what) => write!(f, "malformed reply: {what}"),
         }
     }
@@ -420,6 +425,16 @@ impl<L: ByteLink> Companion<L> {
     ///
     /// Pushes are the receive log (`0x88`) and the advert/ack/status family. A
     /// caller that only wants packets calls this in a loop and ignores the rest.
+    /// Whether a frame is waiting to be read, so a caller can ask before adding work.
+    ///
+    /// **A serial command and an inbound packet share one port.** Polling the radio's stats while a
+    /// received packet is already queued made the poll wait out its own timeout behind that packet
+    /// (and every retry after it), so a caller on the idle path asks this first: with a frame in
+    /// hand, the frame wins.
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
     pub fn next_push(&mut self, timeout: Duration) -> Result<Option<Vec<u8>>, SessionError> {
         if let Some(frame) = self.pending.pop_front() {
             return Ok(Some(frame));
@@ -464,6 +479,14 @@ impl<L: ByteLink> Companion<L> {
                 match frame.first().copied() {
                     Some(code) if code == expect => {
                         outcome = Some(Ok(frame));
+                        break;
+                    }
+                    Some(codes::DISABLED) => {
+                        // **A state, not a fault.** The firmware answers this when it is mid-retune or
+                        // its store is busy (`RESP_CODE_DISABLED`, MyMesh.cpp:86), and the same
+                        // command is worth sending again — where `Unexpected` made it a framing bug
+                        // that aborted the whole ladder.
+                        outcome = Some(Err(SessionError::Disabled));
                         break;
                     }
                     Some(codes::ERROR) => {

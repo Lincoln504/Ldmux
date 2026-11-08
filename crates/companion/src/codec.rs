@@ -29,6 +29,9 @@ pub mod codes {
     /// The reply to [`commands::GET_DEFAULT_FLOOD_SCOPE`]: `name 31`, `key 16`, or the code alone
     /// when the radio has no default scope (`MyMesh.cpp:1964-1972`).
     pub const DEFAULT_FLOOD_SCOPE: u8 = 0x1C;
+    /// `RESP_CODE_DISABLED`: the firmware is in another state and cannot serve the command now
+    /// (`MyMesh.cpp:86`). A retry a moment later is the right response, not a reparse.
+    pub const DISABLED: u8 = 0x0F;
     /// The reply to [`commands::GET_STATS`]: `type u8`, then that type's fields.
     pub const STATS: u8 = 0x18;
     /// The stats sub-types, sent as the request's and the reply's second byte.
@@ -874,7 +877,14 @@ impl SelfInfo {
 /// What the firmware says it can do (`RESP_DEVICE_INFO`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DeviceInfo {
-    pub protocol_version: u8,
+    /// The **firmware's** version code (`FIRMWARE_VER_CODE`), which is the gate for the trailing
+    /// fields below.
+    ///
+    /// **Not the app protocol version.** That one is `APP_TARGET_VERSION`, which this client sends
+    /// in `DEVICE_QUERY` and the firmware latches to choose its frame shapes (`MyMesh.cpp:1028-1031`).
+    /// The two axes were both called `protocol_version`, which made the next reader check the wrong
+    /// one against the wrong feature gate.
+    pub firmware_version_code: u8,
     pub max_contacts: Option<u16>,
     pub max_channels: Option<u8>,
     pub ble_pin: Option<u32>,
@@ -1042,9 +1052,9 @@ pub fn parse_device_info(payload: &[u8]) -> Option<DeviceInfo> {
     if payload.first() != Some(&codes::DEVICE_INFO) || payload.len() < 2 {
         return None;
     }
-    let mut info = DeviceInfo { protocol_version: payload[1], ..Default::default() };
+    let mut info = DeviceInfo { firmware_version_code: payload[1], ..Default::default() };
     let mut rest = &payload[2..];
-    if info.protocol_version >= 3 && rest.len() >= 1 + 1 + 4 + 12 + 40 + 20 {
+    if info.firmware_version_code >= 3 && rest.len() >= 1 + 1 + 4 + 12 + 40 + 20 {
         info.max_contacts = Some(rest[0] as u16 * 2); // firmware stores half
         info.max_channels = Some(rest[1]);
         info.ble_pin = Some(u32::from_le_bytes([rest[2], rest[3], rest[4], rest[5]]));
@@ -1053,11 +1063,11 @@ pub fn parse_device_info(payload: &[u8]) -> Option<DeviceInfo> {
         info.firmware_version = text(&rest[58..78]);
         rest = &rest[78..];
     }
-    if info.protocol_version >= 9 && !rest.is_empty() {
+    if info.firmware_version_code >= 9 && !rest.is_empty() {
         info.repeat_enabled = Some(rest[0] != 0);
         rest = &rest[1..];
     }
-    if info.protocol_version >= 10 && !rest.is_empty() {
+    if info.firmware_version_code >= 10 && !rest.is_empty() {
         info.path_hash_mode = Some(rest[0]);
     }
     Some(info)
@@ -1128,7 +1138,7 @@ mod tests {
         v.push(0); // repeat
         v.push(2); // path hash mode
         let info = parse_device_info(&v).unwrap();
-        assert_eq!(info.protocol_version, 13);
+        assert_eq!(info.firmware_version_code, 13);
         assert_eq!(info.max_contacts, Some(350));
         assert_eq!(info.max_channels, Some(40));
         assert_eq!(info.firmware_version, "v1.17.1");
@@ -1140,7 +1150,7 @@ mod tests {
     #[test]
     fn an_old_device_info_has_no_tail() {
         let info = parse_device_info(&[codes::DEVICE_INFO, 2]).unwrap();
-        assert_eq!(info.protocol_version, 2);
+        assert_eq!(info.firmware_version_code, 2);
         assert_eq!(info.max_contacts, None);
     }
 
