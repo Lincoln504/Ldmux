@@ -36,7 +36,7 @@ commit, which may have moved.
 | Cipher | AES-128-ECB. Not CBC. |
 | Padding | Zero padding to 16 bytes. The reference decoder strips trailing zero bytes, so a binary payload ending in `0x00` is corrupted. |
 | Authentication | 2-byte MAC: HMAC-SHA256 truncated to 2 bytes (in the author's example code). |
-| Key selection | 1-byte hash (first byte of the contact public key, or of SHA-256 of the channel key). With the 2-byte MAC, a wrong key passes both checks with probability about 2^-24 and decrypts to garbage. |
+| Key selection | 1-byte hash (first byte of the contact public key, or of SHA-256 of the channel key). With the 2-byte MAC, a wrong key passes both checks with probability ≈2^-24 and decrypts to garbage. |
 | IV | None. The 4-byte message timestamp plus the attempt number serve as an "ersatz IV" (the author's phrase). |
 | Direct messages | Ed25519 identities; X25519 static-static ECDH. No forward secrecy. |
 | Channels | One shared channel key. A hashtag room's key is the first 16 bytes of SHA-256 of the room name, so its keyspace is guessable: public by design. |
@@ -149,8 +149,8 @@ FIPS 203 itself is final, published 2024-08-13):
 | Item | Value |
 |---|---|
 | Fragments at 160 B each | 8 (public key) + 7 (ciphertext) = 15 packets |
-| Airtime at about 189 B on air, per packet | about 0.3 s (SF7/125 kHz), 0.9 s (SF10/250 kHz), 7.5 s (SF11/62.5 kHz) |
-| Total, whole stage | about 5 s, 13 s, 113 s respectively |
+| Airtime at ≈189 B on air, per packet | ≈0.3 s (SF7/125 kHz), 0.9 s (SF10/250 kHz), 7.5 s (SF11/62.5 kHz) |
+| Total, whole stage | ≈5 s, 13 s, 113 s respectively |
 
 Airtime figures are computed here with the Semtech time-on-air formula from memory
 (coding rate 4/5, 8-symbol preamble, explicit header, CRC, 3-hop path), **not measured
@@ -239,7 +239,7 @@ not hide.
 **What padding can hide:** record sizes, which otherwise reveal key counts and output
 volume. Default (judgement call): pad every record to a bucket of **64, 128 or the
 packet ceiling** of total payload. Cost on a 3-byte keystroke: 30 B becomes 64 B on
-air, about 72 ms to about 113 ms at SF7/125 kHz (computed, see above), and about
+air, ≈72 ms to ≈113 ms at SF7/125 kHz (computed, see above), and about
 doubling at slow presets. Padding is inside the ciphertext; the tag covers it.
 
 **What it cannot hide:** the existence of a session, its start and end, total volume
@@ -303,8 +303,8 @@ mesh path only.
 **QR additions** (**built 2026-10-28 as the same `v=1` link plus optional `mv=1&mk=<64 hex>&psk=<64 hex>[&mr=<64 hex>]`, not a `v=2` link, so a scanner that predates mesh still pairs the tailnet route from the same code; hex rather than base64url. The original text follows.** Version 2 of the link, same `ldmux://pair` scheme): gateway static
 public key (32 B, 43 characters Base64url), PSK (32 B, 43 characters), and the gateway's
 MeshCore address material if carriage B or a directed path is used (32 B, 43
-characters), plus a profile field. The current link is about 85 characters; the
-additions bring it to roughly 230. The encoder (`crates/daemon/src/qr.rs`) supports
+characters), plus a profile field. The current link is ≈85 characters; the
+additions bring it to ≈230. The encoder (`crates/daemon/src/qr.rs`) supports
 versions 1-40 at every level; a link this size needs about version 9-10, from
 the standard capacity table recalled from memory, **unverified**. The tailnet host
 restriction in ADR-0017 does not apply to mesh pairing. As ADR-0017 notes for the token,

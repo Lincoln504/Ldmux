@@ -259,7 +259,7 @@ class MeshInputTest {
         // 5 characters and one named key. The key is its own record; five bytes fit one Input
         // record. The summary is what the bar shows, so the arithmetic has to be honest about
         // records rather than about bytes: an Input record carries MeshTerm.MAX_INPUT.
-        assertEquals("5 characters and 1 key, about 2 records", handle.heldSummary)
+        assertEquals("5 characters and 1 key, ≈2 records", handle.heldSummary)
         handle.discardHeld()
         assertEquals("", handle.heldSummary)
         assertFalse(handle.hasPending)
@@ -270,7 +270,7 @@ class MeshInputTest {
         val handle = MeshTerminalHandle(MeshInputBatcher(), { 0L })
         handle.sendText("x".repeat(MeshTerm.MAX_INPUT * 2 + 1))
         handle.refreshPending()
-        assertEquals("${MeshTerm.MAX_INPUT * 2 + 1} characters, about 3 records", handle.heldSummary)
+        assertEquals("${MeshTerm.MAX_INPUT * 2 + 1} characters, ≈3 records", handle.heldSummary)
     }
 
     @Test
@@ -294,7 +294,7 @@ class MeshInputTest {
         // Four characters ("ls" and "a\t"), four keys (Enter, BSpace, Up, C-c), and one record
         // per run: text, keys, text, keys. That is the honest count — the record is the unit the
         // link spends, not the byte.
-        assertEquals("4 characters and 4 keys, about 4 records", handle.heldSummary)
+        assertEquals("4 characters and 4 keys, ≈4 records", handle.heldSummary)
     }
 
     @Test

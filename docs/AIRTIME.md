@@ -10,7 +10,7 @@ differ, the same record packing) with a link that counts every record and prices
 
 Three facts are worth stating plainly, because they are the reason the mode exists:
 
-- **Typing** a command line costs about a sixth of live mode's air. The saving is almost entirely the
+- **Typing** a command line costs ≈1/6 of live mode's air. The saving is almost entirely the
   echo: one record per keystroke each way becomes one record per command.
 - **A whole command** — typing plus the answer — costs about a quarter of live mode's air, because the
   answer does not get cheaper in either mode.
@@ -45,8 +45,8 @@ conclusion that holds at both ends is a conclusion about the modes rather than a
 - **An agent turn is 86.7 % less air batched.** A 1 % duty cycle (36 s an hour) buys 0.23 typed
   turns or 1.7 batched ones at this tuple.
 
-At the bench tuple (500 kHz, SF7, CR5) every record is about 4.4 times cheaper in air, so the same
-turn is about 36 s typed and 4.8 s batched. The ratio between the modes belongs to the modes; the
+At the bench tuple (500 kHz, SF7, CR5) every record is ≈4.4 times cheaper in air, so the same
+turn is ≈36 s typed and 4.8 s batched. The ratio between the modes belongs to the modes; the
 absolute numbers belong to the tuple.
 
 ## What follows
@@ -56,7 +56,7 @@ absolute numbers belong to the tuple.
 - `rto_initial_ms` scales with the airtime (`Config::with_airtime`): on this tuple a record is about
   550 ms, so a fixed two-second retry would duplicate work the peer already has, and duplicates are
   airtime.
-- The advert costs one record every 30 minutes, about 0.05 % of the allowance, and it is what makes
+- The advert costs one record every 30 minutes, ≈0.05 % of the allowance, and it is what makes
   a repeater-reached phone reachable at all.
 
 ## Method notes, so the numbers can be argued with

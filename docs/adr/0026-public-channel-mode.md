@@ -10,14 +10,14 @@ change, no radio change.
 ## The problem
 
 On a public channel, everything typed is broadcast to everyone in range, and the mesh link's budget
-is about 58 records an hour (`docs/ARCHITECTURE.md#4-the-wire`, ADR-0025). Two costs follow from sending as the
+is ≈58 records an hour (`docs/ARCHITECTURE.md#4-the-wire`, ADR-0025). Two costs follow from sending as the
 user types:
 
 - **Disclosure.** A command half-typed, a path being corrected, a password typed into a prompt that
   has not answered yet: each keystroke is a frame on the air.
 - **Airtime.** A 20-character command typed at a normal pace is two or three records by the
   batcher's own windows, and each one is airtime spent on a shared channel and taken from an hour
-  that has about 58.
+  that has ≈58.
 
 A person composing a command does not need each keystroke to leave the phone. They need the command
 to leave when *they* decide, and the screen to answer then. That is the whole mode.
@@ -93,9 +93,9 @@ with a line saying why, rather than removing it. On a private tuple the user cho
   the link: the driver keeps polling and the session keeps its acks, because a frozen view is a
   view and not a disconnected terminal.
 - **Typing is echoed locally** (see "The local echo" below) and the bar says what is waiting and
-  how stale the view is. `12 characters and 1 key, about 2
+  how stale the view is. `12 characters and 1 key, ≈2
   records · view 3 behind`. The record count is the number the user cannot otherwise see and the
-  one that matters: an `Input` record carries 96 bytes and the hour has about 58.
+  one that matters: an `Input` record carries 96 bytes and the hour has ≈58.
 - **A wait nobody answers says so, without cancelling the wait.** Twenty seconds after a sync with
   no screen, the source draws the newest held screen and says `no answer yet: the link may be busy
   or down`. The deadline is a statement, not a cancellation: on a congested channel — the case this

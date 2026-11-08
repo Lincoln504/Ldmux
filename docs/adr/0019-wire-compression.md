@@ -135,7 +135,7 @@ already below any phone RTT, so the interval was not changed.
   dependency rule excludes), and per-client version matching. permessage-deflate
   is negotiated by the transport the clients already use, and OkHttp, URLSession and
   browsers offer it with no code change. Streaming zstd does compress better (Discord
-  reported about 40% less client bandwidth moving its gateway from streaming zlib
+  reported ≈40% less client bandwidth moving its gateway from streaming zlib
   to streaming zstd, a figure from their write-up, not measured here), and it is
   the upgrade path if deflate's ratio is ever the bottleneck.
 - **Stateless per-message compression** (`*_no_context_takeover`). Supported when

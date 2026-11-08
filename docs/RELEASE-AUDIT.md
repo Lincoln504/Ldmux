@@ -510,7 +510,7 @@ None of these are defects. Each is a decision that changes what ships.
 4. Whether the mesh link carries a heartbeat while a phone is attached. Today it does not, so a
    phone that vanishes without a `Detach` keeps its shell claim until the link is rebuilt or
    the daemon restarts, and the phone cannot tell a dead host from a quiet one. A record every
-   five minutes costs about 12 of the hour's 255 records at 500 kHz/SF7 and about 4 % of the
+   five minutes costs ≈12 of the hour's 255 records at 500 kHz/SF7 and ≈4 % of the
    budget at 62.5 kHz. Open because it trades an invariant ("an idle screen costs nothing")
    against a liveness guarantee.
 

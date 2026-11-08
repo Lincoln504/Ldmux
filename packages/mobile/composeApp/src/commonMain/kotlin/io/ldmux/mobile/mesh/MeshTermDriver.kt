@@ -608,7 +608,7 @@ class MeshTermDriver(
             _view.value = MeshTermView.ProfileMissing
             // Nothing named: attach with an empty selector first. The host takes the one shell if
             // there is exactly one (the common case, and no extra record on a link that allows
-            // about 58 an hour), answers Closed(NOT_FOUND) for none and Closed(AMBIGUOUS) for
+            // ≈58 an hour), answers Closed(NOT_FOUND) for none and Closed(AMBIGUOUS) for
             // several, and only then does the driver ask which (below). It never guesses an id.
             pick = if (selector.isEmpty()) Pick.Probing else Pick.Attached
             namedAttach = selector.isNotEmpty()
@@ -792,7 +792,7 @@ class MeshTermDriver(
         if (requestedFit == key) return
         // Nothing has been asked for on this connection and the host already fits: the first
         // `Profile` after an attach usually reports the size the pty kept from the previous
-        // client. Asking anyway would spend two records on a link that allows about 58 an hour.
+        // client. Asking anyway would spend two records on a link that allows ≈58 an hour.
         // Only the *first* time, though — after a request, the reported size is an answer to it
         // and must not be read as "already right".
         if (requestedFit == null && profile.cols == cols && profile.rows == rows) return
@@ -930,7 +930,7 @@ class MeshTermDriver(
         if (session == null || terminalView != null || pick != Pick.Attached) return@withLock
         // **A list already in flight is not asked for again.** The screen asks whenever it is
         // showing the list and has no entries, which is once per frame until the answer lands;
-        // without this guard that is a record per frame on a link that allows about 58 an hour.
+        // without this guard that is a record per frame on a link that allows ≈58 an hour.
         if (listingForHeader) return@withLock
         listingForHeader = true; pages = ArrayList()
         queue(TermMessage.ListRequest); pump(); publish()

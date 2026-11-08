@@ -61,7 +61,7 @@ const CARRIER_TIMEOUT: Duration = Duration::from_secs(10);
 /// up this loop would sit on a port that never spoke again, with the status reading `established`
 /// and the phone's screen frozen — indefinitely, because nothing in this loop ever concluded
 /// anything from silence. The ARQ's own ladder is the first line (it fails a record after five
-/// attempts over about a minute); this is the backstop for a carriage that stops delivering
+/// attempts over ≈1 min); this is the backstop for a carriage that stops delivering
 /// *anything*, including the answers the ladder is waiting for.
 const CARRIER_SILENCE: Duration = Duration::from_secs(75);
 use ldmux_mesh::error::MeshError;

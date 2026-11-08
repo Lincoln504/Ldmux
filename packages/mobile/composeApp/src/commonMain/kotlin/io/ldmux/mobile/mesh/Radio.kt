@@ -93,7 +93,7 @@ data class RadioPreset(
      * Path-hash width in bytes: 1, 2 or 3. The firmware mode is this minus one.
      *
      * **Two is the default**, not the firmware's one. A one-byte hash has 254 usable values and
-     * collides at about 20 co-channel repeaters (a coin flip); two bytes have 65 536 and hold to a
+     * collides at ≈20 co-channel repeaters (a coin flip); two bytes have 65 536 and hold to a
      * few hundred. The cost is the hop ceiling, 32 instead of 63, which is above every regional path
      * length measured — and a collision is not cosmetic: two repeaters sharing a prefix both forward
      * a direct message meant for one of them.
@@ -290,7 +290,7 @@ fun regionOfPreset(preset: RadioPreset): RadioRegion {
  *    Spreading factors are only *quasi*-orthogonal — measured rejection between different SFs is
  *    about −8 to −25 dB depending on the pair and is worst for a low-SF victim, so changing SF does
  *    not remove the other network, it changes which of you loses.
- *  - **SF is the range and airtime lever.** Each step buys about 2.5 dB of sensitivity for *twice*
+ *  - **SF is the range and airtime lever.** Each step buys ≈2.5 dB of sensitivity for *twice*
  *    the airtime and twice the energy, and its symbol time decides whether low-data-rate
  *    optimisation is mandatory. Drawing it at random makes a link whose range and speed change on
  *    every press, for no gain the operator can see.

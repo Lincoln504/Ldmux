@@ -91,7 +91,7 @@ import io.ldmux.mobile.NoticeLine
 /**
  * How long a sync waits for the host's answer before the screen stops waiting and says so.
  *
- * A radio round trip is about a second and a full screen can be several records, so this is
+ * A radio round trip is ≈1 s and a full screen can be several records, so this is
  * generous on purpose; a link that has run out of budget never answers, and that is the case this
  * exists for. Longer than this and a person is sitting on a screen that looks live and is not.
  */
@@ -128,7 +128,7 @@ internal const val CLAIM_RELEASE_MS = 10_000L
 /**
  * How long the measured grid must stop moving before it is sent to the host.
  *
- * Long enough to outlast the keyboard animation (about 200 ms on the devices measured) and short
+ * Long enough to outlast the keyboard animation (≈200 ms on the devices measured) and short
  * enough that a rotation does not feel delayed. The cost of not waiting is a spurious `Resize`
  * record — which in manual-sync mode is a sync the user paid for — and a shell that starts at the
  * keyboard-down height and is then fitted to the real one.
@@ -167,7 +167,7 @@ internal const val MESH_FAILURE_GRACE_MS = 30_000L
  * When live mode says the link is quiet, and how often it asks.
  *
  * Ten seconds is half the driver's twenty-second verdict: long enough that a record's own round
- * trip (about a second at this spreading factor, plus a retransmission ladder starting at two
+ * trip (≈1 s at this spreading factor, plus a retransmission ladder starting at two
  * seconds) never trips it, short enough that a screen which has silently stopped carrying is not
  * left looking live for the whole twenty. Only asked while something is owed, so an idle shell
  * pays nothing; the poll is a local read, not a transmission.

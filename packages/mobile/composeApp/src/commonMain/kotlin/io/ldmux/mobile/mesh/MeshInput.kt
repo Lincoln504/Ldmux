@@ -30,7 +30,7 @@ sealed interface MeshOut {
  * this side cannot see. Text and keys stay in the order they were typed, so `ls`, `Enter`, `Up`
  * reaches the shell as that and not as whatever order two queues drain in.
  *
- * The link carries a record in about 600 ms at best and the hourly budget is a few dozen records,
+ * The link carries a record in ≈600 ms at best and the hourly budget is a few dozen records,
  * so a record per keystroke would spend the hour on a sentence. Pieces are at most
  * [MeshTerm.MAX_INPUT] bytes (one record, ADR-0025). When a piece leaves:
  *
@@ -44,7 +44,7 @@ sealed interface MeshOut {
  * inconsistent rather than slow: a pause of a moment sent one character in a frame of its own,
  * while fast typing accumulated for seconds. A tight ceiling bounds how stale the pane can be,
  * and a short idle joins the last few characters into the same frame. The floor is physical —
- * one frame each way is about 48 ms at 500 kHz SF5 — so the point is to be *regular*, not to
+ * one frame each way is ≈48 ms at 500 kHz SF5 — so the point is to be *regular*, not to
  * chase zero.
  *
  * A backspace that meets an ordinary printable character still waiting here removes it instead
@@ -375,8 +375,8 @@ class MeshTerminalHandle(
      * What is waiting, counted: typed characters, named keys, and the records it will cost.
      *
      * The record count is the number the user cannot otherwise see and the one that matters on
-     * this link: an `Input` record carries [MeshTerm.MAX_INPUT] bytes and the hour has about 58
-     * records, so "12 characters" and "12 characters, 1 key, about 2 records" are different
+     * this link: an `Input` record carries [MeshTerm.MAX_INPUT] bytes and the hour has ≈58
+     * records, so "12 characters" and "12 characters, 1 key, ≈2 records" are different
      * promises. Counted as the driver will send it, not as bytes divided by a hopeful number.
      */
     var heldSummary: String by mutableStateOf("")
@@ -469,7 +469,7 @@ class MeshTerminalHandle(
             if (chars > 0) add(if (chars == 1) "1 character" else "$chars characters")
             if (keys > 0) add(if (keys == 1) "1 key" else "$keys keys")
         }
-        return parts.joinToString(" and ") + ", " + if (records == 1) "1 record" else "about $records records"
+        return parts.joinToString(" and ") + ", " + if (records == 1) "1 record" else "≈$records records"
     }
 
     /**
@@ -477,7 +477,7 @@ class MeshTerminalHandle(
      *
      * Not `(size + 95) / 96`: [peek] backs off to a character boundary, so a 96-byte run ending in
      * the middle of a character becomes a 95-byte piece and a second piece — two records where the
-     * division promises one. "About 2 records" being 3 is the kind of promise this app would rather
+     * division promises one. "≈2 records" being 3 is the kind of promise this app would rather
      * keep, and the count is the one number the user cannot otherwise see.
      */
     private fun recordsFor(bytes: ByteArray): Int {

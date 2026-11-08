@@ -635,7 +635,7 @@ where
     // speak on a schedule. The mobile client states this once for both of its
     // sockets and documents the failure of stating it twice; this window is the
     // second place, and it said nothing, so the daemon closed it and the window
-    // exited about 20 s after it opened.
+    // exited ≈20 s after it opened.
     let mut ping = tokio::time::interval(std::time::Duration::from_millis(ping_ms.max(1)));
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ping.tick().await; // the first tick is immediate; the first ping is not
@@ -946,7 +946,7 @@ where
                 }
             }
             // Speak on a schedule or the daemon reaps the socket and this window
-            // exits about 20 s after it opens.
+            // exits ≈20 s after it opens.
             _ = ping.tick() => {
                 if missed_pongs >= MAX_MISSED_PONGS {
                     return Ok(Outcome::Lost);

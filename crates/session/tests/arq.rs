@@ -349,7 +349,7 @@ fn sequence_numbers_wrap_without_losing_order() {
 
 #[test]
 fn a_lossy_reordering_link_still_delivers_everything_once_in_order() {
-    // A deterministic pseudo-random link: drops about a third, delays by one tick sometimes.
+    // A deterministic pseudo-random link: drops ≈1/3, delays by one tick sometimes.
     let (mut a, mut b) = (
         Arq::new(Config {
             max_attempts: 200,
@@ -522,7 +522,7 @@ fn two_heartbeats_are_different_packets() {
 }
 
 /// A path that genuinely takes longer than the configured first timeout must not be retried at
-/// that timeout. Two hops at 500 kHz SF8 answer in about 3.7 s, which is above the 1 s this
+/// that timeout. Two hops at 500 kHz SF8 answer in ≈3.7 s, which is above the 1 s this
 /// config starts with, and the old code put a duplicate record on the air for every expiry.
 #[test]
 fn a_slow_ack_raises_the_retry_floor_to_the_measured_round_trip() {

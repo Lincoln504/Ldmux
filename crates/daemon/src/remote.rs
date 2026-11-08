@@ -275,7 +275,7 @@ pub struct RemoteConfig {
     /// A field rather than only the const so the keep-alive contract can be
     /// tested in milliseconds. It is a real contract: a client that does not
     /// speak on a schedule is closed, and the desktop attach client did not, so
-    /// its window exited about 20 s after it opened.
+    /// its window exited ≈20 s after it opened.
     pub idle_ms: u64,
     /// How long one socket write may take before the peer is declared gone.
     pub send_timeout_ms: u64,

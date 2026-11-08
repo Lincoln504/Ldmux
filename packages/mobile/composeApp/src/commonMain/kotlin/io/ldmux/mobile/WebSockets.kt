@@ -11,7 +11,7 @@ import io.ktor.websocket.WebSocketDeflateExtension
  * written twice, and nothing else — which is how they could drift. They cannot now.
  *
  * **Compression is the point of this function.** The daemon compresses a message only
- * at 96 bytes or more (`crates/daemon/src/ws.rs`, ADR-0019), because a keystroke echo is about 9 bytes and deflate's own
+ * at 96 bytes or more (`crates/daemon/src/ws.rs`, ADR-0019), because a keystroke echo is ≈9 bytes and deflate's own
  * framing would make it bigger. Repetition in terminal output, on the other hand, is
  * enormous — `ls -laR` was measured at 421 KB, 7.1x smaller deflated — and it recurs *across* messages, which
  * is why context takeover is left on: a terminal's output is a stream, and a stream

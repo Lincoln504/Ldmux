@@ -51,7 +51,7 @@ pub const MIN_PANE_ROWS: u64 = 5;
 /// draws as row 0, row 300 as row 44, so both handles jump to the top of the
 /// screen and the highlighted range is wrong. Nothing reports it, because nothing
 /// is inconsistent — the number is simply truncated. No real terminal is 255 rows
-/// tall (the phone reaches roughly 100 at its smallest font).
+/// tall (the phone reaches ≈100 at its smallest font).
 /// `packages/mobile/test/architecture.test.ts` asserts the two ends agree, because
 /// this is a number that only makes sense next to the format that reads it.
 pub const MAX_PANE_ROWS: u64 = 255;

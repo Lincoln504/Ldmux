@@ -178,7 +178,7 @@ has to carry.
 
 `Commit.flags`: bit 0 alternate screen, bit 1 the shell has exited, bit 2 **idle** — the pane has
 stopped changing and this commit carries no rows. The idle bit is additive (unknown bits are
-ignored), it is sent once per burst about 700 ms after the last row, and it exists so the phone
+ignored), it is sent once per burst ≈700 ms after the last row, and it exists so the phone
 can end its wait for an answer at the moment the answer ends instead of on a quiet timer. A host
 that never sends it costs the phone one record of latency, not correctness.
 
@@ -304,7 +304,7 @@ ADR-0010 is the decision. The practice:
 | What fails | What happens |
 |---|---|
 | a handshake gets no answer | it is asked again with fresh keys at 8, 16 and 32 seconds, then the connection is rebuilt |
-| a record goes unanswered | silence is measured from the last record the link carried in either direction, so an idle shell cannot look dead. On the phone, 20 s with something outstanding ends the session (`SILENCE_FAILURE_MS`); on the host the ARQ's own ladder fails at about 62 s and the carriage-silence bound is 75 s |
+| a record goes unanswered | silence is measured from the last record the link carried in either direction, so an idle shell cannot look dead. On the phone, 20 s with something outstanding ends the session (`SILENCE_FAILURE_MS`); on the host the ARQ's own ladder fails at ≈62 s and the carriage-silence bound is 75 s |
 | the carriage stops carrying anything | 75 seconds with a record outstanding ends the connection, so `supervise` can build another. The ARQ's own ladder usually fires first |
 | the host restarts | the keeper keeps the shells, the phone reconnects and re-attaches, and the desk window is told when a shell moves |
 | the daemon restarts | the phone's session ends and its retry ladder rebuilds it. A shell the phone created survives on the host |
@@ -335,7 +335,7 @@ by the host radio, by the app before it retunes, and by every budget below.
 - The bridge coalesces screen updates and lets input echo through ahead of them.
 - **The host advertises what it is.** A flooded self-advert goes out when the link opens and every
   `LDMUX_MESH_ADVERT_SECS` (default five minutes), because a peer behind a repeater cannot learn a
-  route to this radio any other way. An advert is one record of about 130 bytes: roughly 0.1 % of a
+  route to this radio any other way. An advert is one record of ≈130 bytes: ≈0.1 % of a
   1 % allowance at the deployed tuple. Five minutes rather than half an hour because the interval
   is the worst case for a phone that has moved: a route heard an hour ago belongs to wherever the
   phone was an hour ago. **An advert is charged to the meter too.** It was unmetered, so the hour's

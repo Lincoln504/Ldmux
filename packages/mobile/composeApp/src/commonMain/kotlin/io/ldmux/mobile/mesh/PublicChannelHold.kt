@@ -37,7 +37,7 @@ internal class PublicChannelHold {
          * **Four seconds, because that is above this link's cadence, not one round trip.** An answer
          * arrives as several records and on the shared channel the gap between two of them is
          * seconds, not milliseconds: measured 2026-11-06, a `echo one` answered by three screens in
-         * about 5 s left two of them held with a 1.2 s window, so the user pressed `show` to see the
+         * ≈5 s left two of them held with a 1.2 s window, so the user pressed `show` to see the
          * output of a command that had already run. Long enough to cover a record, short enough that
          * the view freezes again without the user noticing a delay.
          */

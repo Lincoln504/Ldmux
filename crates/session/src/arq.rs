@@ -122,7 +122,7 @@ impl Config {
         // numbers (3 s ack delay, 20 s first retry, 300 s cap, window 4) were chosen when a
         // reply taking tens of seconds was normal; on a private 500 kHz channel that is a
         // 70 ms frame, and they were the whole of the delay a keystroke saw. Air is not the
-        // constraint here: one echo is two records, about 140 ms.
+        // constraint here: one echo is two records, ≈140 ms.
         //
         //  - `ack_delay_ms` still lets an owed ack ride on outgoing data first; it only bounds
         //    how long a *pure* ack waits, and at 150 ms that frame is not worth avoiding.
@@ -271,7 +271,7 @@ pub struct Stats {
 ///
 /// A refusal is almost always the firmware's transmit table being full, which happens when records
 /// are handed over faster than the radio can put them on the air. meshcore-sar measured that wall at
-/// about 350 ms per fragment and paces for it, and that is the number here: the retry *is* the pace,
+/// ≈350 ms per fragment and paces for it, and that is the number here: the retry *is* the pace,
 /// learned from the radio's own answer instead of guessed from a preset. It is deliberately far
 /// shorter than the interval for a packet that really went out and went unanswered — a refusal says
 /// "not yet", not "lost".
@@ -490,7 +490,7 @@ impl Arq {
     /// estimator nothing and is skipped.
     ///
     /// The estimate matters because a fixed first timeout is wrong in both directions on a mesh:
-    /// at 500 kHz SF8 a record is about 138 ms on air, and the firmware's own direct timeout is
+    /// at 500 kHz SF8 a record is ≈138 ms on air, and the firmware's own direct timeout is
     /// `500 + ((airtime * 6 + 250) * (hops + 1))`, so two hops take 3.7 s and three hops 4.8 s,
     /// while a direct neighbour answers in well under a second.
     fn apply_ack(&mut self, ack: u16, now_ms: u64) {
@@ -716,7 +716,7 @@ impl Arq {
         //     carrier it is not: a record is minutes of budget, and an idle session has nothing to
         //     say that anyone is waiting for. Silence is how each end decides the other
         //     is gone, so an idle session that says nothing is indistinguishable from a dead one;
-        //     a pure ack costs about 22 bytes and carries the receive state.
+        //     a pure ack costs ≈22 bytes and carries the receive state.
         if self.cfg.heartbeat_ms > 0
             && out.is_empty()
             && self

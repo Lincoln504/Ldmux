@@ -138,7 +138,7 @@ async fn workloads(rig: &Rig, offer: Option<&str>) -> Vec<(&'static str, Cost)> 
         // 2000 lines from a bounded tree, not 8000 from `/usr/lib`. The old workload walked
         // a tree that is large and growing, and on a loaded machine the marker never arrived
         // inside the wait: this binary took 318 s against a 300 s ceiling while the same
-        // measurement alone takes about 20 s. What the workload is for is deflate on
+        // measurement alone takes ≈20 s. What the workload is for is deflate on
         // repetitive listing text, and 2000 lines of it measures the same thing.
         "ls -laR (2000 lines)",
         run(

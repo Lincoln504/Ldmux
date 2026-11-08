@@ -145,7 +145,7 @@ rebuild, because only those are asking for a clean parser state.
 
 The render state exposes `GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION` returning
 `{size, start_x, end_x}` per row, and its header advises querying it **once per row**
-rather than once per cell — about 40 calls on a phone's grid.
+rather than once per cell — ≈40 calls on a phone's grid.
 
 The frame's flags field is read as a full 16 bits and the shim sets bits 0-8 only. So
 `FLAG_SELECTED = 1 shl 9` is free: **no header change, no format version bump, no change
@@ -245,7 +245,7 @@ public is the art:
 Three things about using them were wrong first, and each is worth recording:
 
 1. **The aspect ratio is the asset's.** They were drawn at a fixed 48x32 dp, which
-   squashed a roughly 2:1 teardrop into 3:2 and read as a fat blob. The height is now
+   squashed a ≈2:1 teardrop into 3:2 and read as a fat blob. The height is now
    chosen (24 dp, the framework's own design height) and the width is derived from the
    drawable.
 2. **A modern theme has no separate left and right asset.** It ships one teardrop and

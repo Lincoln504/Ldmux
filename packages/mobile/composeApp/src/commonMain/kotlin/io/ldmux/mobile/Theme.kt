@@ -43,7 +43,7 @@ val Dim = Color(0xFFA0A0A0)
  * The quiet end of the palette, and it is a **colour, not [Dim] with an alpha**.
  *
  * Explanatory lines and field placeholders used `Dim.copy(alpha = 0.6f)` and `0.7f`,
- * which over `Bg` works out to about 2.8:1 and 3.6:1 — under the 4.5:1 that body text
+ * which over `Bg` works out to ≈2.8:1 and 3.6:1 — under the 4.5:1 that body text
  * needs, on a screen that is otherwise high contrast. A faded colour is also not a
  * value anyone can look up.
  *
@@ -137,7 +137,7 @@ internal val LdmuxColors = darkColorScheme(
  * lines of text, and the arithmetic says why. Material's `LocalTextStyle` is
  * `bodyLarge`, whose line height is **24sp** -- and a `Text` that asks for `fontSize =
  * 11.sp` overrides the size and not the line height. So an 11sp subtitle was reserving
- * 24sp of vertical space, plus Android's font padding of about 4dp per line, which
+ * 24sp of vertical space, plus Android's font padding of ≈4dp per line, which
  * comes to 56dp for two lines before the row's own padding adds anything.
  *
  * That is the whole of it, and no control-height setting could have fixed it. A minimum
@@ -166,7 +166,7 @@ internal val MinTouch = 48.dp
  * Portrait's header sits above two rows of keys that are themselves above the
  * keyboard, so it is the only chrome in the app stacked three deep. It is also
  * navigation rather than typing, and it is wide rather than tall: each arrow is
- * about 44dp across, so the target stays comfortable while the row stops competing
+ * ≈44dp across, so the target stays comfortable while the row stops competing
  * with the keys below it. Landscape keeps [MinTouch], where there is room and the
  * same row sits at the top of a panel with nothing above it.
  */

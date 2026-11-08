@@ -442,7 +442,7 @@ class AndroidRadioLink(
             if (s.isIdle()) s.requestBatteryStorage()
             // **Two bytes per path hop, unless this radio was deliberately set otherwise.** The
             // firmware ships at mode 0 (one byte), indistinguishable from "never configured": 254
-            // usable values collide at around 20 co-channel repeaters, and a collision makes two
+            // usable values collide at ≈20 co-channel repeaters, and a collision makes two
             // repeaters forward a direct message meant for one of them. Two bytes still allows 32
             // hops, above every observed regional path length. Only mode 0 is upgraded, once per
             // bind; a radio an operator set to three bytes keeps it.

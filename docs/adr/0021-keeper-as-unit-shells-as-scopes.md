@@ -66,7 +66,7 @@ and every process any shell ever daemonized (a qemu VM, php servers) lived in
   `systemd-run.. || exec shell` fallback can start the shell twice, and no fallback
   can start it zero times. Asking for the scope from the parent, on a held child, has
   no such ambiguity.
-- **sd_bus (libsystemd) instead of `busctl`.** Avoids an exec per shell (about 20 ms) but
+- **sd_bus (libsystemd) instead of `busctl`.** Avoids an exec per shell (≈20 ms) but
   adds a C dependency to a workspace that allows none, and an unaccounted pinned bus
   client in a long-lived process. `busctl` ships with systemd.
 

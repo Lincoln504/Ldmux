@@ -70,7 +70,7 @@ const MAX_PATH_SIZE: usize = 64;
 /// **Why minutes and not half an hour.** The interval was 1800 s, which is fine for a peer that
 /// stays in one place and wrong for a phone: a route heard an hour ago belongs to wherever the
 /// phone was an hour ago, and the first thing a moved phone does is fail on it. One advert is
-/// about 0.3 s of air at 62.5 kHz SF7, so five minutes costs roughly a tenth of a percent of a
+/// ≈0.3 s of air at 62.5 kHz SF7, so five minutes costs ≈1/10 of a percent of a
 /// 1 % allowance, and MeshCore treats adverts as unacknowledged broadcasts, so this is the only
 /// lever there is. `LDMUX_MESH_ADVERT_SECS=0` turns them off for an operator who does not want the
 /// node visible on the mesh at all.
@@ -119,8 +119,8 @@ const ROUTE_REASK_FLOOR: Duration = Duration::from_secs(2);
 
 /// The least time between two adverts triggered by a route hint.
 ///
-/// A hint is 36 bytes and an advert is about 0.3 s of air at 62.5 kHz, so a peer that repeats hints
-/// is an amplifier. Three minutes caps that at twenty adverts an hour (six seconds, about a sixth of
+/// A hint is 36 bytes and an advert is ≈0.3 s of air at 62.5 kHz, so a peer that repeats hints
+/// is an amplifier. Three minutes caps that at twenty adverts an hour (six seconds, ≈1/6 of
 /// a 1 % allowance) and only while this radio has no route to the peer at all, which is the moment
 /// the phone actually needs to hear us.
 const HINT_ADVERT_FLOOR: Duration = Duration::from_secs(180);
@@ -179,7 +179,7 @@ fn refresh_peer_route<L: ByteLink>(
 /// The path-hash width ldmux configures a radio for, as the firmware's mode index: 1 = two bytes.
 ///
 /// Two bytes is the 2026 community default for companions and the maintainer's stated minimum for
-/// new presets; one byte collides at about 20 co-channel repeaters, and the cost of the wider hash
+/// new presets; one byte collides at ≈20 co-channel repeaters, and the cost of the wider hash
 /// (32 hops instead of 63) is above every observed regional path length. Named here rather than
 /// written as a literal because three places have to agree on it: this default, the phone's presets,
 /// and the app's own "path N B" readout.
@@ -449,8 +449,8 @@ fn prepare(
     let device_info = companion.device_query().map_err(session_error)?;
     // **Two bytes per hop, the community default, unless this radio already says otherwise.**
     // The firmware ships at mode 0 (one byte), which the 2026 MeshCore guidance is explicit about
-    // not recommending for new deployments: 254 usable one-byte IDs collide at around 20 co-channel
-    // repeaters (a coin flip), 65 536 two-byte IDs at around 300, and a collision is not cosmetic —
+    // not recommending for new deployments: 254 usable one-byte IDs collide at ≈20 co-channel
+    // repeaters (a coin flip), 65 536 two-byte IDs at ≈300, and a collision is not cosmetic —
     // two repeaters with one prefix both forward a direct message meant for one of them. Two bytes
     // also still allows 32 hops, against observed regional paths in the mid-teens.
     //
@@ -1058,7 +1058,7 @@ fn budget_per_hour(airtime_ms: f64) -> u8 {
         return u8::MAX;
     }
     // The contract carries the budget in one byte, so anything above 255 is
-    // reported as 255. On this bench's preset the true figure is about 261 a hour
+    // reported as 255. On this bench's preset the true figure is ≈261 an hour
     // and the cap is what the wire can say, not what the policy allows.
     let n = (AIRTIME_BUDGET_MS / airtime_ms).floor();
     u8::try_from(n as u64).unwrap_or(u8::MAX).max(1)
@@ -1249,7 +1249,7 @@ mod tests {
 
     #[test]
     fn the_budget_comes_from_the_preset_not_a_constant() {
-        // 500 kHz / SF8: about 127 ms for 172 bytes, so a one-percent hour is about 283 records
+        // 500 kHz / SF8: ≈127 ms for 172 bytes, so a one-percent hour is ≈283 records
         // and the one-byte wire field reports that as its 255 ceiling. The faster deployed tuple
         // (SF7, 69 ms) would allow 520 and is also capped by the field, not by the policy.
         let fast = budget_per_hour(137.9);

@@ -22,7 +22,7 @@ import androidx.compose.ui.unit.IntSize
  * Three things here are deliberate, and each was wrong first:
  *
  * 1. **The aspect ratio is the asset's, not ours.** These were drawn at a fixed 48x32 dp,
- *    which squashed a roughly 2:1 teardrop into 3:2 and made it read as a fat blob. The
+ *    which squashed a ≈2:1 teardrop into 3:2 and made it read as a fat blob. The
  *    height is chosen and the width is derived from the drawable, so the shape is the
  *    framework's whatever the theme supplies.
  *

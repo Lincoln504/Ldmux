@@ -135,7 +135,7 @@ class MeshStandaloneTest {
         assertEquals(5, RadioPreset.BENCH.codingRate)
         assertEquals(22, RadioPreset.BENCH.txPowerDbm)
         // **Two bytes is ldmux's default, not the firmware's one.** One byte has 254 usable values
-        // and collides at about 20 co-channel repeaters; two has 65 536 and still allows 32 hops.
+        // and collides at ≈20 co-channel repeaters; two has 65 536 and still allows 32 hops.
         assertEquals(2, RadioPreset.BENCH.pathHashSize)
         assertEquals(3, RadioPreset.CANADA.pathHashSize)
         assertEquals(2, RadioPreset.USA.pathHashSize)

@@ -162,7 +162,7 @@ async fn attach_client_streams_and_types_against_a_daemon() {
 /// The daemon closes a WebSocket that has said nothing for `idle_ms`
 /// (`WS_IDLE_MS`, 20 s). The mobile client pings every 4 s; the desktop attach
 /// client sent nothing at all, so the daemon reaped it and the window exited
-/// about 20 s after it opened — reproducibly, on the live box.
+/// ≈20 s after it opened — reproducibly, on the live box.
 ///
 /// The deadline is injected short and the ping short with it, so the contract is
 /// proved in milliseconds: five deadlines pass with the client on the other end

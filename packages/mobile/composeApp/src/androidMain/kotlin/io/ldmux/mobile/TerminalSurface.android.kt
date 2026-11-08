@@ -1059,7 +1059,7 @@ private const val FLING_MIN_VELOCITY_PX_S = 50f
 
 /**
  * Per-second exponential decay rate for the fling. Chosen so a typical fast
- * flick (roughly 4000–6000 px/s off `VelocityTracker`, measured against Android's
+ * flick (≈4000–6000 px/s off `VelocityTracker`, measured against Android's
  * own fling defaults) decays below [FLING_MIN_VELOCITY_PX_S] in a little under a
  * second — present, but not a scroll that hunts for the bottom of the shell for
  * three seconds after one flick.

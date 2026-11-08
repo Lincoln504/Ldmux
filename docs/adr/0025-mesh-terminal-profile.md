@@ -59,9 +59,9 @@ A patch is `y u8 | flags u8 (bit0 append) | n u8 | n UTF-8 bytes`; a row over 12
 ## Arithmetic
 
 - Every host→phone message encodes to at most **133 bytes** (`MAX_MESSAGE` = 1 + 2 + 130), so each fits one 144-byte record payload. Test: `a_tall_screen_fits_the_record_rules` and `every_host_message_is_within_the_bound_for_any_row_content`.
-- One changed row of 40 characters plus a cursor move: Rows (3 + 3 + 40 + 3 header) + Commit (7) is about 60 bytes, **one record**. At 58 records an hour that is at most 58 such updates, and fewer once acknowledgements that cannot ride on data are counted. Plan for about **one update a minute**.
+- One changed row of 40 characters plus a cursor move: Rows (3 + 3 + 40 + 3 header) + Commit (7) is ≈60 bytes, **one record**. At 58 records an hour that is at most 58 such updates, and fewer once acknowledgements that cannot ride on data are counted. Plan for about **one update a minute**.
 - A mostly empty 80x24 screen with a four-line prompt: 2 records or fewer (`an_ordinary_screen_costs_a_handful_of_records`).
-- A completely full 200x100 screen is about 20,600 bytes, 150 records. **That does not fit an hour of airtime and no encoding makes it fit.** The profile does not hide this: the governor stalls it and `mesh.status` shows the stall. Full-screen programs are therefore poor on this link by physics, and the `ALTERNATE` flag tells the phone it is looking at one.
+- A completely full 200x100 screen is ≈20,600 bytes, 150 records. **That does not fit an hour of airtime and no encoding makes it fit.** The profile does not hide this: the governor stalls it and `mesh.status` shows the stall. Full-screen programs are therefore poor on this link by physics, and the `ALTERNATE` flag tells the phone it is looking at one.
 
 ## Update, 2026-10-29: List and Sessions (choosing a shell over the link)
 
@@ -76,7 +76,7 @@ The profile could not say which shells exist, so a host running more than one an
 - A page is packed to 130 bytes so it fits one record; a longer list is several `Sessions` messages and only the last has `last` set. **No shells is one empty page with `last` set**, so "none" is an answer and not silence.
 - The host attaches nothing on `List`. The phone chooses, and `Attach(id)` with an id from the list is unambiguous.
 - Pinned in `mesh-term-vectors.json` (`messages`, `limits`, and `sessionPages`, a 7-shell list spanning records); both codecs are held to it.
-- **Phone behaviour, and a deliberate deviation from "request the list when the selector is empty".** The driver still sends `Attach("")` first. The host takes the one shell when there is exactly one (the common case) and costs no extra record on a link that allows about 58 an hour; `Closed(NOT_FOUND)` becomes the `NoShells` state; `Closed(AMBIGUOUS)` is the cue to send `List`. One shell attaches, several show a picker (`Choose`), none is stated. `choose(id)` accepts only an id the host listed. A shell named explicitly that is ambiguous still ends visibly with no picker.
+- **Phone behaviour, and a deliberate deviation from "request the list when the selector is empty".** The driver still sends `Attach("")` first. The host takes the one shell when there is exactly one (the common case) and costs no extra record on a link that allows ≈58 an hour; `Closed(NOT_FOUND)` becomes the `NoShells` state; `Closed(AMBIGUOUS)` is the cue to send `List`. One shell attaches, several show a picker (`Choose`), none is stated. `choose(id)` accepts only an id the host listed. A shell named explicitly that is ambiguous still ends visibly with no picker.
 
 ## Update, 2026-10-30: profile version 2, `Key` and a named shell
 

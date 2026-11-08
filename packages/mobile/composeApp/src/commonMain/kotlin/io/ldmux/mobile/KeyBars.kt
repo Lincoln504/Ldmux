@@ -221,7 +221,7 @@ internal fun NavArrow(glyph: String, enabled: Boolean, dense: Boolean = false, o
         Modifier
             .clip(RadiusMedium)
             // The most-repeated action there is, and it was the smallest target in the
-            // app at about 28dp. A control you press constantly is the last one that
+            // app at ≈28dp. A control you press constantly is the last one that
             // should be hard to hit.
             .heightIn(min = if (dense) LocalTouch.current.dense else LocalTouch.current.min)
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick)

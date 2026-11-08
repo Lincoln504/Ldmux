@@ -11,7 +11,7 @@
 //!
 //! The panic needs the writer to have gone quiet before that next message, so each
 //! attempt drains the attach and then pings, as a window does. Measured against the
-//! parent of the fix: about 40% of attempts killed the connection; with the fix, none.
+//! parent of the fix: ≈40% of attempts killed the connection; with the fix, none.
 
 mod common;
 

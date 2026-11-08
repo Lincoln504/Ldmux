@@ -280,7 +280,7 @@ internal fun MiniTextButton(
         // stays the app's own: a button that is wider than its label is a button that
         // lines up with the one beside it.
         // Square-ish, not just short: the height floor was set and no width floor was, so a
-        // one-glyph `-`/`+` measured about 30x36 dp even in the comfortable density — under
+        // one-glyph `-`/`+` measured ≈30x36 dp even in the comfortable density — under
         // the 48x48 dp every platform guidance asks for, on a control whose whole job is to be
         // hit. `widthIn` uses the same floor as the height so the two cannot drift apart.
         // **A verb on a row is a button, so it is drawn as one.** These were bare accent text

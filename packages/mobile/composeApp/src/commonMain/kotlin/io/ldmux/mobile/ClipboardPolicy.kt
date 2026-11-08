@@ -8,7 +8,7 @@ package io.ldmux.mobile
  * on the JVM and identical on iOS.
  *
  * - **Capped.** Android hands a clip to the system over Binder, whose transaction
- *   buffer is about 1 MB shared by everything in flight; a program that copies a few
+ *   buffer is ≈1 MB shared by everything in flight; a program that copies a few
  *   megabytes throws `TransactionTooLargeException` from `setPrimaryClip`, and a
  *   multi-megabyte string on the main thread is a jank before it is an error. Above
  *   the cap the request is **refused whole** rather than truncated: a clipboard that
