@@ -88,12 +88,17 @@ class RadioTupleTest {
     /// A mismatch in power or path width does not stop two radios hearing each other, so it is not
     /// a mismatch this row reports.
     @Test
-    fun `two tuples match on the four numbers the firmware validates`() {
+    fun `two tuples match on the four numbers and the path width, not on power`() {
         val a = RadioPreset(910.525, 500.0, 7, 5, 22, 1)
-        assertTrue(sameTuple(a, a.copy(txPowerDbm = 14, pathHashSize = 3)))
+        // Power is the radio's own business (a regional limit), so it is not part of the channel.
+        assertTrue(sameTuple(a, a.copy(txPowerDbm = 14)))
         assertFalse(sameTuple(a, a.copy(frequencyMhz = 914.25)))
         assertFalse(sameTuple(a, a.copy(bandwidthKhz = 62.5)))
         assertFalse(sameTuple(a, a.copy(spreadingFactor = 8)))
         assertFalse(sameTuple(a, a.copy(codingRate = 8)))
+        // **The width is.** A phone on two bytes cannot follow a route a one-byte public repeater
+        // built, so a host of one byte and a phone of two is a mismatch the row must name.
+        assertFalse(sameTuple(a, a.copy(pathHashSize = 2)))
+        assertFalse(sameTuple(a, a.copy(pathHashSize = 3)))
     }
 }

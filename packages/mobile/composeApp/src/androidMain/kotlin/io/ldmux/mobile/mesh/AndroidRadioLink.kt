@@ -644,7 +644,13 @@ class AndroidRadioLink(
         resetLink()
         connect()
         val got = selfInfo.value ?: return false
+        // Null means the radio never answered the read-back: an unknown, not a disagreement.
         val info = readDeviceInfo()
+        if (info == null) {
+            _lastProblem.value = "radio did not answer the read-back · applied anyway"
+        } else {
+            _lastProblem.value = null
+        }
         val widthTaken = !widthWanted || info?.pathHashMode == hashMode
         if (widthWanted && !widthTaken) {
             // Said once, in the row that keeps it: the channel is the host's, the width is this
@@ -656,7 +662,7 @@ class AndroidRadioLink(
             got.spreadingFactor == preset.spreadingFactor &&
             got.codingRate == preset.codingRate &&
             got.txPowerDbm == tx
-        if (!sameRadio && old != null) {
+        if (!sameRadio && info != null && old != null) {
             // Put the radio back on the tuple it had before the failed write.
             // Best effort, then reconnect again so the link is usable even when
             // the radio ignored one field.
@@ -708,7 +714,17 @@ class AndroidRadioLink(
         // decoder still supports, so nothing broke: the SNR simply never arrived, and the V3
         // branch was unreachable. 3 is what the rest of this client already assumes.
         s.deviceQuery(3)
-        return withTimeoutOrNull(DEVICE_INFO_WAIT_MS) { gate.await() } ?: _deviceInfo.value
+        // **A read-back that timed out is not an answer.** It used to fall back to the cached
+        // value, so a slow firmware looked like a refusal: `applyPreset` compared the new width
+        // against a stale one, called it "the radio did not take the tuple", and rolled back a
+        // channel the radio had in fact accepted (measured 2026-11-07). One retry, then null, and
+        // the caller says the radio did not answer instead of pretending to know.
+        withTimeoutOrNull(DEVICE_INFO_WAIT_MS) { gate.await() }?.let { return it }
+        if (session == null) return _deviceInfo.value
+        val again = CompletableDeferred<RadioDeviceInfo>()
+        deviceInfoDone = again
+        s.deviceQuery(3)
+        return withTimeoutOrNull(DEVICE_INFO_WAIT_MS) { again.await() }
     }
 
     /**

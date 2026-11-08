@@ -492,16 +492,21 @@ internal fun RadioPresetPanel(
  * path width gets a word, because `1B` alone reads as a unit with no quantity.
  */
 /**
- * Whether two radios are on the same operating point.
+ * Whether two radios are on the same **channel**.
  *
- * Compare the four numbers the firmware validates and nothing else: power and path width are local
- * choices, and a mismatch in either does not stop two radios hearing each other.
+ * The four numbers the firmware validates, and the path-hash width. The width is not local: a
+ * repeater's hash is one byte on MeshCore's public presets, so a phone on two bytes cannot follow a
+ * route a public repeater built — and comparing only the four numbers hid exactly that, with the
+ * settings row staying silent while the link could not work (measured 2026-11-07: host one byte,
+ * phone two, no warning). Transmit power is still local and still not compared: a phone in Europe
+ * is limited to 14 dBm and that is nobody else's business.
  */
 internal fun sameTuple(a: RadioPreset, b: RadioPreset): Boolean =
     (a.frequencyMhz - b.frequencyMhz).let { kotlin.math.abs(it) < 0.01 } &&
         (a.bandwidthKhz - b.bandwidthKhz).let { kotlin.math.abs(it) < 0.1 } &&
         a.spreadingFactor == b.spreadingFactor &&
-        a.codingRate == b.codingRate
+        a.codingRate == b.codingRate &&
+        a.pathHashSize == b.pathHashSize
 
 internal fun presetLine(p: RadioPreset): String =
     "${p.frequencyMhz} MHz  ${p.bandwidthKhz} kHz  SF${p.spreadingFactor}  CR${p.codingRate}  ${p.txPowerDbm} dBm  path ${p.pathHashSize}B"
