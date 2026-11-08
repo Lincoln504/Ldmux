@@ -1840,10 +1840,25 @@ impl LdmuxDaemon {
                     sf as u8,
                     cr as u8,
                 );
+                // The path width, in bytes, when the caller named one. The public channel is one
+                // byte by the network's own convention; our own channel is two. A number the
+                // firmware cannot hold is refused here rather than sent and refused later.
+                let path_bytes = match params.get("pathBytes").and_then(|v| v.as_u64()) {
+                    None => None,
+                    Some(n) if (1..=3).contains(&n) => Some(n as u8),
+                    Some(n) => return Err(format!("bad_preset: pathBytes is 1, 2 or 3, not {n}")),
+                };
                 let Some(runtime) = crate::mesh::MeshRuntime::global() else {
                     return Err("mesh is disabled: no radio is configured".to_string());
                 };
-                if !runtime.request_preset(want.0, want.1, want.2, want.3) {
+                let want_retune = crate::mesh::Retune {
+                    freq_khz: want.0,
+                    bw_hz: want.1,
+                    sf: want.2,
+                    cr: want.3,
+                    path_bytes,
+                };
+                if !runtime.request_preset(want_retune) {
                     return Err("the mesh link is not accepting requests".to_string());
                 }
                 // Wait for the link task to have applied it, or for the radio to refuse.
@@ -1863,8 +1878,16 @@ impl LdmuxDaemon {
                                 && p[3].as_u64() == Some(u64::from(want.3))
                         })
                         .unwrap_or(false);
-                    if applied {
-                        return Ok(serde_json::json!({ "ok": true, "radioPreset": v["radioPreset"] }));
+                    let width_applied = match path_bytes {
+                        None => true,
+                        Some(b) => v.get("pathHashSize").and_then(|p| p.as_u64()) == Some(u64::from(b)),
+                    };
+                    if applied && width_applied {
+                        return Ok(serde_json::json!({
+                            "ok": true,
+                            "radioPreset": v["radioPreset"],
+                            "pathHashSize": v["pathHashSize"],
+                        }));
                     }
                     if let Some(e) = v.get("lastError").and_then(|e| e.as_str())
                         && !e.is_empty()

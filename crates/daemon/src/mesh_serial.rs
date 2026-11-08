@@ -184,6 +184,11 @@ enum Command {
         cr: u8,
         reply: std::sync::mpsc::Sender<Result<(), String>>,
     },
+    /// Set the path hash width in bytes (1..=3), answered the same way.
+    SetPathWidth {
+        bytes: u8,
+        reply: std::sync::mpsc::Sender<Result<(), String>>,
+    },
 }
 
 /// The radio, seen as a carrier.
@@ -257,6 +262,22 @@ impl Carrier for SerialCarrier {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => Err(MeshError::Unsupported(format!("the radio refused the tuple: {e}"))),
             Err(_) => Err(MeshError::Timeout("the radio did not answer the retune")),
+        }
+    }
+
+    async fn set_path_width(&mut self, bytes: u8) -> Result<(), MeshError> {
+        let (reply, answer) = channel();
+        self.commands
+            .as_ref()
+            .ok_or(MeshError::Closed)?
+            .send(Command::SetPathWidth { bytes, reply })
+            .map_err(|_| MeshError::Closed)?;
+        match answer.recv_timeout(Duration::from_secs(10)) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(MeshError::Unsupported(format!(
+                "the radio refused the path width: {e}"
+            ))),
+            Err(_) => Err(MeshError::Timeout("the radio did not answer the path width")),
         }
     }
 
@@ -543,6 +564,25 @@ fn serve_loop<L: ByteLink>(
                     budget = budget_per_hour(settings.airtime_ms);
                 }
                 let _ = reply.send(result);
+                let _ = events.blocking_send(Ok(Event::Status(status(
+                    &settings, budget, sent,
+                ))));
+            }
+            Ok(Command::SetPathWidth { bytes, reply }) => {
+                // The firmware's mode is zero-based (`0..2` for one to three bytes). The wire and
+                // the CLI speak bytes, because that is the unit the status line prints and the unit
+                // a person compares against a neighbour's radio.
+                let bytes = bytes.clamp(1, 3);
+                let result = match companion.set_path_hash_mode(bytes - 1) {
+                    Ok(()) => {
+                        settings.preset.hash_size = bytes;
+                        Ok(())
+                    }
+                    Err(e) => Err(format!("{e:?}")),
+                };
+                let _ = reply.send(result);
+                // The status carries the width, so the daemon's snapshot follows the radio instead
+                // of the value it was started with.
                 let _ = events.blocking_send(Ok(Event::Status(status(
                     &settings, budget, sent,
                 ))));

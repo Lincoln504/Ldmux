@@ -351,7 +351,21 @@ struct Exchange {
 ///
 /// The same four numbers the radio reports and the same four the command carries, so a request and
 /// a report are comparable without conversion.
-pub type Retune = (u32, u32, u8, u8);
+/// A retune request: the channel's four numbers, and optionally the path hash width in bytes.
+///
+/// The width is not part of the channel tuple as the firmware sees it, but it is part of *the
+/// channel a network uses*: MeshCore's public presets are one byte, so a repeater's hash is one
+/// byte, and a node that names its neighbours in two bytes cannot read a path a public repeater
+/// built. Hence one request that can carry both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Retune {
+    pub freq_khz: u32,
+    pub bw_hz: u32,
+    pub sf: u8,
+    pub cr: u8,
+    /// `None` leaves the width alone.
+    pub path_bytes: Option<u8>,
+}
 
 /// The running link, shared with the RPC handler.
 #[derive(Clone)]
@@ -383,10 +397,10 @@ static GLOBAL: OnceLock<MeshRuntime> = OnceLock::new();
 
 impl MeshRuntime {
     /// Ask the link to tune the host's own radio. `false` when no session is running.
-    pub fn request_preset(&self, freq_khz: u32, bw_hz: u32, sf: u8, cr: u8) -> bool {
+    pub fn request_preset(&self, want: Retune) -> bool {
         match self.preset_request.lock() {
             Ok(mut slot) => {
-                *slot = Some((freq_khz, bw_hz, sf, cr));
+                *slot = Some(want);
                 self.wake.notify_one();
                 true
             }
@@ -789,13 +803,34 @@ async fn session<C: Carrier>(
         // tuple and either retunes (and saves it) or refuses, and the snapshot says which: the
         // host owning its radio is new, and until this existed the host radio could only be
         // configured with a different tool while the phone configured its own from the app.
-        if let Some((freq_khz, bw_hz, sf, cr)) = runtime.take_preset() {
+        if let Some(want) = runtime.take_preset() {
+            let Retune {
+                freq_khz,
+                bw_hz,
+                sf,
+                cr,
+                path_bytes,
+            } = want;
             match carrier.set_preset(freq_khz, bw_hz, sf, cr).await {
                 Ok(()) => {
                     set(snapshot, |s| {
                         s.radio_preset = Some((freq_khz, bw_hz, sf, cr));
                         s.last_error = None;
                     });
+                    // **The channel is the tuple *and* the width.** A retune that only moved the
+                    // frequency left a node on the public channel naming its neighbours in two
+                    // bytes, which is a path no public repeater builds. Reported apart from the
+                    // tuple because the two can fail independently.
+                    if let Some(bytes) = path_bytes {
+                        match carrier.set_path_width(bytes).await {
+                            Ok(()) => {
+                                set(snapshot, |s| s.path_hash_size = Some(bytes));
+                            }
+                            Err(e) => {
+                                set(snapshot, |s| s.last_error = Some(e.to_string()));
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     set(snapshot, |s| s.last_error = Some(e.to_string()));

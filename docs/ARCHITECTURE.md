@@ -149,6 +149,16 @@ mark table: one entry per marked shell, paged because a message's body is capped
 dozen marks overflow one, and sent with the `Sessions` answer and with an `Attach` rather than
 pushed, because the radio cannot reach a phone that is not connected.
 
+**The channel is the tuple and the path width.** `ldmux mesh preset <MHz> <kHz> <SF> <CR> [--path N]`
+tunes the host's own radio, and `--path` sets the path hash width in bytes. The firmware keeps the
+two apart, but a network does not: MeshCore's public presets name neighbours in **one** byte, so a
+repeater's hash is one byte, and a node that names them in two cannot read a path that repeater
+built. ldmux's own channel is two bytes on both ends, because two bytes per hop is its default and
+one byte collides at about twenty co-channel repeaters; the public channel is one byte by the
+community's convention. The phone takes the width from its preset and the host from this flag. A direct
+zero-hop packet carries no path, which is why a width mismatch is invisible until a repeater is in
+the way.
+
 **A newline in `Input` is a paste, and the host decides what it means.** The pane is the only place
 that knows whether it negotiated bracketed paste (`CSI ? 2004 h`), so `Profile` carries that flag
 (refreshed from every screen read, because programs toggle it at runtime) and the host encodes each

@@ -137,7 +137,7 @@ fn command_help(cmd: &str) -> Option<&'static str> {
         "forget" => "ldmux forget <id>\n  Drop a session's record without touching the keeper.",
         "adopt" => "ldmux adopt <keeper-name>\n  Adopt a keeper session the daemon does not know.",
         "mesh" => {
-            "ldmux mesh [status|preset ...] [--json]\n  The radio route: the device the daemon owns, the records left this hour by the radio's own count, its reading, and the tuple it is tuned to.\n\nldmux mesh preset <MHz> <kHz> <SF> <CR>\n  Tune the host's own radio, e.g. `ldmux mesh preset 910.525 62.5 7 5`. The firmware validates it and the command fails if it refuses."
+            "ldmux mesh [status|preset ...] [--json]\n  The radio route: the device the daemon owns, the records left this hour by the radio's own count, its reading, and the tuple it is tuned to.\n\nldmux mesh preset <MHz> <kHz> <SF> <CR> [--path 1|2|3]\n  Tune the host's own radio, e.g. `ldmux mesh preset 910.525 62.5 7 5`. The firmware validates it and the command fails if it refuses. `--path` is the path hash width in bytes, and it is part of the channel whenever other nodes are in the path: MeshCore's public presets are one byte, ldmux's own channel is two."
         }
         "code" => {
             "ldmux code [--mesh | --mesh-only]\n  Print a QR code the phone app scans to pair. --mesh adds the session key and the pairing secret for the mesh route (the code is then as sensitive as the token and the secret together). --mesh-only carries the mesh keys and nothing of the tailnet: no address, no daemon token, for a phone that will only ever reach this machine by radio."
@@ -367,6 +367,46 @@ fn mesh_subcommand(rest: &[String]) -> &str {
         Some(a) => a,
         None => "status",
     }
+}
+
+/// The four numbers of a channel, and optionally its path hash width.
+///
+/// `--path` is separate from the tuple because the firmware keeps them separately, but they are
+/// one channel to a network: MeshCore's public presets name neighbours in one byte, our own in
+/// two, and a node whose width disagrees with the repeater in between cannot read the path that
+/// repeater built. The width is in bytes, because that is what `ldmux mesh status` prints.
+fn preset_args(n: &[&str]) -> Result<(f64, f64, u8, u8, Option<u8>), String> {
+    let mut positional: Vec<&str> = Vec::new();
+    let mut path: Option<u8> = None;
+    let mut it = n.iter().copied();
+    while let Some(a) = it.next() {
+        if a == "--path" {
+            let Some(v) = it.next() else {
+                return Err("--path needs a number: 1, 2 or 3".to_string());
+            };
+            let parsed = v
+                .parse::<u8>()
+                .map_err(|_| format!("--path is 1, 2 or 3, not {v:?}"))?;
+            if !(1..=3).contains(&parsed) {
+                return Err(format!("--path is 1, 2 or 3, not {parsed}"));
+            }
+            path = Some(parsed);
+        } else {
+            positional.push(a);
+        }
+    }
+    if positional.len() > 4 {
+        return Err(format!("four numbers only, not {}", positional.len()));
+    }
+    let (Some(f), Some(b), Some(sf), Some(cr)) = (
+        positional.first().and_then(|v| v.parse::<f64>().ok()),
+        positional.get(1).and_then(|v| v.parse::<f64>().ok()),
+        positional.get(2).and_then(|v| v.parse::<u8>().ok()),
+        positional.get(3).and_then(|v| v.parse::<u8>().ok()),
+    ) else {
+        return Err("needs four numbers: <MHz> <kHz> <SF> <CR>".to_string());
+    };
+    Ok((f, b, sf, cr, path))
 }
 
 /// The rows `ldmux list` prints.
@@ -963,25 +1003,28 @@ async fn main() {
             if sub == "preset" {
                 // `ldmux mesh preset <MHz> <kHz> <SF> <CR>`: tune the host's OWN radio.
                 let n: Vec<&str> = rest.iter().skip(1).map(String::as_str).collect();
-                let (Some(f), Some(b), Some(sf), Some(cr)) = (
-                    n.first().and_then(|v| v.parse::<f64>().ok()),
-                    n.get(1).and_then(|v| v.parse::<f64>().ok()),
-                    n.get(2).and_then(|v| v.parse::<u8>().ok()),
-                    n.get(3).and_then(|v| v.parse::<u8>().ok()),
-                ) else {
-                    eprintln!("usage: ldmux mesh preset <MHz> <kHz> <SF> <CR>");
-                    eprintln!("  e.g. ldmux mesh preset 910.525 62.5 7 5");
-                    std::process::exit(2);
+                let parsed = preset_args(&n);
+                let (f, b, sf, cr, path) = match parsed {
+                    Ok(v) => v,
+                    Err(why) => {
+                        eprintln!("{why}");
+                        eprintln!("usage: ldmux mesh preset <MHz> <kHz> <SF> <CR> [--path 1|2|3]");
+                        eprintln!("  e.g. ldmux mesh preset 910.525 62.5 7 5 --path 1");
+                        std::process::exit(2);
+                    }
                 };
-                let r: Result<serde_json::Value, CallError> = daemon_call(
-                    &sock,
-                    "mesh.preset",
-                    &serde_json::json!({ "freqMhz": f, "bwKhz": b, "sf": sf, "cr": cr }),
-                )
-                .await;
+                let mut params = serde_json::json!({ "freqMhz": f, "bwKhz": b, "sf": sf, "cr": cr });
+                if let Some(p) = path {
+                    params["pathBytes"] = serde_json::json!(p);
+                }
+                let r: Result<serde_json::Value, CallError> =
+                    daemon_call(&sock, "mesh.preset", &params).await;
                 match r {
                     Ok(v) if v.get("ok").and_then(|o| o.as_bool()) == Some(true) => {
-                        println!("tuned: {f} MHz  {b} kHz  SF{sf}  CR{cr}");
+                        match path {
+                            Some(p) => println!("tuned: {f} MHz  {b} kHz  SF{sf}  CR{cr}  path {p} B"),
+                            None => println!("tuned: {f} MHz  {b} kHz  SF{sf}  CR{cr}"),
+                        }
                     }
                     Ok(v) => {
                         let detail = v
@@ -998,7 +1041,7 @@ async fn main() {
             if sub != "status" {
                 eprintln!("ldmux mesh: unknown subcommand '{sub}'");
                 eprintln!("usage: ldmux mesh status [--json]");
-                eprintln!("       ldmux mesh preset <MHz> <kHz> <SF> <CR>");
+                eprintln!("       ldmux mesh preset <MHz> <kHz> <SF> <CR> [--path 1|2|3]");
                 std::process::exit(2);
             }
             let r: Result<serde_json::Value, CallError> =
@@ -1463,6 +1506,55 @@ mod socket_path_tests {
         assert!(
             super::default_socket_path().ends_with("ldmuxd.sock"),
             "one resolver, one answer"
+        );
+    }
+}
+
+#[cfg(test)]
+mod preset_args_tests {
+    use super::preset_args;
+
+    #[test]
+    fn the_four_numbers_alone_leave_the_width_alone() {
+        assert_eq!(
+            preset_args(&["910.525", "62.5", "7", "5"]),
+            Ok((910.525, 62.5, 7, 5, None))
+        );
+    }
+
+    #[test]
+    fn a_width_is_bytes_and_may_come_before_the_numbers() {
+        assert_eq!(
+            preset_args(&["910.525", "62.5", "7", "5", "--path", "1"]),
+            Ok((910.525, 62.5, 7, 5, Some(1)))
+        );
+        assert_eq!(
+            preset_args(&["--path", "2", "910.525", "500", "7", "5"]),
+            Ok((910.525, 500.0, 7, 5, Some(2)))
+        );
+    }
+
+    #[test]
+    fn a_width_the_firmware_cannot_hold_is_refused_with_a_sentence() {
+        assert_eq!(
+            preset_args(&["910.525", "62.5", "7", "5", "--path", "4"]).unwrap_err(),
+            "--path is 1, 2 or 3, not 4"
+        );
+        assert_eq!(
+            preset_args(&["910.525", "62.5", "7", "5", "--path"]).unwrap_err(),
+            "--path needs a number: 1, 2 or 3"
+        );
+    }
+
+    #[test]
+    fn a_missing_or_extra_number_is_named() {
+        assert_eq!(
+            preset_args(&["910.525", "62.5", "7"]).unwrap_err(),
+            "needs four numbers: <MHz> <kHz> <SF> <CR>"
+        );
+        assert_eq!(
+            preset_args(&["910.525", "62.5", "7", "5", "9"]).unwrap_err(),
+            "four numbers only, not 5"
         );
     }
 }

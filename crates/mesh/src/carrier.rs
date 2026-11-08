@@ -84,6 +84,19 @@ pub trait Carrier {
         ))
     }
 
+    /// Set the radio's path hash width, in **bytes** (1..=3), and report the firmware's answer.
+    ///
+    /// A channel is not only its four numbers. On MeshCore's public presets the width is the
+    /// network's own (one byte, so a repeater's hash is one byte), and a node that names its
+    /// neighbours in two bytes cannot read a path a public repeater built. The default is the same
+    /// refusal as [`Carrier::set_preset`]: a carriage that does not own its radio must say so.
+    async fn set_path_width(&mut self, bytes: u8) -> Result<(), MeshError> {
+        let _ = bytes;
+        Err(MeshError::Unsupported(
+            "this carriage does not own its radio".to_owned(),
+        ))
+    }
+
     /// The next thing the carrier has to say. Waits; wrap in a deadline if the caller needs one.
     async fn recv(&mut self) -> Result<Event, MeshError>;
 }
