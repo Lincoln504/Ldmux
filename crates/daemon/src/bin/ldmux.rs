@@ -443,6 +443,10 @@ fn reject_unknown_flag(rest: &[String]) -> Option<String> {
         "--kind",
         "--note",
         "--session",
+        // `ldmux mesh preset … --path N` is the one flag that takes a value of its own and
+        // belongs to a subcommand rather than to the verb, so it is listed here and parsed
+        // there.
+        "--path",
     ];
     for arg in rest {
         if arg == "--" {

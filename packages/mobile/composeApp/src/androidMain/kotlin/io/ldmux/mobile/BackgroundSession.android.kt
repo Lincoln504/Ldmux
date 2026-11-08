@@ -312,6 +312,18 @@ actual object BackgroundSession {
 
         val intent = Intent(ctx, LdmuxService::class.java).putExtra(LdmuxService.EXTRA_TEXT, wantText)
         if (!wanted) {
+            // **Stop through the service, not past it.** `stopService` on a service that has not
+            // reached `onCreate` yet takes it down before it can promote, and Android then throws
+            // `ForegroundServiceDidNotStartInTimeException` on this process's main thread: measured
+            // 2026-11-07 19:16:15.266, "Bringing down service while still waiting for start
+            // foreground" 5 ms after the start, twice, while leaving and returning to the app. An
+            // ACTION_STOP intent is delivered *after* `onCreate` has promoted, so the order is the
+            // lifecycle's own; `stopSelf()` then runs from `onStartCommand`.
+            val stop = Intent(ctx, LdmuxService::class.java).setAction(LdmuxService.ACTION_STOP)
+            val asked = runCatching { ctx.startService(stop) }.isSuccess
+            if (asked) return
+            // Refused (a background start it will not allow): the direct stop is the only move
+            // left, and it is safe when the service is already past `onCreate`.
             runCatching { ctx.stopService(intent) }.onFailure { Log.w(TAG, "stopService", it) }
             return
         }
