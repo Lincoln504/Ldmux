@@ -680,6 +680,11 @@ class MeshTermDriver(
                 failed(MeshLinkState.SessionFailed)
             }
             if (h.peerClosed && terminalView == null) terminalView = MeshTermView.HostClosed(null)
+            // **A live shell whose screen never arrived re-asks here.** The mirror is empty, so the
+            // page can only draw "waiting for shell screen" — for ever, because nothing retried a
+            // resync that was lost while the session was busy. The 4 s floor in `requestResync`
+            // keeps this from becoming a loop.
+            if (terminalView == null && mirror.profile != null && !painted) requestResync()
             // **A fit the session refused to queue is asked again here.** Otherwise a resize
             // dropped on a full queue left the host's pty at the old grid for the life of the
             // page, and only leaving the shell and re-entering it could cure it. A fit already
@@ -1014,6 +1019,10 @@ class MeshTermDriver(
     suspend fun resync() = lock.withLock {
         if (session != null && terminalView == null) { requestResync(); pump(); publish() }
     }
+
+    /** Whether the attached shell has never delivered a screen: the page has nothing to draw. */
+    val screenUnpainted: Boolean
+        get() = session != null && mirror.profile != null && !painted
 
     /**
      * Whether a named attach is on the wire and its answer has not arrived.
@@ -1399,7 +1408,11 @@ class MeshTermDriver(
                 if (gateway.state.value == MeshLinkState.NoPath) MeshLinkState.NoPath
                 else MeshLinkState.Refused,
             )
-            MeshSendOutcome.ErrTooLong -> failed(MeshLinkState.NoPath)
+            // **A record the radio would not take for its size is not "move closer".** `NoPath`
+            // tells the user the path is unusable; this is a record that did not fit, which the
+            // carrier's own limit should make impossible — so it is reported as a refusal, which
+            // retries, rather than as a link that needs a shorter route.
+            MeshSendOutcome.ErrTooLong -> failed(MeshLinkState.Refused)
             // Busy, a local timeout or an unknown answer: the record was not acknowledged by the
             // host, so the session's own bounded retransmission covers it.
             else -> {}

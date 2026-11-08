@@ -3093,7 +3093,7 @@ mod tests {
                        "resizeVersion":RESIZE_VERSION,"streamVersion":STREAM_VERSION,"lineVersion":STREAM_LINE_VERSION,
                        "originVersion":ORIGIN_VERSION,"ownerVersion":OWNER_VERSION,"shellVersion":SHELL_VERSION,
                        "maxKeys":MAX_KEYS,"unsupportedAllV1":unsupported::ALL_V1,
-                       "recordFloor":ldmux_mesh::constants::RECORD_FLOOR,"recordMax":ldmux_mesh::constants::RECORD_MAX,"creditWindow":ldmux_mesh::constants::CREDIT_WINDOW},
+                       "recordFloor":ldmux_mesh::constants::RECORD_FLOOR,"recordMax":ldmux_mesh::constants::RECORD_MAX,"recordReceivedMax":ldmux_mesh::constants::RECORD_RECEIVED_MAX,"creditWindow":ldmux_mesh::constants::CREDIT_WINDOW},
             "messages": msg_cases,
             "sessionPages": {"input": many.iter().map(|s| json!({"id":s.id,"label":s.label,"cwd":s.cwd,"origin":s.origin,"owner":s.owner,"shell":s.shell})).collect::<Vec<_>>(), "pages": page_cases},
             "script": steps,

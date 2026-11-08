@@ -19,15 +19,23 @@ internal object RouteHint {
     /** The marker the host looks for, and the reason a record of exactly 36 bytes is not a message. */
     val MAGIC: ByteArray = byteArrayOf(0x4C, 0x44, 0x52, 0x48) // "LDRH"
 
-    /** How long a hint record is: the marker and one public key. */
-    const val LENGTH = 36
+    /** How long a hint record is: the marker, one public key, and four bytes of nonce. */
+    const val LENGTH = 40
 
-    /** The record naming [publicKey], or null when the key is not a public key. */
+    /**
+     * The record naming [publicKey], or null when the key is not a public key.
+     *
+     * **The nonce is not decoration.** MeshCore dedupes on `SHA256(payload_type ‖ payload)` in a
+     * 160-entry ring with no timeout, at every repeater and every receiver, so a byte-identical
+     * retransmission of a direct record is silently dropped — and the hint is retried up to three
+     * times in one connect. Four random bytes make each attempt a different packet.
+     */
     fun record(publicKey: ByteArray): ByteArray? {
         if (publicKey.size != 32) return null
         val out = ByteArray(LENGTH)
         MAGIC.copyInto(out)
         publicKey.copyInto(out, MAGIC.size)
+        kotlin.random.Random.nextBytes(out, MAGIC.size + 32, LENGTH)
         return out
     }
 }

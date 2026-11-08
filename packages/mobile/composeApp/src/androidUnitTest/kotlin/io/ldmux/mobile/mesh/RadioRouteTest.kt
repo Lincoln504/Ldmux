@@ -166,7 +166,8 @@ class RadioRouteTest {
         assertEquals(own[0], packet[3])
         assertArrayEquals("LDRQ".toByteArray(), packet.copyOfRange(4, 8))
         assertArrayEquals(own, packet.copyOfRange(8, 40))
-        assertEquals(40, packet.size)
+        // The nonce follows the key, so a retried request is not a duplicate packet.
+        assertEquals(44, packet.size)
     }
 
     /** A key that is not 32 bytes cannot name a radio, so no request is built for it. */
@@ -276,6 +277,8 @@ class RadioRouteTest {
         assertEquals(host[0], packet[6])
         assertEquals(own[0], packet[7])
         assertArrayEquals("LDRQ".toByteArray(), packet.copyOfRange(8, 12))
+        // ...and the payload is hashes, marker, key and nonce, which is what the code covers.
+        assertEquals(42, packet.size - 6)
         // The same payload recomputes the same code, which is how the region is identified.
         val payload = packet.copyOfRange(6, packet.size)
         val expected = RadioRoute.transportCode(key, 0, payload)

@@ -56,6 +56,7 @@ pub struct Session {
     replay: ReplayWindow,
     arq: Arq,
     record_limit: usize,
+    airtime_ms: Option<f64>,
     started_ms: u64,
     pub dropped: u32,
 }
@@ -92,6 +93,7 @@ impl Session {
             replay: ReplayWindow::default(),
             arq: Arq::new(Config::for_payload(app - arq::HEADER).with_airtime(airtime_ms)),
             record_limit,
+            airtime_ms,
             started_ms: now_ms,
             dropped: 0,
         })
@@ -103,7 +105,33 @@ impl Session {
     /// preset is known to this side; this lets the caller hand over the figure afterwards without
     /// rebuilding the session (which would throw away the keys and the queue).
     pub fn set_airtime(&mut self, airtime_ms: Option<f64>) {
+        self.airtime_ms = airtime_ms;
         self.arq.set_config(self.arq.config().with_airtime(airtime_ms));
+    }
+
+    /// Re-size the record, because **the path changed**.
+    ///
+    /// The packet is `[header][path][record]` inside a 176-byte frame, so a repeater's hops come out
+    /// of the record budget: a 172-byte record is refused by the builder at the first path byte. The
+    /// size is therefore a property of the route, not of the link, and a session that outlives a
+    /// route change has to be told. Chunks already queued keep their size — the split happened when
+    /// they were queued — so a *shorter* limit only governs what is queued next; a chunk that no
+    /// longer fits is refused by the carrier and its attempt given back, which ends in a reconnect
+    /// with the right limit.
+    pub fn set_record_limit(&mut self, record_limit: usize) {
+        let app = record::application_bytes(record_limit.min(ldmux_mesh::constants::RECORD_MAX));
+        if app <= arq::HEADER {
+            return;
+        }
+        self.record_limit = record_limit;
+        self.arq
+            .set_config(Config::for_payload(app - arq::HEADER).with_airtime(self.airtime_ms));
+    }
+
+    /// The record limit this session was sized to.
+    #[must_use]
+    pub fn record_limit(&self) -> usize {
+        self.record_limit
     }
 
     #[must_use]

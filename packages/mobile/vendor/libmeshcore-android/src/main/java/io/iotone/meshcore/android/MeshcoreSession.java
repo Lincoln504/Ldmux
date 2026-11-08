@@ -329,6 +329,19 @@ public final class MeshcoreSession {
      * carry — silently — so this is the one fact that decides whether this node's discovery floods
      * cross a scoped mesh at all.</p>
      */
+    /**
+     * Sets the radio's clock ({@code CMD_SET_DEVICE_TIME}, 0x06).
+     *
+     * <p>A companion has no network and starts its clock at zero at boot, and that clock is what
+     * stamps every advert it hears. ldmux reads those stamps back as route ages, so without this
+     * every route looks as old as the epoch. The firmware refuses a time earlier than the one it
+     * holds, so a repeat within a second is answered with an error and changes nothing.</p>
+     */
+    public void setDeviceTime(long unixSeconds) {
+        if (state.get() != SessionState.READY) return;
+        sendTracked(MeshcoreFrameCodec.setDeviceTime(unixSeconds));
+    }
+
     public void getDefaultFloodScope() {
         if (state.get() != SessionState.READY) return;
         sendTracked(MeshcoreFrameCodec.getDefaultFloodScope());

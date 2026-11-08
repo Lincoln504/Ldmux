@@ -103,11 +103,16 @@ internal object RadioRoute {
         if (scope != null && scope.size != 16) return null
         // The payload, which is what a scoped flood's code is computed over: the region code covers
         // the type and the payload only, so it must be hashed before the header and path join them.
-        val payload = ByteArray(2 + REQUEST_MAGIC.size + 32)
+        val payload = ByteArray(2 + REQUEST_MAGIC.size + 32 + 4)
         payload[0] = hostKey[0]
         payload[1] = ownKey[0]
         REQUEST_MAGIC.copyInto(payload, 2)
         ownKey.copyInto(payload, 2 + REQUEST_MAGIC.size)
+        // **Four bytes of nonce, or a retry is dropped.** MeshCore dedupes on
+        // `SHA256(payload_type ‖ payload)` in a 160-entry ring with no timeout at every repeater and
+        // every receiver, so a byte-identical second request never leaves the first repeater. The
+        // host echoes it into the reply for the same reason.
+        kotlin.random.Random.nextBytes(payload, 2 + REQUEST_MAGIC.size + 32, payload.size)
         val codes = if (scope == null) 0 else 4
         val out = ByteArray(1 + codes + 1 + payload.size)
         // Route FLOOD (plain, or transport-coded when scoped) with payload REQ and version 0.
@@ -136,7 +141,13 @@ internal object RadioRoute {
         if (record.size < 5) return null
         for (i in REPLY_MAGIC.indices) if (record[i] != REPLY_MAGIC[i]) return null
         val encoded = record[4].toInt() and 0xFF
-        return reversed(encoded, record.copyOfRange(5, record.size))
+        val hashSize = (encoded ushr 6) + 1
+        if (hashSize == 4) return null
+        val want = (encoded and 0x3F) * hashSize
+        // **The path is the first `hops * hash` bytes; the nonce follows.** Slicing to the end of
+        // the record would feed four nonce bytes into the reversal and change the hop count.
+        if (record.size < 5 + want) return null
+        return reversed(encoded, record.copyOfRange(5, 5 + want))
     }
 
     /**
@@ -165,6 +176,11 @@ internal object RadioRoute {
      * radio having the region configured at all. A private region (a name beginning `$`) has a
      * stored key instead, which can only come from the radio.
      */
+    /** The derived keys of [KNOWN_SCOPE_TAGS], computed once: `heardScope` tests all of them. */
+    private val knownScopeKeys: List<Pair<String, ByteArray>> by lazy {
+        KNOWN_SCOPE_TAGS.map { it to scopeKey(it) }
+    }
+
     fun scopeKey(name: String): ByteArray {
         val bare = name.trim().removePrefix("#")
         val digest = java.security.MessageDigest.getInstance("SHA-256").digest(("#" + bare).toByteArray())
@@ -205,8 +221,15 @@ internal object RadioRoute {
         val packet = parse(raw) ?: return null
         if (!packet.isFlood) return null
         val code = packet.transportCode0 ?: return null
-        for (name in candidates) {
-            if (transportCode(scopeKey(name), packet.payloadType, packet.payload) == code) return name
+        // The full tag list is pre-derived once: this runs per scoped flood while the phone has no
+        // scope, and deriving 70 keys each time is the expensive half of the work.
+        val pool = if (candidates === KNOWN_SCOPE_TAGS) {
+            knownScopeKeys
+        } else {
+            candidates.map { it to scopeKey(it) }
+        }
+        for ((name, key) in pool) {
+            if (transportCode(key, packet.payloadType, packet.payload) == code) return name
         }
         return null
     }

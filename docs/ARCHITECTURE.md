@@ -314,6 +314,7 @@ ADR-0010 is the decision. The practice:
 | the phone takes a shell the desk has | the desk is told and stops, the pane is fitted to the phone, and when the phone lets go the pane is put back to the size it displaced |
 | the app is backgrounded | pages detach after the platform grace, the shell stays in the keeper, and returning re-attaches |
 | the radio's airtime allowance runs out | the host stops sending **new** records until the hour refills (`records_left` from the carrier's countdown), while acks and retransmissions still go, so the link stays alive and the pane stops updating; a record the firmware itself refuses is handed back to the retry ladder so it does not count as a lost attempt, and `last_error` says what happened |
+| a record is larger than the path leaves room for | the limit is `min(171, 172 − path)`, advertised on bind and revised when the route changes; a chunk queued at the old size is refused by the builder, its attempt is given back, and the reconnect re-sizes |
 | a scoped mesh drops our floods | the session still works wherever a direct route exists, because scoping gates floods only; discovery needs the region, so `ldmux mesh status` prints the scope and the log names a scope learned from the air (ADR-0033) |
 | a mesh setting is malformed | the mesh link is disabled with a message and the daemon keeps running, because a bad key must not kill the shells |
 
@@ -340,9 +341,10 @@ by the host radio, by the app before it retunes, and by every budget below.
   for the next one.
 - Batch mode exists because a public channel turns every keystroke into a broadcast.
 - The bridge coalesces screen updates and lets input echo through ahead of them.
-- **An advert is a maintenance broadcast, not the way a peer finds us** (ADR-0032). One flooded
-  self-advert goes out when the link opens and then every `LDMUX_MESH_ADVERT_SECS` (default one
-  hour; `0` turns them off, which is the firmware's own companion default). The community's
+- **An advert is a maintenance broadcast, not the way a peer finds us** (ADR-0032), and it is
+  **off by default** — the firmware's own companion default. `LDMUX_MESH_ADVERT_SECS=<seconds>`
+  turns one on (3600 keeps the node in other operators' contact lists for about 0.07 % of a
+  ten-percent allowance at 62.5 kHz). The community's
   guidance is far longer still — repeaters are told 47 hours — because an advert is airtime every
   node in range pays for. A route is requested on demand instead: a flooded `REQ` of ≈40 bytes and
   a direct reply of ≈40 bytes plus the path, once per attempt rather than once per interval.
@@ -416,6 +418,17 @@ stock firmware and not a fork):
   retune from another app is invisible here until we ask again, and why a radio held by a
   second app fails in the way our "another app holds this radio" wording describes.
 
+**A record's size is a property of the route, not of the link.** A raw send is
+`[0x41][priority][header][path byte][path][record]` inside the firmware's 176-byte frame, so every
+path byte costs a record byte, and a radio does not push a frame it cannot fit in that same 176
+bytes — a direct record's arriving packet is 2 bytes plus the record. The limit advertised to the
+session is therefore **`min(171, 172 − path)`**: 171 is the receive-log ceiling
+(`RECORD_RECEIVED_MAX`) and the rest is the path. The session is sized at the handshake, so the
+carrier reports the limit again when the path changes (`Event::Limit`); a chunk already queued at
+the old size is refused by the packet builder, its attempt is given back, and the reconnect re-sizes
+to what the route actually leaves. A **fixed** 172 was the old answer, and it was refused by
+ldmux's own builder at the first path byte — so a full record only ever worked at zero hops.
+
 **One radio per side, each configured by the device that owns it.** The host radio
 stays plugged into the host over USB, where the daemon drives it and can retune it.
 The phone radio is powered anywhere and belongs to the phone over Bluetooth LE,
@@ -466,17 +479,23 @@ be transmitted and then ignored by every receiver. Direct means the sender must 
    receive log: adverts arrive at 4, 5, 6 and **8** hops, while `REQ` floods arrive at **18-29** in
    the same window. Two radios further apart than eight hops therefore cannot exchange adverts at
    all, and the community's own guidance keeps them rare anyway (repeaters are told 47 hours,
-   companions never). So an advert is a **maintenance broadcast**: one every
-   `LDMUX_MESH_ADVERT_SECS` (default 3600; `0` turns them off, which is the firmware's own
-   companion default), plus a path source when it happens to arrive. The route comes from the
-   request below (ADR-0032).
+   companions never). So an advert is a **maintenance broadcast, off unless asked for**:
+   `LDMUX_MESH_ADVERT_SECS` turns one on (3600 keeps the node in other operators' contact lists),
+   and the firmware's own companion default is to never advertise. Nothing depends on it — the
+   route comes from the request below (ADR-0032) — and an advert heard from a radio that does
+   advertise still teaches a route through the receive log (§ step 3).
 1. **A route is asked for, over a flood.** A raw record cannot be flooded, so the request rides a
    payload type repeaters already forward: `REQ` (0), the one MeshCore's own flooded path request
-   uses. The packet is `[header 0x01][path byte][dest hash 1][src hash 1][LDRQ][requester key 32]` —
+   uses. The packet is
+   `[header 0x01][path byte][dest hash 1][src hash 1][LDRQ][requester key 32][nonce 4]` —
    destination addressed by the first byte of the peer's public key (`PATH_HASH_SIZE` is 1), a
    four-byte marker, and the requester's radio key. The firmware never reads the tail: with no
    matching contact the `REQ` fails its MAC and is ignored, and a repeater forwards it by route and
    hop limit alone. `CMD_SEND_RAW_PACKET` (0x41) transmits it as built, so a stock radio works.
+   **The four-byte nonce is load-bearing**: MeshCore dedupes on `SHA256(payload_type ‖ payload)` in
+   a 160-entry ring with no timeout (`Packet::calculatePacketHash`, `SimpleMeshTables`), at every
+   repeater and every receiver, so a byte-identical second request never leaves the first repeater.
+   The reply echoes that nonce for the same reason, and the route hint carries one too.
 2. **The peer answers with its own path, direct.** A request arrives with the hops it crossed, in
    travel order (flooded packets *append* one hash per repeater, `Mesh::routeRecvPacket`), so the
    receiver reverses the hop groups and replies with a `RAW_CUSTOM` record: `[LDRR][path byte][path]`,
@@ -559,8 +578,12 @@ Consequences worth knowing:
   254 usable hashes, and 0x00 and 0xFF are reserved. At ≈20 co-channel repeaters a one-byte
   prefix collides with coin-flip probability, and a collision is not cosmetic — two repeaters with
   the same prefix both forward a direct message meant for one of them. Two bytes gives 65 536 and
-  holds to a few hundred; the price is the hop ceiling, 32 instead of 63, which is above every
-  measured regional path length. Both ends therefore put a radio reporting mode 0 onto mode 1 at
+  holds to a few hundred; the price is the hop ceiling — `hash_count × hash_size ≤ 64` (`Packet::
+  isValidPathLen`), so **63 hops at one byte, 32 at two, 21 at three**. This mesh's own floods were
+  measured at 18-29 hops on 2026-11-08, so two bytes leaves three to eleven hops of headroom and
+  three bytes would be below the distance actually in use: the mode 2 upgrade is left alone when an
+  operator chose it, but it is not a width ldmux would pick, and a path that hits the ceiling is
+  dropped by `routeRecvPacket` without a word. Both ends therefore put a radio reporting mode 0 onto mode 1 at
   bind (`DEFAULT_PATH_HASH_MODE`, `set_path_hash_mode`), once, and never touch a radio an operator
   set to three bytes. The width is a preference about the node's *own* adverts only: a repeater
   forwards whatever width arrives (`MyMesh.cpp:491`), so this changes what peers hear from us, not

@@ -112,13 +112,6 @@ class AndroidRadioLink(
     override var radioPublicKey: ByteArray? = null
         private set
 
-    /** When a record last arrived from the peer, and when this radio last announced itself. */
-    @Volatile
-    private var lastRxAt: Long = 0L
-
-    @Volatile
-    private var lastAnnounceAt: Long = 0L
-
     private val _deviceInfo = MutableStateFlow<RadioDeviceInfo?>(null)
     override val deviceInfo: StateFlow<RadioDeviceInfo?> = _deviceInfo.asStateFlow()
 
@@ -190,6 +183,10 @@ class AndroidRadioLink(
 
     @Volatile
     private var adoptedScope: ByteArray? = null
+
+    /** When an overheard scoped flood was last tested against the known region names. */
+    @Volatile
+    private var scopeCheckAt: Long = 0L
 
     /** The scope key this phone's requests are scoped with, or null for an unscoped flood. */
     private val scopeKey: ByteArray?
@@ -275,11 +272,19 @@ class AndroidRadioLink(
             val path = hostPath ?: RadioPath(0, ByteArray(0))
             // 176-byte companion frame, minus the opcode and priority byte, minus the packet
             // header and its path-length byte, minus the path itself.
-            return 172 - path.bytes.size
+            return MeshRecordLimits.MAX - path.bytes.size
         }
 
+    /**
+     * The largest record this link can carry now: the budget the path leaves, capped by what a
+     * radio **hands up**.
+     *
+     * The second cap was missing, and it is silent: a radio does not push a frame it cannot fit in
+     * its 176-byte buffer, so a 172-byte record is transmitted, received and never reported to
+     * either app — on every full record, with no error anywhere.
+     */
     override val uplinkRecordMax: Int
-        get() = minOf(172, carrierPayloadMax)
+        get() = minOf(MeshRecordLimits.RECEIVED_MAX, carrierPayloadMax)
 
     private val listener = object : SessionListener {
         override fun onStateChanged(state: SessionState) {
@@ -325,7 +330,6 @@ class AndroidRadioLink(
         }
 
         override fun onRawData(frame: RawDataFrame) {
-            lastRxAt = System.currentTimeMillis()
             _status.value = _status.value.copy(rssiDbm = frame.rssi())
             val payload = frame.payload()
             // **A route reply is not a session record.** It arrives before the session exists and
@@ -354,7 +358,6 @@ class AndroidRadioLink(
                 // the advert path goes through, so one malformed answer cannot become a route.
                 contactPath = RadioRoute.fromContact(c.outPathLen(), c.activePath())
                     ?.let { RadioPath(it.encoded, it.bytes) }
-                if (contactPath != null) routeHeardAt = System.currentTimeMillis()
             }
             contactDone?.complete(Unit)
         }
@@ -377,7 +380,11 @@ class AndroidRadioLink(
                     // never on the air — only a 16-bit code over the payload — so recognising one
                     // means recomputing what each known name would have produced. Only while this
                     // radio has no scope of its own, because that is a decision someone made.
-                    if (radioScope == null && adoptedScope == null) {
+                    val now = System.currentTimeMillis()
+                    if (radioScope == null && adoptedScope == null &&
+                        now - scopeCheckAt >= SCOPE_CHECK_FLOOR_MS
+                    ) {
+                        scopeCheckAt = now
                         RadioRoute.heardScope(raw, RadioRoute.KNOWN_SCOPE_TAGS)?.let { name ->
                             adoptedScope = RadioRoute.scopeKey(name)
                             appLog("mesh scope $name learned from the mesh")
@@ -390,7 +397,13 @@ class AndroidRadioLink(
                 is AdvertPathFrame -> {
                     val path = RadioRoute.reversed(frame.pathLength(), frame.path())
                     if (path != null) {
-                        adoptRoute(path, "cached")
+                        // The firmware stamps the entry when the advert was **heard**, in seconds.
+                        // A radio whose clock was never set answers in boot-seconds, so anything
+                        // that does not look like a wall clock is treated as old rather than fresh.
+                        val heardAt = frame.receivedAtSeconds().toLong() * 1000L
+                        val now = System.currentTimeMillis()
+                        val plausible = heardAt in (now - 86_400_000L)..(now + 60_000L)
+                        adoptRoute(path, "cached", if (plausible) heardAt else 0L)
                     } else {
                         appLog("mesh advert route: malformed path, ignored")
                     }
@@ -473,15 +486,15 @@ class AndroidRadioLink(
         contactPath = null
         advertPath = null
         radioPublicKey = null
-        lastRxAt = 0L
         radioScope = null
         // An adopted scope belonged to the air at the last place; a new attempt starts from what
         // this radio says, and learns again if it says nothing.
         adoptedScope = null
-        // A rebuilt link is a link the peer may have forgotten: its advert-path entry expires, and
-        // the reconnect exists because something went wrong. Without this a rebuild within
-        // ANNOUNCE_EVERY_MS of the last advert stayed silent for the rest of that window.
-        lastAnnounceAt = 0L
+        // **Every attempt asks.** A reconnect is the moment the route matters most, and the floor
+        // that keeps a failing link from broadcasting applies between attempts of *one* connect, not
+        // across a rebuild: without this a reconnect within five seconds of a request skipped the
+        // ping and then waited out a reply that could not come.
+        lastRequestAt = 0L
         _selfInfo.value = null
         _deviceInfo.value = null
         // A voltage from the previous session must not be attached to this one's DEVICE_INFO.
@@ -546,6 +559,12 @@ class AndroidRadioLink(
                 // own sends, and the radio's advert keeps its old width.
                 appLog("mesh radio was on one-byte paths; asked for two")
             }
+            // **Set the radio's clock**, because that clock is what stamps every advert it hears and
+            // this end reads those stamps as route ages. A companion boots at zero, so without this
+            // every route would look as old as the epoch and a cache answer could never be judged.
+            s.setDeviceTime(System.currentTimeMillis() / 1000)
+            // Wait for its `OK`: the next command must not be written into the same answer window.
+            withTimeoutOrNull(DEVICE_INFO_WAIT_MS) { while (!s.isIdle()) delay(10) }
             // **Ask the radio which region it scopes its floods to.** One tracked read, answered
             // with its own typed frame. The operator's MeshCore app is where a scope is set, so
             // this follows a decision rather than making one; a radio with none stays unscoped,
@@ -555,25 +574,12 @@ class AndroidRadioLink(
             s.getDefaultFloodScope()
             withTimeoutOrNull(DEVICE_INFO_WAIT_MS) { scopeRead.await() }
             scopeDone = null
-            // **Announce now, because the host needs this before it can answer anything.** Its route
-            // back to us exists only in its own radio's advert-path cache, and that cache is filled
-            // by our advert arriving through the repeaters. Waiting for the maintenance loop's first
-            // tick was a 45-second delay on the one connection that needs it most — the first one
-            // after the phone moved.
-            announceIfQuiet(s)
-            withTimeoutOrNull(ANNOUNCE_SETTLE_MS) { while (!s.isIdle()) delay(10) }
-            // **A route before the first record, when the radio can give one.** The contact answer
-            // above may have carried an out-path; when it did not, the advert-path cache is the only
-            // place a route can come from, and asking before the first send means one record goes
-            // out once instead of a zero-hop attempt that only reaches earshot.
-            //
-            // Asked on **every** connect attempt, not only when there is no route: a route learned
-            // in the last place the phone was is still a well-formed route, so nothing refuses it
-            // and nothing notices it is wrong. Re-reading it per attempt is what turns "walked
-            // outside, the link died" into "walked outside, the next attempt used the new path".
-            // **A route in hand may be an hour old.** Ask the host for one and wait, bounded: the
-            // first handshake record needs it, and without this the phone transmits the handshake
-            // down a path that no longer exists and learns nothing from the silence.
+            // **A route before the first record, and a fresh one.** A route in hand may be an hour
+            // old: the phone learned it where it used to be, nothing refuses it, and the radio
+            // accepts the send it cannot deliver. So when it is stale — or absent — ask the host
+            // over a flood and wait, bounded, because the first handshake record needs it. The
+            // radio's advert-path cache below is the fallback, and an advert heard on the air has
+            // usually answered this already.
             if (!routeIsFresh(System.currentTimeMillis())) {
                 ensureRoute(s)
                 withTimeoutOrNull(ROUTE_REPLY_WAIT_MS) {
@@ -621,35 +627,6 @@ class AndroidRadioLink(
             _state.value = MeshLinkState.RadioUnavailable
             throw RadioLinkException(MeshLinkState.RadioUnavailable, _lastProblem.value!!)
         }
-    }
-
-    /**
-     * Announce this radio when the peer has gone quiet.
-     *
-     * **A flooded advert is the only thing that teaches the peer a route back.** Direct packets lose
-     * a hash per repeater, so nothing this phone sends carries a return route; the peer reads the
-     * route out of its own advert-path cache, and that cache is filled by our advert arriving through
-     * the repeaters. An advert is a broadcast — a few hundred milliseconds of air — so it is spent
-     * only while the peer is silent, and at most every [ANNOUNCE_EVERY_MS].
-     *
-     * **Called from the maintenance loop, never from `send`.** The advert is a *tracked* command
-     * (the firmware answers it with an `OK`), so issuing it while a record is being written would
-     * occupy the one answer window and the record's own answer would be taken for the advert's.
-     * The maintenance loop runs only when the session is idle, which is the ordering this needs.
-     */
-    private fun announceIfQuiet(s: MeshcoreSession) {
-        val now = System.currentTimeMillis()
-        val quiet = lastRxAt == 0L || now - lastRxAt > ANNOUNCE_QUIET_MS
-        if (!quiet || now - lastAnnounceAt < ANNOUNCE_EVERY_MS) return
-        lastAnnounceAt = now
-        runCatching { s.sendSelfAdvert(true) }
-            // **An advert is airtime, and this meter is the one that gates sends.** The firmware's
-            // own figure (what the settings page draws) already includes it; this counter is the
-            // phone's own allowance, and leaving the broadcasts out of it spent the budget on
-            // announces the gate never saw. Charged at the full record size: an advert is smaller
-            // than that at every tuple, so this errs towards spending less, never more.
-            .onSuccess { recordAirtime(MeshRecordLimits.MAX) }
-            .onFailure { appLog("mesh advert refused: ${it.message}") }
     }
 
     override suspend fun send(record: ByteArray): RadioSendResult {
@@ -948,11 +925,22 @@ class AndroidRadioLink(
         )
     }
 
-    /** Keep a route heard on the air, and remember when: the age is what decides whether to ask. */
-    private fun adoptRoute(path: RadioRoute.Path, source: String) {
+    /**
+     * Keep a route, and remember **when the peer was heard** — not when the radio was asked.
+     *
+     * The difference is the whole stale-route rule: a cache read answers with an entry that may be
+     * hours old, so stamping "now" on it makes [routeIsFresh] true for ever and the phone keeps
+     * sending down a path it learned in a different city. An advert heard on the air or a reply to
+     * our own request is stamped now; a cache answer carries the time the radio heard it; a stored
+     * contact path carries none, because on this transport it is never fresh information.
+     */
+    private fun adoptRoute(path: RadioRoute.Path, source: String, heardAt: Long = System.currentTimeMillis()) {
         advertPath = RadioPath(path.encoded, path.bytes)
-        routeHeardAt = System.currentTimeMillis()
-        appLog("mesh $source route: ${path.encoded and 0x3F} hop(s)")
+        routeHeardAt = heardAt
+        appLog(
+            "mesh $source route: ${path.encoded and 0x3F} hop(s)" +
+                if (heardAt > 0L) " · ${(System.currentTimeMillis() - heardAt) / 1000}s old" else " · age unknown",
+        )
     }
 
     /** A route heard recently enough to try before asking again. */
@@ -1090,15 +1078,6 @@ class AndroidRadioLink(
                 if (closing) continue
                 if (!routeIsFresh(System.currentTimeMillis())) ensureRoute(s)
                 if (!s.canSendRaw()) continue
-                // **Announce from here, not from a send.** A flooded advert is what teaches the
-                // peer its route back to us; it is a tracked command, so it may only be issued when
-                // the answer window is free. This loop is the one place that is always true.
-                announceIfQuiet(s)
-                // The advert is a tracked command, so it holds the answer window for a moment. Wait
-                // it out rather than skipping the tick: skipping meant an announce cost a whole
-                // interval and the route read was pushed past the case it exists for.
-                withTimeoutOrNull(ANNOUNCE_SETTLE_MS) { while (!s.canSendRaw()) delay(10) }
-                if (closing || !s.canSendRaw()) continue
                 // One command per tick: the companion has one answer window, and a second request
                 // inside it makes both answers ambiguous.
                 //
@@ -1210,14 +1189,8 @@ class AndroidRadioLink(
         /// It is a preferences write on the radio, so it answers at once; waiting longer only
         /// delays the first record of a fresh link.
         const val PATH_MODE_SETTLE_MS = 1_500L
-        /** Nothing heard from the peer for this long means the route back may be stale or unknown. */
-        const val ANNOUNCE_QUIET_MS = 120_000L
-        /** At most one advert per this interval, because each one is a broadcast on a shared band. */
-        const val ANNOUNCE_EVERY_MS = 180_000L
         /** How long connect() waits for the advert-path answer, which is a local cache read. */
         const val ROUTE_WAIT_MS = 2_000L
-        /** How long an advert's own `OK` is waited for, so the next command is not refused. */
-        const val ANNOUNCE_SETTLE_MS = 300L
         /** Re-ask for the host's path while none is known: often enough to catch a late advert. */
         const val PATH_RETRY_MS = 10_000L
         /** Re-ask once a path is known: paths move with the radios, but slowly. */
@@ -1232,6 +1205,14 @@ class AndroidRadioLink(
         const val ROUTE_REPLY_WAIT_MS = 4_000L
         /** How long a send waits for a config write's answer window to clear. */
         const val RAW_WINDOW_WAIT_MS = 1_500L
+        /**
+         * The least gap between two attempts to name the region an overheard flood was scoped to.
+         *
+         * Naming one means recomputing an HMAC for each known region — a few dozen — on the phone's
+         * own CPU. A quiet mesh gives one candidate every few minutes, so this only bounds the cost
+         * on a busy one, where nothing else would.
+         */
+        const val SCOPE_CHECK_FLOOR_MS = 5_000L
         const val COMMAND_SETTLE_MS = 2_500L
         const val SEND_TIMEOUT_MS = 10_000L
         const val PRESET_COMMAND_WAIT_MS = 3_000L

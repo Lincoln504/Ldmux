@@ -57,6 +57,14 @@ pub mod commands {
     /// takes a path-length byte that the firmware reads both as a byte count and as an encoded
     /// value, which agrees only at a one-byte hash.
     pub const SEND_RAW_PACKET: u8 = 0x41;
+    /// Set the radio's clock: `unix seconds u32` little-endian.
+    ///
+    /// **The radio's clock is what stamps an advert**, and ldmux reads those stamps back as route
+    /// ages (`CMD_GET_ADVERT_PATH` returns `recv_timestamp`). A companion has no network, so its
+    /// clock starts at zero at boot: without this every advert looks as old as the epoch, and the
+    /// "is this route still true" question has no answer. The firmware accepts a time only if it is
+    /// not in the past (`MyMesh.cpp:1247-1256`), which a wall clock always is.
+    pub const SET_DEVICE_TIME: u8 = 0x06;
     /// Read the radio's **default flood scope**: no argument, and the answer is
     /// [`codes::DEFAULT_FLOOD_SCOPE`] with the name and the 16-byte key, or the code alone when the
     /// radio has none (`MyMesh.cpp:1964-1972`).
@@ -246,7 +254,16 @@ impl FloodScope {
     #[must_use]
     pub fn from_name(name: &str) -> Self {
         use sha2::Digest as _;
-        let bare = name.trim().trim_start_matches('#');
+        // **At most one `#` is stripped, and the name is cut to the field the firmware stores.**
+        // The firmware hashes the stored name as it is, adding a `#` only for a name that has none
+        // (`RegionMap::getTransportKeysFor`), so `##us` is a different region from `#us`; stripping
+        // every hash would silently derive a key for a name this end never sends. The 30-byte cut
+        // is the radio's own field, and hashing the cut name keeps the name and the key in step —
+        // a truncated name with a key derived from the full one describes a region that cannot
+        // exist.
+        let trimmed = name.trim();
+        let bare = trimmed.strip_prefix('#').unwrap_or(trimmed);
+        let bare = &bare[..bare.len().min(30)];
         let mut hasher = sha2::Sha256::new();
         hasher.update(b"#");
         hasher.update(bare.as_bytes());
@@ -318,19 +335,24 @@ pub fn parse_default_flood_scope(frame: &[u8]) -> Option<Option<FloodScope>> {
 ///
 /// The firmware refuses a name of 31 bytes or more with `ERR_CODE_ILLEGAL_ARG`, so a longer name is
 /// truncated to the 30 it accepts rather than sent and refused.
-#[must_use]
-pub fn build_default_flood_scope(scope: Option<&FloodScope>) -> Vec<u8> {
+pub fn build_default_flood_scope(scope: Option<&FloodScope>) -> Result<Vec<u8>, CodecError> {
     let Some(scope) = scope else {
-        return vec![commands::SET_DEFAULT_FLOOD_SCOPE];
+        return Ok(vec![commands::SET_DEFAULT_FLOOD_SCOPE]);
     };
+    // The radio's field is 31 bytes with its NUL, and the firmware refuses a longer name with
+    // `ILLEGAL_ARG`. Refusing here rather than truncating keeps the stored name and the stored key
+    // describing the same region: a cut name with a key derived from the full one is a region no
+    // repeater can have.
+    let name = scope.name.as_bytes();
+    if name.is_empty() || name.len() > 30 {
+        return Err(CodecError::ScopeName { len: name.len() });
+    }
     let mut out = Vec::with_capacity(1 + 31 + 16);
     out.push(commands::SET_DEFAULT_FLOOD_SCOPE);
-    let name = scope.name.as_bytes();
-    let n = name.len().min(30);
-    out.extend_from_slice(&name[..n]);
+    out.extend_from_slice(name);
     out.resize(1 + 31, 0);
     out.extend_from_slice(&scope.key);
-    out
+    Ok(out)
 }
 
 /// The public region names worth testing an overheard scoped flood against.
@@ -539,14 +561,33 @@ pub fn build_route_request_in_scope(
     own_key: &[u8; 32],
     scope: Option<&FloodScope>,
 ) -> Result<Vec<u8>, CodecError> {
+    // A nonce that changes per call: two requests must not hash the same, or the second one never
+    // leaves the first repeater (`Packet::calculatePacketHash`). Time is the cheapest source that
+    // differs between two attempts seconds apart.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    build_route_request_with_nonce(hash_size, peer_key, own_key, scope, &nanos.to_le_bytes())
+}
+
+/// The same request with a caller-chosen nonce, so a test can be deterministic.
+pub fn build_route_request_with_nonce(
+    hash_size: u8,
+    peer_key: &[u8; 32],
+    own_key: &[u8; 32],
+    scope: Option<&FloodScope>,
+    nonce: &[u8; 4],
+) -> Result<Vec<u8>, CodecError> {
     if !(1..=3).contains(&hash_size) {
         return Err(CodecError::BadHashSize(hash_size));
     }
-    let mut payload = Vec::with_capacity(2 + ROUTE_REQUEST_MAGIC.len() + 32);
+    let mut payload = Vec::with_capacity(2 + ROUTE_REQUEST_MAGIC.len() + 32 + 4);
     payload.push(peer_key[0]);
     payload.push(own_key[0]);
     payload.extend_from_slice(ROUTE_REQUEST_MAGIC);
     payload.extend_from_slice(own_key);
+    payload.extend_from_slice(nonce);
     let mut out = Vec::with_capacity(6 + payload.len());
     match scope {
         None => out.push(ROUTE_FLOOD_HEADER),
@@ -571,6 +612,16 @@ pub struct RouteRequest {
     pub peer_key: [u8; 32],
     /// The path the request took to arrive, in travel order.
     pub path: AdvertPath,
+    /// Four bytes that make this request **a different packet** from the last one.
+    ///
+    /// **Without it a retry is dropped on the floor.** MeshCore dedupes on
+    /// `SHA256(payload_type ‖ payload)` in a 160-entry ring with no timeout (`Packet::calculatePacketHash`,
+    /// `SimpleMeshTables`), and every repeater and every receiver consults it, so a byte-identical
+    /// retransmission of a flood — or of a direct record — is swallowed until 160 other packets have
+    /// passed. That is why MeshCore's own flooded requests carry `getRNG()->random()` in their
+    /// payload (`BaseChatMesh`, path discovery), and why the session re-seals every retransmission.
+    /// The reply echoes it, so a second reply is a different packet too.
+    pub nonce: [u8; 4],
 }
 
 /// Read a flooded route request addressed to `own_key`.
@@ -585,16 +636,18 @@ pub fn parse_route_request(packet: &[u8], own_key: &[u8; 32]) -> Option<RouteReq
         return None;
     }
     let payload = view.payload;
-    if payload.len() != 2 + ROUTE_REQUEST_MAGIC.len() + 32 {
+    if payload.len() != 2 + ROUTE_REQUEST_MAGIC.len() + 32 + 4 {
         return None;
     }
     if payload[0] != own_key[0] || payload.get(2..6)? != ROUTE_REQUEST_MAGIC.as_slice() {
         return None;
     }
     let peer_key: [u8; 32] = payload.get(6..38)?.try_into().ok()?;
+    let nonce: [u8; 4] = payload.get(38..42)?.try_into().ok()?;
     Some(RouteRequest {
         peer_key,
         path: view.path,
+        nonce,
     })
 }
 
@@ -605,6 +658,16 @@ pub fn parse_route_request(packet: &[u8], own_key: &[u8; 32]) -> Option<RouteReq
 /// whose contents reach this application on both ends; it is recognised by its marker before the
 /// session ever sees it (`mesh_serial::route_reply`, `AndroidRadioLink.onRawData`).
 pub fn build_route_reply(hash_size: u8, hops: u8, path: &[u8]) -> Result<Vec<u8>, CodecError> {
+    build_route_reply_with_nonce(hash_size, hops, path, &[0; 4])
+}
+
+/// The reply to one request, carrying that request's nonce so a second reply is a different packet.
+pub fn build_route_reply_with_nonce(
+    hash_size: u8,
+    hops: u8,
+    path: &[u8],
+    nonce: &[u8; 4],
+) -> Result<Vec<u8>, CodecError> {
     if !(1..=3).contains(&hash_size) {
         return Err(CodecError::BadHashSize(hash_size));
     }
@@ -614,10 +677,11 @@ pub fn build_route_reply(hash_size: u8, hops: u8, path: &[u8]) -> Result<Vec<u8>
             hash: hash_size,
         });
     }
-    let mut out = Vec::with_capacity(5 + path.len());
+    let mut out = Vec::with_capacity(5 + path.len() + 4);
     out.extend_from_slice(ROUTE_REPLY_MAGIC);
     out.push(path_byte(hash_size, hops)?);
     out.extend_from_slice(path);
+    out.extend_from_slice(nonce);
     Ok(out)
 }
 
@@ -699,6 +763,8 @@ pub enum CodecError {
     /// A reply that is not the one the parse expected: the firmware answered, but with
     /// another command's frame. A framing fault, not a path one.
     WrongResponse { want: u8, got: u8 },
+    /// A region name the radio's 31-byte field cannot hold (1..=30 bytes).
+    ScopeName { len: usize },
 }
 
 impl std::fmt::Display for CodecError {
@@ -714,6 +780,9 @@ impl std::fmt::Display for CodecError {
             }
             CodecError::WrongResponse { want, got } => {
                 write!(f, "expected response {want:#04x}, got {got:#04x}")
+            }
+            CodecError::ScopeName { len } => {
+                write!(f, "a {len}-byte region name does not fit the radio's 30-byte field")
             }
         }
     }
@@ -1045,7 +1114,7 @@ mod tests {
         assert_eq!(view.route, ROUTE_TRANSPORT_FLOOD);
         assert_eq!(view.payload_type, 0);
         assert_eq!(view.path.hops, 0);
-        assert_eq!(view.payload.len(), 38);
+        assert_eq!(view.payload.len(), 42, "hashes, marker, key and nonce");
         assert_eq!(
             view.transport_codes.unwrap()[0],
             transport_code(&scope.key, 0, view.payload)
@@ -1055,6 +1124,33 @@ mod tests {
         assert!(identify_scope(&view, &["us", "usa", "colorado"]).is_none());
         // ...and the request still parses as a request addressed to the peer.
         assert_eq!(parse_route_request(&packet, &peer).unwrap().peer_key, own);
+    }
+
+    /// **The name and the key have to describe the same region.** The radio's field is 31 bytes with
+    /// its NUL, so a longer name is refused rather than cut: a truncated name with a key derived from
+    /// the full one names a region that cannot exist, and the operator would see it in their app.
+    #[test]
+    fn a_region_name_that_does_not_fit_is_refused() {
+        assert!(build_default_flood_scope(Some(&FloodScope::with_key("a".repeat(31), [0; 16]))).is_err());
+        assert!(build_default_flood_scope(Some(&FloodScope::with_key("", [0; 16]))).is_err());
+        // A `from_name` scope is always inside the field, because the derivation cuts first.
+        let long = FloodScope::from_name(&"b".repeat(40));
+        assert_eq!(long.name.len(), 30);
+        assert_eq!(
+            long.key,
+            FloodScope::from_name(&"b".repeat(30)).key,
+            "the key belongs to the name the radio can hold"
+        );
+        assert!(build_default_flood_scope(Some(&long)).is_ok());
+    }
+
+    /// One leading `#` is stripped and no more: the firmware hashes the stored name as it is, so
+    /// `##us` is a different region from `#us`.
+    #[test]
+    fn only_one_leading_hash_is_stripped() {
+        assert_eq!(FloodScope::from_name("#us").name, "us");
+        assert_eq!(FloodScope::from_name("##us").name, "#us");
+        assert_ne!(FloodScope::from_name("#us").key, FloodScope::from_name("##us").key);
     }
 
     /// A plain flood carries no codes, so it can never be attributed to a region.
@@ -1071,7 +1167,7 @@ mod tests {
     #[test]
     fn the_radios_default_scope_round_trips() {
         let scope = FloodScope::from_name("us-co");
-        let frame = build_default_flood_scope(Some(&scope));
+        let frame = build_default_flood_scope(Some(&scope)).expect("builds");
         assert_eq!(frame.len(), 1 + 31 + 16);
         assert_eq!(frame[0], commands::SET_DEFAULT_FLOOD_SCOPE);
         assert_eq!(&frame[1..6], b"us-co");
@@ -1083,10 +1179,13 @@ mod tests {
 
         // The firmware's null answer, and a clear command, are both one byte.
         assert_eq!(parse_default_flood_scope(&[codes::DEFAULT_FLOOD_SCOPE]), Some(None));
-        assert_eq!(build_default_flood_scope(None), vec![commands::SET_DEFAULT_FLOOD_SCOPE]);
+        assert_eq!(
+            build_default_flood_scope(None).expect("builds"),
+            vec![commands::SET_DEFAULT_FLOOD_SCOPE]
+        );
         // A name the firmware would refuse is truncated to the 30 bytes it accepts.
         let long = FloodScope::from_name(&"a".repeat(40));
-        assert_eq!(build_default_flood_scope(Some(&long)).len(), 1 + 31 + 16);
+        assert!(build_default_flood_scope(Some(&long)).is_ok());
     }
 
     #[test]
@@ -1171,7 +1270,7 @@ mod tests {
         coded.splice(1..1, [0u8; 4]);
         let view = parse_packet(&coded).expect("parses with transport codes");
         assert_eq!(view.path.hash_size, 2);
-        assert_eq!(view.payload.len(), 38);
+        assert_eq!(view.payload.len(), 42);
     }
 
     #[test]

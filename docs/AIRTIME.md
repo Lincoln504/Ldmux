@@ -102,12 +102,13 @@ numbers belong to the tuple.
 - `rto_initial_ms` scales with the airtime (`Config::with_airtime`): on this tuple a record is about
   600 ms, so a fixed two-second retry would duplicate work the peer already has, and duplicates are
   airtime.
-- **Discovery is a request, not a broadcast** (ADR-0032). A route request is ≈40 bytes and its
-  direct answer ≈40 bytes plus the path, spent once per attempt instead of once per interval: at
-  62.5 kHz that is ≈0.5 s of air for both, against 449 ms for one 120-byte advert that a repeater
-  will not carry past eight hops.
-- **The advert is a maintenance broadcast** at `LDMUX_MESH_ADVERT_SECS`, default one hour, ≈0.07 % of
-  a ten-percent allowance per advert at this tuple.
+- **Discovery is a request, not a broadcast** (ADR-0032). A route request is 44 bytes and its direct
+  answer 40 bytes plus the path, spent once per attempt instead of once per interval: at 62.5 kHz
+  that is ≈0.35 s of air for both, against 449 ms for one 120-byte advert that a repeater will not
+  carry past eight hops.
+- **The advert is a maintenance broadcast, and it is off by default**
+  (`LDMUX_MESH_ADVERT_SECS`; 3600 turns it on at ≈0.07 % of a ten-percent allowance per advert at this
+  tuple). Nothing depends on it: a peer is found by the request.
 
 ## Method notes, so the numbers can be argued with
 

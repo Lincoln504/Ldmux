@@ -36,10 +36,13 @@ use ldmux_companion::codec::{
 };
 use ldmux_companion::{
     ByteLink, Companion, FloodScope, KNOWN_SCOPE_TAGS, RouteRequest, SerialLink, SessionError,
-    build_route_reply, build_route_request_in_scope, identify_scope,
+    build_route_request_in_scope, identify_scope,
 };
 use ldmux_mesh::carrier::{Bound, Budget, Carrier, Event};
-use ldmux_mesh::constants::{RECORD_MAX, RadioState, SendOutcome, UNKNOWN_BATTERY, UNKNOWN_RSSI};
+use ldmux_mesh::constants::{
+    RECORD_MAX, RECORD_RECEIVED_MAX as RECEIVED_RECORD_MAX, RadioState, SendOutcome,
+    UNKNOWN_BATTERY, UNKNOWN_RSSI,
+};
 use ldmux_mesh::messages::ScopeInfo;
 use ldmux_mesh::error::MeshError;
 use ldmux_mesh::messages::{SendResult, Status};
@@ -75,22 +78,21 @@ const MAX_PATH_SIZE: usize = 64;
 /// (`examples/simple_repeater/MyMesh.cpp:907`) — so an advert-only design cannot reach a peer nine
 /// hops away at all.
 ///
-/// **So this is now a maintenance broadcast, and the community's own cadence applies to it.** The
-/// MeshCore firmware ships repeaters at a 12-hour flood advert interval and companions at *never*
-/// (`flood.advert.interval` 3-168 h, `advert.interval` 60-240 min, default 0), and the regional
-/// guides push it further out — Switzerland recommends 49 hours, CT Mesh and Ottawa 47 — because
-/// an advert is airtime every node in range pays for. ldmux used to advertise every five minutes,
-/// 564 times that cadence, which was a bad neighbour on a shared band even before it failed to
-/// solve the problem it was there for. One hour is a compromise: the node stays visible in other
-/// operators' contact lists without paying for it repeatedly.
+/// **So this defaults to off, which is the firmware's own answer for a companion.** MeshCore's
+/// repeater default is a 47-hour flood advert, its companion default is *never*, and the regional
+/// guides push repeaters further out still (Switzerland 49 hours) — because an advert is airtime
+/// every node in range pays for, and a repeater drops it after eight hops anyway. ldmux advertised
+/// every five minutes, 564 times the community's cadence, and no mechanism now depends on it:
+/// discovery is a request, and the receive-log advert event keeps the old path working for an
+/// operator who does advertise.
 ///
-/// `LDMUX_MESH_ADVERT_SECS=0` turns adverts off entirely, which is what the firmware's own
-/// companion default is.
+/// `LDMUX_MESH_ADVERT_SECS=<seconds>` turns it on (3600 keeps the node visible in other operators'
+/// contact lists for about 0.07 % of a ten-percent allowance at 62.5 kHz).
 fn advert_interval() -> Option<Duration> {
     let secs = std::env::var("LDMUX_MESH_ADVERT_SECS")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(3_600);
+        .unwrap_or(0);
     (secs > 0).then(|| Duration::from_secs(secs))
 }
 
@@ -128,6 +130,13 @@ const PEER_ROUTE_RETRY: Duration = Duration::from_secs(15);
 /// command and no airtime**, so it is cheap; this floor is what keeps a burst of records from
 /// spending the radio's single answer window on route questions.
 const ROUTE_REASK_FLOOR: Duration = Duration::from_secs(2);
+
+/// How old a route may be before this end asks about it again, even though it has one.
+///
+/// The phone uses the same figure. A route is only true while the repeaters that carried it are
+/// still there, and a peer that walks away leaves a well-formed path that nothing refuses — the
+/// radio transmits and nobody answers.
+const PEER_ROUTE_STALE: Duration = Duration::from_secs(120);
 
 /// The least time between two **route replies** to the same peer.
 ///
@@ -217,10 +226,12 @@ fn trace_rx(frame: &[u8]) {
 /// one can only redirect where records are *sent*, and everything inside them is sealed by the
 /// session.
 fn route_hint(record: &[u8]) -> Option<[u8; 32]> {
-    if record.len() != 4 + 32 || record.get(..4)? != ROUTE_HINT_MAGIC {
+    // Four bytes of nonce may follow the key (a retried hint is otherwise a duplicate packet the
+    // radio drops), so the length is a range rather than one number.
+    if !(4 + 32..=4 + 32 + 8).contains(&record.len()) || record.get(..4)? != ROUTE_HINT_MAGIC {
         return None;
     }
-    record.get(4..).and_then(|k| k.try_into().ok())
+    record.get(4..36).and_then(|k| k.try_into().ok())
 }
 
 /// Send a **flooded route request** for `peer`: one packet, every repeater in range forwards it.
@@ -260,10 +271,19 @@ fn send_route_reply<L: ByteLink>(companion: &mut Companion<L>, req: &RouteReques
     ) else {
         return false;
     };
-    let Ok(record) = build_route_reply(send.hash_size, send.hops, &send.bytes) else {
+    // **The reply echoes the request's nonce**, so answering the same question twice produces two
+    // different packets: an identical one would be dropped as a duplicate by the phone's radio
+    // (`Packet::calculatePacketHash`), and the phone would learn nothing.
+    let Ok(record) =
+        ldmux_companion::build_route_reply_with_nonce(send.hash_size, send.hops, &send.bytes, &req.nonce)
+    else {
         return false;
     };
-    companion.send_raw(send.hash_size, &send.bytes, &record).is_ok()
+    // **Two seconds, not ten.** This runs inside the push handler, before the record that arrived is
+    // delivered upward, so a radio that stopped answering must not hold the loop for ten seconds.
+    companion
+        .send_raw_within(send.hash_size, &send.bytes, &record, Duration::from_secs(2))
+        .is_ok()
 }
 
 /// The route a peer's `LDRR` reply names: the path it uses towards us, reversed into ours.
@@ -288,6 +308,21 @@ fn frame_route_request(frame: &[u8], own_key: &[u8; 32]) -> Option<RouteRequest>
     parse_route_request(frame.get(3..)?, own_key)
 }
 
+/// The largest record this link can carry **now**, given the path it is using.
+///
+/// The sender's ceiling is `RECORD_MAX - path` — a raw send is
+/// `[0x41][priority][header][path byte][path][record]` inside the firmware's 176-byte frame — and
+/// the receiver's is [`RECORD_RECEIVED_MAX`], because a radio does not push a frame it cannot fit in
+/// that same 176 bytes. `min` of the two is what a full record may be. A **fixed** 172 was the old
+/// answer, and it was refused by ldmux's own packet builder at the first path byte.
+fn record_limit(path: Option<&PeerPath>) -> u8 {
+    let used = path.map_or(0, |p| p.bytes.len());
+    let max = RECORD_MAX
+        .saturating_sub(used)
+        .min(RECEIVED_RECORD_MAX);
+    u8::try_from(max).unwrap_or(1).max(1)
+}
+
 /// Ask the radio for the route to `peer_radio`, and keep it when the answer has one.
 ///
 /// **This is a serial command, not a transmission**, so it can be asked as often as is useful; what
@@ -299,6 +334,7 @@ fn refresh_peer_route<L: ByteLink>(
     companion: &mut Companion<L>,
     peer_radio: Option<&[u8; 32]>,
     peer_path: &mut Option<PeerPath>,
+    peer_path_heard: &mut Option<Instant>,
 ) -> bool {
     let Some(key) = peer_radio else {
         return false;
@@ -316,6 +352,15 @@ fn refresh_peer_route<L: ByteLink>(
                 usize::from(path.hops),
                 &path.bytes,
             );
+            // The radio stamps the entry when the advert was heard. A clock that was never set
+            // answers in boot-seconds, so an implausible stamp counts as old rather than fresh.
+            let now_unix = unix_now();
+            let plausible = u64::from(path.received_at) + 86_400 > now_unix;
+            *peer_path_heard = if plausible {
+                Instant::now().checked_sub(Duration::from_secs(age))
+            } else {
+                None
+            };
             if *peer_path != before {
                 route_log(&format!("cache answer hops={} age={age}s", path.hops));
             }
@@ -372,7 +417,27 @@ impl ScopeChoice {
                     source: "off",
                 };
             }
-            let scope = FloodScope::from_name(&pin);
+            // **A pin is checked before it is used.** Region names are lower-case letters, digits
+            // and hyphens (the firmware's `is_name_char` rejects space, `*`, `,` and `:` as well),
+            // the hash covers the exact bytes, and a name nobody has is not a degraded scope — it is
+            // a scope every repeater drops. Refusing a bad pin and staying unscoped is the safe
+            // direction, and it is said out loud rather than silently ignored.
+            let bare = pin.trim().trim_start_matches('#');
+            let valid = !bare.is_empty()
+                && bare.len() <= 30
+                && bare
+                    .bytes()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-');
+            if !valid {
+                route_log(&format!(
+                    "scope '{pin}' is not a region name (lower-case letters, digits and '-', up to 30); staying unscoped"
+                ));
+                return Self {
+                    scope: None,
+                    source: "none",
+                };
+            }
+            let scope = FloodScope::from_name(bare);
             if log {
                 route_log(&format!("scope {} pinned by LDMUX_MESH_SCOPE", scope.name));
             }
@@ -777,6 +842,10 @@ fn prepare(
     })?;
     let mut companion = Companion::new(link);
     let self_info = companion.app_start("ldmux").map_err(session_error)?;
+    // **The radio's clock is what stamps an advert.** A companion has no network and starts its
+    // clock at zero at boot, so `CMD_GET_ADVERT_PATH` would report route ages against the epoch and
+    // every "is this path still true" question would be unanswerable. One command, best effort.
+    let _ = companion.set_time(u32::try_from(unix_now()).unwrap_or(u32::MAX));
     // The version this sends is what the firmware latches to decide whether it
     // emits its V3 frames (MyMesh.cpp:1028-1031); `crates/companion` sends 3.
     let device_info = companion.device_query().map_err(session_error)?;
@@ -839,7 +908,9 @@ fn prepare(
     };
     let airtime_ms = self_info.time_on_air_ms(RECORD_MAX);
     let bound = Bound {
-        uplink_record_max: u8::try_from(RECORD_MAX).unwrap_or(172),
+        // No route yet, so no path bytes are spent: the receiver's cap is the whole answer until
+        // `Event::Limit` revises it as soon as a route is learned.
+        uplink_record_max: record_limit(None),
         radio_state: RadioState::Connected,
         // No gateway is in the path: this process owns the radio, and the firmware is the meter.
         budget: Budget::RadioGoverned,
@@ -899,6 +970,11 @@ fn serve_loop<L: ByteLink>(
 ) {
     // Recomputed on a retune: a budget is records per hour at *this* tuple's airtime, so a
     // radio moved to a slower spreading factor can spend fewer records than this number said.
+    // **The hour's allowance in records, uncapped.** The session only needs "is there any left" —
+    // it may emit at most the L2 credit window per poll — so a count that is truncated to the
+    // one-byte wire field is fine to *publish* but must never be the number this end counts
+    // against: at 62.5 kHz a ten-percent hour is 597 records, and a 255-byte ceiling stopped the
+    // link at 43 % of its own allowance.
     let mut budget = budget_per_hour(settings.airtime_ms, settings.preset.freq_mhz);
     // **The allowance belongs to the hour, not to this process.** A restart used to hand out a
     // fresh 36 s; the spend is now read back from the state directory and the window resumes where
@@ -925,6 +1001,10 @@ fn serve_loop<L: ByteLink>(
     // packets append one hash per repeater (`Mesh::routeRecvPacket`), and is read back out of the
     // radio's advert-path cache.
     let mut peer_path: Option<PeerPath> = None;
+    // When the peer was last **heard** on that route, so an old answer cannot silence the request
+    // path. A cache entry may be hours old — `received_at` says so once the radio's clock is set —
+    // and a route that merely exists is not a route that works.
+    let mut peer_path_heard: Option<Instant> = None;
     // Which radio the peer is: from the state record, a route hint or a route request. Without it
     // there is no prefix to look a route up by, and nothing to address a route request to.
     let mut peer_radio: Option<[u8; 32]> = settings.peer_key;
@@ -936,6 +1016,19 @@ fn serve_loop<L: ByteLink>(
     // Whether the radio has already been asked to re-read what it actually has, so a mismatch
     // noticed later does not rewrite the operator's choice twice.
     let mut scope_followed_radio = scope.source != "none";
+    // A region name matched once, and a fingerprint of the payload that matched it. **Two matches
+    // over different payloads before anything is adopted**: a 16-bit code has one chance in 65 536
+    // of matching by accident per candidate, so one match across ~70 names is a coin toss once every
+    // few thousand wideband packets, while two independent payloads settling on the same name is
+    // evidence. Nothing is written to the radio on a single match.
+    let mut scope_candidate: Option<(String, u64)> = None;
+    // A scope adopted from the air **before anything has answered under it**. The probe is one
+    // request; until a reply comes back the region is not written to the radio, because a wrong
+    // scope in flash is the one state in which discovery cannot work at all.
+    let mut scope_unproven = false;
+    // The least gap between two identification attempts: naming a region costs one HMAC per
+    // candidate, and a busy scoped mesh would pay for it on every packet.
+    let mut scope_checked: Option<Instant> = None;
     let mut last_ping: Option<Instant> = None;
     // When the "request sent" line last went to the journal, so a failing link cannot flood it.
     let mut last_ping_log: Option<Instant> = None;
@@ -965,6 +1058,14 @@ fn serve_loop<L: ByteLink>(
         return;
     }
     if events.blocking_send(Ok(Event::Scope(scope.info()))).is_err() {
+        return;
+    }
+    // The record size for the path in hand (none yet: a bare record is the largest).
+    let mut published_limit = record_limit(peer_path.as_ref());
+    if events
+        .blocking_send(Ok(Event::Limit(published_limit)))
+        .is_err()
+    {
         return;
     }
 
@@ -1000,7 +1101,27 @@ fn serve_loop<L: ByteLink>(
                         }
                         SendOutcome::SentDirect
                     }
-                    Err(e) => refused(&e),
+                    Err(e) => {
+                        // The one refusal that is not about this record: a radio whose firmware
+                        // predates raw-packet composition cannot send anything at all, and "the
+                        // radio refused (busy)" is the wrong sentence for it.
+                        if let SessionError::Rejected { code: 1, .. } = &e {
+                            eprintln!(
+                                "ldmuxd: this radio does not accept a raw packet send (needs MeshCore companion v1.16.0 or newer)"
+                            );
+                        }
+                        if let SessionError::Codec(why) = &e {
+                            // Said once per record, at the place the number is known: a record that
+                            // does not fit the path is a sizing bug, not a radio one, and the
+                            // `Limit` event should have prevented it.
+                            eprintln!(
+                                "ldmuxd: a {}-byte record does not fit a {}-byte path: {why}",
+                                record.len(),
+                                path.len()
+                            );
+                        }
+                        refused(&e)
+                    }
                 };
                 if events
                     .blocking_send(Ok(Event::SendResult(SendResult { seq, outcome })))
@@ -1008,9 +1129,8 @@ fn serve_loop<L: ByteLink>(
                 {
                     return;
                 }
-                let left = budget.saturating_sub(u8::try_from(sent).unwrap_or(u8::MAX));
                 if events
-                    .blocking_send(Ok(Event::Status(status(&settings, left, sent))))
+                    .blocking_send(Ok(Event::Status(status(&settings, budget, sent))))
                     .is_err()
                 {
                     return;
@@ -1111,15 +1231,21 @@ fn serve_loop<L: ByteLink>(
                 // silence would never let the route be re-read.
                 if peer_radio.is_some() && due {
                     last_route_ask = Some(Instant::now());
-                    refresh_peer_route(&mut companion, peer_radio.as_ref(), &mut peer_path);
+                    refresh_peer_route(&mut companion, peer_radio.as_ref(), &mut peer_path, &mut peer_path_heard);
                     // **The cache is a shortcut, not the mechanism.** When it has nothing, ask the
                     // peer for a route: the reply is one direct record and it crosses whatever
                     // distance the mesh actually carries, which an advert does not (a repeater
                     // drops an advert after 8 hops by default).
-                    if peer_path.is_none()
+                    // **An existing route is not a working route.** The peer may have moved since
+                    // the advert that taught it; a request is one flood and its reply re-establishes
+                    // both directions, so a route older than `PEER_ROUTE_STALE` is asked about again
+                    // rather than trusted until something fails.
+                    let route_stale = peer_path_heard
+                        .is_none_or(|t| t.elapsed() >= PEER_ROUTE_STALE);
+                    if (peer_path.is_none() || route_stale)
                         && let Some(peer) = peer_radio
                         && last_ping.is_none_or(|t| t.elapsed() >= PEER_PING_FLOOR)
-                        && budget.saturating_sub(u8::try_from(sent).unwrap_or(u8::MAX)) > 0
+                        && left(budget, sent) > 0
                     {
                         last_ping = Some(Instant::now());
                         let ok = send_route_request(
@@ -1182,28 +1308,12 @@ fn serve_loop<L: ByteLink>(
                             {
                                 settings.preset.hash_size = mode.saturating_add(1).clamp(1, 3);
                             }
-                            // The scope is a register on the same radio, and another app setting
-                            // it is the case that matters: this daemon would otherwise keep
-                            // flooding under a region the operator has just replaced.
-                            let seen_scope = ScopeChoice::resolve(&mut companion, false);
-                            if seen_scope.source == "radio" && seen_scope.info() != scope.info() {
-                                if let Some(s) = seen_scope.info() {
-                                    route_log(&format!(
-                                        "scope {} set on the radio by another app",
-                                        s.name
-                                    ));
-                                } else {
-                                    route_log("scope cleared on the radio by another app");
-                                }
-                                scope = seen_scope;
-                                scope_followed_radio = true;
-                                if events.blocking_send(Ok(Event::Scope(scope.info()))).is_err() {
-                                    return;
-                                }
-                            }
-                            // The airtime estimate follows the tuple, or the budget keeps measuring
-                            // the radio that is no longer in use.
+                            // The airtime estimate follows the tuple, and so must the allowance: a
+                            // radio moved from 500 kHz to 62.5 kHz inside the European sub-band
+                            // keeps 255 records an hour unless this is recomputed.
                             settings.airtime_ms = info.time_on_air_ms(RECORD_MAX);
+                            budget =
+                                budget_per_hour(settings.airtime_ms, settings.preset.freq_mhz);
                             if events
                                 .blocking_send(Ok(Event::Status(status(&settings, budget, sent))))
                                 .is_err()
@@ -1211,13 +1321,32 @@ fn serve_loop<L: ByteLink>(
                                 return;
                             }
                         }
+                        // **The scope is its own register, and another app owns it too.** It is
+                        // watched on every pass rather than inside the tuple branch: an operator
+                        // who only clears `region default` leaves the tuple untouched, and this
+                        // daemon would keep flooding under a region its own radio no longer has.
+                        // Whatever the radio says now wins, including "nothing".
+                        let seen_scope = ScopeChoice::resolve(&mut companion, false);
+                        if seen_scope.info() != scope.info() {
+                            match seen_scope.info() {
+                                Some(s) => route_log(&format!(
+                                    "scope {} set on the radio by another app",
+                                    s.name
+                                )),
+                                None => route_log("scope cleared on the radio by another app"),
+                            }
+                            scope = seen_scope;
+                            scope_followed_radio = scope.source != "none";
+                            if events.blocking_send(Ok(Event::Scope(scope.info()))).is_err() {
+                                return;
+                            }
+                        }
                     }
                 }
                 if last_status.elapsed() >= STATUS_REFRESH {
                     last_status = Instant::now();
-                    let left = budget.saturating_sub(u8::try_from(sent).unwrap_or(u8::MAX));
                     if events
-                        .blocking_send(Ok(Event::Status(status(&settings, left, sent))))
+                        .blocking_send(Ok(Event::Status(status(&settings, budget, sent))))
                         .is_err()
                     {
                         return;
@@ -1241,8 +1370,7 @@ fn serve_loop<L: ByteLink>(
                     // 62.5 kHz left `records 0 left this hour` with 14 records pending, and the
                     // broadcast would otherwise have kept spending a band the daemon had already
                     // declared exhausted.
-                    let advert_ok = budget.saturating_sub(u8::try_from(sent).unwrap_or(u8::MAX)) > 0
-                        && companion.send_self_advert(true).is_ok();
+                    let advert_ok = left(budget, sent) > 0 && companion.send_self_advert(true).is_ok();
                     if trace_on() {
                         eprintln!("ldmuxd: trace advert scheduled ok={advert_ok}");
                     }
@@ -1252,7 +1380,14 @@ fn serve_loop<L: ByteLink>(
                             save_window(path, window_start_unix, sent);
                         }
                     }
-                    last_advert = Some(Instant::now());
+                    // **A failed advert is not an advert sent.** Advancing the clock on a refusal
+                    // (the radio still settling after a boot is the common one) hid the node for a
+                    // whole interval; a retry a minute later costs one broadcast and fixes it.
+                    last_advert = Some(if advert_ok {
+                        Instant::now()
+                    } else {
+                        Instant::now() - every.saturating_sub(Duration::from_secs(60))
+                    });
                 }
             }
             Err(RecvTimeoutError::Disconnected) => {
@@ -1261,6 +1396,15 @@ fn serve_loop<L: ByteLink>(
             }
         }
 
+        let limit_now = record_limit(peer_path.as_ref());
+        if limit_now != published_limit {
+            // The route changed and took record bytes with it. The session is told, so a screen
+            // update is split to fit instead of being refused by the packet builder.
+            published_limit = limit_now;
+            if events.blocking_send(Ok(Event::Limit(limit_now))).is_err() {
+                return;
+            }
+        }
         match companion.next_push(Duration::from_millis(1)) {
             Ok(Some(frame)) => {
                 if trace_on() {
@@ -1273,29 +1417,75 @@ fn serve_loop<L: ByteLink>(
                 //
                 // This runs only while this end has no scope. Once the radio reports one, or an
                 // operator pinned one, that decision stands.
+                // **The floor is for the work, not for the evidence.** While a name is waiting to
+                // be confirmed, every scoped flood is tested — that is the case where a second
+                // sample settles it — and once nothing is pending the work is rate-limited, because
+                // naming a region costs one HMAC per candidate and a busy mesh would pay it on
+                // every packet.
                 if !scope_followed_radio
+                    && (scope_candidate.is_some()
+                        || scope_checked.is_none_or(|t| t.elapsed() >= Duration::from_secs(5)))
                     && let Some(view) = frame_packet(&frame)
                     && view.is_flood()
+                    // **A zero-hop flood proves nothing about the repeaters.** It was never
+                    // forwarded, so a matching tag says only that an adjacent radio used it; the
+                    // repeaters this end needs may not carry that region at all.
+                    && view.path.hops >= 1
                     && view.transport_codes.is_some()
-                    && let Some(learned) = identify_scope(&view, KNOWN_SCOPE_TAGS)
                 {
-                    route_log(&format!(
-                        "scope {} learned from a flood on the mesh",
-                        learned.name
-                    ));
-                    // Write it to the radio too: an advert is firmware-built and uses the radio's
-                    // own default scope, so a daemon that only scoped its raw packets would keep
-                    // advertising unscoped on the one mesh that needs the scope.
-                    if companion.set_default_flood_scope(Some(&learned)).is_ok() {
-                        route_log("scope written to the radio");
+                    scope_checked = Some(Instant::now());
+                    if let Some(learned) = identify_scope(&view, KNOWN_SCOPE_TAGS) {
+                        use std::hash::{Hash as _, Hasher as _};
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        view.payload_type.hash(&mut hasher);
+                        view.payload.hash(&mut hasher);
+                        let fingerprint = hasher.finish();
+                        let confirmed = matches!(
+                            &scope_candidate,
+                            Some((name, seen)) if name == &learned.name && *seen != fingerprint
+                        );
+                        scope_candidate = Some((learned.name.clone(), fingerprint));
+                        if confirmed {
+                            route_log(&format!(
+                                "scope {} proven by two scoped floods on the mesh",
+                                learned.name
+                            ));
+                            // **Adopted for this end's own floods, not yet written to the radio.**
+                            // The next request goes out under it; when something answers under it
+                            // the region is proved and the radio can be told too.
+                            scope = ScopeChoice {
+                                scope: Some(learned),
+                                source: "learned",
+                            };
+                            scope_followed_radio = true;
+                            scope_unproven = true;
+                            if events.blocking_send(Ok(Event::Scope(scope.info()))).is_err() {
+                                return;
+                            }
+                        }
                     }
-                    scope = ScopeChoice {
-                        scope: Some(learned),
-                        source: "learned",
-                    };
-                    scope_followed_radio = true;
-                    if events.blocking_send(Ok(Event::Scope(scope.info()))).is_err() {
-                        return;
+                }
+                // **Proved: something came back over the scope this end is using.** Only now is the
+                // radio given it, because an advert is firmware-built and uses the radio's own
+                // default scope — a daemon that only scoped its raw packets would keep advertising
+                // unscoped on the one mesh that needs the scope.
+                let answered = frame_route_request(&frame, &settings.preset.public_key).is_some()
+                    || incoming_record(&frame)
+                        .and_then(|i| route_reply(&i.record))
+                        .is_some();
+                if scope_unproven && answered {
+                    scope_unproven = false;
+                    if let Some(learned) = scope.as_ref() {
+                        match companion.set_default_flood_scope(Some(learned)) {
+                            Ok(()) => route_log(&format!(
+                                "scope {} proved by an answered request, written to the radio",
+                                learned.name
+                            )),
+                            Err(e) => route_log(&format!(
+                                "scope {} proved, but the radio refused the write ({e})",
+                                learned.name
+                            )),
+                        }
                     }
                 }
                 if let Some(req) = frame_route_request(&frame, &settings.preset.public_key) {
@@ -1321,7 +1511,7 @@ fn serve_loop<L: ByteLink>(
                         }
                     }
                     if last_reply.is_none_or(|t| t.elapsed() >= ROUTE_REPLY_FLOOR)
-                        && budget.saturating_sub(u8::try_from(sent).unwrap_or(u8::MAX)) > 0
+                        && left(budget, sent) > 0
                     {
                         last_reply = Some(Instant::now());
                         let ok = send_route_reply(&mut companion, &req);
@@ -1363,7 +1553,7 @@ fn serve_loop<L: ByteLink>(
                         // amplifier.
                         if peer_path.is_none()
                             && last_ping.is_none_or(|t| t.elapsed() >= PEER_PING_FLOOR)
-                            && budget.saturating_sub(u8::try_from(sent).unwrap_or(u8::MAX)) > 0
+                            && left(budget, sent) > 0
                         {
                             last_ping = Some(Instant::now());
                             let ok = send_route_request(
@@ -1391,7 +1581,7 @@ fn serve_loop<L: ByteLink>(
                                 save_peer(record, &key);
                             }
                         }
-                        if refresh_peer_route(&mut companion, peer_radio.as_ref(), &mut peer_path) {
+                        if refresh_peer_route(&mut companion, peer_radio.as_ref(), &mut peer_path, &mut peer_path_heard) {
                             last_route_ask = Some(Instant::now());
                         }
                     } else if let Some(reply) = route_reply(&incoming.record) {
@@ -1401,6 +1591,7 @@ fn serve_loop<L: ByteLink>(
                         let hops = reply.hops;
                         route_log(&format!("reply received hops={hops}"));
                         peer_path = Some(reply);
+                        peer_path_heard = Some(Instant::now());
                     } else {
                         // **Learn the route again whenever the peer talks.** A link that is up can
                         // still hold a stale path: the phone walks, the session survives on
@@ -1412,7 +1603,7 @@ fn serve_loop<L: ByteLink>(
                             && last_route_ask.is_none_or(|t| t.elapsed() >= ROUTE_REASK_FLOOR)
                         {
                             last_route_ask = Some(Instant::now());
-                            refresh_peer_route(&mut companion, peer_radio.as_ref(), &mut peer_path);
+                            refresh_peer_route(&mut companion, peer_radio.as_ref(), &mut peer_path, &mut peer_path_heard);
                         }
                         if events
                             .blocking_send(Ok(Event::Recv(incoming.record)))
@@ -1600,26 +1791,37 @@ fn refused(e: &SessionError) -> SendOutcome {
             6 => SendOutcome::ErrTooLong,
             _ => SendOutcome::ErrBusy,
         },
+        // **Our own packet builder refusing the packet is not the radio's word.** It means the
+        // record is larger than the path leaves room for — a sizing fault on this end, which the
+        // retry ladder must not read as "the radio is busy" and retry unchanged for 30 s.
+        SessionError::Codec(_) => SendOutcome::ErrTooLong,
         _ => SendOutcome::ErrBusy,
     }
 }
 
-/// Records of the full size that fit the allowance in an hour, capped by the one-byte wire field.
+/// Records of the full size that fit the allowance in an hour, **not** capped by the wire field.
 ///
-/// The cap is what the contract can say, not what the policy allows: at 500 kHz/SF7 ten percent is
-/// ≈4770 records, and every tuple above that says 255. The daemon still counts the real spend
-/// (`sent`), it simply cannot publish a number above 255.
-fn budget_per_hour(airtime_ms: f64, freq_mhz: f64) -> u8 {
+/// The published count is one byte, so [`left`] clamps it to 255 — but the figure this end counts
+/// against is the policy's own: at 62.5 kHz SF7 a ten-percent hour is 597 records, and clamping the
+/// counter at 255 stopped the link at 43 % of its allowance while `mesh status` said "0 left" beside
+/// an airtime figure that had minutes to run.
+fn budget_per_hour(airtime_ms: f64, freq_mhz: f64) -> u32 {
     if airtime_ms <= 0.0 {
-        return u8::MAX;
+        return u32::MAX;
     }
     let n = (airtime_budget_ms(freq_mhz) / airtime_ms).floor();
-    u8::try_from(n as u64).unwrap_or(u8::MAX).max(1)
+    u32::try_from(n as u64).unwrap_or(u32::MAX).max(1)
+}
+
+/// What is left of the hour, in the one byte the contract carries: capped, never zeroed by the cap.
+fn left(budget: u32, sent: u32) -> u8 {
+    u8::try_from(budget.saturating_sub(sent)).unwrap_or(u8::MAX)
 }
 
 /// The status a serial radio actually knows: no RSSI or battery reading, and a
 /// budget computed from its own preset rather than reported by a gateway.
-fn status(settings: &Settings, left: u8, sent: u32) -> Status {
+fn status(settings: &Settings, budget: u32, sent: u32) -> Status {
+    let left = left(budget, sent);
     let tenths = (f64::from(sent) * settings.airtime_ms / 100.0).round();
     Status {
         radio_state: RadioState::Connected,
@@ -1639,6 +1841,24 @@ mod tests {
         let mut frame = vec![0x88, 0xE0, 0xA1];
         frame.extend_from_slice(packet);
         frame
+    }
+
+    /// A scoped request with one repeater's hash spliced into its path.
+    ///
+    /// **One hop is the point**: a zero-hop flood was never forwarded, so a matching region in it
+    /// proves nothing about the repeaters this end needs — that rule is what keeps a neighbour's
+    /// tag from pinning the radio to a region the mesh does not carry.
+    fn scoped_request_with_a_hop(
+        peer: &[u8; 32],
+        own: &[u8; 32],
+        scope: &ldmux_companion::FloodScope,
+        hop: u8,
+    ) -> Vec<u8> {
+        let mut packet =
+            ldmux_companion::build_route_request_in_scope(1, peer, own, Some(scope)).unwrap();
+        packet[5] = ldmux_companion::codec::path_byte(1, 1).unwrap();
+        packet.insert(6, hop);
+        packet
     }
 
     #[test]
@@ -1766,14 +1986,21 @@ mod tests {
         link.push_payload(&advert_path_frame(0x02, &[0x11, 0x22]));
         let mut companion = Companion::new(link);
         let mut path: Option<PeerPath> = None;
-        assert!(refresh_peer_route(&mut companion, Some(&peer), &mut path), "an answer arrived");
+        let mut heard: Option<Instant> = None;
+        assert!(
+            refresh_peer_route(&mut companion, Some(&peer), &mut path, &mut heard),
+            "an answer arrived"
+        );
         let learned = path.clone().expect("two hops is a route");
         assert_eq!(learned.bytes, vec![0x22, 0x11], "reversed into sending order");
         assert_eq!((learned.hash_size, learned.hops), (1, 2));
 
         // The same phone, back in earshot: its advert arrives with no hops.
         companion.link_mut().push_payload(&advert_path_frame(0x00, &[]));
-        assert!(refresh_peer_route(&mut companion, Some(&peer), &mut path), "an answer arrived");
+        assert!(
+            refresh_peer_route(&mut companion, Some(&peer), &mut path, &mut heard),
+            "an answer arrived"
+        );
         let adjacent = path.clone().expect("no hops is an answer: the peer is adjacent");
         assert_eq!(adjacent.hops, 0, "the stale repeater chain is gone");
         assert!(adjacent.bytes.is_empty());
@@ -1806,6 +2033,137 @@ mod tests {
         let path = PeerPath::reversed(2, 2, &[0xA1, 0xA2, 0xB1, 0xB2]).expect("two hops is a route");
         assert_eq!(path.bytes, vec![0xB1, 0xB2, 0xA1, 0xA2]);
         assert_eq!((path.hash_size, path.hops), (2, 2));
+    }
+
+    /// **A region is adopted only on evidence, and then written to the radio.** One match of a
+    /// 16-bit code across ~70 candidate names is a coin toss; two matches over different payloads
+    /// settling on the same name is proof, and only then does anything change.
+    ///
+    /// Driven through `serve_loop` rather than the helpers, because the bug this guards is the
+    /// wiring: a `continue` in the wrong place would drop the very request that arrived in the same
+    /// frame, and a helper test could not see that.
+    #[test]
+    fn a_scope_is_adopted_only_after_two_scoped_floods_and_then_written_to_the_radio() {
+        let own = [0x91u8; 32];
+        let scope = ldmux_companion::FloodScope::from_name("us-co");
+        // Two requests to *other* radios (so nothing replies), scoped to the same region and
+        // carrying different payloads because the requester key differs.
+        let first = scoped_request_with_a_hop(&[0x11; 32], &own, &scope, 0x31);
+        let second = scoped_request_with_a_hop(&[0x22; 32], &[0x92u8; 32], &scope, 0x32);
+        let mut link = MemoryLink::new();
+        link.push_payload(&log_frame(&first));
+        link.push_payload(&log_frame(&second));
+        // The firmware's answer to the scope write, and to nothing else.
+        link.push_payload(&[0x00]);
+        let companion = Companion::new(link);
+        let (command_tx, command_rx) = channel();
+        let (event_tx, mut event_rx) = async_mpsc::channel(64);
+        let worker = std::thread::spawn(move || {
+            serve(
+                companion,
+                Settings {
+                    hash_size: 1,
+                    airtime_ms: 602.6,
+                    window_record: None,
+                    peer_record: None,
+                    peer_key: None,
+                    scope: ScopeChoice { scope: None, source: "none" },
+                    preset: RadioPreset {
+                        freq_mhz: 910.525,
+                        bw_khz: 62.5,
+                        sf: 7,
+                        cr: 5,
+                        tx_power_dbm: 22,
+                        public_key: own,
+                        hash_size: 1,
+                    },
+                },
+                command_rx,
+                event_tx,
+                Arc::new(AtomicBool::new(false)),
+            );
+        });
+
+        // Read events until the scope arrives, bounded: statuses refresh on their own.
+        let mut adopted = None;
+        for _ in 0..40 {
+            match event_rx.blocking_recv() {
+                Some(Ok(Event::Scope(scope))) if scope.is_some() => {
+                    adopted = scope.map(|s| s.name);
+                    break;
+                }
+                Some(Ok(_)) => {}
+                other => panic!("unexpected event {other:?}"),
+            }
+        }
+        assert_eq!(
+            adopted,
+            Some("us-co".to_owned()),
+            "two scoped floods over different payloads name the region"
+        );
+        drop(command_tx);
+        worker.join().unwrap();
+    }
+
+    /// One scoped flood is not proof: nothing is adopted, and nothing is written to the radio.
+    #[test]
+    fn a_single_scoped_flood_changes_nothing() {
+        let own = [0x91u8; 32];
+        let scope = ldmux_companion::FloodScope::from_name("us-co");
+        let request = scoped_request_with_a_hop(&[0x11; 32], &own, &scope, 0x31);
+        let mut link = MemoryLink::new();
+        link.push_payload(&log_frame(&request));
+        let companion = Companion::new(link);
+        let (command_tx, command_rx) = channel();
+        let (event_tx, mut event_rx) = async_mpsc::channel(64);
+        let worker = std::thread::spawn(move || {
+            serve(
+                companion,
+                Settings {
+                    hash_size: 1,
+                    airtime_ms: 602.6,
+                    window_record: None,
+                    peer_record: None,
+                    peer_key: None,
+                    scope: ScopeChoice { scope: None, source: "none" },
+                    preset: RadioPreset {
+                        freq_mhz: 910.525,
+                        bw_khz: 62.5,
+                        sf: 7,
+                        cr: 5,
+                        tx_power_dbm: 22,
+                        public_key: own,
+                        hash_size: 1,
+                    },
+                },
+                command_rx,
+                event_tx,
+                Arc::new(AtomicBool::new(false)),
+            );
+        });
+        // The opening scope is the only one this end will ever report: the loop opens with a
+        // status, then the scope, and a single match must not add a second scope report.
+        let deadline = std::time::Instant::now() + Duration::from_millis(900);
+        let mut opened = None;
+        let mut reports = 0;
+        while std::time::Instant::now() < deadline {
+            match event_rx.try_recv() {
+                Ok(Ok(Event::Scope(scope))) => {
+                    if opened.is_none() {
+                        opened = Some(scope.is_none());
+                    }
+                    reports += 1;
+                    assert!(scope.is_none(), "one match must not be adopted");
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => panic!("carrier error {e:?}"),
+                Err(_) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+        assert_eq!(opened, Some(true), "the opening report is unscoped");
+        assert_eq!(reports, 1, "and it is the only one");
+        drop(command_tx);
+        worker.join().unwrap();
     }
 
     /// **A route request is answered with the path this end uses, and both ends end up holding
@@ -1977,14 +2335,17 @@ mod tests {
         let eu = 869.525;
         let us = 910.525;
         assert!(airtime_budget_ms(eu) < airtime_budget_ms(us));
-        // At 62.5 kHz/SF7 a record is ≈603 ms, so even ten percent fits below the wire's ceiling
-        // only just; at 500 kHz/SF7 (≈75 ms) the policy figure is far above it and 255 is the
-        // number the contract can carry.
-        assert_eq!(budget_per_hour(602.6, us), u8::MAX);
+        // **The policy figure, not the wire's.** At 62.5 kHz/SF7 a record is ≈603 ms, so ten
+        // percent is 597 records an hour — far past the one byte the contract publishes, which is
+        // exactly why the counter this end charges must not be the published one.
+        assert_eq!(budget_per_hour(602.6, us), 597);
         assert_eq!(budget_per_hour(602.6, eu), 59);
-        assert_eq!(budget_per_hour(75.3, us), u8::MAX);
-        assert_eq!(budget_per_hour(75.3, eu), u8::MAX);
-        // Twice the airtime is half the records wherever the cap does not hide it.
+        assert_eq!(budget_per_hour(75.3, us), 4_780);
+        // The published byte saturates without ever looking spent.
+        assert_eq!(left(budget_per_hour(602.6, us), 0), 255);
+        assert_eq!(left(budget_per_hour(602.6, us), 500), 97);
+        assert_eq!(left(budget_per_hour(602.6, us), 597), 0);
+        // Twice the airtime is half the records.
         assert!(budget_per_hour(7_315.5, us) < budget_per_hour(602.6, us));
     }
 
@@ -2028,17 +2389,17 @@ mod tests {
         // SAFETY: this key is read only by `advert_interval`, and this test is the only place in
         // the binary that writes it, so there is nothing to race with.
         unsafe { std::env::remove_var("LDMUX_MESH_ADVERT_SECS") };
-        assert_eq!(advert_interval(), Some(Duration::from_secs(3_600)), "the default");
+        assert_eq!(advert_interval(), None, "off by default, as a companion ships");
         // SAFETY: as above; this test owns the key for its whole body.
         unsafe { std::env::set_var("LDMUX_MESH_ADVERT_SECS", "0") };
         assert_eq!(advert_interval(), None, "off means off");
         // SAFETY: as above.
         unsafe { std::env::set_var("LDMUX_MESH_ADVERT_SECS", "60") };
         assert_eq!(advert_interval(), Some(Duration::from_secs(60)));
-        // SAFETY: as above. A malformed value falls back to the default rather than turning
-        // adverts off, because "off" is a decision the operator makes on purpose.
+        // SAFETY: as above. A malformed value falls back to the default, which is off: a typo must
+        // not turn a broadcast on.
         unsafe { std::env::set_var("LDMUX_MESH_ADVERT_SECS", "often") };
-        assert_eq!(advert_interval(), Some(Duration::from_secs(3_600)));
+        assert_eq!(advert_interval(), None);
         // SAFETY: as above.
         unsafe { std::env::remove_var("LDMUX_MESH_ADVERT_SECS") };
     }
@@ -2105,17 +2466,20 @@ mod tests {
                 companion,
                 Settings {
                     hash_size: 1,
-                    airtime_ms: 137.9,
+                    airtime_ms: 602.6,
                     window_record: None,
                     peer_record: None,
                     peer_key: None,
                     scope: ScopeChoice { scope: None, source: "none" },
-                preset: RadioPreset {
-                        freq_mhz: 914.25,
-                        bw_khz: 500.0,
-                        sf: 8,
+                    preset: RadioPreset {
+                        // The European sub-band, where the allowance is one percent: 59 records an
+                        // hour at this airtime, which fits the published byte and so shows the
+                        // spend decrementing.
+                        freq_mhz: 869.525,
+                        bw_khz: 62.5,
+                        sf: 7,
                         cr: 5,
-        tx_power_dbm: 22,
+                        tx_power_dbm: 14,
                         public_key: [7u8; 32],
                         hash_size: 1,
                     },
@@ -2131,7 +2495,7 @@ mod tests {
             .unwrap();
         // A status first: the loop starts with no budget, and unknown is zero.
         match event_rx.blocking_recv() {
-            Some(Ok(Event::Status(s))) => assert_eq!(s.ops_left_this_hour, Some(u8::MAX)),
+            Some(Ok(Event::Status(s))) => assert_eq!(s.ops_left_this_hour, Some(59)),
             other => panic!("expected an opening status, got {other:?}"),
         }
         // ...then the scope this node's floods are proved with (none here: the radio has no
@@ -2139,6 +2503,14 @@ mod tests {
         match event_rx.blocking_recv() {
             Some(Ok(Event::Scope(scope))) => assert!(scope.is_none(), "unscoped by default"),
             other => panic!("expected the opening scope, got {other:?}"),
+        }
+        // ...the largest record this path allows (no path yet, so the receiver's cap), and only
+        // then the answer to the record.
+        match event_rx.blocking_recv() {
+            Some(Ok(Event::Limit(limit))) => {
+                assert_eq!(limit, RECEIVED_RECORD_MAX as u8, "a bare record, capped by the receiver")
+            }
+            other => panic!("expected the record limit, got {other:?}"),
         }
         match event_rx.blocking_recv() {
             Some(Ok(Event::SendResult(r))) => {
@@ -2150,7 +2522,7 @@ mod tests {
         match event_rx.blocking_recv() {
             Some(Ok(Event::Status(s))) => assert_eq!(
                 s.ops_left_this_hour,
-                Some(u8::MAX - 1),
+                Some(58),
                 "one record spent one of the hour's budget"
             ),
             other => panic!("expected a status after the send, got {other:?}"),

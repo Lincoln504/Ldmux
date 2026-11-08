@@ -126,6 +126,7 @@ class MeshTermCodecTest {
         assertEquals(n("recordFloor"), MeshRecordLimits.FLOOR)
         assertEquals(n("recordMax"), MeshRecordLimits.MAX)
         assertEquals(n("recordMax"), SessionLib.RECORD_MAX)
+        assertEquals(n("recordReceivedMax"), MeshRecordLimits.RECEIVED_MAX)
         assertEquals(n("creditWindow"), MeshRecordLimits.CREDIT_WINDOW)
     }
 

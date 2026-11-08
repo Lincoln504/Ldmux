@@ -23,6 +23,15 @@ pub enum Event {
     Recv(Vec<u8>),
     /// The answer to one [`Carrier::send_record`], naming the sequence it carried.
     SendResult(SendResult),
+    /// The **largest record this link can carry now**, after the path it is using.
+    ///
+    /// The record budget is not a constant: a raw send is `[0x41][priority][header][path][record]`
+    /// in a 176-byte frame, so every path byte costs a record byte, and a 172-byte record is refused
+    /// by the builder as soon as one repeater is in the path. The session's record size is fixed at
+    /// the handshake, so a carrier that learns a longer path must say so: this event re-sizes it.
+    ///
+    /// Sent when the path is learned and whenever it changes materially.
+    Limit(u8),
     /// The **flood scope** this node's broadcasts are scoped to, or `None` when they are unscoped.
     ///
     /// Sent at open and whenever it changes — which on this carrier happens once, when a radio with

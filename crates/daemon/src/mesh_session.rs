@@ -132,6 +132,20 @@ impl SessionHost {
         }
     }
 
+    /// Re-size the session's records because **the path changed**.
+    ///
+    /// The limit is advertised on bind, but the route to the peer is learned after that and moves
+    /// with it: every path byte costs a record byte. A session created at 171 bytes and then routed
+    /// through a repeater can no longer build a full record, so the carrier reports the new limit
+    /// and this hands it to the session. Nothing is lost if there is no session yet — the figure is
+    /// kept for the next handshake.
+    pub fn set_record_limit(&mut self, record_limit: usize) {
+        self.record_limit = record_limit;
+        if let Some(session) = self.session.as_mut() {
+            session.set_record_limit(record_limit);
+        }
+    }
+
     /// One record arrived from the tunnel. `now_ms` is monotonic (ARQ timers); `wall_ms` is Unix
     /// time (the handshake timestamp window).
     ///

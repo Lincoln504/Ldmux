@@ -47,7 +47,13 @@ carries.
 
 The wire is two shapes, both in `crates/companion`:
 
-- **Request** — `[header 0x01][path byte 0][dest hash 1][src hash 1]["LDRQ"][requester's radio key 32]`.
+- **Request** —
+  `[header 0x01][path byte 0][dest hash 1][src hash 1]["LDRQ"][requester's radio key 32][nonce 4]`.
+  **The nonce is what makes a retry possible at all**: MeshCore dedupes on
+  `SHA256(payload_type ‖ payload)` in a 160-entry ring with no timeout
+  (`Packet::calculatePacketHash`, `SimpleMeshTables`), at every repeater and every receiver, so a
+  byte-identical second request dies in the first repeater. The reply echoes the nonce, and the
+  route hint carries its own.
   Route `FLOOD`, payload type `REQ` (0), which is the payload type MeshCore's own flooded path
   request uses (`BaseChatMesh::sendRequest` sends a `REQ` flood when the path is unknown). The
   hashes are the firmware's own: the first byte of each public key (`PATH_HASH_SIZE` is 1). The

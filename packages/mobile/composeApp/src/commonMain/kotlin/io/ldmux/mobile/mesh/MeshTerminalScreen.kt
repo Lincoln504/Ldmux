@@ -178,11 +178,11 @@ internal const val QUIET_NOTICE_MS = 10_000L
 /**
  * The longest wait before a dropped link is rebuilt, for the Nth rebuild of this screen.
  *
- * **The ladder keeps climbing and it never stops.** Two seconds doubling to a 256-second cap
- * (in seconds: 2, 4, 8, 16, 32, 64, 128, 256): a link that comes back is picked up within four minutes at
- * worst, and a link that is gone costs one handshake every four minutes rather than one every
- * thirty seconds — which matters because a handshake is several records against an hourly budget
- * of dozens. The refresh square is the immediate retry for a user who is watching.
+ * **The ladder keeps climbing and it never stops.** Two seconds doubling, capped at five minutes
+ * (in seconds: 2, 4, 8, 16, 32, 64, 128, 256, then 300): a link that comes back is picked up within
+ * five minutes at worst, and a link that is gone costs one handshake every five minutes rather than
+ * one every thirty seconds — which matters because a handshake is several records against an
+ * hourly allowance. The refresh square is the immediate retry for a user who is watching.
  *
  * Pure, so the ladder is a value a test can hold rather than an expression inside an effect. The
  * wait itself is drawn below the cap (full jitter): two ends that double in lockstep keep meeting.
@@ -804,6 +804,7 @@ fun MeshTerminalScreen(
     // is asking the host again; anywhere else it is the reconnect that used to be a button in the body.
     val onRefresh: () -> Unit = {
         when {
+            terminalLive && conn.driver.screenUnpainted -> scope.launch { conn.driver.resync() }
             terminalLive -> scope.launch { conn.driver.listShells() }
             view is MeshTermView.Choose || view is MeshTermView.NoShells -> scope.launch { conn.driver.refresh() }
             view is MeshTermView.HostClosed -> {
@@ -1125,11 +1126,12 @@ fun MeshTerminalScreen(
                             handle.overflow && source.publicChannel ->
                                 Notice("input refused: held text at limit", ok = false)
                             handle.overflow -> Notice("too much typed: wait for send", ok = false)
-                            // **Live mode has no bar, so a link that stopped carrying used to look
-                            // live for twenty seconds.** The driver's own verdict is the silence
-                            // rule; this is the same silence said earlier, and only while something
-                            // is still owed - an idle shell is silent by design and says nothing.
-                            quietSecs > 0L && !config.meshHoldsInput ->
+                            // **A link that stopped carrying looked live for twenty seconds.** The
+                            // driver's own verdict is the silence rule; this is the same silence
+                            // said earlier, and only while something is still owed — an idle shell
+                            // is silent by design and says nothing. Batch mode has the bar too, so
+                            // gating it there hid the one warning a sync wait should have carried.
+                            quietSecs > 0L ->
                                 Notice("link quiet · ${quietSecs} s", ok = true)
                             live?.stalled == true -> Notice("waiting for send budget", ok = true)
                             live?.screen?.alternate == true ->
@@ -1227,8 +1229,11 @@ fun MeshTerminalScreen(
                     val waiting = when (v) {
                         MeshTermView.Idle -> "starting"
                         MeshTermView.Handshaking -> if (spent) "airtime spent" else "handshaking"
-                        MeshTermView.NoAnswer -> if (spent) "airtime spent" else "no answer from host"
-                        MeshTermView.ProfileMissing -> "host has no terminal yet"
+                        // **A verdict, not a wait.** `NoAnswer` has its own sentence ("check the host
+                        // is on the same channel, then refresh") and this branch would replace it
+                        // with a counter that never says what to do about it.
+                        MeshTermView.NoAnswer -> null
+                        MeshTermView.ProfileMissing -> "asking host for the shell"
                         MeshTermView.Listing -> "asking host for shells"
                         else -> null
                     }

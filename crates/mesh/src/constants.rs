@@ -13,15 +13,36 @@
 /// count the daemon reports, so the two cannot disagree.
 pub const CREDIT_WINDOW: u8 = 8;
 
-/// Absolute ceiling for an opaque record.
+/// Absolute ceiling for an opaque record: 172 bytes with an empty path.
 ///
 /// A raw send is `[0x41][priority][header][path_len][path][record]` inside the companion frame's 176
-/// bytes, which leaves 172 for the sealed record when the path is empty. The real limit is advertised
-/// per peer, because a longer path leaves less room; this is the ceiling no path may exceed.
+/// bytes. **The real limit is per peer and follows the path**, because the packet carries the path
+/// too: 172 − path bytes, capped by [`RECORD_RECEIVED_MAX`]. It is advertised on bind and revised
+/// when the path changes ([`crate::carrier::Event::Limit`]), which is what keeps a full record
+/// buildable through a repeater — a fixed 172 was refused by our own packet builder at the first
+/// path byte.
 pub const RECORD_MAX: usize = 172;
 
-/// The conservative floor: a long path still fits a record this size.
-pub const RECORD_FLOOR: usize = 160;
+/// The largest record a radio will **hand up as a receive-log push**: 171, one less than the wire
+/// budget.
+///
+/// `MyMesh::logRxRaw` refuses a frame it cannot fit in `MAX_FRAME_SIZE` 176 —
+/// `if (_serial->isConnected() && len + 3 <= MAX_FRAME_SIZE)` (`examples/companion_radio/MyMesh.cpp:287`)
+/// — where `len` is the received packet: 1 header + 1 path byte + the record (a direct packet's
+/// path has been consumed by the repeaters that carried it). So a 172-byte record is transmitted,
+/// received, and **never reported upward**, which is silent and repeats on every full record.
+///
+/// This is the receiver's ceiling. The sender's is `RECORD_MAX - path`, because the packet it builds
+/// carries the path too; the limit that is advertised to the session is therefore
+/// `min(RECORD_RECEIVED_MAX, RECORD_MAX - path)`.
+pub const RECORD_RECEIVED_MAX: usize = 171;
+
+/// The smallest record limit ldmux will try to send on, and it is a **sanity check, not a path
+/// test**: the firmware's longest legal path is 64 bytes, so the limit can never legitimately fall
+/// below `RECORD_MAX - 64` = 108. It used to be 160, which is what a path of 12 bytes leaves —
+/// six two-byte hops — so every path past six hops made the phone refuse to send anything at all
+/// and report "no usable path to host" on a link that was working.
+pub const RECORD_FLOOR: usize = 108;
 
 /// `rssi` meaning "no reading" (`0x80` on the wire, signed).
 pub const UNKNOWN_RSSI: i8 = -128;

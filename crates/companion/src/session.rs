@@ -207,8 +207,23 @@ impl<L: ByteLink> Companion<L> {
     /// The reply means "the radio accepted it for transmission", never "the peer
     /// received it": delivery is the session layer's problem, above this one.
     pub fn send_raw(&mut self, hash_size: u8, path: &[u8], record: &[u8]) -> Result<(), SessionError> {
+        self.send_raw_within(hash_size, path, record, Duration::from_secs(10))
+    }
+
+    /// The same, with a deadline of the caller's choosing.
+    ///
+    /// A **route reply** is 40-ish bytes and the radio accepts or refuses it at once; waiting ten
+    /// seconds for its `OK` holds the one answer window — and therefore every record behind it —
+    /// for ten seconds on a radio that has stopped answering. The short form is for those sends.
+    pub fn send_raw_within(
+        &mut self,
+        hash_size: u8,
+        path: &[u8],
+        record: &[u8],
+        timeout: Duration,
+    ) -> Result<(), SessionError> {
         let packet = build_raw_direct(hash_size, path, record)?;
-        self.send_packet(&packet)
+        self.send_packet_within(&packet, timeout)
     }
 
     /// Transmit a packet we built, whatever its route and payload type.
@@ -220,6 +235,15 @@ impl<L: ByteLink> Companion<L> {
     /// (`MyMesh.cpp:2003-2016`, `Dispatcher::sendPacket`). The frame ceiling is the firmware's
     /// own: two bytes of command and priority out of `MAX_FRAME_SIZE` 176, so 174 of packet.
     pub fn send_packet(&mut self, packet: &[u8]) -> Result<(), SessionError> {
+        self.send_packet_within(packet, Duration::from_secs(10))
+    }
+
+    /// The same, with a deadline of the caller's choosing.
+    pub fn send_packet_within(
+        &mut self,
+        packet: &[u8],
+        timeout: Duration,
+    ) -> Result<(), SessionError> {
         if packet.len() > crate::codec::PACKET_MAX {
             return Err(SessionError::Codec(crate::codec::CodecError::TooLong {
                 len: packet.len(),
@@ -230,7 +254,21 @@ impl<L: ByteLink> Companion<L> {
         payload.push(commands::SEND_RAW_PACKET);
         payload.push(0); // priority
         payload.extend_from_slice(packet);
-        self.request(&payload, codes::OK, Duration::from_secs(10))?;
+        self.request(&payload, codes::OK, timeout)?;
+        Ok(())
+    }
+
+    /// Set the radio's clock from this machine's wall clock.
+    ///
+    /// One command, best effort: the firmware refuses a time earlier than the one it holds, so a
+    /// repeated call within a second is answered with an error and nothing changes. What it buys is
+    /// that every advert the radio hears is stamped with real time, which is what makes a route's
+    /// age knowable (`AdvertPath::received_at`).
+    pub fn set_time(&mut self, unix_seconds: u32) -> Result<(), SessionError> {
+        let mut payload = Vec::with_capacity(5);
+        payload.push(commands::SET_DEVICE_TIME);
+        payload.extend_from_slice(&unix_seconds.to_le_bytes());
+        self.request(&payload, codes::OK, Duration::from_secs(5))?;
         Ok(())
     }
 
@@ -256,7 +294,7 @@ impl<L: ByteLink> Companion<L> {
     /// self-adverts use, and a daemon that knew a scope the radio did not would otherwise advertise
     /// unscoped on a mesh that drops unscoped floods.
     pub fn set_default_flood_scope(&mut self, scope: Option<&FloodScope>) -> Result<(), SessionError> {
-        let frame = build_default_flood_scope(scope);
+        let frame = build_default_flood_scope(scope)?;
         self.request(&frame, codes::OK, Duration::from_secs(5))?;
         Ok(())
     }

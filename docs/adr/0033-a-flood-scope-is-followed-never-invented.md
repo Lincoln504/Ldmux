@@ -56,10 +56,17 @@ The order, implemented identically on both ends:
 2. **The radio's own default scope**, read with `CMD_GET_DEFAULT_FLOOD_SCOPE`. This is the operator's
    own decision, made in the tool that owns it, and it is what the radio's self-adverts already use.
 3. **A scope learned from the air.** When a scoped flood is overheard and its code matches one of a
-   curated list of published region tags (`KNOWN_SCOPE_TAGS`), that tag is *proven to be carried by
-   the repeaters that forwarded it*. ldmux adopts it, and on the host it writes it back to the radio
-   so the firmware-built advert is scoped too. Only while the radio has none: an explicit choice is
-   never overwritten.
+   curated list of published region tags (`KNOWN_SCOPE_TAGS`), that tag is *candidate evidence* —
+   with three conditions, because a 16-bit code over ~70 names has a one-in-a-thousand chance of
+   matching by accident:
+   - it must have travelled **at least one hop**, or nothing was forwarded and the tag says only
+     that an adjacent radio used it;
+   - the **same name must match two different payloads** before it is adopted;
+   - and the radio is told only once something **answers under it** — a request that comes back is
+     the proof that the region is carried, and a wrong scope in flash is the one state in which
+     discovery cannot work at all.
+
+   Only while the radio has none: an explicit choice is never overwritten.
 4. **None.** Unscoped floods, which most meshes forward and which is where every MeshCore client
    starts.
 
@@ -85,8 +92,10 @@ one — are already handled, and a third control would only invite the failure t
   air, so a 16-bit code cannot be reversed. The log says a scoped mesh was seen without naming it,
   and the operator's own app is where the tag can be read and set.
 - **Two ends on different scopes still exchange records** once a route exists (direct packets are not
-  gated) but can never discover each other. That is why `mesh status` prints the line, and why the
-  host carries its scope in the pairing code for a phone that has none.
+  gated) but can never discover each other. That is why `mesh status` prints the line and the app logs
+  what its radio reports. **The pairing code does not carry a scope**: the phone's radio is the one
+  the operator's MeshCore app manages, so a scope set anywhere is set there first, and a code field
+  nothing read was removed rather than carried.
 - **Two dependencies join `crates/companion`**: `hmac` and `sha2`, the RustCrypto crates
   `crates/session` already uses for the handshake tag. Both are pure Rust — no C, no `ring`, nothing
   the deny list forbids — and the alternative was reimplementing HMAC-SHA-256 by hand to avoid

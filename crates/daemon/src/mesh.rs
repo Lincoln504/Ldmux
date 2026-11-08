@@ -52,7 +52,14 @@ const AWAITING_DEADLINE: Duration = Duration::from_secs(10);
 /// The port is local, so seconds are already generous. Without a bound, a radio that accepted the
 /// port and then stopped draining left the daemon waiting forever: no error, no backoff, no
 /// reconnect, and a `mesh.status` that said "handshaking" for the life of the process.
-const CARRIER_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long an open may take, and it has to cover the whole of it.
+///
+/// `prepare` runs on a blocking task that cannot be cancelled, and it holds the port's `flock`
+/// while it works: `APP_START` (5 s), `DEVICE_QUERY` (5 s), the one-off width write (5 s) and the
+/// scope read (1.5 s) are 16.5 s worst case. A ten-second bound fired inside that window abandoned
+/// the task with the lock still held, so the next attempt failed with "another process holds this
+/// radio" — the wrong cause for the wrong symptom.
+const CARRIER_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long the carriage may carry nothing at all while a record is outstanding.
 ///
@@ -603,20 +610,10 @@ pub fn pairing_json() -> Result<serde_json::Value, String> {
     // shows up once a repeater is in the way. Sent as a fifth element, so a phone that predates it
     // reads four and carries on.
     let host_path = runtime.snapshot().path_hash_size;
-    // **The scope rides with the tuple too.** MeshCore's region scoping gates *floods* only, so two
-    // radios on different scopes still exchange every record once a route exists — they just cannot
-    // discover each other, because the discovery floods are dropped by the first repeater that does
-    // not carry the scope. A phone whose radio has no scope would therefore never find a host on a
-    // scoped mesh, and the one place the host can tell it is the code.
-    let host_scope = runtime.snapshot().flood_scope;
     Ok(serde_json::json!({
         "hostKey": hex(&keys.host_key),
         "psk": hex(&keys.psk),
         "hostRadio": host_radio.map(|r| hex(&r)),
-        "hostScope": host_scope.map(|s| serde_json::json!({
-            "name": s.name,
-            "key": s.key_hex(),
-        })),
         "hostPreset": host_preset.map(|(f, b, sf, cr)| {
             let mut v = vec![u64::from(f), u64::from(b), u64::from(sf), u64::from(cr)];
             if let Some(width) = host_path {
@@ -681,6 +678,9 @@ async fn supervise(cfg: MeshConfig, mut setup: Option<SessionSetup>, runtime: Me
         set(&snapshot, |s| {
             s.reconnects = reconnects;
             s.records_left = None;
+            // The scope belongs to the radio that was open; a reopen has to report it again before
+            // `mesh status` claims one.
+            s.flood_scope = None;
             s.uplink_record_max = None;
             if s.session.state != "off" {
                 s.session.state = "waiting";
@@ -923,6 +923,17 @@ async fn session<C: Carrier>(
             event = carrier.recv() => {
                 last_carrier = Instant::now();
                 match event? {
+                    Event::Limit(limit) => {
+                        // **The record size follows the path.** A raw send carries the path inside
+                        // the same 176-byte frame as the record, so a repeater's hops come out of
+                        // the record budget: a full record built for an empty path is refused by
+                        // our own packet builder at the first path byte. The session is sized at
+                        // the handshake, so the carrier revises it here.
+                        if let Some(h) = host.as_mut() {
+                            h.set_record_limit(usize::from(limit));
+                        }
+                        set(snapshot, |s| s.uplink_record_max = Some(limit));
+                    }
                     Event::Scope(scope) => {
                         // The scope this node's floods are proved with, from the carrier: the
                         // radio's own `region default`, an operator's pin, or a region ldmux
