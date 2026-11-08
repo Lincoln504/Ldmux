@@ -62,3 +62,38 @@ fun planSnapshot(
     if (!current.viewportActive) return SnapshotApply.ReplayInPlace
     return SnapshotApply.Rebuild
 }
+
+/**
+ * Rows above the live bottom that a history page-in must leave the viewport on.
+ *
+ * **A page-in only prepends rows.** Everything the client already held keeps its
+ * distance from the live bottom and gains older rows above it, so the bottom is the
+ * one anchor that survives the round trip — and it is exact, because output that
+ * arrived while the page was on its way appends *below* the viewport rather than
+ * moving it.
+ *
+ * [owed] is the part of the gesture the viewport refused to move: rows the user asked
+ * for beyond what was loaded. The page that arrives is where they were going, so the
+ * owed rows continue there instead of being dropped.
+ *
+ * **The top is not an anchor, and treating it as one is a bug that shipped.** A freshly
+ * attached client holds a single screenful, where offset 0 is both the oldest row and
+ * the live bottom; the first swipe therefore asked for a page, and the reply parked
+ * the viewport on row 0 of it — with a 4,000-row answer, 4,000 rows above the prompt
+ * the finger was on. Measured 2026-11-08 on a phone against a tailnet shell.
+ */
+internal fun historyRowsAboveBottom(frame: TerminalFrame.Frame, owed: Int): Int {
+    val below = (frame.scrollTotal - frame.scrollLen - frame.scrollOffset).coerceAtLeast(0L)
+    return (below + owed.coerceAtLeast(0)).coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
+}
+
+/**
+ * The rows of a gesture the viewport refused to move.
+ *
+ * [moved] is what the emulator's scrollbar actually did — negative upwards, as the
+ * controller's scroll reads it before and after — and [rows] is what the gesture asked
+ * for. Only the shortfall is owed to the page-in: the part that did move is already
+ * counted in the distance from the bottom, so owing it as well would scroll the page that
+ * arrives further than the finger travelled.
+ */
+internal fun historyOwed(rows: Int, moved: Int): Int = (moved - rows).coerceAtLeast(0)

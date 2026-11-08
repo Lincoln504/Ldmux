@@ -347,22 +347,15 @@ class TerminalController(
                     historyAskLines = (historyAskLines * 2).coerceAtMost(pacing.historyMaxLines())
                 }
                 historyLoading = false
-                if (pageAfterHistory > 0) {
-                    // A page turn asked for this page-in. Land one page above the live
-                    // bottom, which is where the tap was aimed; the rows the page-in added
-                    // are above the viewport, so the distance from the bottom is the one
-                    // quantity that survived the round trip.
+                // The page landed. Put the viewport back where the gesture that asked for
+                // it was aiming, counted from the live bottom — the only end a prepend
+                // cannot move. `null` means the request was refused, so there is nothing
+                // to restore and the rebuilt engine's own bottom is the right place.
+                val landRows = historyLandRows
+                historyLandRows = null
+                if (landRows != null) {
                     engine.scrollToBottom()
-                    engine.scrollBy(-pageAfterHistory)
-                    pageAfterHistory = 0
-                } else if (historyRestoreAtTop) {
-                    // The request was made from the top of what was loaded, and a page-in
-                    // only adds rows above it. How many now sit above the row the user
-                    // was reading is not knowable here — live output that arrived between
-                    // the request and this reply moved the count — so the top is the one
-                    // place that is still honest.
-                    historyRestoreAtTop = false
-                    engine.scrollToTop()
+                    if (landRows > 0) engine.scrollBy(-landRows)
                 }
             } else {
                 // An ordinary snapshot rebuilt the engine from the visible screen alone:
@@ -375,7 +368,7 @@ class TerminalController(
                 historyExhausted = false
                 historyAskLines = 0
                 historyLoading = false
-                historyRestoreAtTop = false
+                historyLandRows = null
             }
             if (keptSelection != null) {
                 val (bounds, text) = keptSelection
@@ -697,11 +690,10 @@ class TerminalController(
             // page it owed. Without this, the first tap on a freshly attached shell lands on
             // the oldest loaded row instead of a page up.
             if (f != null && above < step && !historyExhausted && !historyLoading) {
-                pageAfterHistory = step
-                maybeExtendHistory(force = true)
-                // A request that could not be sent (no socket, or nothing deeper to ask for)
-                // leaves no page owed: the next page-in belongs to somebody else's gesture.
-                if (!historyLoading) pageAfterHistory = 0
+                // The rows this tap wanted are the ones the viewport has not got. They
+                // travel with the request, so the page that arrives lands where the tap
+                // was aimed rather than at either end of it.
+                maybeExtendHistory(force = true, owed = step)
                 return
             }
         }
@@ -747,7 +739,7 @@ class TerminalController(
         // page-in, which rebuilds the engine, and the engine is where the drag's
         // selection lives. The drag stops at the top of what is loaded, and the
         // next drag asks — which is a released finger, so nothing is lost.
-        if (rows < 0 && pageInHistory) maybeExtendHistory()
+        if (rows < 0 && pageInHistory) maybeExtendHistory(owed = historyOwed(rows, moved))
         return moved
     }
 
@@ -758,7 +750,7 @@ class TerminalController(
      * scrollback request re-sends the whole screen, so asking on every pixel of
      * drag would be a round trip per frame.
      */
-    private fun maybeExtendHistory(force: Boolean = false) {
+    private fun maybeExtendHistory(force: Boolean = false, owed: Int = 0) {
         val f = _frame.value ?: return
         if (historyLoading || historyExhausted) return
         // The offset is counted from the top of what is loaded — 0 is the oldest
@@ -795,7 +787,7 @@ class TerminalController(
         }
         if (!attach.scrollback(ask)) return
         historyLoading = true
-        historyRestoreAtTop = true
+        historyLandRows = historyRowsAboveBottom(f, owed)
         historyAskLines = ask
         historyTotalBefore = f.scrollTotal
     }
@@ -815,18 +807,22 @@ class TerminalController(
     private var historyAskLines = 0
     /** The engine's scrollback total when the outstanding request was made. */
     private var historyTotalBefore = 0L
-    /** The page-in was asked for from the top of what is loaded. */
-    private var historyRestoreAtTop = false
     /**
-     * A page turn that asked for more history first, and the step it owes.
+     * Rows above the live bottom the outstanding page-in must leave the viewport on.
      *
-     * A page-up from the live bottom with only one screenful loaded used to clamp at the top of
-     * what was there and stop: the tap moved 17 rows instead of 19 and looked like it had jumped
-     * to the beginning (measured on the device 2026-11-05: `total=38 off=17 step=19`). The next
-     * request now carries the intent, so the reply lands one page above the live bottom rather
-     * than at the oldest row.
+     * Decided when the request goes out ([historyRowsAboveBottom]) and consumed by the reply,
+     * because it describes a state that no longer exists once the page has replaced the
+     * engine. It was a boolean — "restore at the top" — and the top is the wrong end: a
+     * page-in only prepends rows, so everything already loaded keeps its distance from the
+     * bottom, and a fresh client's offset 0 is both ends at once. That is the jump to the top
+     * of the scrollback the user reported on 2026-11-08: one screenful held, first swipe asks
+     * for a page, reply lands on the oldest row of it.
+     *
+     * A page tap from the live bottom carried its own copy of this intent before
+     * (`pageAfterHistory`, which the tap set and then had to remember to clear when the send
+     * failed); the distance is now one quantity for every gesture that asks for history.
      */
-    private var pageAfterHistory = 0
+    private var historyLandRows: Int? = null
 
     /**
      * Park the viewport on the live bottom, whatever history it was reading.
@@ -1006,7 +1002,7 @@ class TerminalController(
         // silently disabled. Live output does not clear it either.
         if (historyLoading) {
             historyLoading = false
-            historyRestoreAtTop = false
+            historyLandRows = null
         }
         // A keystroke the shell did not take. It was accepted by this page, so nothing else on
         // screen would say it went nowhere; say so, and let it fade rather than become chrome
