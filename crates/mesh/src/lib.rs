@@ -9,7 +9,8 @@
 //!     loop never names a device;
 //!   * [`constants`] — the record limits and the radio-state vocabulary, the numbers the phone
 //!     must agree with (`crates/protocol/src/mesh_term.rs` publishes them to the app); and
-//!   * [`messages`] — the two reports a carrier hands upward, a send result and a status.
+//!   * [`messages`] — the reports a carrier hands upward: a send result, a status, and the flood
+//!     scope this node broadcasts under.
 //!
 //! It deliberately contains **no radio knowledge**. No frequency, bandwidth, spreading factor,
 //! coding rate, path hash, contact or preset arithmetic appears here; the companion crate owns
@@ -29,4 +30,4 @@ pub use constants::{
     UNKNOWN_RSSI,
 };
 pub use error::MeshError;
-pub use messages::{SendResult, Status};
+pub use messages::{ScopeInfo, SendResult, Status};

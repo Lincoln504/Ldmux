@@ -50,6 +50,12 @@ What each route protects, what it does not, and where the secrets live. The desi
   name and public key to the mesh. `LDMUX_MESH_ADVERT_SECS=0` on the host turns the host's own
   adverts off; discovery then rests on the route request alone.
 
+- **A flood scope is a routing label, not a credential.** Its name and its 16-byte key are
+  `SHA256("#" + name)` for every public region, and neither is ever transmitted: a scoped packet
+  carries only a 16-bit HMAC over its own payload. Scoping hides nothing and authenticates nothing;
+  it decides which repeaters forward a flood (ADR-0033). ldmux reads the scope from the radio rather
+  than inventing one, because a repeater drops a flood scoped to a region it does not carry, silently.
+
 ## Secrets
 
 - **The pairing code is the secret.** A `--mesh` code carries the session PSK, the host radio's

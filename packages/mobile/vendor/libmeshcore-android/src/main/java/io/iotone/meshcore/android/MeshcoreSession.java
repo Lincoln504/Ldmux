@@ -320,6 +320,20 @@ public final class MeshcoreSession {
      *
      * @param publicKey the peer's full 32-byte public key
      */
+    /**
+     * Reads the radio's **default flood scope** ({@code CMD_GET_DEFAULT_FLOOD_SCOPE}, 0x40).
+     *
+     * <p>The answer arrives as a {@link io.iotone.meshcore.frames.DefaultFloodScopeFrame}: the region
+     * name and its 16-byte key, or an empty name when the radio has none. A MeshCore region scopes a
+     * flood with a 16-bit HMAC of that key, and a repeater drops a flood whose region it does not
+     * carry — silently — so this is the one fact that decides whether this node's discovery floods
+     * cross a scoped mesh at all.</p>
+     */
+    public void getDefaultFloodScope() {
+        if (state.get() != SessionState.READY) return;
+        sendTracked(MeshcoreFrameCodec.getDefaultFloodScope());
+    }
+
     public void getAdvertPath(@NonNull byte[] publicKey) {
         if (state.get() != SessionState.READY) return;
         try {
@@ -988,6 +1002,12 @@ public final class MeshcoreSession {
         // answer window expires, so `isIdle()` lies and raw sends are refused for seconds after a
         // route has already been learned.
         if (frame instanceof io.iotone.meshcore.frames.AdvertPathFrame) {
+            trackedAnswered();
+        }
+        // ...and the same for the radio's default flood scope, which is a typed answer to a tracked
+        // read: without this the answer slot stayed held for ten seconds and every send behind it
+        // was refused.
+        if (frame instanceof io.iotone.meshcore.frames.DefaultFloodScopeFrame) {
             trackedAnswered();
         }
         if (frame instanceof DecodeFailure f) {

@@ -17,8 +17,9 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use crate::codec::{
-    APP_TARGET_VERSION, AdvertPath, CodecError, DeviceInfo, build_raw_direct, commands, codes,
-    parse_advert_path, parse_device_info, parse_self_info, SelfInfo,
+    APP_TARGET_VERSION, AdvertPath, CodecError, DeviceInfo, FloodScope, SelfInfo,
+    build_default_flood_scope, build_raw_direct, codes, commands, parse_advert_path,
+    parse_default_flood_scope, parse_device_info, parse_self_info,
 };
 use crate::framing::{FrameError, FrameReader, encode};
 use crate::link::ByteLink;
@@ -230,6 +231,33 @@ impl<L: ByteLink> Companion<L> {
         payload.push(0); // priority
         payload.extend_from_slice(packet);
         self.request(&payload, codes::OK, Duration::from_secs(10))?;
+        Ok(())
+    }
+
+    /// Read the radio's **default flood scope**, or `None` when it has none.
+    ///
+    /// The reply is `[0x1C][name 31][key 16]`, and the code alone is the firmware's "null" answer
+    /// (`MyMesh.cpp:1964-1972`). The key comes back with the name, which is the only way a private
+    /// (`$…`) region's key can be known: a public one is derivable from the name, a private one is
+    /// not.
+    pub fn get_default_flood_scope(&mut self) -> Result<Option<FloodScope>, SessionError> {
+        let reply = self.request(
+            &[commands::GET_DEFAULT_FLOOD_SCOPE],
+            codes::DEFAULT_FLOOD_SCOPE,
+            ROUTE_READ_TIMEOUT,
+        )?;
+        parse_default_flood_scope(&reply).ok_or(SessionError::Malformed("default flood scope"))
+    }
+
+    /// Write the radio's default flood scope, or clear it with `None`.
+    ///
+    /// **ldmux only calls this with a scope it learned from the air while the radio had none**, so
+    /// the operator's own choice is never overwritten; the radio's default scope is what its
+    /// self-adverts use, and a daemon that knew a scope the radio did not would otherwise advertise
+    /// unscoped on a mesh that drops unscoped floods.
+    pub fn set_default_flood_scope(&mut self, scope: Option<&FloodScope>) -> Result<(), SessionError> {
+        let frame = build_default_flood_scope(scope);
+        self.request(&frame, codes::OK, Duration::from_secs(5))?;
         Ok(())
     }
 

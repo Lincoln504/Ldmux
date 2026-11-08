@@ -23,6 +23,7 @@ import io.iotone.meshcore.frames.EndOfContactsFrame
 import io.iotone.meshcore.frames.ErrorFrame
 import io.iotone.meshcore.frames.MeshcoreInbound
 import io.iotone.meshcore.frames.RawDataFrame
+import io.iotone.meshcore.frames.DefaultFloodScopeFrame
 import io.iotone.meshcore.frames.RfLogFrame
 import io.iotone.meshcore.model.Contact
 import io.iotone.meshcore.model.DeviceInfo
@@ -172,6 +173,29 @@ class AndroidRadioLink(
     /** When the last route request went out, so a failing link cannot turn into a broadcaster. */
     @Volatile
     private var lastRequestAt: Long = 0L
+
+    /**
+     * The **flood scope** this radio broadcasts under, as the radio itself reports it.
+     *
+     * **The radio is the source of truth**, because the operator's own MeshCore app sets it there
+     * (`region default`, the app's Experimental Settings from v1.43.0) and a regional firmware build
+     * can ship one. A client that invented a scope would be worse than one with none: a repeater
+     * drops a flood whose region it does not carry, silently, while an unscoped flood is forwarded
+     * by any repeater whose `*` entry allows floods — which is the default.
+     *
+     * `adopted` is the fallback: a region ldmux recognised from a flood it overheard on the mesh.
+     */
+    @Volatile
+    private var radioScope: ByteArray? = null
+
+    @Volatile
+    private var adoptedScope: ByteArray? = null
+
+    /** The scope key this phone's requests are scoped with, or null for an unscoped flood. */
+    private val scopeKey: ByteArray?
+        get() = radioScope ?: adoptedScope
+
+    private var scopeDone: CompletableDeferred<Unit>? = null
 
     private val hostPath: RadioPath?
         get() = RadioRoute.preferHeard(contactPath, advertPath)
@@ -343,9 +367,21 @@ class AndroidRadioLink(
                 // already in hand the poll was five minutes apart, which is why a phone that moved
                 // kept sending down the old one.
                 is RfLogFrame -> {
+                    val raw = frame.log().raw()
                     val host = hostKey
                     if (host.size == 32) {
-                        RadioRoute.heardAdvert(frame.log().raw(), host)?.let { adoptRoute(it, "advert") }
+                        RadioRoute.heardAdvert(raw, host)?.let { adoptRoute(it, "advert") }
+                    }
+                    // **Learn the mesh's scope from a packet it scoped.** A scoped flood proves the
+                    // region is carried by the repeaters that forwarded it, and the region's name is
+                    // never on the air — only a 16-bit code over the payload — so recognising one
+                    // means recomputing what each known name would have produced. Only while this
+                    // radio has no scope of its own, because that is a decision someone made.
+                    if (radioScope == null && adoptedScope == null) {
+                        RadioRoute.heardScope(raw, RadioRoute.KNOWN_SCOPE_TAGS)?.let { name ->
+                            adoptedScope = RadioRoute.scopeKey(name)
+                            appLog("mesh scope $name learned from the mesh")
+                        }
                     }
                 }
                 // **The advert-path cache's answer for the host's key**, when the cache is what
@@ -365,6 +401,11 @@ class AndroidRadioLink(
                     // both waiters should stop waiting rather than sit out their deadlines.
                     contactDone?.complete(Unit)
                     routeDone?.complete(Unit)
+                }
+                is DefaultFloodScopeFrame -> {
+                    radioScope = frame.scopeKey()
+                    appLog("mesh radio scope: ${frame.scopeName() ?: "none (unscoped floods)"}")
+                    scopeDone?.complete(Unit)
                 }
                 is DeviceInfoFrame -> {
                     val info = frame.info().toRadioDeviceInfo().copy(batteryMillivolts = batteryMv)
@@ -433,6 +474,10 @@ class AndroidRadioLink(
         advertPath = null
         radioPublicKey = null
         lastRxAt = 0L
+        radioScope = null
+        // An adopted scope belonged to the air at the last place; a new attempt starts from what
+        // this radio says, and learns again if it says nothing.
+        adoptedScope = null
         // A rebuilt link is a link the peer may have forgotten: its advert-path entry expires, and
         // the reconnect exists because something went wrong. Without this a rebuild within
         // ANNOUNCE_EVERY_MS of the last advert stayed silent for the rest of that window.
@@ -501,6 +546,15 @@ class AndroidRadioLink(
                 // own sends, and the radio's advert keeps its old width.
                 appLog("mesh radio was on one-byte paths; asked for two")
             }
+            // **Ask the radio which region it scopes its floods to.** One tracked read, answered
+            // with its own typed frame. The operator's MeshCore app is where a scope is set, so
+            // this follows a decision rather than making one; a radio with none stays unscoped,
+            // which is what most meshes forward.
+            val scopeRead = CompletableDeferred<Unit>()
+            scopeDone = scopeRead
+            s.getDefaultFloodScope()
+            withTimeoutOrNull(DEVICE_INFO_WAIT_MS) { scopeRead.await() }
+            scopeDone = null
             // **Announce now, because the host needs this before it can answer anything.** Its route
             // back to us exists only in its own radio's advert-path cache, and that cache is filled
             // by our advert arriving through the repeaters. Waiting for the maintenance loop's first
@@ -924,7 +978,7 @@ class AndroidRadioLink(
         val now = System.currentTimeMillis()
         if (now - lastRequestAt < ROUTE_REQUEST_FLOOR_MS) return false
         if (!s.canSendRaw()) return false
-        val packet = RadioRoute.routeRequest(currentPreset().pathHashSize, key, own) ?: return false
+        val packet = RadioRoute.routeRequest(currentPreset().pathHashSize, key, own, scopeKey) ?: return false
         lastRequestAt = now
         val answer = CompletableDeferred<RadioSendResult>()
         val queued = runCatching {
@@ -934,7 +988,10 @@ class AndroidRadioLink(
         }.getOrDefault(false)
         if (!queued) return false
         val result = withTimeoutOrNull(REQUEST_ANSWER_MS) { answer.await() }
-        appLog("mesh route request: ${result ?: RadioSendResult.Failed}")
+        appLog(
+            "mesh route request (${scopeKey?.let { "scoped" } ?: "unscoped"}): " +
+                "${result ?: RadioSendResult.Failed}",
+        )
         // A request is a broadcast like an advert, so it is charged like one.
         if (result == RadioSendResult.Accepted) recordAirtime(packet.size + 3)
         return result == RadioSendResult.Accepted

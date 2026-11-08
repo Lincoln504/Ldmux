@@ -35,11 +35,12 @@ use ldmux_companion::codec::{
     parse_advert_path, parse_packet, parse_route_reply, parse_route_request,
 };
 use ldmux_companion::{
-    ByteLink, Companion, RouteRequest, SerialLink, SessionError,
-    build_route_reply, build_route_request,
+    ByteLink, Companion, FloodScope, KNOWN_SCOPE_TAGS, RouteRequest, SerialLink, SessionError,
+    build_route_reply, build_route_request_in_scope, identify_scope,
 };
 use ldmux_mesh::carrier::{Bound, Budget, Carrier, Event};
 use ldmux_mesh::constants::{RECORD_MAX, RadioState, SendOutcome, UNKNOWN_BATTERY, UNKNOWN_RSSI};
+use ldmux_mesh::messages::ScopeInfo;
 use ldmux_mesh::error::MeshError;
 use ldmux_mesh::messages::{SendResult, Status};
 use tokio::sync::mpsc as async_mpsc;
@@ -237,8 +238,9 @@ fn send_route_request<L: ByteLink>(
     own_key: &[u8; 32],
     hash_size: u8,
     peer: &[u8; 32],
+    scope: Option<&FloodScope>,
 ) -> bool {
-    let Ok(packet) = build_route_request(hash_size, peer, own_key) else {
+    let Ok(packet) = build_route_request_in_scope(hash_size, peer, own_key, scope) else {
         return false;
     };
     companion.send_packet(&packet).is_ok()
@@ -334,6 +336,83 @@ fn refresh_peer_route<L: ByteLink>(
 /// written as a literal because three places have to agree on it: this default, the phone's presets,
 /// and the app's own "path N B" readout.
 pub const DEFAULT_PATH_HASH_MODE: u8 = 1;
+
+/// The flood scope this node broadcasts under, and where it came from.
+///
+/// **Nothing here is a setting.** The order is: what the radio itself says (`region default` in the
+/// operator's MeshCore app, or a regional firmware build's `DEFAULT_FLOOD_SCOPE_NAME`), then
+/// `LDMUX_MESH_SCOPE` for an operator who wants to pin it, then a region ldmux *recognised* from a
+/// flood it overheard, then none — which is unscoped, and is where every MeshCore client starts.
+///
+/// The order matters because a wrong scope is worse than none: a repeater forwards a scoped flood
+/// only if it carries that region, and drops it *silently* otherwise (`allowPacketForward`,
+/// `RegionMap::findMatch`), while an unscoped flood is forwarded by any repeater whose `*` entry
+/// allows floods — the default.
+#[derive(Clone, Debug)]
+struct ScopeChoice {
+    scope: Option<FloodScope>,
+    /// One word for the diagnostics line: `radio`, `env`, `learned`, `off` or `none`.
+    source: &'static str,
+}
+
+impl ScopeChoice {
+    /// What the radio reports, an explicit pin winning over it, and an explicit `off`.
+    fn resolve<L: ByteLink>(companion: &mut Companion<L>, log: bool) -> Self {
+        let pinned = std::env::var("LDMUX_MESH_SCOPE")
+            .ok()
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty());
+        if let Some(pin) = pinned {
+            if pin.eq_ignore_ascii_case("off") {
+                if log {
+                    route_log("scope off (LDMUX_MESH_SCOPE=off): every flood is unscoped");
+                }
+                return Self {
+                    scope: None,
+                    source: "off",
+                };
+            }
+            let scope = FloodScope::from_name(&pin);
+            if log {
+                route_log(&format!("scope {} pinned by LDMUX_MESH_SCOPE", scope.name));
+            }
+            return Self {
+                scope: Some(scope),
+                source: "env",
+            };
+        }
+        match companion.get_default_flood_scope() {
+            Ok(Some(scope)) => {
+                if log {
+                    route_log(&format!("scope {} from the radio", scope.name));
+                }
+                Self {
+                    scope: Some(scope),
+                    source: "radio",
+                }
+            }
+            // A radio with none is the firmware's companion default, and unscoped floods are what
+            // most meshes forward. It is not an error, and it is not a place to guess.
+            Ok(None) | Err(_) => Self {
+                scope: None,
+                source: "none",
+            },
+        }
+    }
+
+    /// The scope for a builder, or `None` for an unscoped flood.
+    fn as_ref(&self) -> Option<&FloodScope> {
+        self.scope.as_ref()
+    }
+
+    /// What the snapshot shows: the name and the key, or nothing.
+    fn info(&self) -> Option<ScopeInfo> {
+        self.scope.as_ref().map(|s| ScopeInfo {
+            name: s.name.clone(),
+            key: s.key,
+        })
+    }
+}
 
 /// The airtime allowance this daemon holds itself to, in milliseconds per hour, for a frequency.
 ///
@@ -578,6 +657,8 @@ struct Settings {
     /// The peer's radio key as the record held it at open, or `None` when this radio has never
     /// heard from that peer.
     peer_key: Option<[u8; 32]>,
+    /// The flood scope this end broadcasts under, and where it came from.
+    scope: ScopeChoice,
     /// Where the hour's spend is recorded, so the allowance survives a daemon restart.
     ///
     /// **The window was per process.** `sent` started at zero whenever the worker started, so a
@@ -777,6 +858,11 @@ fn prepare(
         .as_deref()
         .and_then(load_peer)
         .filter(|key| *key != self_info.public_key);
+    // **What the radio itself says about flood scoping**, read before anything is transmitted: the
+    // operator's own MeshCore app sets it there (`region default`), and a regional firmware build
+    // can ship one. Reading it is the difference between following a decision someone made and
+    // inventing one.
+    let scope = ScopeChoice::resolve(&mut companion, true);
     Ok((
         companion,
         bound,
@@ -787,6 +873,7 @@ fn prepare(
             window_record,
             peer_record,
             peer_key,
+            scope,
         },
     ))
 }
@@ -843,6 +930,12 @@ fn serve_loop<L: ByteLink>(
     let mut peer_radio: Option<[u8; 32]> = settings.peer_key;
     // When the last route request went out, and when the last reply was sent, so neither mechanism
     // can be turned into an amplifier by a peer that repeats itself.
+    // The scope this end broadcasts under. Mutable: a radio with none of its own can learn one from
+    // a flood it overhears, and every later request then uses it.
+    let mut scope = settings.scope.clone();
+    // Whether the radio has already been asked to re-read what it actually has, so a mismatch
+    // noticed later does not rewrite the operator's choice twice.
+    let mut scope_followed_radio = scope.source != "none";
     let mut last_ping: Option<Instant> = None;
     // When the "request sent" line last went to the journal, so a failing link cannot flood it.
     let mut last_ping_log: Option<Instant> = None;
@@ -869,6 +962,9 @@ fn serve_loop<L: ByteLink>(
         .blocking_send(Ok(Event::Status(status(&settings, budget, 0))))
         .is_err()
     {
+        return;
+    }
+    if events.blocking_send(Ok(Event::Scope(scope.info()))).is_err() {
         return;
     }
 
@@ -1031,6 +1127,7 @@ fn serve_loop<L: ByteLink>(
                             &settings.preset.public_key,
                             settings.hash_size,
                             &peer,
+                            scope.as_ref(),
                         );
                         route_log_rare(
                             &mut last_ping_log,
@@ -1084,6 +1181,25 @@ fn serve_loop<L: ByteLink>(
                                 && let Some(mode) = info.path_hash_mode
                             {
                                 settings.preset.hash_size = mode.saturating_add(1).clamp(1, 3);
+                            }
+                            // The scope is a register on the same radio, and another app setting
+                            // it is the case that matters: this daemon would otherwise keep
+                            // flooding under a region the operator has just replaced.
+                            let seen_scope = ScopeChoice::resolve(&mut companion, false);
+                            if seen_scope.source == "radio" && seen_scope.info() != scope.info() {
+                                if let Some(s) = seen_scope.info() {
+                                    route_log(&format!(
+                                        "scope {} set on the radio by another app",
+                                        s.name
+                                    ));
+                                } else {
+                                    route_log("scope cleared on the radio by another app");
+                                }
+                                scope = seen_scope;
+                                scope_followed_radio = true;
+                                if events.blocking_send(Ok(Event::Scope(scope.info()))).is_err() {
+                                    return;
+                                }
                             }
                             // The airtime estimate follows the tuple, or the budget keeps measuring
                             // the radio that is no longer in use.
@@ -1149,6 +1265,38 @@ fn serve_loop<L: ByteLink>(
             Ok(Some(frame)) => {
                 if trace_on() {
                     trace_rx(&frame);
+                }
+                // **Learn the mesh's scope from a packet it scoped.** A scoped flood proves the
+                // region is carried by the repeaters that forwarded it, so recognising one is the
+                // only evidence available: the region's name is never on the air, only a 16-bit
+                // code over the payload, and a name is what has to be hashed to answer it.
+                //
+                // This runs only while this end has no scope. Once the radio reports one, or an
+                // operator pinned one, that decision stands.
+                if !scope_followed_radio
+                    && let Some(view) = frame_packet(&frame)
+                    && view.is_flood()
+                    && view.transport_codes.is_some()
+                    && let Some(learned) = identify_scope(&view, KNOWN_SCOPE_TAGS)
+                {
+                    route_log(&format!(
+                        "scope {} learned from a flood on the mesh",
+                        learned.name
+                    ));
+                    // Write it to the radio too: an advert is firmware-built and uses the radio's
+                    // own default scope, so a daemon that only scoped its raw packets would keep
+                    // advertising unscoped on the one mesh that needs the scope.
+                    if companion.set_default_flood_scope(Some(&learned)).is_ok() {
+                        route_log("scope written to the radio");
+                    }
+                    scope = ScopeChoice {
+                        scope: Some(learned),
+                        source: "learned",
+                    };
+                    scope_followed_radio = true;
+                    if events.blocking_send(Ok(Event::Scope(scope.info()))).is_err() {
+                        return;
+                    }
                 }
                 if let Some(req) = frame_route_request(&frame, &settings.preset.public_key) {
                     // **A peer asking where we are.** The request is a flood, so its path is what it
@@ -1223,6 +1371,7 @@ fn serve_loop<L: ByteLink>(
                                 &settings.preset.public_key,
                                 settings.hash_size,
                                 &key,
+                                scope.as_ref(),
                             );
                             route_log_rare(
                                 &mut last_ping_log,
@@ -1667,7 +1816,7 @@ mod tests {
         let peer = [0x42u8; 32];
         let own = [0x91u8; 32];
         // The peer's request arrived through two repeaters, one-byte hashes: 0x11 nearest the peer.
-        let mut packet = build_route_request(1, &own, &peer).unwrap();
+        let mut packet = ldmux_companion::build_route_request(1, &own, &peer).unwrap();
         packet[1] = ldmux_companion::codec::path_byte(1, 2).unwrap();
         packet.splice(2..2, [0x11, 0x22]);
         let req = frame_route_request(&log_frame(&packet), &own).expect("addressed to us");
@@ -1710,9 +1859,67 @@ mod tests {
     /// that never asked us, from every node in range at once.
     #[test]
     fn a_route_request_for_another_radio_is_not_ours() {
-        let packet = build_route_request(1, &[0x42; 32], &[0x91; 32]).unwrap();
+        let packet = ldmux_companion::build_route_request(1, &[0x42; 32], &[0x91; 32]).unwrap();
         assert!(frame_route_request(&log_frame(&packet), &[0x43; 32]).is_none());
         assert!(frame_route_request(&log_frame(&packet), &[0x42; 32]).is_some());
+    }
+
+    /// **A scope is followed, not invented.** The order is the radio's own answer, then an
+    /// operator's pin, then nothing. `off` is a decision too, and it has to survive: an operator on
+    /// a mesh where unscoped floods are better must be able to say so.
+    #[test]
+    fn a_scope_comes_from_the_radio_or_a_pin_and_never_from_a_guess() {
+        let mut companion = Companion::new(MemoryLink::new());
+        // SAFETY: these keys are read only by `ScopeChoice::resolve`, and the two tests that write
+        // them take turns by owning the keys for their whole body.
+        unsafe { std::env::remove_var("LDMUX_MESH_SCOPE") };
+        let none = ScopeChoice::resolve(&mut companion, false);
+        assert_eq!(none.source, "none", "a radio that says nothing is unscoped");
+        assert!(none.info().is_none());
+
+        // SAFETY: as above.
+        unsafe { std::env::set_var("LDMUX_MESH_SCOPE", "off") };
+        let off = ScopeChoice::resolve(&mut companion, false);
+        assert_eq!(off.source, "off");
+        assert!(off.as_ref().is_none(), "off means every flood is unscoped");
+
+        // SAFETY: as above.
+        unsafe { std::env::set_var("LDMUX_MESH_SCOPE", "#us-co") };
+        let pinned = ScopeChoice::resolve(&mut companion, false);
+        assert_eq!(pinned.source, "env");
+        let scope = pinned.as_ref().expect("a pin is a scope");
+        assert_eq!(scope.name, "us-co", "the leading # is not part of the name");
+        assert_eq!(
+            scope.key,
+            ldmux_companion::FloodScope::from_name("us-co").key,
+            "a pin derives the public key the firmware would"
+        );
+        // SAFETY: as above.
+        unsafe { std::env::remove_var("LDMUX_MESH_SCOPE") };
+    }
+
+    /// A scoped request is what a mesh that denies unscoped floods needs, and the scope a flood
+    /// proves is what this end adopts: the name is never on the air, so the code is the evidence.
+    #[test]
+    fn a_scoped_request_is_built_and_can_be_attributed() {
+        let peer = [0x31u8; 32];
+        let own = [0x72u8; 32];
+        let scope = ldmux_companion::FloodScope::from_name("us-co");
+        let packet = ldmux_companion::build_route_request_in_scope(1, &peer, &own, Some(&scope))
+            .expect("builds");
+        assert_eq!(packet[0], ldmux_companion::ROUTE_FLOOD_SCOPED_HEADER);
+        let view = parse_packet(&packet).expect("a packet");
+        assert!(view.transport_codes.is_some(), "a scoped flood carries its code");
+        assert_eq!(
+            ldmux_companion::identify_scope(&view, ldmux_companion::KNOWN_SCOPE_TAGS)
+                .map(|s| s.name),
+            Some("us-co".to_owned())
+        );
+        // The unscoped form is still a plain flood, and proves nothing.
+        let plain = ldmux_companion::build_route_request(1, &peer, &own).expect("builds");
+        let view = parse_packet(&plain).expect("a packet");
+        assert!(view.transport_codes.is_none());
+        assert!(ldmux_companion::identify_scope(&view, ldmux_companion::KNOWN_SCOPE_TAGS).is_none());
     }
 
     /// **The peer's key outlives a restart.** It is learned from a hint, a request or a reply, and
@@ -1854,6 +2061,7 @@ mod tests {
                     window_record: None,
                     peer_record: None,
                     peer_key: None,
+                    scope: ScopeChoice { scope: None, source: "none" },
                 preset: RadioPreset {
                         freq_mhz: 914.25,
                         bw_khz: 500.0,
@@ -1901,6 +2109,7 @@ mod tests {
                     window_record: None,
                     peer_record: None,
                     peer_key: None,
+                    scope: ScopeChoice { scope: None, source: "none" },
                 preset: RadioPreset {
                         freq_mhz: 914.25,
                         bw_khz: 500.0,
@@ -1924,6 +2133,12 @@ mod tests {
         match event_rx.blocking_recv() {
             Some(Ok(Event::Status(s))) => assert_eq!(s.ops_left_this_hour, Some(u8::MAX)),
             other => panic!("expected an opening status, got {other:?}"),
+        }
+        // ...then the scope this node's floods are proved with (none here: the radio has no
+        // region and nothing scoped was overheard), and only then the answer to the record.
+        match event_rx.blocking_recv() {
+            Some(Ok(Event::Scope(scope))) => assert!(scope.is_none(), "unscoped by default"),
+            other => panic!("expected the opening scope, got {other:?}"),
         }
         match event_rx.blocking_recv() {
             Some(Ok(Event::SendResult(r))) => {
@@ -1962,6 +2177,7 @@ mod tests {
                     window_record: None,
                     peer_record: None,
                     peer_key: None,
+                    scope: ScopeChoice { scope: None, source: "none" },
                 preset: RadioPreset {
                         freq_mhz: 914.25,
                         bw_khz: 500.0,
@@ -2011,6 +2227,7 @@ mod tests {
                     window_record: None,
                     peer_record: None,
                     peer_key: None,
+                    scope: ScopeChoice { scope: None, source: "none" },
                 preset: RadioPreset {
                         freq_mhz: 914.25,
                         bw_khz: 500.0,
@@ -2039,6 +2256,7 @@ mod tests {
                     window_record: None,
                     peer_record: None,
                     peer_key: None,
+                    scope: ScopeChoice { scope: None, source: "none" },
                 preset: RadioPreset {
                         freq_mhz: 914.25,
                         bw_khz: 500.0,

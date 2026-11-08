@@ -13,6 +13,28 @@ pub struct SendResult {
     pub outcome: crate::constants::SendOutcome,
 }
 
+/// The **flood scope** this node's broadcasts are proved with, as the carrier found it.
+///
+/// MeshCore scopes a flood to a region by attaching a 16-bit HMAC of the region's key over the
+/// payload, so a repeater that does not carry that region drops the packet silently. The key is
+/// `SHA256("#" + name)` cut to 16 bytes for the public regions everybody uses, but a private one
+/// (a name beginning `$`) has a stored key, which is why the key travels with the name.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ScopeInfo {
+    /// The region name as the radio stores it, without the leading `#`.
+    pub name: String,
+    /// The 16-byte transport key.
+    pub key: [u8; 16],
+}
+
+impl ScopeInfo {
+    /// The key as 32 lower-case hex characters, for a pairing code and for `mesh status`.
+    #[must_use]
+    pub fn key_hex(&self) -> String {
+        self.key.iter().map(|b| format!("{b:02x}")).collect()
+    }
+}
+
 /// A report from the radio: its state, signal, charge, airtime and remaining budget.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Status {

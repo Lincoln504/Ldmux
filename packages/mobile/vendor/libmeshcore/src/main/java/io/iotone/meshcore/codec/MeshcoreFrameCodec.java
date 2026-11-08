@@ -16,6 +16,7 @@ import io.iotone.meshcore.frames.ContactsStartFrame;
 import io.iotone.meshcore.frames.CurrentTimeFrame;
 import io.iotone.meshcore.frames.CustomVarsFrame;
 import io.iotone.meshcore.frames.DecodeFailure;
+import io.iotone.meshcore.frames.DefaultFloodScopeFrame;
 import io.iotone.meshcore.frames.DeviceInfoFrame;
 import io.iotone.meshcore.frames.EndOfContactsFrame;
 import io.iotone.meshcore.frames.ErrorFrame;
@@ -354,6 +355,10 @@ public final class MeshcoreFrameCodec {
      * @return the encoded frame
      * @throws IllegalArgumentException when the key is not 32 bytes
      */
+    public static byte[] getDefaultFloodScope() {
+        return new FrameBuilder().u8(MeshcoreCommand.GET_DEFAULT_FLOOD_SCOPE.code()).build();
+    }
+
     public static byte[] getAdvertPath(byte[] publicKey) {
         if (publicKey.length != MeshcoreConstants.PUB_KEY_SIZE) {
             throw new IllegalArgumentException("public key must be exactly "
@@ -866,6 +871,30 @@ public final class MeshcoreFrameCodec {
                             c.bytes(MeshcoreConstants.CHANNEL_PSK_SIZE,
                                     "channelInfo.psk")));
 
+                case 0x1C: { // RESP_CODE_DEFAULT_FLOOD_SCOPE
+                    // The code alone is the firmware's "this radio has no default scope" answer.
+                    if (c.atEnd()) {
+                        return new DefaultFloodScopeFrame("", null);
+                    }
+                    // [name 31][key 16]: a name longer than the field is impossible, and a frame
+                    // shorter than the pair is a truncated answer rather than a scope.
+                    if (c.remaining() < 31 + 16) {
+                        return new DecodeFailure(MeshcoreDecodeError.of(
+                                DecodeErrorKind.TRUNCATED,
+                                "defaultFloodScope needs 47 bytes after the code, has "
+                                        + c.remaining(),
+                                0x1C));
+                    }
+                    String scopeName = new String(
+                            c.bytes(31, "defaultFloodScope.name"),
+                            java.nio.charset.StandardCharsets.UTF_8);
+                    int nul = scopeName.indexOf('\0');
+                    if (nul >= 0) {
+                        scopeName = scopeName.substring(0, nul);
+                    }
+                    byte[] scopeKey = c.bytes(16, "defaultFloodScope.key");
+                    return new DefaultFloodScopeFrame(scopeName.trim(), scopeKey);
+                }
                 case 0x16: { // RESP_CODE_ADVERT_PATH
                     int receivedAt = (int) c.u32("advertPath.receivedAt");
                     int pathLen = c.u8("advertPath.pathLen");

@@ -66,6 +66,9 @@ public enum MeshcoreResponse {
      */
     CUSTOM_VARS(0x15),
 
+    /** {@code RESP_CODE_DEFAULT_FLOOD_SCOPE} — reply to GET_DEFAULT_FLOOD_SCOPE. */
+    DEFAULT_FLOOD_SCOPE(0x1C),
+
     /** {@code PUSH_CODE_ADVERTISEMENT}. */
     ADVERTISEMENT(0x80),
 

@@ -26,6 +26,9 @@ pub mod codes {
     pub const LOG_RX_DATA: u8 = 0x88;
     /// The reply to [`commands::GET_ADVERT_PATH`]: `received u32`, `path byte`, path bytes.
     pub const ADVERT_PATH: u8 = 0x16;
+    /// The reply to [`commands::GET_DEFAULT_FLOOD_SCOPE`]: `name 31`, `key 16`, or the code alone
+    /// when the radio has no default scope (`MyMesh.cpp:1964-1972`).
+    pub const DEFAULT_FLOOD_SCOPE: u8 = 0x1C;
 }
 
 /// Command codes this crate sends.
@@ -54,6 +57,19 @@ pub mod commands {
     /// takes a path-length byte that the firmware reads both as a byte count and as an encoded
     /// value, which agrees only at a one-byte hash.
     pub const SEND_RAW_PACKET: u8 = 0x41;
+    /// Read the radio's **default flood scope**: no argument, and the answer is
+    /// [`codes::DEFAULT_FLOOD_SCOPE`] with the name and the 16-byte key, or the code alone when the
+    /// radio has none (`MyMesh.cpp:1964-1972`).
+    ///
+    /// **The radio is the source of truth for the scope**, because the operator's own MeshCore app
+    /// sets it there (`region default`, the app's Experimental Settings from v1.43.0) and a regional
+    /// firmware build can ship one (`DEFAULT_FLOOD_SCOPE_NAME`). ldmux reads it rather than asking
+    /// for the same fact twice in two places.
+    pub const GET_DEFAULT_FLOOD_SCOPE: u8 = 0x40;
+    /// Write the radio's default flood scope: `name 31` then `key 16`; a frame of the code alone
+    /// clears it (`MyMesh.cpp:1947-1963`). Used only when ldmux *learned* a scope from the air and
+    /// the radio had none, so the operator's device and this daemon agree.
+    pub const SET_DEFAULT_FLOOD_SCOPE: u8 = 0x3F;
     /// Emit this node's advert: `mode u8`, where 1 floods it and 0 sends it zero-hop
     /// (`MyMesh.cpp:1257-1272`).
     ///
@@ -193,6 +209,232 @@ pub const ROUTE_REQUEST_MAGIC: &[u8; 4] = b"LDRQ";
 /// The four bytes that mark a direct **route reply**, carried as a `RAW_CUSTOM` record.
 pub const ROUTE_REPLY_MAGIC: &[u8; 4] = b"LDRR";
 
+/// Route type value for a flood that carries two 16-bit transport codes.
+///
+/// A scoped flood is `ROUTE_TYPE_TRANSPORT_FLOOD` (0), and the four bytes after the header are
+/// `transport_codes[0]` (the region's per-packet code) and `transport_codes[1]` (reserved,
+/// `sendFloodScoped` writes zero; `src/Packet.h:16`, `Packet::readFrom`).
+pub const ROUTE_TRANSPORT_FLOOD: u8 = 0x00;
+
+/// Header byte for a scoped route request: `route = 0` (TRANSPORT_FLOOD), `payload_type = 0` (REQ).
+pub const ROUTE_FLOOD_SCOPED_HEADER: u8 = 0x00;
+
+/// A flood scope: the operator's region name and the 16-byte key its packets are proved with.
+///
+/// **The name is not on the air.** A scoped packet carries only a 16-bit HMAC of the key over its
+/// payload (`TransportKey::calcTransportCode`), so every repeater in the path recomputes the same
+/// value from a key it holds, and an observer learns nothing but two bytes. The key is
+/// `SHA256("#" + name)` cut to 16 bytes for the public hashtag-style regions everyone uses
+/// (`TransportKeyStore::getAutoKeyFor`, `RegionMap::getTransportKeysFor`); a private region whose
+/// name begins `$` has a stored key instead, which is why a parsed scope keeps its key rather than
+/// re-deriving one from the name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FloodScope {
+    /// The region name as the radio stores it, without the `#` the hash adds (`us`, `us-co`, …).
+    pub name: String,
+    /// The 16-byte transport key.
+    pub key: [u8; 16],
+}
+
+impl FloodScope {
+    /// The scope for a public region name: `SHA256("#name")` cut to 16 bytes.
+    ///
+    /// The leading `#` is the firmware's own convention and is added even when the operator's name
+    /// has none (`RegionMap::getTransportKeysFor`: a name that is not `$…` is hashed as `#name`), so
+    /// `us-co` and `#us-co` name the same region and a client can derive the key without the radio
+    /// having the region configured at all.
+    #[must_use]
+    pub fn from_name(name: &str) -> Self {
+        use sha2::Digest as _;
+        let bare = name.trim().trim_start_matches('#');
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(b"#");
+        hasher.update(bare.as_bytes());
+        let digest = hasher.finalize();
+        let mut key = [0u8; 16];
+        key.copy_from_slice(&digest[..16]);
+        Self {
+            name: bare.to_owned(),
+            key,
+        }
+    }
+
+    /// A scope with a key the radio supplied, which is the only way a private (`$…`) region's key
+    /// can be known.
+    #[must_use]
+    pub fn with_key(name: impl Into<String>, key: [u8; 16]) -> Self {
+        Self {
+            name: name.into(),
+            key,
+        }
+    }
+}
+
+/// A packet's scope proof: `HMAC-SHA-256(key, payload_type || payload)` cut to two little-endian
+/// bytes, with 0x0000 and 0xFFFF remapped (`TransportKey::calcTransportCode`,
+/// `src/helpers/TransportKeyStore.cpp:4-18`).
+///
+/// **Only the payload and its type are hashed**, so the value survives every hop — the path grows,
+/// the payload does not — and the *same* two bytes are what a repeater recomputes to decide whether
+/// to forward. That is also why this must be computed over exactly the bytes that go on the air.
+#[must_use]
+pub fn transport_code(key: &[u8; 16], payload_type: u8, payload: &[u8]) -> u16 {
+    use hmac::Mac as _;
+    let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(key)
+        .expect("HMAC accepts a key of any length");
+    mac.update(&[payload_type]);
+    mac.update(payload);
+    let bytes = mac.finalize().into_bytes();
+    let code = u16::from_le_bytes([bytes[0], bytes[1]]);
+    match code {
+        0 => 1,
+        0xFFFF => 0xFFFE,
+        other => other,
+    }
+}
+
+/// Parse `RESP_CODE_DEFAULT_FLOOD_SCOPE`: the radio's default flood scope, or `Some(None)` when the
+/// radio has none (the firmware answers with the code alone).
+#[must_use]
+pub fn parse_default_flood_scope(frame: &[u8]) -> Option<Option<FloodScope>> {
+    if frame.first() != Some(&codes::DEFAULT_FLOOD_SCOPE) {
+        return None;
+    }
+    if frame.len() < 1 + 31 + 16 {
+        // The code alone is the firmware's "null" answer (`MyMesh.cpp:1971`).
+        return Some(None);
+    }
+    let name = text(&frame[1..1 + 31]);
+    if name.is_empty() {
+        return Some(None);
+    }
+    let mut key = [0u8; 16];
+    key.copy_from_slice(frame.get(1 + 31..1 + 31 + 16)?);
+    Some(Some(FloodScope { name, key }))
+}
+
+/// Build `CMD_SET_DEFAULT_FLOOD_SCOPE`: `name 31` (NUL padded) then `key 16`, or the code alone to
+/// clear it (`MyMesh.cpp:1947-1963`).
+///
+/// The firmware refuses a name of 31 bytes or more with `ERR_CODE_ILLEGAL_ARG`, so a longer name is
+/// truncated to the 30 it accepts rather than sent and refused.
+#[must_use]
+pub fn build_default_flood_scope(scope: Option<&FloodScope>) -> Vec<u8> {
+    let Some(scope) = scope else {
+        return vec![commands::SET_DEFAULT_FLOOD_SCOPE];
+    };
+    let mut out = Vec::with_capacity(1 + 31 + 16);
+    out.push(commands::SET_DEFAULT_FLOOD_SCOPE);
+    let name = scope.name.as_bytes();
+    let n = name.len().min(30);
+    out.extend_from_slice(&name[..n]);
+    out.resize(1 + 31, 0);
+    out.extend_from_slice(&scope.key);
+    out
+}
+
+/// The public region names worth testing an overheard scoped flood against.
+///
+/// **Matching one is evidence, not a configuration.** A scoped flood proves the tag it was scoped to
+/// is carried by the repeaters that forwarded it, so a match is the difference between "this mesh
+/// scopes" and "this mesh scopes to `us-co`". The list cannot be complete — region names are local,
+/// lower-case and operator-chosen (`us`, `us-co`, `pnw`, `nl-ut`, `ch-de`) and the largest US
+/// community guide says outright that there is no national standard — so a miss leaves the node
+/// unscoped, which is where every client starts and what the firmware's own companion default is.
+///
+/// Order matters: the broadest tag that matches is adopted first, because scoping a terminal to a
+/// metro (`sea`, `pdx`) would cut it off from everything outside that city.
+pub const KNOWN_SCOPE_TAGS: &[&str] = &[
+    // National and supranational.
+    "us",
+    "usa",
+    "ca",
+    "uk",
+    "eu",
+    "ch",
+    "nl",
+    "de",
+    "au",
+    "nz",
+    // Whole-state and province tags — the level most US and EU guides recommend for a client.
+    "us-co",
+    "us-ca",
+    "us-tx",
+    "us-wa",
+    "us-or",
+    "us-id",
+    "us-mt",
+    "us-az",
+    "us-nv",
+    "us-ut",
+    "us-ny",
+    "us-fl",
+    "us-ga",
+    "us-nc",
+    "us-pa",
+    "us-oh",
+    "us-mi",
+    "us-il",
+    "us-wi",
+    "us-mn",
+    "us-mo",
+    "us-ks",
+    "us-ne",
+    "us-ok",
+    "us-nm",
+    "us-va",
+    "us-md",
+    "us-ma",
+    "us-ct",
+    "us-nj",
+    "us-ri",
+    "us-nh",
+    "us-vt",
+    "us-me",
+    "us-sc",
+    "us-tn",
+    "us-ky",
+    "us-in",
+    "us-ia",
+    "us-ar",
+    "us-la",
+    "us-ms",
+    "us-al",
+    "us-ak",
+    "us-hi",
+    "us-dc",
+    // Names some communities publish instead of the ISO form, and the largest regional tags.
+    "colorado",
+    "pnw",
+    "bos",
+    "northeast",
+    "east",
+    "west",
+    "nl-ut",
+    "ch-de",
+    "ch-fr",
+    "ch-it",
+];
+
+/// Which known region name an overheard scoped packet was scoped to, if any.
+///
+/// The packet's two-byte code is compared against the code every candidate *would* have produced for
+/// this payload, which is the only way to attribute a scope to a name: the name is never sent. A
+/// 16-bit code has one chance in 65 536 of matching by accident per candidate, so a match across a
+/// short list is good evidence and a repeated match across different payloads settles it.
+#[must_use]
+pub fn identify_scope(view: &PacketView<'_>, candidates: &[&str]) -> Option<FloodScope> {
+    let codes = view.transport_codes?;
+    let wanted = codes[0];
+    for name in candidates {
+        let scope = FloodScope::from_name(name);
+        if transport_code(&scope.key, view.payload_type, view.payload) == wanted {
+            return Some(scope);
+        }
+    }
+    None
+}
+
 /// One received packet, split into the fields a route or a record needs.
 ///
 /// `path` is in **travel order**: a flooded packet accumulates one hash per repeater, so the hops
@@ -204,6 +446,9 @@ pub struct PacketView<'a> {
     pub route: u8,
     /// `PAYLOAD_TYPE_*` from the header.
     pub payload_type: u8,
+    /// The two transport codes, for a `ROUTE_TYPE_TRANSPORT_FLOOD`/`_DIRECT` packet; `None` for a
+    /// plain flood or a plain direct packet, which carry no scope at all.
+    pub transport_codes: Option<[u16; 2]>,
     /// The packet's path, with the encoding the wire carried.
     pub path: AdvertPath,
     /// Everything after the path.
@@ -231,7 +476,13 @@ pub fn parse_packet(packet: &[u8]) -> Option<PacketView<'_>> {
     let mut i = 1;
     // ROUTE_TYPE_TRANSPORT_FLOOD (0) and ROUTE_TYPE_TRANSPORT_DIRECT (3) carry two 16-bit codes
     // before the path (`Packet::readFrom`).
+    let mut transport_codes = None;
     if route == 0 || route == 3 {
+        let lo = packet.get(i..i + 4)?;
+        transport_codes = Some([
+            u16::from_le_bytes([lo[0], lo[1]]),
+            u16::from_le_bytes([lo[2], lo[3]]),
+        ]);
         i += 4;
     }
     let encoded = *packet.get(i)?;
@@ -250,6 +501,7 @@ pub fn parse_packet(packet: &[u8]) -> Option<PacketView<'_>> {
     Some(PacketView {
         route,
         payload_type,
+        transport_codes,
         path: AdvertPath {
             received_at: 0,
             hash_size,
@@ -272,16 +524,43 @@ pub fn build_route_request(
     peer_key: &[u8; 32],
     own_key: &[u8; 32],
 ) -> Result<Vec<u8>, CodecError> {
+    build_route_request_in_scope(hash_size, peer_key, own_key, None)
+}
+
+/// The same request, scoped to a region when the mesh needs it.
+///
+/// A scoped flood is the only form a repeater will forward on a mesh that denies unscoped traffic
+/// (`region denyf *`), and it also escapes a low `flood.max.unscoped`: the region's own
+/// `flood.max` applies instead. The transport code is computed over **exactly** the payload that
+/// follows the path, because that is what every repeater recomputes.
+pub fn build_route_request_in_scope(
+    hash_size: u8,
+    peer_key: &[u8; 32],
+    own_key: &[u8; 32],
+    scope: Option<&FloodScope>,
+) -> Result<Vec<u8>, CodecError> {
     if !(1..=3).contains(&hash_size) {
         return Err(CodecError::BadHashSize(hash_size));
     }
-    let mut out = Vec::with_capacity(2 + ROUTE_REQUEST_MAGIC.len() + 34);
-    out.push(ROUTE_FLOOD_HEADER);
+    let mut payload = Vec::with_capacity(2 + ROUTE_REQUEST_MAGIC.len() + 32);
+    payload.push(peer_key[0]);
+    payload.push(own_key[0]);
+    payload.extend_from_slice(ROUTE_REQUEST_MAGIC);
+    payload.extend_from_slice(own_key);
+    let mut out = Vec::with_capacity(6 + payload.len());
+    match scope {
+        None => out.push(ROUTE_FLOOD_HEADER),
+        Some(scope) => {
+            out.push(ROUTE_FLOOD_SCOPED_HEADER);
+            let code = transport_code(&scope.key, 0, &payload);
+            out.extend_from_slice(&code.to_le_bytes());
+            // The second code slot is reserved: the firmware writes zero there too
+            // (`sendFloodScoped`, `MyMesh.cpp:508-513`).
+            out.extend_from_slice(&0u16.to_le_bytes());
+        }
+    }
     out.push(path_byte(hash_size, 0)?);
-    out.push(peer_key[0]);
-    out.push(own_key[0]);
-    out.extend_from_slice(ROUTE_REQUEST_MAGIC);
-    out.extend_from_slice(own_key);
+    out.extend_from_slice(&payload);
     Ok(out)
 }
 
@@ -710,6 +989,104 @@ mod tests {
         // 21 hops at three bytes is 63, inside the ceiling, and still encodable.
         let fits = vec![0u8; 3 * 21];
         assert!(build_raw_direct(3, &fits, &[0u8; 8]).is_ok());
+    }
+
+
+    /// **A region's key is SHA-256 of its name with the `#` the firmware adds**, and the scope tag
+    /// itself never goes on the air. The value is pinned to the firmware's own derivation so a
+    /// change here cannot silently make every scoped packet unrecognisable to every repeater.
+    #[test]
+    fn a_scope_key_is_the_firmware_derivation() {
+        // `python3 -c 'import hashlib; print(hashlib.sha256(b"#us-co").hexdigest()[:32])'`
+        assert_eq!(
+            FloodScope::from_name("us-co").key,
+            [
+                0x62, 0xca, 0xa5, 0xae, 0xbc, 0xa0, 0x85, 0x2f, 0xa4, 0x7c, 0x96, 0x42, 0xc5, 0xc6,
+                0x30, 0xac
+            ]
+        );
+        // The `#` is optional in the name the operator types, and hashing is case-sensitive.
+        assert_eq!(FloodScope::from_name("us-co"), FloodScope::from_name("#us-co"));
+        assert_ne!(FloodScope::from_name("us-co"), FloodScope::from_name("US-CO"));
+        assert_eq!(FloodScope::from_name("#us-co").name, "us-co");
+    }
+
+    /// The packet code is an HMAC over `payload_type || payload` and nothing else, with the two
+    /// reserved values remapped. Only the payload is hashed, which is why a code computed at the
+    /// origin still verifies at hop ten (the path grows, the payload does not).
+    #[test]
+    fn a_transport_code_covers_the_payload_and_its_type() {
+        let scope = FloodScope::from_name("us-co");
+        let code = transport_code(&scope.key, 0, b"payload");
+        // Pinned across both implementations — the app's test asserts the same number from the same
+        // key and payload — so a difference in hashing can never hide behind "it compiles".
+        assert_eq!(code, 0x9C1A);
+        assert_eq!(transport_code(&FloodScope::from_name("us").key, 0, b"payload"), 0x1E95);
+        assert_eq!(code, transport_code(&scope.key, 0, b"payload"), "stable");
+        assert_ne!(code, transport_code(&scope.key, 0, b"other"), "over the payload");
+        assert_ne!(code, transport_code(&scope.key, 4, b"payload"), "the type is hashed too");
+        assert_ne!(code, transport_code(&FloodScope::from_name("us-ca").key, 0, b"payload"));
+        assert_ne!(code, 0);
+        assert_ne!(code, 0xFFFF);
+    }
+
+    /// A scoped request carries the code in the four bytes after the header, and the far end can
+    /// read the scope back out of it — which is the whole point of the shape.
+    #[test]
+    fn a_scoped_request_proves_its_region() {
+        let peer = [0x21u8; 32];
+        let own = [0x84u8; 32];
+        let scope = FloodScope::from_name("us-co");
+        let packet = build_route_request_in_scope(1, &peer, &own, Some(&scope)).unwrap();
+        assert_eq!(packet[0], ROUTE_FLOOD_SCOPED_HEADER);
+        let view = parse_packet(&packet).unwrap();
+        // The path byte is after the four code bytes, so a parser that forgot them would read the
+        // first code as a path length and mangle everything after it.
+        assert_eq!(view.route, ROUTE_TRANSPORT_FLOOD);
+        assert_eq!(view.payload_type, 0);
+        assert_eq!(view.path.hops, 0);
+        assert_eq!(view.payload.len(), 38);
+        assert_eq!(
+            view.transport_codes.unwrap()[0],
+            transport_code(&scope.key, 0, view.payload)
+        );
+        // The far end identifies the region by recomputing candidate codes, and refuses to guess.
+        assert_eq!(identify_scope(&view, &["us", "us-co"]).unwrap().name, "us-co");
+        assert!(identify_scope(&view, &["us", "usa", "colorado"]).is_none());
+        // ...and the request still parses as a request addressed to the peer.
+        assert_eq!(parse_route_request(&packet, &peer).unwrap().peer_key, own);
+    }
+
+    /// A plain flood carries no codes, so it can never be attributed to a region.
+    #[test]
+    fn an_unscoped_request_has_no_scope_to_prove() {
+        let packet = build_route_request(1, &[1u8; 32], &[2u8; 32]).unwrap();
+        let view = parse_packet(&packet).unwrap();
+        assert!(view.transport_codes.is_none());
+        assert!(identify_scope(&view, KNOWN_SCOPE_TAGS).is_none());
+    }
+
+    /// The radio's own default scope is the source of truth, in both directions: the null answer is
+    /// one byte, and a set one carries the name and the key.
+    #[test]
+    fn the_radios_default_scope_round_trips() {
+        let scope = FloodScope::from_name("us-co");
+        let frame = build_default_flood_scope(Some(&scope));
+        assert_eq!(frame.len(), 1 + 31 + 16);
+        assert_eq!(frame[0], commands::SET_DEFAULT_FLOOD_SCOPE);
+        assert_eq!(&frame[1..6], b"us-co");
+        assert_eq!(&frame[32..], &scope.key);
+
+        let mut reply = vec![codes::DEFAULT_FLOOD_SCOPE];
+        reply.extend_from_slice(&frame[1..]);
+        assert_eq!(parse_default_flood_scope(&reply), Some(Some(scope)));
+
+        // The firmware's null answer, and a clear command, are both one byte.
+        assert_eq!(parse_default_flood_scope(&[codes::DEFAULT_FLOOD_SCOPE]), Some(None));
+        assert_eq!(build_default_flood_scope(None), vec![commands::SET_DEFAULT_FLOOD_SCOPE]);
+        // A name the firmware would refuse is truncated to the 30 bytes it accepts.
+        let long = FloodScope::from_name(&"a".repeat(40));
+        assert_eq!(build_default_flood_scope(Some(&long)).len(), 1 + 31 + 16);
     }
 
     #[test]

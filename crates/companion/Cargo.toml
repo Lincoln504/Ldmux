@@ -9,6 +9,12 @@ description = "The host's own MeshCore companion radio over USB serial: framing,
 
 [dependencies]
 nix = { version = "0.29", features = ["term", "fs", "ioctl", "poll"] }
+# ADR-0033: a flood scope is proved per packet with HMAC-SHA-256 over the payload, and a region's
+# key is SHA-256 of its name — the firmware's own two operations (`TransportKeyStore.cpp:4-25`,
+# `:52-63`). Pure Rust (RustCrypto), the same crates `ldmux-session` already uses for the
+# handshake tag; no C, no `ring`.
+hmac = "0.12"
+sha2 = "0.10"
 libc = "0.2"
 tokio = { version = "1", features = ["io-util", "sync", "time", "rt", "macros"] }
 

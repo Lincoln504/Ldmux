@@ -92,16 +92,37 @@ internal object RadioRoute {
      *
      * @return the packet, or null when either key is not a public key.
      */
-    fun routeRequest(hashSize: Int, hostKey: ByteArray, ownKey: ByteArray): ByteArray? {
+    fun routeRequest(
+        hashSize: Int,
+        hostKey: ByteArray,
+        ownKey: ByteArray,
+        scope: ByteArray? = null,
+    ): ByteArray? {
         if (hashSize !in 1..3) return null
         if (hostKey.size != 32 || ownKey.size != 32) return null
-        val out = ByteArray(2 + 2 + REQUEST_MAGIC.size + 32)
-        out[0] = ROUTE_FLOOD.toByte() // route FLOOD, payload REQ, version 0
-        out[1] = (((hashSize - 1) shl 6) or 0).toByte() // no hops yet: we are asking
-        out[2] = hostKey[0]
-        out[3] = ownKey[0]
-        REQUEST_MAGIC.copyInto(out, 4)
-        ownKey.copyInto(out, 4 + REQUEST_MAGIC.size)
+        if (scope != null && scope.size != 16) return null
+        // The payload, which is what a scoped flood's code is computed over: the region code covers
+        // the type and the payload only, so it must be hashed before the header and path join them.
+        val payload = ByteArray(2 + REQUEST_MAGIC.size + 32)
+        payload[0] = hostKey[0]
+        payload[1] = ownKey[0]
+        REQUEST_MAGIC.copyInto(payload, 2)
+        ownKey.copyInto(payload, 2 + REQUEST_MAGIC.size)
+        val codes = if (scope == null) 0 else 4
+        val out = ByteArray(1 + codes + 1 + payload.size)
+        // Route FLOOD (plain, or transport-coded when scoped) with payload REQ and version 0.
+        out[0] = if (scope == null) ROUTE_FLOOD.toByte() else ROUTE_TRANSPORT_FLOOD.toByte()
+        if (scope != null) {
+            val code = transportCode(scope, 0, payload)
+            out[1] = (code and 0xFF).toByte()
+            out[2] = ((code ushr 8) and 0xFF).toByte()
+            // The second code slot is reserved; the firmware writes zero there too.
+            out[3] = 0
+            out[4] = 0
+        }
+        // No hops yet: we are asking.
+        out[1 + codes] = (((hashSize - 1) shl 6) or 0).toByte()
+        payload.copyInto(out, 2 + codes)
         return out
     }
 
@@ -127,27 +148,128 @@ internal object RadioRoute {
      * `GET_ADVERT_PATH` — which, with a route already in hand, used to be five minutes apart.
      */
     fun heardAdvert(raw: ByteArray, hostKey: ByteArray): Path? {
-        if (hostKey.size != 32 || raw.size < 4) return null
+        if (hostKey.size != 32) return null
+        val packet = parse(raw) ?: return null
+        if (!packet.isFlood || packet.payloadType != PAYLOAD_ADVERT) return null
+        if (packet.payload.size < 32) return null
+        for (i in 0 until 32) if (packet.payload[i] != hostKey[i]) return null
+        return reversed(packet.pathEncoded, packet.path)
+    }
+
+    /**
+     * A region's **transport key**: the first 16 bytes of `SHA256("#" + name)`.
+     *
+     * The firmware hashes the stored name with a leading `#` added even when the operator's name has
+     * none (`RegionMap::getTransportKeysFor`, `TransportKeyStore::getAutoKeyFor`), so the key is the
+     * same for `us-co` and `#us-co`, it is case-sensitive, and a client can derive it without the
+     * radio having the region configured at all. A private region (a name beginning `$`) has a
+     * stored key instead, which can only come from the radio.
+     */
+    fun scopeKey(name: String): ByteArray {
+        val bare = name.trim().removePrefix("#")
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(("#" + bare).toByteArray())
+        return digest.copyOfRange(0, 16)
+    }
+
+    /**
+     * A packet's scope proof: `HMAC-SHA-256(key, payloadType || payload)` cut to two little-endian
+     * bytes, with 0x0000 and 0xFFFF remapped.
+     *
+     * Only the payload and its type are hashed, so the same two bytes verify at every hop: the path
+     * grows in transit, the payload does not. A repeater recomputes exactly this to decide whether
+     * to forward, which is why it is computed here over the bytes that will go on the air.
+     */
+    fun transportCode(key: ByteArray, payloadType: Int, payload: ByteArray): Int {
+        val mac = javax.crypto.Mac.getInstance("HmacSHA256")
+        mac.init(javax.crypto.spec.SecretKeySpec(key, "HmacSHA256"))
+        mac.update(byteArrayOf(payloadType.toByte()))
+        mac.update(payload)
+        val bytes = mac.doFinal()
+        val code = (bytes[0].toInt() and 0xFF) or ((bytes[1].toInt() and 0xFF) shl 8)
+        return when (code) {
+            0 -> 1
+            0xFFFF -> 0xFFFE
+            else -> code
+        }
+    }
+
+    /**
+     * Which known region a flood was scoped to, if any.
+     *
+     * A scoped flood carries only the 16-bit code, never the name, so the only way to attribute it
+     * is to recompute what each candidate *would* have produced for this payload. A match is
+     * evidence that the repeaters which forwarded it carry that region — which is exactly what
+     * makes it safe to adopt.
+     */
+    fun heardScope(raw: ByteArray, candidates: List<String>): String? {
+        val packet = parse(raw) ?: return null
+        if (!packet.isFlood) return null
+        val code = packet.transportCode0 ?: return null
+        for (name in candidates) {
+            if (transportCode(scopeKey(name), packet.payloadType, packet.payload) == code) return name
+        }
+        return null
+    }
+
+    /** The parts of an over-the-air packet the route logic needs. */
+    private class Ota(
+        val isFlood: Boolean,
+        val payloadType: Int,
+        val transportCode0: Int?,
+        val pathEncoded: Int,
+        val path: ByteArray,
+        val payload: ByteArray,
+    )
+
+    /**
+     * `[header][transport codes 4?][path byte][path][payload]`, the firmware's own layout
+     * (`Packet::readFrom`). Four code bytes sit between the header and the path byte for a
+     * transport-coded flood or direct packet, and forgetting them turns the first code into a path
+     * length.
+     */
+    private fun parse(raw: ByteArray): Ota? {
+        if (raw.size < 2) return null
         val header = raw[0].toInt() and 0xFF
         val route = header and 0x03
         val payloadType = (header shr 2) and 0x0F
-        // A **scoped** advert is a transport-coded flood (route 0) and carries four bytes of codes
-        // before its path byte; a plain flood (route 1) does not. Missing that would read the first
-        // two codes as a path byte, so a region-configured host would look like a malformed route.
-        if (route != ROUTE_FLOOD && route != ROUTE_TRANSPORT_FLOOD) return null
-        if (payloadType != PAYLOAD_ADVERT) return null
-        val pathAt = 1 + if (route == ROUTE_TRANSPORT_FLOOD) 4 else 0
-        if (raw.size < pathAt + 1) return null
-        val encoded = raw[pathAt].toInt() and 0xFF
+        var at = 1
+        var code0: Int? = null
+        if (route == ROUTE_TRANSPORT_FLOOD || route == 3) {
+            if (raw.size < 5) return null
+            code0 = (raw[1].toInt() and 0xFF) or ((raw[2].toInt() and 0xFF) shl 8)
+            at = 5
+        }
+        if (raw.size <= at) return null
+        val encoded = raw[at].toInt() and 0xFF
         val hashSize = (encoded ushr 6) + 1
         if (hashSize == 4) return null
         val hops = encoded and 0x3F
         val want = hops * hashSize
-        val payloadAt = pathAt + 1 + want
-        if (payloadAt + 32 > raw.size) return null
-        for (i in 0 until 32) if (raw[payloadAt + i] != hostKey[i]) return null
-        return reversed(encoded, raw.copyOfRange(pathAt + 1, payloadAt))
+        val pathAt = at + 1
+        if (pathAt + want > raw.size) return null
+        return Ota(
+            isFlood = route == ROUTE_FLOOD || route == ROUTE_TRANSPORT_FLOOD,
+            payloadType = payloadType,
+            transportCode0 = code0,
+            pathEncoded = encoded,
+            path = raw.copyOfRange(pathAt, pathAt + want),
+            payload = raw.copyOfRange(pathAt + want, raw.size),
+        )
     }
+
+    /** The public region names worth testing an overheard scoped flood against. */
+    val KNOWN_SCOPE_TAGS: List<String> = listOf(
+        // National and supranational.
+        "us", "usa", "ca", "uk", "eu", "ch", "nl", "de", "au", "nz",
+        // Whole-state and province tags: the level most US and EU guides recommend for a client.
+        "us-co", "us-ca", "us-tx", "us-wa", "us-or", "us-id", "us-mt", "us-az", "us-nv", "us-ut",
+        "us-ny", "us-fl", "us-ga", "us-nc", "us-pa", "us-oh", "us-mi", "us-il", "us-wi", "us-mn",
+        "us-mo", "us-ks", "us-ne", "us-ok", "us-nm", "us-va", "us-md", "us-ma", "us-ct", "us-nj",
+        "us-ri", "us-nh", "us-vt", "us-me", "us-sc", "us-tn", "us-ky", "us-in", "us-ia", "us-ar",
+        "us-la", "us-ms", "us-al", "us-ak", "us-hi", "us-dc",
+        // Names some communities publish instead of the ISO form, and the largest regional tags.
+        "colorado", "pnw", "bos", "northeast", "east", "west", "nl-ut", "ch-de", "ch-fr", "ch-it",
+    )
 
     /**
      * Which of the two route sources to send through: **the one heard on the air, when there is one.**

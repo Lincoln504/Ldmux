@@ -314,6 +314,7 @@ ADR-0010 is the decision. The practice:
 | the phone takes a shell the desk has | the desk is told and stops, the pane is fitted to the phone, and when the phone lets go the pane is put back to the size it displaced |
 | the app is backgrounded | pages detach after the platform grace, the shell stays in the keeper, and returning re-attaches |
 | the radio's airtime allowance runs out | the host stops sending **new** records until the hour refills (`records_left` from the carrier's countdown), while acks and retransmissions still go, so the link stays alive and the pane stops updating; a record the firmware itself refuses is handed back to the retry ladder so it does not count as a lost attempt, and `last_error` says what happened |
+| a scoped mesh drops our floods | the session still works wherever a direct route exists, because scoping gates floods only; discovery needs the region, so `ldmux mesh status` prints the scope and the log names a scope learned from the air (ADR-0033) |
 | a mesh setting is malformed | the mesh link is disabled with a message and the daemon keeps running, because a bad key must not kill the shells |
 
 ## 9. Airtime
@@ -516,6 +517,20 @@ be transmitted and then ignored by every receiver. Direct means the sender must 
    A route request's path and a reply's path are already absolute: a request that arrives with no
    hops came from an adjacent peer, and that is the route.
 
+5. **A flood scope is followed, never invented** (ADR-0033). A MeshCore region gates *floods only* —
+   `allowPacketForward` checks it when `isRouteFlood()`, so a direct record is forwarded on its path
+   alone — which means a wrong scope costs discovery and never the session. Three facts decide the
+   rule: an unscoped flood goes to the repeaters' wildcard `*` entry, whose flood flag is clear by
+   default and which most meshes therefore forward; a scoped flood is forwarded only by repeaters
+   carrying that exact tag; and the drop is **silent**. ldmux therefore reads the radio's own default
+   scope (`CMD_GET_DEFAULT_FLOOD_SCOPE` 0x40, which returns the name **and** the 16-byte key), uses
+   `LDMUX_MESH_SCOPE` only as an operator's pin (`<tag>` or `off`), and otherwise adopts a tag only
+   when an **overheard scoped flood proves** one of the published region names — a scoped packet
+   carries `HMAC-SHA-256(key, payload_type ‖ payload)`, so recomputing candidates is the only way to
+   name a region, and a match is proof that the repeaters in the path carry it. A radio with no scope
+   and no proof stays unscoped. Nothing is a setting, and `ldmux mesh status` prints the one line
+   that says which of those happened.
+
 Consequences worth knowing:
 
 - **Timing follows airtime.** One 172-byte record at 62.5 kHz SF7 is 603 ms (the firmware's own
@@ -566,6 +581,10 @@ Consequences worth knowing:
   sends the advert inside that scope (`default_scope_key`, `MyMesh.cpp:489-498`), so two radios on
   the same tuple but different scopes hear each other only for zero-hop traffic. Nothing to change
   in ldmux; it is one more thing "the same tuple" means.
+- **A scope is a routing label, not a secret.** The name and the 16-byte key are public for every
+  hashtag-style region, nothing about them goes on the air, and a scoped packet shows only a 16-bit
+  HMAC over its own payload. Scoping therefore hides nothing and authenticates nothing; it decides
+  only which repeaters carry a flood.
 - **A path is not authenticated by MeshCore.** Route integrity is an 8-bit prefix comparison per
   hop (issue #1775 in the firmware tracker), so the session's Noise layer, not the path, is what
   authenticates the peer.

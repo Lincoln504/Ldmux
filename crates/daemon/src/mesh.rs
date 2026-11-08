@@ -265,6 +265,13 @@ pub struct MeshSnapshot {
     pub radio_preset: Option<(u32, u32, u8, u8)>,
     /// Bytes per path hash on this radio's own adverts, once it has been identified.
     pub path_hash_size: Option<u8>,
+    /// The flood scope this node's broadcasts are scoped to, with the key that proves them.
+    ///
+    /// **The third thing two radios can disagree about that produces no error.** Two ends on
+    /// different scopes still hear each other's direct records — repeater region checks gate floods
+    /// only — but neither one's discovery floods cross, so neither can learn a route. Reported here
+    /// because the app compares itself against this line and an operator has nowhere else to look.
+    pub flood_scope: Option<ldmux_mesh::ScopeInfo>,
     /// The host radio's transmit power in dBm, as it reports it (`SELF_INFO` byte 2).
     ///
     /// Published for the same reason as the tuple and the width: the phone shows its own power, so
@@ -303,6 +310,7 @@ impl MeshSnapshot {
             own_radio_key: None,
             radio_preset: None,
             path_hash_size: None,
+            flood_scope: None,
             tx_power_dbm: None,
             serial: Some(cfg.serial.clone()),
             uplink_record_max: None,
@@ -334,6 +342,10 @@ impl MeshSnapshot {
             // The width the host's adverts carry: the other half of "the same tuple" when a
             // peer's advert path never resolves.
             "pathHashSize": self.path_hash_size,
+            "floodScope": self.flood_scope.as_ref().map(|s| serde_json::json!({
+                "name": s.name,
+                "key": s.key_hex(),
+            })),
             "txPowerDbm": self.tx_power_dbm,
             "rssi": self.rssi,
             "batteryPercent": self.battery_percent,
@@ -591,10 +603,20 @@ pub fn pairing_json() -> Result<serde_json::Value, String> {
     // shows up once a repeater is in the way. Sent as a fifth element, so a phone that predates it
     // reads four and carries on.
     let host_path = runtime.snapshot().path_hash_size;
+    // **The scope rides with the tuple too.** MeshCore's region scoping gates *floods* only, so two
+    // radios on different scopes still exchange every record once a route exists — they just cannot
+    // discover each other, because the discovery floods are dropped by the first repeater that does
+    // not carry the scope. A phone whose radio has no scope would therefore never find a host on a
+    // scoped mesh, and the one place the host can tell it is the code.
+    let host_scope = runtime.snapshot().flood_scope;
     Ok(serde_json::json!({
         "hostKey": hex(&keys.host_key),
         "psk": hex(&keys.psk),
         "hostRadio": host_radio.map(|r| hex(&r)),
+        "hostScope": host_scope.map(|s| serde_json::json!({
+            "name": s.name,
+            "key": s.key_hex(),
+        })),
         "hostPreset": host_preset.map(|(f, b, sf, cr)| {
             let mut v = vec![u64::from(f), u64::from(b), u64::from(sf), u64::from(cr)];
             if let Some(width) = host_path {
@@ -901,6 +923,14 @@ async fn session<C: Carrier>(
             event = carrier.recv() => {
                 last_carrier = Instant::now();
                 match event? {
+                    Event::Scope(scope) => {
+                        // The scope this node's floods are proved with, from the carrier: the
+                        // radio's own `region default`, an operator's pin, or a region ldmux
+                        // recognised from a flood it overheard. Two ends on different scopes hear
+                        // each other's direct records and can never discover each other, so this
+                        // is a fact the app has to be able to compare.
+                        set(snapshot, |s| s.flood_scope = scope);
+                    }
                     Event::Status(status) => {
                         // **Upward only, and that is the whole fix for a double charge.** The loop
                         // reserves against the countdown when it hands records to the carrier

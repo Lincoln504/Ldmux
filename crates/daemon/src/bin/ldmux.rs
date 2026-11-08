@@ -263,6 +263,14 @@ fn print_mesh_status(v: &serde_json::Value) {
             n(3)
         );
     }
+    // **The flood scope, on its own line.** A repeater forwards a scoped flood only if it carries
+    // that region and drops it silently otherwise, so two ends on different scopes hear each
+    // other's direct records and can never discover each other. Nothing else on this page would
+    // tell an operator that, and the phone compares itself against this line.
+    match v.get("floodScope").and_then(|s| s.get("name")).and_then(serde_json::Value::as_str) {
+        Some(name) => println!("scope    {name} (floods are scoped to this region)"),
+        None => println!("scope    none (floods are unscoped, which most meshes forward)"),
+    }
     match v.get("uplinkRecordMax").and_then(serde_json::Value::as_u64) {
         // The carrier's record, not the terminal protocol's payload: a `Rows` message holds at
         // most 143 application bytes inside it, and an operator reading "172" beside a protocol

@@ -33,3 +33,4 @@ One file per decision, oldest first. A record says what was decided, what it cos
 - `0029-the-session-rides-raw-custom.md` — Our session layer rides MeshCore's `RAW_CUSTOM` payload.
 - `0031-a-keeper-restart-can-keep-the-shells.md` — A keeper restart can keep the shells: fd custody and a terminal snapshot. **Proposed.**
 - `0032-a-route-is-asked-for-not-waited-for.md` — A route is asked for, not waited for: a flooded `REQ` and a direct reply, because a repeater drops an advert after eight hops.
+- `0033-a-flood-scope-is-followed-never-invented.md` — A flood scope is followed, never invented: the radio's own region, else one proven by an overheard scoped flood, else unscoped.

@@ -48,6 +48,7 @@ public sealed interface MeshcoreInbound
                 RawDataFrame,
                 AdvertPathFrame,
                 TelemetryResponseFrame,
+                DefaultFloodScopeFrame,
                 UnsupportedFrame,
                 DecodeFailure {
 }

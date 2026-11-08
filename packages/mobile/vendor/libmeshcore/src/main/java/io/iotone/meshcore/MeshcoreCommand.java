@@ -39,6 +39,17 @@ public enum MeshcoreCommand {
      */
     GET_ADVERT_PATH(0x2A),
 
+    /**
+     * {@code CMD_GET_DEFAULT_FLOOD_SCOPE} (0x40) — read the radio's default flood scope.
+     *
+     * <p>A MeshCore region scopes a <em>flood</em> by attaching a 16-bit HMAC of the region's key
+     * over the payload; a repeater that does not carry that region drops the packet silently. The
+     * radio's default scope is what its own floods use, and the operator's MeshCore app sets it
+     * ({@code region default}). Reading it is how a client follows a decision someone made instead
+     * of inventing one.</p>
+     */
+    GET_DEFAULT_FLOOD_SCOPE(0x40),
+
     /** {@code CMD_GET_DEVICE_TIME} — source-only. */
     GET_DEVICE_TIME(0x05),
 

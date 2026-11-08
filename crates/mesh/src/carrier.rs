@@ -12,7 +12,7 @@
 
 use crate::constants::RadioState;
 use crate::error::MeshError;
-use crate::messages::{SendResult, Status};
+use crate::messages::{ScopeInfo, SendResult, Status};
 
 /// What a carrier reports upward.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -23,6 +23,14 @@ pub enum Event {
     Recv(Vec<u8>),
     /// The answer to one [`Carrier::send_record`], naming the sequence it carried.
     SendResult(SendResult),
+    /// The **flood scope** this node's broadcasts are scoped to, or `None` when they are unscoped.
+    ///
+    /// Sent at open and whenever it changes — which on this carrier happens once, when a radio with
+    /// no scope of its own overhears a scoped flood and recognises the region. Nothing else in the
+    /// system can report it: the phone compares its own radio against this one, and two ends on
+    /// different scopes hear each other's *direct* records but cannot discover each other at all,
+    /// because the discovery floods are dropped by the first repeater that does not carry the scope.
+    Scope(Option<ScopeInfo>),
 }
 
 /// What a carrier promised at connect time.

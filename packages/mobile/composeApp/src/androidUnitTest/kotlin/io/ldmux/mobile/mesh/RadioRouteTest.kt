@@ -5,9 +5,11 @@ import io.iotone.meshcore.frames.AdvertPathFrame
 import io.iotone.meshcore.frames.DecodeFailure
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -216,5 +218,94 @@ class RadioRouteTest {
         assertNull(RadioRoute.heardAdvert(raw, ByteArray(32) { (it + 8).toByte() }))
         assertNull(RadioRoute.heardAdvert(byteArrayOf(0x12, 0x00) + host, host))
         assertNull(RadioRoute.heardAdvert(raw.copyOfRange(0, 20), host))
+    }
+
+    // ── flood scope: a region's key, and the per-packet code that proves it ──────────────────
+
+    /**
+     * **Both languages derive the same region key.** The firmware's derivation is
+     * `SHA256("#" + name)` cut to 16 bytes, and the pinned value is the one
+     * `crates/companion/src/codec.rs` asserts for the same name: a difference here would make every
+     * scoped packet this phone sends unrecognisable to every repeater, with no error anywhere.
+     */
+    @Test
+    fun `a scope key is the firmware derivation`() {
+        val key = RadioRoute.scopeKey("us-co")
+        assertEquals(
+            "62caa5aebca0852fa47c9642c5c630ac",
+            key.joinToString("") { "%02x".format(it) },
+        )
+        // The `#` is optional in what an operator types, and hashing is case-sensitive.
+        assertArrayEquals(key, RadioRoute.scopeKey("#us-co"))
+        assertFalse(RadioRoute.scopeKey("us-co").contentEquals(RadioRoute.scopeKey("US-CO")))
+    }
+
+    /** The per-packet code, pinned across languages: `HMAC-SHA256(key, 0 || "payload")` cut to 2. */
+    @Test
+    fun `a transport code covers the payload and its type`() {
+        val key = RadioRoute.scopeKey("us-co")
+        assertEquals(0x9C1A, RadioRoute.transportCode(key, 0, "payload".toByteArray()))
+        assertEquals(0x1E95, RadioRoute.transportCode(RadioRoute.scopeKey("us"), 0, "payload".toByteArray()))
+        assertNotEquals(
+            "the payload type is hashed too",
+            RadioRoute.transportCode(key, 0, "payload".toByteArray()),
+            RadioRoute.transportCode(key, 4, "payload".toByteArray()),
+        )
+        assertNotEquals(
+            RadioRoute.transportCode(key, 0, "payload".toByteArray()),
+            RadioRoute.transportCode(key, 0, "other".toByteArray()),
+        )
+    }
+
+    /**
+     * **A scoped request is a transport flood**, and the far end can name the region from the code
+     * alone — the name is never on the air. A parser that forgot the four code bytes would read the
+     * first code as a path length and mangle everything after it.
+     */
+    @Test
+    fun `a scoped request proves its region`() {
+        val host = ByteArray(32) { (it + 1).toByte() }
+        val own = ByteArray(32) { (it + 0x40).toByte() }
+        val key = RadioRoute.scopeKey("us-co")
+        val packet = RadioRoute.routeRequest(1, host, own, key)
+        assertNotNull(packet)
+        packet!!
+        assertEquals("transport flood", 0, packet[0].toInt() and 0x03)
+        // Path byte after the two codes, then the payload: no hops yet, one-byte hashes.
+        assertEquals(0x00, packet[5].toInt() and 0xFF)
+        assertEquals(host[0], packet[6])
+        assertEquals(own[0], packet[7])
+        assertArrayEquals("LDRQ".toByteArray(), packet.copyOfRange(8, 12))
+        // The same payload recomputes the same code, which is how the region is identified.
+        val payload = packet.copyOfRange(6, packet.size)
+        val expected = RadioRoute.transportCode(key, 0, payload)
+        assertEquals(expected, (packet[1].toInt() and 0xFF) or ((packet[2].toInt() and 0xFF) shl 8))
+        assertEquals("us-co", RadioRoute.heardScope(packet, RadioRoute.KNOWN_SCOPE_TAGS))
+        // ...and a key that names another region is not it.
+        assertNull(RadioRoute.heardScope(packet, listOf("us", "colorado")))
+    }
+
+    /** An unscoped request carries no codes, so no region can be attributed to it. */
+    @Test
+    fun `an unscoped request has no scope to prove`() {
+        val packet = RadioRoute.routeRequest(1, ByteArray(32), ByteArray(32))
+        assertNotNull(packet)
+        assertEquals("plain flood", 1, packet!![0].toInt() and 0x03)
+        assertNull(RadioRoute.heardScope(packet, RadioRoute.KNOWN_SCOPE_TAGS))
+        // A scoped request builder refuses a key that is not 16 bytes rather than hashing it.
+        assertNull(RadioRoute.routeRequest(1, ByteArray(32), ByteArray(32), ByteArray(15)))
+    }
+
+    /** A scoped **advert** is a transport flood too, and its path starts after the codes. */
+    @Test
+    fun `a scoped advert names the host route`() {
+        val host = ByteArray(32) { (it + 7).toByte() }
+        // header TRANSPORT_FLOOD|ADVERT, two codes, path byte one hop, path 0x0A, then the key.
+        val raw = byteArrayOf(
+            0x10, 0x00, 0x00, 0x00, 0x00, 0x01, 0x0A,
+        ) + host + ByteArray(4)
+        val route = RadioRoute.heardAdvert(raw, host)
+        assertNotNull(route)
+        assertArrayEquals(byteArrayOf(0x0A), route!!.bytes)
     }
 }
