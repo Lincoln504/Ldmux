@@ -36,7 +36,7 @@ import kotlinx.coroutines.delay
 /// How long a repeatable button must be held before it starts repeating.
 private const val REPEAT_DELAY_MS = 400L
 
-/// How often it steps while held: fast enough to cross the text-size range in about two seconds,
+/// How often it steps while held: fast enough to cross the text-size range in ≈2 seconds,
 /// slow enough that a held thumb lands on a size rather than overshooting it.
 private const val REPEAT_EVERY_MS = 90L
 

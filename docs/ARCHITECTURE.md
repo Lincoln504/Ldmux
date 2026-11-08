@@ -152,12 +152,15 @@ pushed, because the radio cannot reach a phone that is not connected. Version 10
 second line, because a row's name is the conversation and the line under it has to say where the
 shell is and what it is.
 
-**The channel is the tuple and the path width.** `ldmux mesh preset <MHz> <kHz> <SF> <CR> [--path N]`
-tunes the host's own radio, and `--path` sets the path hash width in bytes. The firmware keeps the
-two apart, but a network does not: MeshCore's public presets name neighbours in **one** byte, so a
+**The channel is the tuple and the path width; power is the third register.** `ldmux mesh preset
+<MHz> <kHz> <SF> <CR> [--path N] [--power dBm]` tunes the host's own radio, `--path` sets the path
+hash width in bytes, and `--power` the transmit power — which the firmware keeps apart from the
+tuple and which a phone can set too, so it is a register two owners share rather than part of the
+channel. `ldmux mesh status` prints all three on the preset line. The firmware keeps the tuple and
+the width apart, but a network does not: MeshCore's public presets name neighbours in **one** byte, so a
 repeater's hash is one byte, and a node that names them in two cannot read a path that repeater
 built. ldmux's own channel is two bytes on both ends, because two bytes per hop is its default and
-one byte collides at about twenty co-channel repeaters; the public channel is one byte by the
+one byte collides at ≈20 co-channel repeaters; the public channel is one byte by the
 community's convention. The phone takes the width from its preset and the host from this flag, and
 the host publishes it in the pairing code (`hostPreset`'s fifth number), so the phone's one-press
 `match` copies the whole channel and keeps only its own transmit power. A direct zero-hop packet
@@ -525,7 +528,7 @@ Consequences worth knowing:
   on-air test — two radios far enough apart that a public repeater is the only way between them —
   is what proves the route-learning step end to end.
 - **Two bytes per path hop, and that is ldmux's default.** The firmware ships at mode 0, one byte:
-  254 usable hashes, and 0x00 and 0xFF are reserved. At about twenty co-channel repeaters a one-byte
+  254 usable hashes, and 0x00 and 0xFF are reserved. At ≈20 co-channel repeaters a one-byte
   prefix collides with coin-flip probability, and a collision is not cosmetic — two repeaters with
   the same prefix both forward a direct message meant for one of them. Two bytes gives 65 536 and
   holds to a few hundred; the price is the hop ceiling, 32 instead of 63, which is above every
@@ -575,7 +578,7 @@ all", so delivery is two different answers to the same question:
   mark table (`{"type":"marks"}`), which is how the marks made while it was away arrive; every later
   one is a `{"type":"buzz"}` push.
 - **Radio: replay on attach and on list.** Keeping a radio session alive to be reachable would cost
-  about twelve records an hour of a budget that is a few hundred, so the host keeps one mark per
+  ≈12 records an hour of a budget that is a few hundred, so the host keeps one mark per
   shell (`MARK_TTL_MS` 10 min, `MARKS_MAX` 64, coalesced per shell for 5 s) and sends the table with
   the phone's `Sessions` answer and with its `Attach` (`Message::Marks`, version 9). A version-8 phone
   is never sent the tag; a version-9 phone against an older host simply never sees one, which reads

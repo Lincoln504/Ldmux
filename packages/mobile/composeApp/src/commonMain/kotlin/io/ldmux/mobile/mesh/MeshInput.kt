@@ -194,7 +194,7 @@ class MeshInputBatcher(
     private fun isPlain(b: Byte): Boolean = b.toInt() in 0x20..0x7e
 
     companion object {
-        /** Quiet that means "done typing for now": about one round trip at the default preset. */
+        /** Quiet that means "done typing for now": ≈1 round trip at the default preset. */
         const val IDLE_MS = 100L
         /** The longest a byte waits, however steadily the user types. */
         const val MAX_HOLD_MS = 200L

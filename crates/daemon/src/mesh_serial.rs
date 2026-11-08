@@ -461,7 +461,7 @@ fn prepare(
     // about what it forwards.
     let reported_mode = device_info.path_hash_mode;
     // **A one-byte width means two different things, and the daemon must not confuse them.** Mode 0
-    // is the firmware default (it collides at about twenty co-channel repeaters) *and* the width
+    // is the firmware default (it collides at ≈20 co-channel repeaters) *and* the width
     // MeshCore's public presets use, so an operator who deliberately set one byte was being
     // overruled at every daemon start: measured 2026-11-07, the log said "was 1: raised to the
     // default" after every restart, which silently reverted a width the phone had just matched to.

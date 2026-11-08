@@ -163,7 +163,9 @@ between may use their own presets, as MeshCore handles that. No MeshCore
 channel key is involved: records are direct packets addressed to the peer's radio key and sealed
 by the session, so a preset is a frequency to share, not a secret to match. The code carries the
 desktop radio's tuple, so the app compares it with its own radio and matches it in one press.
-`ldmux mesh status` prints the tuple; `ldmux mesh preset <MHz> <kHz> <SF> <CR>` sets it. Across
+`ldmux mesh status` prints the tuple, the path width and the power; `ldmux mesh preset <MHz> <kHz>
+<SF> <CR> [--path N] [--power dBm]` sets them. Power is its own register on the radio, not part of
+the channel, so it is optional and left alone when unmentioned. Across
 repeaters the desktop advertises itself on open and every five minutes (`LDMUX_MESH_ADVERT_SECS`),
 the phone reads the route out of the advert it heard, and every reply follows the path the request
 arrived by (`docs/ARCHITECTURE.md` §11).

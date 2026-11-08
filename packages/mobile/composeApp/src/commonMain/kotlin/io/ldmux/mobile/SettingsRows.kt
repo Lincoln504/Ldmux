@@ -117,7 +117,7 @@ internal fun SettingsRow(
 /**
  * A setting whose control is a set of choices, drawn under the title.
  *
- * Two option buttons beside a title on a phone leaves the title about ten characters before it
+ * Two option buttons beside a title on a phone leaves the title ≈10 characters before it
  * ellipsises, and a truncated label is what the label is for. So the choices get their own line,
  * left-aligned with the title, which is also where a desktop settings app puts a segmented control.
  */

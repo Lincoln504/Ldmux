@@ -2538,7 +2538,7 @@ async fn a_kitty_keyboard_query_is_answered_by_the_keeper() {
 /// input. A program that echoes what it reads (`cat`, a pager, a shell with echo on)
 /// turns that into output, the emulator parses it — and, because the parameterised
 /// form is query-shaped, answers it again. That loop never stops: measured
-/// 2026-10-25 at about sixty replies a second through a pane running `cat`, filling
+/// 2026-10-25 at ≈60 replies a second through a pane running `cat`, filling
 /// the pane and the wire at once. A reply is not content, so the keeper drops it from
 /// the output stream before the emulator sees it.
 #[tokio::test]

@@ -146,7 +146,7 @@ impl Config {
     /// A record is on air for that long, the ack for as long again, and each repeater adds a
     /// random forward delay of up to two airtimes, so a first retry at four airtimes is the
     /// earliest that cannot be a duplicate of a record still in flight; two hops plus the ack is
-    /// about six. The interactive defaults (2 s) are kept when that is larger, so a fast private
+    /// ≈6. The interactive defaults (2 s) are kept when that is larger, so a fast private
     /// channel still retries quickly, and the cap grows with the airtime so a slow preset does not
     /// exhaust its attempts inside one round trip.
     #[must_use]

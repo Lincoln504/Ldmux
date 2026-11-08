@@ -201,7 +201,7 @@ unsafe extern "C" fn write_pty_cb(
 /// A program that echoes what it reads (`cat`, a pager, a shell with echo on) turns
 /// it back into output, the emulator parses it, and — because the parameterised
 /// form is also a query-shaped sequence — answers it again. That loop never stops:
-/// measured 2026-10-25 at about sixty replies a second through a pane running `cat`,
+/// measured 2026-10-25 at ≈60 replies a second through a pane running `cat`,
 /// growing the pane and the wire at once.
 ///
 /// The **question** is the bare `CSI ? u`; the **answer** is `CSI ? <params> u`, and

@@ -199,7 +199,7 @@ class AndroidRadioLink(
      * matching the host's channel.
      *
      * **"One byte" means two different things**, and the firmware cannot tell them apart: a radio
-     * that was never configured (the factory default, which collides at about twenty co-channel
+     * that was never configured (the factory default, which collides at ≈20 co-channel
      * repeaters) and a radio deliberately put on one byte for MeshCore's public channel. The
      * upgrade to two bytes therefore happens **once per radio** and is recorded here; after that a
      * one-byte width is somebody's decision and is left alone. Without this, the upgrade ran on

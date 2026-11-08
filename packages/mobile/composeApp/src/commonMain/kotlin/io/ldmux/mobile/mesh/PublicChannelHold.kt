@@ -171,7 +171,7 @@ internal class PublicChannelHold {
         reported = false
     }
 
-    /** Quiet that means "the answer has finished arriving": about one round trip. */
+    /** Quiet that means "the answer has finished arriving": ≈1 round trip. */
     private val quietMs = QUIET_MS
 
     /** When the last screen was drawn, so "quiet" is measured from evidence. */
@@ -185,7 +185,7 @@ internal class PublicChannelHold {
     /**
      * End the wait once the shell has stopped talking.
      *
-     * Called on a tick while a wait is running. [QUIET_MS] is about one round trip, so an answer
+     * Called on a tick while a wait is running. [QUIET_MS] is ≈1 round trip, so an answer
      * split across two records is not mistaken for a finished one.
      */
     fun settleIfQuiet(nowMs: Long): Boolean {

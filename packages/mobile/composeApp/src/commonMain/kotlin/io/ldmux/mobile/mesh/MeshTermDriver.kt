@@ -736,7 +736,7 @@ class MeshTermDriver(
     /**
      * Send keystrokes to the shell. Only while the terminal is live; at most
      * [MeshTerm.MAX_INPUT] bytes per call (a paste is the caller's to split and to rate-limit:
-     * the link carries about one record a minute).
+     * the link carries ≈1 record a minute).
      */
     suspend fun input(bytes: ByteArray): InputOutcome = lock.withLock {
         if (bytes.isEmpty()) return@withLock InputOutcome.Empty

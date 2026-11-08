@@ -508,7 +508,7 @@ async fn putting_a_desk_shell_down_reaches_the_other_clients() {
     // tested on its own is announced by the next pass whether or not it is
     // announced when it happens. A change made through the daemon's own handle
     // (no socket, so no immediate broadcast) is announced by the pass, and seeing
-    // that means the next pass is about two seconds away. A release that reaches
+    // that means the next pass is ≈2 seconds away. A release that reaches
     // the desk inside a second was therefore broadcast when it happened.
     let cwd = std::env::current_dir()
         .unwrap()

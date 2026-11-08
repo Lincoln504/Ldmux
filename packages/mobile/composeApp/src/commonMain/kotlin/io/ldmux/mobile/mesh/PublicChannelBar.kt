@@ -149,7 +149,7 @@ internal fun PublicChannelBar(
 
     // **Two shapes, because the row lives in two widths.** Portrait gives it the whole screen
     // under the terminal; landscape gives it the side panel's 190 dp, where a status line and a
-    // button in one row leave the status about four characters. Narrow stacks: the status on its
+    // button in one row leave the status ≈4 characters. Narrow stacks: the status on its
     // own lines, then the button full width.
     BoxWithConstraints(
         modifier

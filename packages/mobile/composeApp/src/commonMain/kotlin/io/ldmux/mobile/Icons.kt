@@ -84,7 +84,7 @@ fun IconBtn(
             .clip(RadiusMedium)
             .background(if (filled) Raised else Bg)
             // Android's minimum touch target, and nothing in this app specified one.
-            // These buttons came to ≈30-34dp, which is small enough to miss —
+            // These buttons came to ≈30–34 dp, which is small enough to miss —
             // including the close button, which is destructive and sits nested inside
             // a row that is itself tappable.
             .heightIn(min = LocalTouch.current.min)

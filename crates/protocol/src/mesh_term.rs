@@ -135,7 +135,7 @@ pub const ORIGIN_VERSION: u8 = 7;
 /// The version whose host sends the [`Message::Marks`] table (version 9).
 ///
 /// The radio has no way to reach a phone that is not connected, and keeping a session established
-/// just to be reachable would cost about twelve records an hour of a budget that is a few hundred —
+/// just to be reachable would cost ≈12 records an hour of a budget that is a few hundred —
 /// so the host sends the table when the phone attaches instead of pushing. A version-8 phone is
 /// never sent the tag, and a version-9 phone against a version-8 host simply never sees one, which
 /// the app must treat as "no marks" rather than as a broken link.

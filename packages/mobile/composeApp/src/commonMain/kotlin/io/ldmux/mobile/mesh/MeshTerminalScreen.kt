@@ -271,7 +271,7 @@ fun MeshTerminalScreen(
             return@LaunchedEffect
         }
         // **Only a state the user must cure stops the retry.** `NoPath` and `Refused` used to be
-        // in this set, and both are the radio's word about one record — a busy transmit table, a
+        // in this set, and both are the radio's word ≈1 record — a busy transmit table, a
         // path that has not resolved yet — so a transient refusal ended the retry loop for good.
         // That is the reported "the host is not connected or out of range", cured by one refresh
         // and working two seconds later: the refresh built the connection the loop had stopped

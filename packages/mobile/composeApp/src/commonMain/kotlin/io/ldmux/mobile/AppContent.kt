@@ -153,7 +153,7 @@ internal fun AppContent(
         }
         // Coming back on screen is a network change as far as the sockets are concerned: the
         // link they hold across a long absence is dead without having said so, and every socket
-        // re-probes on this signal instead of waiting out its own heartbeat (about twenty-six
+        // re-probes on this signal instead of waiting out its own heartbeat (≈26
         // seconds before the desktop request could even be sent).
         val removeForeground = AppLifecycle.onForeground { NetworkWake.fire() }
         onDispose {
