@@ -194,6 +194,21 @@ class AndroidRadioLink(
      * survive a reboot, and neither should an hour's window).
      */
     private val airtimePrefs = context.getSharedPreferences("ldmux_radio_airtime", Context.MODE_PRIVATE)
+    /**
+     * Whether this radio's path width has ever been set on purpose — by us, or by the operator
+     * matching the host's channel.
+     *
+     * **"One byte" means two different things**, and the firmware cannot tell them apart: a radio
+     * that was never configured (the factory default, which collides at about twenty co-channel
+     * repeaters) and a radio deliberately put on one byte for MeshCore's public channel. The
+     * upgrade to two bytes therefore happens **once per radio** and is recorded here; after that a
+     * one-byte width is somebody's decision and is left alone. Without this, the upgrade ran on
+     * every connect and silently undid the very setting the operator had just applied — measured
+     * 2026-11-07: `applyPreset` wrote one byte, the reconnect read it back as one byte, called it
+     * "never configured", asked for two, and the panel then said the radio "keeps its own path
+     * width".
+     */
+    private val widthPrefs = context.getSharedPreferences("ldmux_radio_width", Context.MODE_PRIVATE)
     private val airtimeKeyStart = "window_start_$address"
     private val airtimeKeyUsed = "used_ms_$address"
     private var airtimeWindowStartMs: Long = airtimePrefs.getLong(airtimeKeyStart, 0L)
@@ -439,9 +454,13 @@ class AndroidRadioLink(
             // One `DEVICE_QUERY` per connect is the price of knowing a fact about the radio that
             // decides how many neighbours it can name.
             val info = deviceInfo.value ?: readDeviceInfo()
-            if (info != null && info.pathHashMode == 0 && s.isIdle()) {
+            // Once per radio, and never over a width somebody chose: the flag is set by this
+            // upgrade and by every deliberate write in `applyPreset`.
+            val widthConfigured = widthPrefs.getBoolean(address, false)
+            if (info != null && info.pathHashMode == 0 && !widthConfigured && s.isIdle()) {
                 s.setPathHashMode(DEFAULT_PATH_HASH_MODE)
                 withTimeoutOrNull(PATH_MODE_SETTLE_MS) { while (!s.isIdle()) delay(10) }
+                widthPrefs.edit().putBoolean(address, true).apply()
                 // A refusal is not a failure: `currentPreset` still reports two bytes for ldmux's
                 // own sends, and the radio's advert keeps its old width.
                 appLog("mesh radio was on one-byte paths; asked for two")
@@ -633,8 +652,23 @@ class AndroidRadioLink(
         // then looked like a radio refusing a value it was never sent. Each call reports whether it
         // was queued, and the first refusal is named.
         var refused: String? = null
+        // **One line per apply, so a refused field is readable from the phone.** Three separate
+        // reasons can leave a channel unchanged — the radio refused, our frame was never queued, or
+        // we did not ask for the field at all — and from a read-back they look identical.
+        appLog(
+            "preset: want ${preset.frequencyMhz}/${preset.bandwidthKhz}/SF${preset.spreadingFactor}" +
+                "/CR${preset.codingRate} path ${preset.pathHashSize}B · radio " +
+                "${old?.frequencyMhz}/${old?.bandwidthKhz}/SF${old?.spreadingFactor}/CR${old?.codingRate}" +
+                " mode ${oldHashMode ?: -1} · want mode $hashMode · width write ${widthWanted}",
+        )
         if (widthWanted) {
-            if (!s.setPathHashMode(hashMode)) refused = "path width"
+            if (!s.setPathHashMode(hashMode)) {
+                refused = "path width"
+            } else {
+                // **Recorded before the reconnect**, which re-reads the radio: a one-byte width
+                // written here must not be mistaken for the factory default and upgraded back.
+                widthPrefs.edit().putBoolean(address, true).apply()
+            }
             withTimeoutOrNull(PRESET_COMMAND_WAIT_MS) { while (!s.isIdle()) delay(25) }
         }
         val channel = RadioParams.of(
