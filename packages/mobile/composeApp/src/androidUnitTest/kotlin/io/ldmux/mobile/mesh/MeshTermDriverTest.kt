@@ -87,6 +87,32 @@ class MeshTermDriverTest {
     private fun driver(handshakeTimeoutMs: Long = 300_000, sendTimeoutMs: Long = 10_000) =
         MeshTermDriver(gw, { hs }, selector = "", clock = { now }, handshakeTimeoutMs = handshakeTimeoutMs, sendTimeoutMs = sendTimeoutMs)
 
+    /**
+     * **A handshake nobody answers becomes a sentence, not a climbing counter.**
+     *
+     * The ladder keeps running behind it (that is what heals the link when the host comes back), but
+     * after `handshakeVerdictMs` the view says no answer came, because the operator needs to know the
+     * host is not there rather than watch seconds pass (measured on the device, 2026-11-07: the host
+     * radio answered pushes and not commands, and the phone sat on `handshaking · 59 s`).
+     */
+    @Test
+    fun an_unanswered_handshake_becomes_no_answer_and_the_retrying_goes_on(): Unit = runBlocking {
+        val d = driver()
+        d.start()
+        assertIs<MeshTermView.Handshaking>(d.view.value)
+        now += 29_000
+        d.tick()
+        assertIs<MeshTermView.Handshaking>(d.view.value, "under the verdict it is still securing the link")
+        now += 2_000
+        d.tick()
+        assertIs<MeshTermView.NoAnswer>(d.view.value, "past thirty seconds the app says nothing came back")
+        // ... and the ladder is untouched: it asks again, which is what heals it when the host returns.
+        val asked = gw.sent.size
+        now += 40_000
+        d.tick()
+        assertTrue(gw.sent.size > asked, "the retrying continues behind the verdict")
+    }
+
     /** An unanswered handshake is asked again in seconds, not waited out. */
     @Test
     fun an_unanswered_handshake_is_asked_again_with_new_keys(): Unit = runBlocking {

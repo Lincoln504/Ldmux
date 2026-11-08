@@ -1221,6 +1221,7 @@ fun MeshTerminalScreen(
                     val waiting = when (v) {
                         MeshTermView.Idle -> "starting"
                         MeshTermView.Handshaking -> "handshaking"
+                        MeshTermView.NoAnswer -> "no answer from host"
                         MeshTermView.ProfileMissing -> "host has no terminal yet"
                         MeshTermView.Listing -> "asking host for shells"
                         else -> null

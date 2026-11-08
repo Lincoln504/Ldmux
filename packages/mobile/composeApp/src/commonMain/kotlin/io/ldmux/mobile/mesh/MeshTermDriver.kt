@@ -152,8 +152,19 @@ sealed interface MeshTermView {
      */
     data class LinkDown(val link: MeshLinkState, val detail: String? = null) : MeshTermView
 
-    /** Link up, handshake with the host under way. Minutes are normal on this link. */
+    /** Link up, handshake with the host under way. A few seconds are ordinary on this link. */
     data object Handshaking : MeshTermView
+
+    /**
+     * A handshake has been asked for again and again, and nothing has come back.
+     *
+     * **A try that keeps failing is a verdict, not a spinner.** The ladder keeps running behind this
+     * (a re-ask, then a rebuilt transport), so the link heals by itself when the host comes back —
+     * but the person is owed the sentence rather than a counter that climbs for a minute and then
+     * says "dropped" about a link that was never up (measured on the device, 2026-11-07: the host
+     * radio answered pushes and not commands, and the phone sat on `handshaking · 59 s`).
+     */
+    data object NoAnswer : MeshTermView
 
     /** Session established and `Attach` sent, but the host has not described a terminal yet. */
     data object ProfileMissing : MeshTermView
@@ -244,6 +255,13 @@ class MeshTermDriver(
      * backoff) gives 8 s, 16 s, 32 s.
      */
     private val handshakeRetryMs: Long = 8_000,
+    /**
+     * How long an unanswered handshake is drawn as `handshaking` before the app says no answer came.
+     *
+     * Two re-asks (8 s and 16 s) plus a full round trip on a narrow channel fit inside this; the
+     * ladder itself keeps going, so this changes the sentence and not the retrying.
+     */
+    private val handshakeVerdictMs: Long = 30_000,
     /** How many re-asks before the transport itself is judged dead and the connection rebuilt. */
     private val handshakeRetries: Int = 3,
     /** How long the gateway may take to say what the radio did with one record. */
@@ -274,6 +292,15 @@ class MeshTermDriver(
 
     private var handshake: HandshakePort? = null
     private var handshakeSince = 0L
+    /**
+     * When this link's *first* handshake started, and 0 when none is running.
+     *
+     * **[handshakeSince] restarts on every re-ask**, which is right for the retry ladder and wrong
+     * for a verdict: a host that never answers is re-asked at 8 s and 16 s, so a clock reset with
+     * each attempt would never reach thirty seconds. This one survives the attempts and is cleared
+     * when a session is established or the link is given up.
+     */
+    private var handshakeBeganAt = 0L
 
     /**
      * Set when this connection cannot be revived from the inside.
@@ -469,6 +496,7 @@ class MeshTermDriver(
         }
         handshake = h
         handshakeSince = clock()
+        if (handshakeBeganAt == 0L) handshakeBeganAt = handshakeSince
         _view.value = MeshTermView.Handshaking
         // Message 1 is handshake traffic, not an ARQ record: it has no slot to give back, so it
         // travels with an unknown sequence.
@@ -504,6 +532,8 @@ class MeshTermDriver(
         // session holds keys and a queue that only a fresh handshake should replace.
         handshake?.abandon()
         handshake = null
+        // The verdict was about *this* link; the next one starts its own clock.
+        handshakeBeganAt = 0L
         session?.close()
         session = null
         forgetMarkPage()
@@ -555,6 +585,8 @@ class MeshTermDriver(
             }
             session = s
             handshakeTries = 0
+            // A session is up: the next handshake (after a drop) starts its own clock.
+            handshakeBeganAt = 0L
             // A session that worked earns the fast retry back for the next failure.
             recoverDelayMs = FIRST_RECOVERY_MS
             recoverAt = 0
@@ -1385,7 +1417,9 @@ class MeshTermDriver(
         if (lp != null) { _view.value = MeshTermView.LinkDown(lp, linkDetail); return }
         _view.value = when {
             session == null && handshake == null -> MeshTermView.Idle
-            handshake != null -> MeshTermView.Handshaking
+            handshake != null ->
+                if (clock() - handshakeBeganAt > handshakeVerdictMs) MeshTermView.NoAnswer
+                else MeshTermView.Handshaking
             mirror.profile == null -> when (pick) {
                 Pick.Listing -> MeshTermView.Listing
                 Pick.Choosing -> MeshTermView.Choose(choices)

@@ -28,6 +28,7 @@ fun meshTermLabel(view: MeshTermView): String = when (view) {
     // is three small records and is now retried every six seconds, so the honest label is the
     // state, not a warning about how long it might take.
     MeshTermView.Handshaking -> "mesh · securing link"
+    MeshTermView.NoAnswer -> "mesh · no answer from host"
     MeshTermView.ProfileMissing -> "mesh · linked, no terminal"
     MeshTermView.Listing -> "mesh · listing shells"
     // **The state, not an action.** `open on the desktop` was the label for the button that takes

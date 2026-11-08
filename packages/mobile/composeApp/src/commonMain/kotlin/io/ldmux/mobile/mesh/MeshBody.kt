@@ -25,6 +25,9 @@ class MeshBody(val line: String, val detail: String? = null)
 /** Null for the states that draw something else: the waits (with their seconds) and the lists. */
 fun meshBodyFor(view: MeshTermView): MeshBody? = when (view) {
     MeshTermView.Idle, MeshTermView.Handshaking, MeshTermView.ProfileMissing, MeshTermView.Listing -> null
+    // The verdict has a body: it is the one wait that means something is wrong at the other end.
+    MeshTermView.NoAnswer ->
+        MeshBody("no answer from host", "check the host is on the same channel, then refresh")
     // **Not a body.** It is a page state for one shell, drawn by the screen's own branch; putting it
     // here let it appear under the home header, in the empty-list case and in the waiting case,
     // which is where it was seen with the keyboard up between two screens.
