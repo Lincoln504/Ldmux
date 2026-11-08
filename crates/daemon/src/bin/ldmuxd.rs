@@ -176,7 +176,12 @@ fn main() {
     // CLI, and the only symptom was "the app does not work". The mesh route is one feature;
     // say why it is off and start the rest.
     let mesh_cfg = match ldmux_daemon::mesh::MeshConfig::from_env() {
-        Ok(cfg) => cfg,
+        Ok(cfg) => cfg.map(|mut c| {
+            // Beside the other state: the record of whether this radio's path width has already
+            // been decided once (see `mesh_serial::prepare`).
+            c.width_marker = Some(state_dir.join("mesh-width"));
+            c
+        }),
         Err(e) => {
             eprintln!("ldmuxd: mesh link disabled: {e}");
             None

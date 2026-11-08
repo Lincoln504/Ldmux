@@ -78,6 +78,11 @@ use crate::mesh_session::{INBOUND_MAX, SessionFiles, SessionHost, SessionSnapsho
 pub struct MeshConfig {
     /// The device the daemon owns, e.g. a `/dev/serial/by-id/…` path. Never empty.
     pub serial: String,
+    /// Where the "this radio's path width has been decided" record lives, in the state directory.
+    ///
+    /// Filled by the daemon rather than read from the environment, because it must sit beside the
+    /// state it protects. `None` in a test that drives the radio directly.
+    pub width_marker: Option<std::path::PathBuf>,
 }
 
 impl MeshConfig {
@@ -103,6 +108,8 @@ impl MeshConfig {
             }
             Some(device) => Ok(Some(Self {
                 serial: device.trim().to_owned(),
+                // The daemon adds the state directory's record; a bare config has none.
+                width_marker: None,
             })),
         }
     }
@@ -677,7 +684,7 @@ async fn link(
     set(&runtime.snapshot, |s| s.state = "handshaking");
     let opened = tokio::time::timeout(
         CARRIER_TIMEOUT,
-        crate::mesh_serial::SerialCarrier::open(&cfg.serial),
+        crate::mesh_serial::SerialCarrier::open(&cfg.serial, cfg.width_marker.clone()),
     )
     .await
     .map_err(|_| MeshError::Timeout("the radio did not open"))??;

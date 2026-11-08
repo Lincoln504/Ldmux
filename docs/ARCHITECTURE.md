@@ -367,6 +367,47 @@ by the host radio, by the app before it retunes, and by every budget below.
 
 ## 11. Bringing up the two radios
 
+**What the firmware actually guarantees, checked against `MeshCore` at
+`companion-v1.17.0` on 2026-11-07** (the tag every command here exists in, so ldmux needs
+stock firmware and not a fork):
+
+- Frames over USB/UART are `0x3C <len lo> <len hi> <payload>` in and
+  `0x3E <len lo> <len hi> <payload>` out, with a **16-bit little-endian payload-only
+  length** and `MAX_FRAME_SIZE 176`. Over Bluetooth LE there is no delimiter at all: one
+  GATT write is one frame, and one notification is one frame. A frame longer than 176 is
+  **truncated** in and refused out, silently, with no error frame.
+- `DEVICE_QUERY` (`0x16`) carries the app's target protocol version in byte 1, and the
+  firmware **latches** it there, which is what selects the V3 message frames (we send 3).
+  A latched value means the first `DEVICE_QUERY` of a connection decides the shapes.
+- `DEVICE_INFO` (`0x0D`) is **82 bytes**: contacts ×2, channels, the BLE PIN, build date,
+  manufacturer, version, then the client-repeat byte (v9+) and **`path_hash_mode` as the
+  last byte** (v10+). The PIN bytes can read 0 while the radio is enforcing a random
+  session PIN, so 0 is not "unprotected".
+- `SET_RADIO_PARAMS` (`0x0B`) carries frequency in **kHz**, bandwidth in **Hz**, SF and CR,
+  plus an optional repeat byte — and **no path width**, which is why the width has a
+  command of its own. `SET_RADIO_TX_POWER` (`0x0C`) is **one signed byte**, window
+  −9…max. `SET_PATH_HASH_MODE` (`0x3D`) is `[0x3D][0][mode]`; mode ≥ 3 answers
+  `ILLEGAL_ARG`, while a *malformed* frame (byte 1 not 0, or shorter than three) answers
+  `UNSUPPORTED_CMD` instead — two different codes for two different mistakes.
+- `SEND_RAW_PACKET` (`0x41`) is a priority byte plus a whole MeshCore packet, and
+  `RAW_CUSTOM` (payload type `0x0F`) is **processed only when it arrives by direct
+  routing**; it is not flood-routed. The session therefore rides a direct header and can
+  never be carried by a flood, which is why `RAW_CUSTOM_DIRECT_HEADER` is the only header
+  the codec will build for it.
+- **No fragmentation exists in v1.17.** `PACKET_FRAME_FRAGMENT` (`0x91`) appears in a
+  community document but in no firmware at that tag, so 176 bytes is the hard ceiling for
+  one frame and our record size is chosen under it.
+- The path width is **per packet on the air** (the top two bits of `path_len`); the
+  firmware's stored mode decides only what the node **originates**. Forwarding is
+  width-agnostic from v1.14, so a one-byte phone and a two-byte host still hear each
+  other; what breaks is reach *through* repeaters older than v1.14, which drop two- and
+  three-byte packets without a word.
+- **A radio has no notion of a client.** Frames carry no session id and no request tag,
+  radio parameters and the width are global and persistent, and a write from one app is
+  the device's state for the other with **no notification of the change**. That is why a
+  retune from another app is invisible here until we ask again, and why a radio held by a
+  second app fails in the way our "another app holds this radio" wording describes.
+
 **One radio per side, each configured by the device that owns it.** The host radio
 stays plugged into the host over USB, where the daemon drives it and can retune it.
 The phone radio is powered anywhere and belongs to the phone over Bluetooth LE,

@@ -689,7 +689,15 @@ class AndroidRadioLink(
         delay(PRESET_SETTLE_MS)
         resetLink()
         connect()
-        val got = selfInfo.value ?: return false
+        val got = selfInfo.value
+        if (got == null) {
+            // **The setters were queued and the radio never answered afterwards.** That is an
+            // unknown, not a refusal: the change may well have landed. Say which, because a bare
+            // "not confirmed" left the operator with no way to tell a lost read-back from a radio
+            // that ignored the write (the `apply` press reads in this order: write, reset, read).
+            _lastProblem.value = "no answer after the change · reopen this panel to read the radio"
+            return false
+        }
         // Null means the radio never answered the read-back: an unknown, not a disagreement.
         val info = readDeviceInfo()
         if (info == null) {

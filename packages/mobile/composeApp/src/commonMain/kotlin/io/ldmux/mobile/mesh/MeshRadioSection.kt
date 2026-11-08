@@ -313,7 +313,14 @@ internal fun RadioPresetPanel(
     }
 
     fun applyNow(p: RadioPreset) {
-        val l = link ?: return
+        // **A press that cannot work says so.** `link` is null while the radio page is still
+        // acquiring the radio, and the press used to return in silence — indistinguishable from a
+        // write that was sent and ignored.
+        val l = link
+        if (l == null) {
+            note = Notice("radio not ready · reopen this panel", ok = false)
+            return
+        }
         busy = true
         scope.launch {
             note = try {
@@ -323,7 +330,11 @@ internal fun RadioPresetPanel(
                     // mode that depends on it is the cautious one either way.
                     onClassified(isPublicChannel(p))
                     Notice("applied", ok = true)
-                } else Notice("not confirmed", ok = false)
+                } else {
+                    // The reason, when the link recorded one: "not confirmed" alone cannot tell a
+                    // lost read-back from a radio keeping its own width.
+                    Notice(l.lastProblem.value ?: "not confirmed", ok = false)
+                }
             } catch (e: RadioLinkException) {
                 Notice(radioLinkProblemLine(e.state), ok = false)
             } catch (e: Exception) {

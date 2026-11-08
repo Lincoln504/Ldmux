@@ -307,7 +307,13 @@ private fun MeshRadioFacts(
             // path width too, which are not part of the channel and are not applied.
             SettingsValue(channelLine(hostPreset), Modifier.weight(1f), color = Dim, maxLines = 2)
             MiniTextButton(onClick = {
-                val l = link ?: return@MiniTextButton
+                // **A press that cannot work says so**, the same as the panel's apply: a null link
+                // used to return in silence and the row sat there unchanged.
+                val l = link
+                if (l == null) {
+                    matchProblem = "radio not ready · reopen this panel"
+                    return@MiniTextButton
+                }
                 matchProblem = null
                 scope.launch {
                     // Only the channel: this radio keeps its own power and path width.
