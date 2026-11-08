@@ -992,7 +992,9 @@ fn prepare(
                 " (was 1: raised to the default, once)"
             }
             (true, _, _) => " (asked for two, the radio kept one)",
-            (false, Some(1), _) => " (one was tried once and the radio kept it)",
+            // Only when the radio really is on one byte: the marker saying "one was tried" is the
+            // reason *not* to try again, not a claim about the width it ended up with.
+            (false, Some(1), _) if hash_size == 1 => " (one was tried once and the radio kept it)",
             _ => "",
         }
     );

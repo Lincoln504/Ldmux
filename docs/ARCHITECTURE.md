@@ -379,6 +379,35 @@ by the host radio, by the app before it retunes, and by every budget below.
 | iOS client | planned, and tailnet only: the radio route's MeshCore library is Java for Android and would have to be written again for iOS. Needs a macOS host for the xcframework |
 | LoRa route, Android plus host | built and run on real radios, multi-hop recovery not implemented |
 
+
+### The client's look and its voice
+
+The Android client has **five themes**, and they are a contract rather than a decoration: one
+`Palette` of thirteen tokens plus a terminal palette, one monospace and one proportional face per
+theme, and — for four of them — three session cues. `Dark` is the default and is silent on purpose;
+`Forest`, `Air`, `Daybreak`, `Nerv` and `Gruvbox` each answer a session event in one *material*.
+
+- **The tokens are the API.** `Bg`, `Surface`, `Raised`, `Line`, `Edge`, `Fg`, `Dim`, `Muted`,
+  `Accent`, `Chosen`, `Danger`, `Warn`, `OnAccent` are read by ~200 call sites; each theme supplies
+  all of them, and a switch recomposes them because they are getters into snapshot state.
+- **The tones are pinned, not eyeballed.** `ThemePaletteTest` recomputes every ratio from the
+  literals: body ≥ 9:1, the second voice ≥ 6:1 and ≥ 1.3× the note, notes 4.5-6.6:1, every boundary
+  and focus ring ≥ 3:1, and every surface a visible step off the one below it. It also pins the
+  *ordering* (body > second voice > note > hairline), which is what stops a set of individually
+  reasonable numbers from reading as a flat page.
+- **Dark marks a choice with lightness, not with hue**, and that is asserted: its accent, chosen
+  state, terminal cursor and selection wash are achromatic to the third decimal. The other four
+  carry a hue in the same tokens.
+- **The surfaces are tinted, the page is not.** Forest's ground is grey and its panels carry ≈0.02
+  chroma of pine; Air's page is pure white with blue-grey rules; Daybreak's is white with a warm
+  grey. A tint below ≈0.01 does not read as a cast at all, which is why the first Forest pass looked
+  grey.
+- **The cues are synthesised, not sampled.** `packages/mobile/tools/make-theme-sounds.py` builds
+  all fifteen from modal-synthesis arithmetic (phase-zero partials, higher partials damping faster,
+  a 1 ms head and a 5 ms tail, DC-blocked, each peak-normalised to its own target because equal peak
+  is not equal loudness) and refuses to write a file outside its spec. Nothing is downloaded and no
+  cue carries a licence.
+
 ## 11. Bringing up the two radios
 
 **What the firmware actually guarantees, checked against `MeshCore` at
