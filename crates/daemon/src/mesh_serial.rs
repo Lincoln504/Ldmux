@@ -101,6 +101,13 @@ const PEER_ROUTE_REFRESH: Duration = Duration::from_secs(120);
 /// that arriving somewhere new is felt as a pause, and the read is a serial command with no airtime
 /// at all.
 const PEER_ROUTE_RETRY: Duration = Duration::from_secs(15);
+/// The shortest gap between two route re-reads caused by traffic.
+///
+/// A record from the peer is the moment the route matters and the moment it may have changed: the
+/// phone opened a shell after a walk, or moved while it was idle. The re-read is **one serial
+/// command and no airtime**, so it is cheap; this floor is what keeps a burst of records from
+/// spending the radio's single answer window on route questions.
+const ROUTE_REASK_FLOOR: Duration = Duration::from_secs(2);
 
 /// The least time between two adverts triggered by a route hint.
 ///
@@ -775,6 +782,18 @@ fn serve_loop<L: ByteLink>(
                             last_route_ask = Some(Instant::now());
                         }
                     } else {
+                        // **Learn the route again whenever the peer talks.** A link that is up can
+                        // still hold a stale path: the phone walks, the session survives on
+                        // retransmissions, and the first record of a *newly opened shell* then goes
+                        // down a route that no longer exists. Re-reading the advert cache here costs
+                        // one serial command, so the answer to that record uses the path that is
+                        // true now.
+                        if peer_radio.is_some()
+                            && last_route_ask.is_none_or(|t| t.elapsed() >= ROUTE_REASK_FLOOR)
+                        {
+                            last_route_ask = Some(Instant::now());
+                            refresh_peer_route(&mut companion, peer_radio.as_ref(), &mut peer_path);
+                        }
                         if events
                             .blocking_send(Ok(Event::Recv(incoming.record)))
                             .is_err()

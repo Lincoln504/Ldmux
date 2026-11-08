@@ -118,6 +118,19 @@ fn read_token(path: &str) -> Result<String, String> {
             md.uid()
         ));
     }
+    // **Only a regular file is a token, and only a regular file may be tightened.**
+    //
+    // The mode fix used to run on whatever was at the path, which for a *directory* is a small
+    // disaster: 0600 on a directory removes its execute bit, so nothing can traverse it any more and
+    // the daemon has made a directory it cannot read, list or delete. The auth test that puts a
+    // directory where the token belongs found this by leaving 0600 directories that `rm -rf` could
+    // not remove (184 of them in `/tmp` on 2026-11-07). A non-file is reported instead, because the
+    // caller's answer is "no token here" and that must not be a silent success.
+    if !md.is_file() {
+        return Err(format!(
+            "the token path {path} is not a regular file; refusing to use it"
+        ));
+    }
     if md.mode() & 0o077 != 0 {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
             format!("the token file {path} is accessible to others and could not be fixed: {e}")

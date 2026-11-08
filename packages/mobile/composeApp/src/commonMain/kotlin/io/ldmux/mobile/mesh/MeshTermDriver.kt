@@ -36,6 +36,15 @@ interface GatewayPort {
     suspend fun send(record: ByteArray): MeshSendResult
 
     /**
+     * Re-read the route to the host now, because a shell is being opened.
+     *
+     * A route is learned from the air, so it is only true while the repeaters that carried it are
+     * still there. Defaulted: a test double has no radio to ask, and a carrier with no route to
+     * learn answers nothing.
+     */
+    suspend fun refreshRoute() {}
+
+    /**
      * This radio's own public key, once the link is bound; null before that or when the link has no
      * radio to ask.
      *
@@ -455,6 +464,12 @@ class MeshTermDriver(
 
     /** Begin: needs a bound gateway. Sends handshake message 1 as the first record. */
     suspend fun start() = lock.withLock {
+        // **A shell being opened is a reason to ask where the host is.** The session survives a
+        // walk on retransmissions, so a link that is "up" can be holding a route that no longer
+        // exists; the maintenance loop would notice within a minute, and the first record of this
+        // shell is what is being sent now. Two serial reads, no airtime, and nothing is refused if
+        // they fail.
+        runCatching { gateway.refreshRoute() }
         check(handshake == null && session == null) { "already started" }
         // A new connection gets a full set of handshake re-asks. `connect` itself is also the
         // retry path inside one connection, which is why it does not reset this.

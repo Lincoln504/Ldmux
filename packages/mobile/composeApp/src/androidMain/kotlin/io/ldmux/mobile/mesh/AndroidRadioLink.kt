@@ -756,6 +756,32 @@ class AndroidRadioLink(
         resetLink()
     }
 
+    /**
+     * Read the route to the host now, because a shell is being opened.
+     *
+     * **Both sources, once each, and never while the answer window is busy.** The advert cache is
+     * what a companion can actually read (a contact's out-path is usually empty because a companion
+     * never asks for a path return), so the advert is asked first; the contact read follows because
+     * on firmwares that do store an out-path it is the authoritative one. `hostPath` prefers
+     * whichever arrives freshest, so one failing source cannot erase the other.
+     *
+     * Silence on failure, by design: opening a shell must not be refused because the radio was
+     * briefly busy, and a route that cannot be read now is still the one in hand.
+     */
+    override suspend fun refreshRoute() {
+        val s = session ?: return
+        val key = hostKey.takeIf { it.size == 32 } ?: return
+        if (closing || !s.isIdle()) return
+        val done = CompletableDeferred<Unit>()
+        routeDone = done
+        runCatching { s.getAdvertPath(key) }
+        withTimeoutOrNull(ROUTE_WAIT_MS) { done.await() }
+        routeDone = null
+        withTimeoutOrNull(ROUTE_WAIT_MS) { while (!s.isIdle()) delay(10) }
+        if (closing || !s.isIdle()) return
+        runCatching { s.getContact(hostKey) }
+    }
+
     override suspend fun readDeviceInfo(): RadioDeviceInfo? {
         val s = session ?: return _deviceInfo.value
         val gate = CompletableDeferred<RadioDeviceInfo>()

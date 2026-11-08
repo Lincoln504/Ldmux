@@ -45,6 +45,18 @@ interface RadioLink {
     /** Send one raw-custom record. The path belongs to the link; the caller sends only the record. */
     suspend fun send(record: ByteArray): RadioSendResult
 
+    /**
+     * Re-read the route to the host **now**, from both sources the radio has.
+     *
+     * A route is learned from the air, so it is only true while the repeaters that carried it are
+     * still there: a phone that walked while idle holds a path that no longer works, and the first
+     * record of a newly opened shell then goes into a route that is gone. The maintenance loop
+     * re-reads on a timer, which is up to a minute late; this is the "a shell is being opened, learn
+     * where the host is" call. Two serial reads, no airtime, and a failure is silence rather than an
+     * error because a route that cannot be read now is not a reason to refuse to open a shell.
+     */
+    suspend fun refreshRoute() {}
+
     /** Read the radio's firmware description (path-hash mode, limits). */
     suspend fun readDeviceInfo(): RadioDeviceInfo?
 
@@ -473,6 +485,8 @@ class RadioLinkException(val state: MeshLinkState, message: String) : Exception(
  * sequence; the ARQ above this sees one result per send and owns delivery.
  */
 class MeshRadioGateway(private val link: RadioLink) : GatewayPort {
+    override suspend fun refreshRoute() = link.refreshRoute()
+
     override val state: StateFlow<MeshLinkState> = link.state
     override val status: StateFlow<MeshStatus?> = link.status
     override val problem: String? get() = link.lastProblem.value
