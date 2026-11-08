@@ -433,12 +433,23 @@ internal fun RadioPresetPanel(
                 // The cost of the press, where the press is. It names the cure as well as the
                 // break: the desktop's own command, and this radio's `match` row once the desktop
                 // has moved.
-                if (hostTuple != null && !sameTuple(selected, hostTuple)) {
+                if (hostTuple != null && !sameChannel(selected, hostTuple)) {
                     Text(
                         "desktop radio on " + channelLine(hostTuple) +
                             " · apply leaves link down until desktop moves " +
                             "(`ldmux mesh preset` there) or you press match here",
                         color = Warn,
+                        fontSize = 11.sp,
+                        fontFamily = MonoFont,
+                    )
+                } else if (hostTuple != null && selected.pathHashSize != hostTuple.pathHashSize) {
+                    // **Not a link warning.** The four numbers match, so the two radios hear each
+                    // other; only a path through a repeater cares about the width. Said plainly, and
+                    // the press stays a press rather than an "apply anyway?".
+                    Text(
+                        "same channel · path differs: desktop " + hostTuple.pathHashSize +
+                            " B, here " + selected.pathHashSize + " B · a repeater needs the same width",
+                        color = Dim,
                         fontSize = 11.sp,
                         fontFamily = MonoFont,
                     )
@@ -463,7 +474,9 @@ internal fun RadioPresetPanel(
             // previous selection, which is not what the text says.
             val customOk = !custom || customText.isBlank() || typed != null
             // What this press costs, before it is made: the desktop is on another channel.
-            val breaksLink = hostTuple != null && !sameTuple(selected, hostTuple)
+            // Only a channel change costs the link. A path-width change does not, so it does not
+            // ask twice either.
+            val breaksLink = hostTuple != null && !sameChannel(selected, hostTuple)
             val canApply = link != null && !busy && seeded && state == MeshLinkState.Bound && customOk
             AccentBtn(
                 label = when {
@@ -501,12 +514,25 @@ internal fun RadioPresetPanel(
  * phone two, no warning). Transmit power is still local and still not compared: a phone in Europe
  * is limited to 14 dBm and that is nobody else's business.
  */
-internal fun sameTuple(a: RadioPreset, b: RadioPreset): Boolean =
+/** Whether two radios are on the same **channel**: the four numbers that decide if they hear each
+ * other at all. A difference here really does leave the link down until both ends move. */
+internal fun sameChannel(a: RadioPreset, b: RadioPreset): Boolean =
     (a.frequencyMhz - b.frequencyMhz).let { kotlin.math.abs(it) < 0.01 } &&
         (a.bandwidthKhz - b.bandwidthKhz).let { kotlin.math.abs(it) < 0.1 } &&
         a.spreadingFactor == b.spreadingFactor &&
-        a.codingRate == b.codingRate &&
-        a.pathHashSize == b.pathHashSize
+        a.codingRate == b.codingRate
+
+/**
+ * Whether two radios are on the same channel **and** the same path width.
+ *
+ * The row that offers `match` wants this: a width difference is worth naming, because a repeater's
+ * hash is one byte on MeshCore's public presets and a two-byte reader cannot follow the route it
+ * built. It is *not* a link failure, though — two radios on the same four numbers hear each other
+ * whatever their widths — and the preset panel said "apply leaves link down" and offered
+ * `apply anyway?` for exactly that difference (seen on the device, 2026-11-07).
+ */
+internal fun sameTuple(a: RadioPreset, b: RadioPreset): Boolean =
+    sameChannel(a, b) && a.pathHashSize == b.pathHashSize
 
 internal fun presetLine(p: RadioPreset): String =
     "${p.frequencyMhz} MHz  ${p.bandwidthKhz} kHz  SF${p.spreadingFactor}  CR${p.codingRate}  ${p.txPowerDbm} dBm  path ${p.pathHashSize}B"

@@ -96,9 +96,14 @@ class RadioTupleTest {
         assertFalse(sameTuple(a, a.copy(bandwidthKhz = 62.5)))
         assertFalse(sameTuple(a, a.copy(spreadingFactor = 8)))
         assertFalse(sameTuple(a, a.copy(codingRate = 8)))
-        // **The width is.** A phone on two bytes cannot follow a route a one-byte public repeater
-        // built, so a host of one byte and a phone of two is a mismatch the row must name.
+        // **The width is** part of the *row's* comparison: a phone on two bytes cannot follow a
+        // route a one-byte public repeater built, so a host of one byte and a phone of two is a
+        // mismatch the row must name.
         assertFalse(sameTuple(a, a.copy(pathHashSize = 2)))
         assertFalse(sameTuple(a, a.copy(pathHashSize = 3)))
+        // ...but it is **not** a channel difference, and the panel must not say the link dies for
+        // it: two radios on the same four numbers hear each other whatever their widths.
+        assertTrue(sameChannel(a, a.copy(pathHashSize = 3)))
+        assertFalse(sameChannel(a, a.copy(frequencyMhz = 914.25)))
     }
 }
