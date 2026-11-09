@@ -414,10 +414,11 @@ struct Exchange {
 /// a report are comparable without conversion.
 /// A retune request: the channel's four numbers, and optionally the path hash width in bytes.
 ///
-/// The width is not part of the channel tuple as the firmware sees it, but it is part of *the
-/// channel a network uses*: MeshCore's public presets are one byte, so a repeater's hash is one
-/// byte, and a node that names its neighbours in two bytes cannot read a path a public repeater
-/// built. Hence one request that can carry both.
+/// The width is not part of the channel tuple: it travels **in each packet** (`getPathHashSize`
+/// reads it from the path-length byte, and a forwarder appends with that width), so a two-byte
+/// node and a one-byte repeater interoperate. MeshCore's public presets are one byte, which is
+/// why ldmux follows the radio rather than writing a width, and the field here is what an operator
+/// may still choose explicitly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Retune {
     pub freq_khz: u32,

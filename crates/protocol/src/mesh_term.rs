@@ -48,9 +48,11 @@
 //!
 //! # What this is not
 //!
-//! Every host→phone message encodes to at most [`MAX_MESSAGE`] bytes, so each one fits one
-//! 144-byte record. The phone paints on `Commit` only: `Rows` for an epoch are held until its
-//! `Commit` arrives, so a screen is never half-drawn.
+//! A `Rows`/`Sessions` message encodes to at most [`MAX_MESSAGE`] bytes. A **compressed frame** is
+//! larger on purpose ([`MAX_BODY`]) and travels across records, which the phone's stream decoder
+//! already handles: a message's meaning never depends on it fitting one record. The phone paints on
+//! `Commit` only: `Rows` for an epoch are held until its `Commit` arrives, so a screen is never
+//! half-drawn.
 
 use std::collections::VecDeque;
 
@@ -165,12 +167,12 @@ pub const MAX_BODY: usize = 600;
 /// `2 + 40 (id) + 24 (label) + 61 (cwd) + 7 (origin)` = 134, and a page must hold at least one
 /// entry: the packer puts an oversized entry on a page of its own, and an entry that cannot fit
 /// even alone made `Sessions` fail to encode, which is a list the phone never receives. The
-/// message is still 137 bytes, inside one record's 144, so the invariant the number exists for
+/// message is still 137 bytes, inside one record's payload, so the invariant the number exists for
 /// holds.
 pub const MAX_ROWS_BODY: usize = 134;
 /// The largest encoded host→phone message.
 pub const MAX_MESSAGE: usize = 1 + 2 + MAX_ROWS_BODY;
-/// The payload of one record after the L3 headers: 172 − 24 (ADR-0020) − 4 (ARQ).
+/// The payload of one record after the L3 headers: 172 − 24 (ADR-0020) − 5 (the ARQ header).
 pub const RECORD_PAYLOAD: usize = 143;
 /// Most bytes in one `Input` message.
 pub const MAX_INPUT: usize = 96;

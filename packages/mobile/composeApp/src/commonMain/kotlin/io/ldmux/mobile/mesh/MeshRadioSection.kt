@@ -495,12 +495,14 @@ internal fun RadioPresetPanel(
                         fontFamily = MonoFont,
                     )
                 } else if (hostTuple != null && selected.pathHashSize != hostTuple.pathHashSize) {
-                    // **Not a link warning.** The four numbers match, so the two radios hear each
-                    // other; only a path through a repeater cares about the width. Said plainly, and
-                    // the press stays a press rather than an "apply anyway?".
+                    // **Not a link warning, and not a repeater requirement either.** A width
+                    // travels in each packet, so a one-byte and a two-byte node hear each other
+                    // through repeaters of either width; what differs is how many neighbours each
+                    // can name. Said plainly, and the press stays a press rather than an
+                    // "apply anyway?".
                     Text(
                         "same channel · path differs: desktop " + hostTuple.pathHashSize +
-                            " B, here " + selected.pathHashSize + " B · a repeater needs the same width",
+                            " B, here " + selected.pathHashSize + " B · each packet carries its own",
                         color = Dim,
                         fontSize = 11.sp,
                         fontFamily = MonoFont,

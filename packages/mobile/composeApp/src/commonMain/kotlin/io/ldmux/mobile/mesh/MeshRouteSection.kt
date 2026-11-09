@@ -355,7 +355,7 @@ private fun MeshRadioFacts(
             "airtime limit",
             checked = !openAirtime,
             // **The allowance is the band's**, so the sentence is too: 36 s inside the European
-            // sub-band, 360 s outside it, where there is no duty cycle to comply with.
+            // 868.0-868.6 sub-band, and no limit at all outside a duty-cycled band.
             // **Both units, because a reader cannot do the arithmetic in their head.** 360 s/h is
             // 10 % of the hour and 36 s/h is 1 %; the seconds are what the meter counts in, and the
             // percentage is what the band talks about.
@@ -381,8 +381,8 @@ internal fun allowanceSeconds(preset: RadioPreset?): Int? =
  * The hour's airtime and what is left of the budget, in the radio's own units.
  *
  * `txAirtimeTenthsThisHour` is tenths of a second, and the app's own allowance is the band's
- * ([RadioAirtime.budgetMsPerHour]): 36 s in the European sub-band, 360 s outside it — which is what
- * the figure means, not a cap the app invents.
+ * ([RadioAirtime.budgetMsPerHour]): 36 s in the European 868.0-868.6 sub-band, and `null` outside a
+ * duty-cycled band, where the figure is a measurement and not a cap.
  *
  * **A denominator is only shown when there is something to be a fraction of.** With the meter off,
  * the old line read `37.4/360 s this hour · no hourly cap`: a fraction whose second half is not a

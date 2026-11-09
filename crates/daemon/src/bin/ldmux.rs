@@ -238,7 +238,7 @@ fn print_mesh_status(v: &serde_json::Value) {
         && p.len() == 4
     {
         let n = |i: usize| p[i].as_u64().unwrap_or(0);
-        // **The path width is part of the tuple on this radio.** A wider hash is what keeps two
+        // **The path width is per packet, not part of the channel.** A wider hash is what keeps two
         // repeaters from colliding; it is also what two ends must agree about to read each other's
         // hops, so an operator comparing this line with the phone's `path N B` row compares the
         // whole tuple rather than three quarters of it.
@@ -272,9 +272,9 @@ fn print_mesh_status(v: &serde_json::Value) {
         None => println!("scope    none (floods are unscoped, which most meshes forward)"),
     }
     match v.get("uplinkRecordMax").and_then(serde_json::Value::as_u64) {
-        // The carrier's record, not the terminal protocol's payload: a `Rows` message holds at
-        // most 143 application bytes inside it, and an operator reading "172" beside a protocol
-        // figure needs the two labelled.
+        // The carrier's record, not the terminal protocol's payload: 143 bytes of payload at an
+        // empty path (166 at range, less per hop), and a compressed frame spans records. An
+        // operator reading "172" beside a protocol figure needs the two labelled.
         Some(capacity) => println!("capacity {capacity} B per carrier record"),
         None => println!("capacity unknown (not bound yet)"),
     }

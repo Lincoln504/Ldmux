@@ -58,11 +58,11 @@ pub struct HostPreset {
     pub cr: u8,
     /// The host radio's path hash width in **bytes**, when the host knows it.
     ///
-    /// It belongs with the channel, not with the radio: MeshCore's public presets name neighbours
-    /// in one byte, so a repeater's hash is one byte, and a node that names them in two cannot read
-    /// a path that public repeater built. A phone that matches the host's tuple but keeps its own
-    /// width therefore matches the *frequency* and not the *channel*, and the mismatch only shows
-    /// up once a repeater is in the way.
+    /// **Not part of the channel.** The width travels in each packet: a forwarder appends its own
+    /// hash with the width the packet states, so a two-byte phone and a one-byte repeater work
+    /// together. It is published for one reason — an operator comparing two ends can see that they
+    /// are set differently, which matters for how many neighbours each can name, not for whether
+    /// they can hear each other.
     pub path_bytes: Option<u8>,
 }
 

@@ -706,7 +706,20 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
             // came back, and on this link an ack only rides on the phone's next record or its pure
             // ack timer. Measured on the device as a 16 s gap between a keystroke and its echo.
             // The bound that belongs here is the window: past it the queue would only grow.
-            let room = PENDING_LIMIT.saturating_sub(self.link.pending());
+            // **A whole frame when the window is empty, a cautious slice when it is not.** The
+            // differ's argument is in messages and the window is in records, and a compressed frame
+            // is one message per screen — so a message budget of 8 split the phone's own grid across
+            // two ticks and, because a partial frame carries no `Commit`, the phone could paint
+            // nothing until the second one. With nothing in flight a whole frame is built at once
+            // (2 records once compressed, well inside the window); with the pipe busy, the old
+            // record-for-message budget stands, because that is what keeps a keyboard echo from
+            // queueing behind a repaint.
+            let pending = self.link.pending();
+            let room = if pending == 0 {
+                FRAME_MESSAGES
+            } else {
+                PENDING_LIMIT.saturating_sub(pending)
+            };
             if room == 0 {
                 self.stalled = true;
                 break;
@@ -1643,6 +1656,17 @@ fn work(stats: &BridgeStats) -> u64 {
 /// the session's own window, so the queue can never grow past what the link can carry.
 pub const PENDING_LIMIT: usize = 8;
 
+/// The message budget a frame is built within, which is **not** [`PENDING_LIMIT`].
+///
+/// `PENDING_LIMIT` is a window of **records**; the differ spends its argument in **messages**. They
+/// were the same number until a frame was compressed, and then they were not: a 46x17 screen is
+/// `Profile` + 9 `Rows` + `Commit` = 11 messages, so an 8-message budget split it into two ticks,
+/// and — because a partial frame deliberately carries no `Commit` — the phone could paint nothing
+/// until the second tick. Twelve messages let the phone's own grid go out whole, which is 2 records
+/// once compressed: one record fewer and one tick sooner than the split, for the same airtime.
+/// A desk-sized pane (43 messages) still splits, which is the pacing doing its job.
+pub const FRAME_MESSAGES: usize = 12;
+
 /// The most often a screen that keeps changing is sent, unless the change is the echo of input.
 ///
 /// This is a coalescing window, not a delay added to every update: a change that arrives after a
@@ -1653,9 +1677,13 @@ pub const PENDING_LIMIT: usize = 8;
 /// staleness: nothing coalesced waits longer than this.
 pub const BURST_GAP: Duration = Duration::from_millis(1000);
 
-/// How long the first frame after an attach waits for the phone's grid (two records at the public
-/// tuple, with a little room): the difference between drawing a 158x82 pane and a 46x17 one.
-const ATTACH_GRACE: Duration = Duration::from_millis(1_400);
+/// How long the first frame after an attach waits for the phone's grid.
+///
+/// The grid now rides **inside** the attach record (22 bytes of payload, ~193 ms on air at the public
+/// tuple), so the wait only has to cover that record plus a tick; it was two records' worth of air
+/// when the grid was a message of its own. The grace is a fallback for a phone whose grid never
+/// arrives, and a `Resize` clears it outright, so this bounds only the fallback path.
+const ATTACH_GRACE: Duration = Duration::from_millis(700);
 
 /// Wait until either the link has something to say or the cadence expires.
 ///
@@ -3104,6 +3132,46 @@ mod tests {
         );
         // The phone's decode of what was sent is still the screen itself.
         assert_eq!(phone_view(&link, 1).lines, wide);
+    }
+
+    /// **The phone's own grid paints in one tick.** A 46x17 screen is 11 messages — Profile, nine
+    /// `Rows`, Commit — and a message budget of 8 split it across two ticks, where the partial frame
+    /// deliberately carries no Commit, so the phone could paint nothing until the second one. The
+    /// compressed frame is 2 records, well inside the window.
+    #[tokio::test]
+    async fn a_phone_sized_frame_paints_in_one_tick() {
+        let (mut b, host, link) = setup();
+        let clock = FakeClock::new();
+        b.clock = clock.reader();
+        let lines: Vec<String> = (0..17)
+            .map(|i| format!("{i:>2} · {}", "cargo build --release".repeat(2)))
+            .map(|l| l.chars().take(46).collect())
+            .collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        paced(&host, &refs);
+        b.tick().await;
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: "abcd-1".into(),
+            },
+        );
+        phone_says(&link, 1, &Message::Resize { cols: 46, rows: 17 });
+        b.tick().await;
+        clock.advance(50);
+        b.tick().await;
+        let records = link.0.lock().unwrap().sent.iter().filter(|(s, _)| *s == 1).count();
+        assert!(
+            records <= 3,
+            "a 46x17 first paint is profile + one compressed frame: {records} records"
+        );
+        assert_eq!(
+            phone_view(&link, 1).lines,
+            lines,
+            "and it is paintable after one tick"
+        );
     }
 
     /// **A screen that does not compress still paints.**
