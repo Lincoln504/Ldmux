@@ -828,38 +828,38 @@ fn a_refusal_on_a_slow_preset_waits_one_airtime() {
     );
 }
 
-/// **The first timeout covers the whole burst it was started for.**
+/// **A lost record is retried after its own slot on the air, not after the burst.**
 ///
-/// A slot's timer starts when the record is handed to the radio, and the ARQ hands over a whole
-/// window at once. On a 0.6 s preset the last record of an eight-record burst is still on the air
-/// four seconds after the first one's timer began, so six airtimes fired before the burst had
-/// cleared: every full burst retransmitted its front.
+/// The ARQ hands a whole window over at once and the caller writes the records one after another, so
+/// a record's first timeout has to start at its own air slot: stamping them all with the hand-over
+/// time made the timeout expire before the record had been transmitted, and the front of every full
+/// burst was retransmitted for nothing. Six airtimes from the slot is the recovery time that gives,
+/// which is what a genuinely lost record needs on a noisy link.
 #[test]
-fn the_first_timeout_covers_a_whole_burst() {
-    let air = Config {
-        airtime_ms: 600,
+fn a_burst_is_timed_from_each_records_own_slot() {
+    let cfg = Config {
         // No heartbeat: this is about the retransmission timer, not the idle one.
         heartbeat_ms: 0,
+        window: 8,
+        airtime_ms: 600,
         ..cfg()
-    };
-    // The same numbers a real session derives: window 8, RTO at least (window + 2) airtimes.
-    let cfg = Config { window: 8, ..air }.with_airtime(Some(600.0));
-    assert!(
-        cfg.rto_initial_ms >= 10 * 600,
-        "ten airtimes: the burst plus its ack, got {}",
-        cfg.rto_initial_ms
-    );
+    }
+    .with_airtime(Some(600.0));
+    assert_eq!(cfg.rto_initial_ms, 3_600, "six airtimes, not a whole window");
+
     let mut a = Arq::new(cfg);
-    for i in 0..10u8 {
+    for i in 0..8u8 {
         a.send(0, &[i; 10]).unwrap();
     }
     let out = a.poll(0, PLENTY);
     assert_eq!(out.len(), 8, "one full window");
+    // The front is timed from t=0. The eighth is timed from its own slot, 7 × 600 ms later, so
+    // nothing is due before the front's timeout and only the front is due at it.
     assert!(
-        a.poll(5_999, PLENTY).is_empty(),
-        "not retransmitted while its own burst may still be on the air"
+        a.poll(3_599, PLENTY).is_empty(),
+        "not retransmitted before its own air slot plus six airtimes"
     );
-    let retry = a.poll(6_000, PLENTY);
+    let retry = a.poll(3_600, PLENTY);
     assert_eq!(retry.len(), 1, "one retransmission, not a storm");
-    assert!(retry[0].retransmit);
+    assert_eq!(retry[0].seq, out[0].seq, "the oldest record, whose timer is the one that expired");
 }

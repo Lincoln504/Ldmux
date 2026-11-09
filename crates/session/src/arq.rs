@@ -161,15 +161,13 @@ impl Config {
         let Some(airtime) = airtime_ms.filter(|a| *a > 0.0) else {
             return self;
         };
-        // **A burst, not a record.** `sent_at` is stamped when a record is handed to the radio, not
-        // when its bytes leave, and the ARQ hands over a whole window at once. On a 0.6 s preset the
-        // last record of an eight-record burst is still on the air four seconds after the first one's
-        // timer started, so a first timeout of six airtimes fired before its own burst had cleared:
-        // every full burst retransmitted its front, and a retransmission is a record of air. The
-        // window plus the ack is the shortest interval that cannot be a duplicate. It costs nothing
-        // on a real gap, because a non-advancing ack pulls the front early (`fast_due`).
-        let burst = self.window as f64 + 2.0;
-        let scaled = (airtime * burst).round() as u64;
+        // **Six airtimes: a record, its ack, and two forward delays per hop.** The burst is no longer
+        // a reason to stretch this, because a slot's timer starts at its own air slot (see `poll`):
+        // the eighth record of a window is timed from two seconds later, not from the hand-over.
+        // Stretching it to ten airtimes to cover the burst doubled the time a genuinely lost record
+        // took to come back — measured 2026-11-09, a first paint waited eleven seconds for one lost
+        // record on a noisy link — and a loss is the common case this timer exists for.
+        let scaled = (airtime * 6.0).round() as u64;
         self.rto_initial_ms = self.rto_initial_ms.max(scaled).min(60_000);
         // **A pure ack must not cost its own record when a little patience avoids it.** An owed ack
         // used to wait a fixed 150 ms for outgoing data and then go as a record of its own, which at
@@ -776,12 +774,21 @@ impl Arq {
             let (shell, payload) = self.queue.pop_front().expect("checked non-empty");
             let seq = self.next_seq;
             self.next_seq = self.next_seq.wrapping_add(1);
+            // **The timer starts when this record's turn on the air begins, not when the window was
+            // handed over.** The caller writes a whole poll's records to the radio one after
+            // another, and a radio at 0.6 s a record does not start the fourth until two seconds
+            // after the first: stamping them all `now` made a record's timeout expire before it had
+            // been transmitted, and the front of every full burst was retransmitted for nothing.
+            // The estimate is the slot's position in this poll times the airtime, which is what
+            // lets the first timeout stay at six airtimes (fast recovery on a lossy link) instead of
+            // being stretched to cover the whole window.
+            let slot_air = u64::try_from(out.len()).unwrap_or(0).saturating_mul(self.cfg.airtime_ms);
             self.inflight.push_back(Slot {
                 seq,
                 shell,
                 payload: payload.clone(),
                 attempts: 1,
-                sent_at: now_ms,
+                sent_at: now_ms.saturating_add(slot_air),
                 refused: false,
                 refused_since: None,
                 fast_due: false,

@@ -852,22 +852,6 @@ class MeshTermDriver(
     private var wantedGrid: Pair<Int, Int>? = null
     private var requestedFit: Triple<String, Int, Int>? = null
 
-    /**
-     * Forget the grid the last screen measured, on leaving it for the launcher.
-     *
-     * The surface only measures a grid while it is drawing a terminal (`onGrid` returns early on
-     * the list), so the grid carried into the next attach is the shell just left — measured in
-     * chrome that may have changed (the keyboard, the batch bar, a rotation). A stale grid fits the
-     * pane to it and paints a full frame, then the real grid arrives and paints another: two full
-     * paints, and on a slow link two of them is most of a minute. `requestedFit` goes with it, so
-     * the first `Profile` of the new attach is judged on its own answer rather than against a
-     * request that belonged to the visit that is over.
-     */
-    suspend fun forgetGrid() = lock.withLock {
-        wantedGrid = null
-        requestedFit = null
-    }
-
     /** When this radio's route hint last went out, so a retry does not repeat it. */
     private var hintSentAt: Long = 0L
     private var hostVersion = 0

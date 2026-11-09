@@ -804,11 +804,11 @@ fun MeshTerminalScreen(
     // is sent from here, so there is one place to look when it does not answer.
     val openList = {
         chosen = emptyList(); showList = true; resumeShell = ""
-        // **The grid measured here belongs to the shell being left.** `onGrid` returns early on the
-        // launcher, so a re-attach would carry the previous shell's grid — measured in chrome that
-        // may have changed — fit the pane to it, paint a full frame, and then correct itself with
-        // the real length: two full paints where one belongs.
-        scope.launch { conn.driver.forgetGrid() }
+        // **The measured grid survives the launcher on purpose.** `onGrid` does not run on the list,
+        // so the grid carried into the next attach is the one the surface last measured — the same
+        // phone, the same chrome, usually the same keyboard. Clearing it made the attach carry no
+        // `Resize` at all, the host drew the desk's 62x82 pane inside its 1.4 s grace, and the
+        // first paint took fifteen seconds behind a full desk-sized frame (measured 2026-11-09).
         Unit
     }
     // The notification's Disconnect, answered here as the launcher button is: let go of the shell
