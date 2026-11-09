@@ -344,6 +344,24 @@ by the host radio, by the app before it retunes, and by every budget below.
   no shipped preset reaches it, but `ldmux mesh preset` does.
 - One screen update or one keystroke is one record. A record that does not fit waits
   for the next one.
+- **A record is 24 bytes of session overhead plus a 5-byte ARQ header plus payload**, so a
+  171-byte record carries 142 application bytes and a full 172-byte one carries 143. The bridge
+  packs to that figure (`Link::record_payload`), not to the record size: the session chunks at
+  its own ceiling, so a bridge that handed over 166 bytes made the ARQ split it into two records,
+  the second nearly empty. One arithmetic, one place, and a test pinning all three sizes.
+- **A retransmission timer starts when the record is handed to the radio, and the ARQ hands over
+  a whole window at once.** So the first timeout is at least `(window + 2) × airtime`: six
+  airtimes on a 0.6 s preset expired while the burst that record belonged to was still going out,
+  and every full burst retransmitted its front. A refusal is the opposite case and is paced at
+  `max(350 ms, one airtime)`, because a full transmit table drains a record at a time.
+- **A `Resync` while records are still in flight is deferred, not obeyed.** The differ is reset
+  only when the pipe is empty, so a request the phone repeated while its screen was already on the
+  way costs one repaint instead of two — the deferral, not the ladder, is what stops a slow paint
+  from turning into a repaint loop.
+- **Neither the echo nor its answer is paced.** The echo of input goes at once, and the change it
+  produces is due at once too; only a screen that keeps changing is coalesced to one update per
+  second. Before this, marking the echo push as a burst held every command's output for a whole
+  coalescing window (1 s).
 - Batch mode exists because a public channel turns every keystroke into a broadcast.
 - The bridge coalesces screen updates and lets input echo through ahead of them.
 - **An advert is a maintenance broadcast, not the way a peer finds us** (ADR-0032), and it is

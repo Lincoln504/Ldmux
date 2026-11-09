@@ -176,13 +176,20 @@ impl Link for crate::mesh::MeshRuntime {
         Some(Arc::clone(&self.inbound_wake))
     }
     fn record_payload(&self) -> usize {
-        // `uplink_record_max` is what the peer said a record may be; the ARQ header is 5 bytes. The
-        // clamp keeps a nonsensical advertisement from packing more than a record can hold.
+        // **The record is not the payload.** `uplink_record_max` is what the peer said a *record*
+        // may be, and a record carries a 24-byte session overhead (6 clear header + 2 inner header
+        // + 16 tag) before the ARQ's own 5-byte header, so the application bytes are what is left.
+        // Packing to `max - 5` instead made every record of more than 142 bytes become two: the
+        // ARQ re-chunks with its own ceiling, so the bridge's figure has to be the same one or the
+        // two layers disagree about what a record is.
         let limit = ldmux_protocol::mesh_term::RECORD_PAYLOAD;
         self.snapshot()
             .uplink_record_max
-            .map_or(limit, |m| usize::from(m).saturating_sub(5))
-            .clamp(limit, 166)
+            .map_or(limit, |m| {
+                ldmux_session::record::application_bytes(usize::from(m))
+                    .saturating_sub(ldmux_session::arq::HEADER)
+            })
+            .clamp(1, limit)
     }
 }
 
@@ -279,6 +286,15 @@ struct Attached {
     /// The user typed into this shell and the echo has not been read yet. Input echo never
     /// waits for the pacing: the keystroke is what the user is looking for.
     echo: bool,
+    /// A `Resync` the phone asked for while records were still in flight.
+    ///
+    /// **Asking for the screen while it is already on its way is not a reason to paint it twice.**
+    /// A reset while a frame is queued makes the next tick build a second full frame, and on a slow
+    /// link the phone asks again before the first one has landed: that is the repaint loop that
+    /// spent about 20 s of air a minute on an attached shell nobody was typing in. The request is
+    /// remembered and honoured as soon as the pipe is empty, so a genuine resync still happens and
+    /// a repeat costs nothing.
+    resync_wanted: bool,
     /// **The grid this phone displaced, put back when it lets go.**
     ///
     /// A phone that attaches takes the shell and fits the pty to its own screen, which is right —
@@ -368,9 +384,10 @@ impl Attached {
     }
 
     /// Start the screen over: the differ forgets what the phone holds, and so does the pacing.
-    /// A `Resync`, an accepted `Resize` and a refused send are each "the phone's screen is not
-    /// the one the last push left", so the next update is due the moment it exists - holding it
-    /// would be pacing a burst that has already ended.
+    /// A `Resync` and an accepted `Resize` are each "the phone's screen is not the one the last
+    /// push left", so the next update is due the moment it exists - holding it would be pacing a
+    /// burst that has already ended. A refused send is not one of these any more: it keeps the
+    /// exact messages it failed to deliver and re-offers them (see `retry`).
     fn resync(&mut self) {
         self.differ.reset();
         // A resize is the answer the grace was waiting for, so it ends the hold too.
@@ -378,6 +395,23 @@ impl Attached {
         self.last_push = None;
         self.changed_last_tick = false;
         self.echo = false;
+        self.resync_wanted = false;
+    }
+
+    /// Rebuild the screen once the link owes nothing.
+    ///
+    /// A `Resync` that arrives while records are in flight is the phone asking again while the
+    /// answer is still going out. Resetting now queues a second full frame behind the first, and
+    /// because the phone re-asks on its own timer the second frame is built before the first has
+    /// landed: that is the loop that spent about 20 s of air a minute on an attached shell nobody
+    /// was typing in. The wanted flag makes the request cost one repaint instead of two, and the
+    /// next tick with an empty pipe honours it, so a real resync still happens.
+    fn defer_resync(&mut self, pending: usize) {
+        if pending == 0 {
+            self.resync();
+        } else {
+            self.resync_wanted = true;
+        }
     }
 }
 
@@ -568,6 +602,17 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
 }
 
     fn reply(&mut self, shell: u8, messages: &[Message]) -> bool {
+        self.reply_upto(shell, messages).is_ok()
+    }
+
+    /// As [`Self::reply`], saying **how far it got**.
+    ///
+    /// The return value is the number of messages at the front the phone is done with: sent, or
+    /// skipped because they will never encode. A caller that keeps its messages for a retry needs
+    /// this, because a record can carry several messages and a refusal takes the whole record: the
+    /// prefix already on the link must not be offered again, and on a link priced per record that
+    /// duplicate is a whole record of air.
+    fn reply_upto(&mut self, shell: u8, messages: &[Message]) -> Result<(), usize> {
         // **Messages share a record when they fit.** The phone's decoder is a stream decoder
         // (`TermDecoder` in MeshTerm.kt), so a record may carry several messages, and the
         // protocol's own `RECORD_PAYLOAD` is the only limit. Sending one record per message
@@ -594,73 +639,68 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
             messages.to_vec()
         };
         let messages: &[Message] = &framed;
-        let mut ok = true;
-        let mut record: Vec<u8> = Vec::with_capacity(ldmux_protocol::mesh_term::RECORD_PAYLOAD);
-        let flush =
-            |record: &mut Vec<u8>, ok: &mut bool, link: &mut L, stats: &mut BridgeStats| {
-                if record.is_empty() {
-                    return;
-                }
-                if link.send(shell, record).is_ok() {
-                    stats.records_sent += 1;
-                } else {
-                    stats.refused_sends += 1;
-                    *ok = false;
-                }
-                record.clear();
-            };
         let payload = self.link.record_payload();
-        let mut packed: usize = 0;
+        let mut record: Vec<u8> = Vec::with_capacity(payload);
+        // Messages inside `record` that the link has not taken yet.
+        let mut carried: usize = 0;
+        // Messages at the front that are finished with: on the link, or unencodable.
+        let mut delivered: usize = 0;
+        let mut skipped: usize = 0;
         for m in messages {
             let Ok(bytes) = m.encode() else {
-                ok = false;
+                // **An unencodable message is consumed, not retried.** It will never encode, so a
+                // retry re-fails on every tick and holds everything behind it for ever.
+                delivered += 1;
+                skipped += 1;
                 continue;
             };
             if !streamed {
                 if self.link.send(shell, &bytes).is_ok() {
-                    self.stats.messages_sent += 1;
+                    delivered += 1;
                 } else {
                     self.stats.refused_sends += 1;
-                    ok = false;
-                    break;
+                    return Err(delivered);
                 }
                 continue;
             }
             if !record.is_empty() && record.len() + bytes.len() > payload {
-                flush(&mut record, &mut ok, &mut self.link, &mut self.stats);
-                if !ok {
-                    break;
+                if self.link.send(shell, &record).is_ok() {
+                    self.stats.records_sent += 1;
+                    delivered += carried;
+                } else {
+                    self.stats.refused_sends += 1;
+                    return Err(delivered);
                 }
+                record.clear();
+                carried = 0;
             }
-            // **A message bigger than a record is carried across records.** The phone's decoder
-            // reassembles by length, so nothing about a message's meaning depends on it fitting one
-            // record - and a compressed frame (a few hundred bytes for a screen that was seven
-            // records) is exactly such a message.
-            if bytes.len() > payload {
-                record.extend_from_slice(&bytes);
-                flush(&mut record, &mut ok, &mut self.link, &mut self.stats);
-                if !ok {
-                    break;
-                }
-                packed += 1;
-                continue;
-            }
+            // **A message bigger than a record is carried whole and split below.** The phone's
+            // decoder reassembles by length, so nothing about a message's meaning depends on it
+            // fitting one record — and a compressed frame (a few hundred bytes for a screen that
+            // was seven records) is exactly such a message. The session chunks it into records at
+            // this same ceiling, so one `send` here is one message, however many records it becomes.
             record.extend_from_slice(&bytes);
-            packed += 1;
+            carried += 1;
         }
-        if ok {
-            // **Counted after the send, not before it.** The flush can fail (a full queue, a link
-            // that says no), and a counter incremented as messages were packed reported messages
-            // that never left — the one number a user would read as "the phone got it".
-            flush(&mut record, &mut ok, &mut self.link, &mut self.stats);
-            if ok {
-                self.stats.messages_sent = self.stats.messages_sent.saturating_add(packed as u32);
-            }
-            if timing() {
-                eprintln!("ldmuxd: mesh timing: reply queued at {:?}", stamp());
+        if !record.is_empty() {
+            if self.link.send(shell, &record).is_ok() {
+                self.stats.records_sent += 1;
+                delivered += carried;
+            } else {
+                self.stats.refused_sends += 1;
+                return Err(delivered);
             }
         }
-        ok
+        // **Counted after the send, not before it.** A counter incremented as messages were packed
+        // reported messages that never left, which is the one number a user reads as "the phone
+        // got it".
+        self.stats.messages_sent = self.stats.messages_sent.saturating_add(
+            u32::try_from(delivered.saturating_sub(skipped)).unwrap_or(u32::MAX),
+        );
+        if timing() {
+            eprintln!("ldmuxd: mesh timing: reply queued at {:?}", stamp());
+        }
+        Ok(())
     }
 
     /// How long to wait before the next pass.
@@ -766,6 +806,15 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
             // record-for-message budget stands, because that is what keeps a keyboard echo from
             // queueing behind a repaint.
             let pending = self.link.pending();
+            // **A resync asked for while the link owed records is honoured now.** It was deferred so
+            // the screen it asked for was not queued twice; the pipe is empty, so this is the one
+            // repaint the request should cost.
+            if pending == 0
+                && let Some(a) = self.shells.get_mut(&shell)
+                && a.resync_wanted
+            {
+                a.resync();
+            }
             let room = if pending == 0 {
                 FRAME_MESSAGES
             } else {
@@ -824,13 +873,23 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
                 .map(|a| a.retry.clone())
                 .unwrap_or_default();
             if !retry.is_empty() {
-                if self.reply(shell, &retry) {
-                    if let Some(a) = self.shells.get_mut(&shell) {
-                        a.retry.clear();
-                        a.last_push = Some((self.clock)());
+                // **Only what did not go out is offered again.** A record can carry several
+                // messages, so a refusal at the third record means the first two are on the link:
+                // re-offering the whole list would put them there twice, and on this link a
+                // duplicate is a whole record of air.
+                match self.reply_upto(shell, &retry) {
+                    Ok(()) => {
+                        if let Some(a) = self.shells.get_mut(&shell) {
+                            a.retry.clear();
+                            a.last_push = Some((self.clock)());
+                        }
                     }
-                } else {
-                    self.stalled = true;
+                    Err(unsent) => {
+                        if let Some(a) = self.shells.get_mut(&shell) {
+                            a.retry = retry[unsent.min(retry.len())..].to_vec();
+                        }
+                        self.stalled = true;
+                    }
                 }
                 continue;
             }
@@ -890,13 +949,14 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
                 continue;
             }
             self.stats.updates += 1;
-            if !self.reply(shell, &messages) {
+            let was_echo = self.shells.get(&shell).is_some_and(|a| a.echo);
+            if let Err(unsent) = self.reply_upto(shell, &messages) {
                 // **Keep them, do not start the screen over.** `reply` fails when the ARQ queue is
                 // full, which is a moment: the differ has already advanced over the rows it handed
                 // out, so the same messages are the only way to deliver them. Resyncing made the
                 // next frame a full screen into a queue that was already full.
                 if let Some(a) = self.shells.get_mut(&shell) {
-                    a.retry = messages;
+                    a.retry = messages[unsent.min(messages.len())..].to_vec();
                 }
                 self.stalled = true;
                 continue;
@@ -904,7 +964,12 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
             if let Some(a) = self.shells.get_mut(&shell) {
                 a.retry.clear();
                 a.last_push = Some(now);
-                a.changed_last_tick = true;
+                // **An echo does not open a burst.** The keystroke is sent at once, which is right,
+                // and then the answer it produces is the *next* change: marking this push as a
+                // burst held that answer for a whole coalescing window, so every command paid up
+                // to a second of nothing after its own echo had already gone out. A burst is what
+                // follows a burst, and an echo is not one.
+                a.changed_last_tick = !was_echo;
                 a.idle_sent = false;
                 a.echo = false;
                 a.pushes_since_input = a.pushes_since_input.saturating_add(1);
@@ -1094,9 +1159,16 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
                                 geometry: remembered,
                                 retry: Vec::new(),
                                 last_push: None,
-                                hold: Some(
-                                    Instant::now() + ATTACH_GRACE,
-                                ),
+                                // **Only when the grid is unknown.** The grace exists so the
+                                // first frame is not drawn at the desk's geometry while the
+                                // phone's own grid is in flight. When this phone has attached
+                                // before, the pane was already fitted to that grid above, so
+                                // there is nothing to wait for: 1.4 s of blank screen per
+                                // re-attach was being spent on a record that had arrived.
+                                hold: remembered
+                                    .is_none()
+                                    .then(|| Instant::now() + ATTACH_GRACE),
+                                resync_wanted: false,
                                 changed_last_tick: false,
                                 echo: false,
                                 original,
@@ -1110,21 +1182,19 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
                         // that would have made the phone ask for 46x17 was held with the rows behind
                         // the grace. Eighteen bytes now, and the phone's `Resize` follows one round
                         // trip later.
-                        if let Some(a) = self.shells.get(&shell) {
-                            let profile = Message::Profile {
-                                version: a.version,
-                                cols: original.map_or(0, |(c, _)| c),
-                                rows: original.map_or(0, |(_, r)| r),
-                                unsupported: if a.version >= RESIZE_VERSION {
-                                    ldmux_protocol::mesh_term::unsupported::ALL_V1
-                                        & !ldmux_protocol::mesh_term::unsupported::RESIZE
-                                } else {
-                                    ldmux_protocol::mesh_term::unsupported::ALL_V1
-                                },
-                                shell: a.shell.clone(),
-                            };
-                            self.reply(shell, &[profile]);
-                        }
+                        let profile = self.shells.get(&shell).map(|a| Message::Profile {
+                            version: a.version,
+                            cols: original.map_or(0, |(c, _)| c),
+                            rows: original.map_or(0, |(_, r)| r),
+                            unsupported: if a.version >= RESIZE_VERSION {
+                                ldmux_protocol::mesh_term::unsupported::ALL_V1
+                                    & !ldmux_protocol::mesh_term::unsupported::RESIZE
+                            } else {
+                                ldmux_protocol::mesh_term::unsupported::ALL_V1
+                            },
+                            shell: a.shell.clone(),
+                        });
+                        let Some(profile) = profile else { return };
                         // **What this phone missed, sent once.** The marks that are true now go
                         // with the attach, because the radio cannot reach a phone that is not
                         // connected and this is the only moment delivery is possible. A phone on a
@@ -1133,9 +1203,18 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
                         // **Sent even when it is empty.** An empty page is how the phone learns that
                         // a mark it still shows has expired or been read elsewhere; skipping the
                         // message left the stale row on the launcher until the app restarted.
+                        //
+                        // **In the same record as the profile.** They are a few dozen bytes together
+                        // and two separate replies were two records: 0.6 s of air on this link for a
+                        // page that is usually empty. The profile stays first in the record, so the
+                        // phone still learns the grid before it reads a row.
                         if version >= MARKS_VERSION {
                             let marks = self.host.marks().await;
-                            self.reply(shell, &marks_pages(marks));
+                            let mut together = vec![profile];
+                            together.extend(marks_pages(marks));
+                            self.reply(shell, &together);
+                        } else {
+                            self.reply(shell, &[profile]);
                         }
                     }
                     _ => {
@@ -1186,10 +1265,8 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
                 // The shell rides the list like the folder and the holder: one flag, one string per
                 // entry, and only for a phone that speaks it.
                 let with_shell = version.is_some_and(|v| v >= SHELL_VERSION);
-                self.reply(
-                    shell,
-                    &session_pages(&listing, with_cwd, with_origin, with_owner, with_shell),
-                );
+                let mut answer =
+                    session_pages(&listing, with_cwd, with_origin, with_owner, with_shell);
                 // **The marks ride with the list.** The launcher is the one screen that shows every
                 // shell, so it is the one screen that needs the table — and it lists without
                 // attaching, which is why sending the table only on an attach left every row
@@ -1201,11 +1278,15 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
                 // the host has not learned yet is not worth another round trip. The table costs one
                 // record per list, empty included: an empty page is how the phone learns that a mark
                 // it still draws has expired, or was read on the desk.
+                //
+                // **In the same record as the first page.** Two replies were two records, and a
+                // launcher screen the user opens and closes all day is not worth a second one.
                 let marks_version_ok = self.versions.get(&shell).is_none_or(|v| *v >= MARKS_VERSION);
                 if marks_version_ok {
                     let marks = self.host.marks().await;
-                    self.reply(shell, &marks_pages(marks));
+                    answer.extend(marks_pages(marks));
                 }
+                self.reply(shell, &answer);
             }
             // ── version 7: the phone starts and ends shells, as the tailnet client does ──
             Message::Create { version, cwd } => {
@@ -1384,16 +1465,18 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
                 // the grid as it was and the phone keeps what it has.
                 let accepted = self.host.resize(&session, cols, rows).await.is_ok();
                 if accepted {
+                    let pending = self.link.pending();
                     if let Some(a) = self.shells.get_mut(&shell) {
                         a.geometry = Some((cols, rows));
-                        a.resync();
+                        a.defer_resync(pending);
                     }
                     self.grids.insert(shell, (cols, rows));
                 }
             }
             Message::Resync => {
+                let pending = self.link.pending();
                 if let Some(a) = self.shells.get_mut(&shell) {
-                    a.resync();
+                    a.defer_resync(pending);
                 }
             }
             Message::Detach => {
@@ -1874,6 +1957,9 @@ mod tests {
         sent: Vec<(u8, Vec<u8>)>,
         inbound: Vec<(u8, Vec<u8>)>,
         refuse: bool,
+        /// Refuse every send once this many records have been handed over: a link that takes
+        /// part of a reply, which is how a full queue really behaves.
+        refuse_after: Option<usize>,
     }
     #[derive(Clone, Default)]
     struct FakeLink(Arc<Mutex<LinkState>>);
@@ -1889,7 +1975,7 @@ mod tests {
         }
         fn send(&self, shell: u8, bytes: &[u8]) -> Result<(), String> {
             let mut s = self.0.lock().unwrap();
-            if s.refuse {
+            if s.refuse || s.refuse_after.is_some_and(|n| s.sent.len() >= n) {
                 return Err("full".into());
             }
             s.sent.push((shell, bytes.to_vec()));
@@ -3111,6 +3197,73 @@ mod tests {
         );
     }
 
+    /// **A resync asked for while the screen is already on its way costs one repaint.** The phone
+    /// re-asks on a timer, and a reset with a frame in flight queued a second full frame behind the
+    /// first: that is the loop that spent about 20 s of air a minute on an attached shell nobody
+    /// was typing in. The request is remembered and honoured when the pipe is empty.
+    #[tokio::test]
+    async fn a_resync_while_the_screen_is_in_flight_costs_one_repaint() {
+        let (mut b, _host, link) = setup();
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+            },
+        );
+        b.tick().await;
+        let base = sent_records(&link);
+        // The phone asks again while records are still on their way.
+        link.0.lock().unwrap().pending = 2;
+        phone_says(&link, 1, &Message::Resync);
+        b.tick().await;
+        assert_eq!(
+            sent_records(&link),
+            base,
+            "nothing is built into a pipe that already owes records"
+        );
+        // The pipe empties: the request is honoured, once.
+        link.0.lock().unwrap().pending = 0;
+        b.tick().await;
+        let after = link.0.lock().unwrap().sent[base..].to_vec();
+        assert!(!after.is_empty(), "the deferred resync is honoured");
+        let mut d = Decoder::new();
+        let first = d.push(&after[0].1).unwrap().remove(0).unwrap();
+        assert!(
+            matches!(first, Message::Profile { .. }),
+            "a full screen starts with Profile"
+        );
+        let settled = sent_records(&link);
+        b.tick().await;
+        assert_eq!(sent_records(&link), settled, "one repaint, not a loop");
+    }
+
+    /// **The profile and the marks are one record.** Two replies were two records, and the attach
+    /// page is usually an empty one: 0.6 s of air at the public preset for nothing.
+    #[tokio::test]
+    async fn the_profile_and_the_marks_share_a_record() {
+        let (mut b, host, link) = setup();
+        host.0.lock().unwrap().marks = vec![("abcd-1".into(), 1)];
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+            },
+        );
+        b.tick().await;
+        let first = link.0.lock().unwrap().sent[0].1.clone();
+        let items = Decoder::new().push(&first).unwrap();
+        assert!(matches!(
+            items[0].as_ref().unwrap(),
+            Message::Profile { .. }
+        ));
+        assert_eq!(items.len(), 2, "the marks ride the same record");
+        assert!(matches!(items[1].as_ref().unwrap(), Message::Marks { .. }));
+    }
+
     #[tokio::test]
     async fn a_dead_shell_is_reported_and_detached_and_an_unreadable_one_too() {
         let (mut b, host, link) = setup();
@@ -3356,6 +3509,45 @@ mod tests {
             .next_back()
             .expect("a profile");
         assert_eq!(profile, (46, 17), "the remembered grid, not the desk's");
+    }
+
+    /// **A re-attach does not wait for a grid it already remembers.** The grace exists because the
+    /// pane's first size is whatever the desk left it at. When this phone has attached before, the
+    /// pane is fitted to its remembered grid before the first frame is read, so the wait has nothing
+    /// to wait for: spending it was 1.4 s of blank screen per re-attach.
+    #[tokio::test]
+    async fn a_reattach_does_not_wait_again_for_the_remembered_grid() {
+        let (mut b, _host, link) = setup();
+        let clock = FakeClock::new();
+        b.clock = clock.reader();
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: "abcd-1".into(),
+            },
+        );
+        b.tick().await;
+        phone_says(&link, 1, &Message::Resize { cols: 46, rows: 17 });
+        b.tick().await;
+        phone_says(&link, 1, &Message::Detach);
+        b.tick().await;
+
+        let base = sent_records(&link);
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: "abcd-1".into(),
+            },
+        );
+        b.tick().await;
+        assert!(
+            sent_records(&link) - base >= 2,
+            "the profile and the first frame go in the attach's own tick"
+        );
     }
 
     /// **A refused send re-offers the same messages, and does not start the screen over.**
@@ -3687,6 +3879,51 @@ mod tests {
             ["four", ""],
             "the held burst coalesces into the present screen, not a replay"
         );
+    }
+
+    /// **An echo does not open a coalescing window.** The echo goes at once, which is right, but
+    /// marking that push as a burst held the answer it produced for a whole `BURST_GAP`: every
+    /// command paid up to a second of nothing after its own echo had already gone out.
+    #[tokio::test]
+    async fn an_answer_is_not_held_behind_its_own_echo() {
+        let (mut b, host, link, clock) = attached_paced().await;
+        let base = sent_records(&link);
+
+        clock.advance(50);
+        phone_says(&link, 1, &Message::Input(b"ls".to_vec()));
+        paced(&host, &["$ ls", ""]);
+        b.tick().await;
+        let echoed = sent_records(&link) - base;
+        assert!(echoed >= 1, "the echo is sent");
+
+        // The answer appears 100 ms later, well inside the window the echo used to open.
+        clock.advance(100);
+        paced(&host, &["$ ls", "a.txt", "b.txt", ""]);
+        b.tick().await;
+        assert!(
+            sent_records(&link) - base > echoed,
+            "the answer is not held for a window its own echo opened"
+        );
+    }
+
+    /// **A refused reply re-offers only what did not go out.** A record can carry several messages,
+    /// so the prefix already on the link must not be offered again: on a link priced per record that
+    /// duplicate is a whole record of air.
+    #[tokio::test]
+    async fn a_refusal_keeps_only_the_messages_it_did_not_send() {
+        let (mut b, _host, link) = setup();
+        let marks: Vec<(String, u8)> = (0..20).map(|i| (format!("session-{i:02}"), 0)).collect();
+        let messages = marks_pages(marks);
+        assert_eq!(messages.len(), 2, "the table needs two pages");
+        let base = sent_records(&link);
+        link.0.lock().unwrap().refuse_after = Some(base + 1);
+        let outcome = b.reply_upto(1, &messages);
+        assert_eq!(
+            outcome,
+            Err(1),
+            "the first message went, the second did not"
+        );
+        assert_eq!(sent_records(&link) - base, 1);
     }
 
     #[tokio::test]

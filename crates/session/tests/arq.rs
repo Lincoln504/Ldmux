@@ -791,3 +791,75 @@ fn an_ack_owed_by_a_gap_goes_out_at_once() {
     assert_eq!(urgent[0].ack, 0);
 }
 
+/// **A slow radio is not asked again before one record has left.**
+///
+/// A refusal means the firmware's transmit table is full, and at 62.5 kHz a record occupies it for
+/// 603 ms. The fixed 350 ms pace was faster than the radio could drain, so every refused burst spent
+/// a serial round trip per attempt for an answer the radio had already given.
+#[test]
+fn a_refusal_on_a_slow_preset_waits_one_airtime() {
+    let mut a = Arq::new(Config {
+        airtime_ms: 600,
+        ..cfg()
+    });
+    a.send(0, b"hello").unwrap();
+    let first = a.poll(0, PLENTY);
+    assert_eq!(first.len(), 1);
+    let seq = first[0].seq;
+    assert!(a.on_refused(seq, 10));
+    assert_eq!(
+        a.poll(609, PLENTY).len(),
+        0,
+        "599 ms is short of one record's air, so nothing can have drained"
+    );
+    assert_eq!(
+        a.poll(610, PLENTY).len(),
+        1,
+        "one airtime after the refusal the table may have a slot"
+    );
+    // A fast link keeps the firmware's measured pace: the airtime is a floor, not a replacement.
+    let mut fast = Arq::new(cfg());
+    fast.send(0, b"hello").unwrap();
+    let out = fast.poll(0, PLENTY);
+    assert!(fast.on_refused(out[0].seq, 0));
+    assert!(
+        fast.poll(REFUSED_RETRY_MS - 1, PLENTY).is_empty(),
+        "the bench pace is unchanged"
+    );
+}
+
+/// **The first timeout covers the whole burst it was started for.**
+///
+/// A slot's timer starts when the record is handed to the radio, and the ARQ hands over a whole
+/// window at once. On a 0.6 s preset the last record of an eight-record burst is still on the air
+/// four seconds after the first one's timer began, so six airtimes fired before the burst had
+/// cleared: every full burst retransmitted its front.
+#[test]
+fn the_first_timeout_covers_a_whole_burst() {
+    let air = Config {
+        airtime_ms: 600,
+        // No heartbeat: this is about the retransmission timer, not the idle one.
+        heartbeat_ms: 0,
+        ..cfg()
+    };
+    // The same numbers a real session derives: window 8, RTO at least (window + 2) airtimes.
+    let cfg = Config { window: 8, ..air }.with_airtime(Some(600.0));
+    assert!(
+        cfg.rto_initial_ms >= 10 * 600,
+        "ten airtimes: the burst plus its ack, got {}",
+        cfg.rto_initial_ms
+    );
+    let mut a = Arq::new(cfg);
+    for i in 0..10u8 {
+        a.send(0, &[i; 10]).unwrap();
+    }
+    let out = a.poll(0, PLENTY);
+    assert_eq!(out.len(), 8, "one full window");
+    assert!(
+        a.poll(5_999, PLENTY).is_empty(),
+        "not retransmitted while its own burst may still be on the air"
+    );
+    let retry = a.poll(6_000, PLENTY);
+    assert_eq!(retry.len(), 1, "one retransmission, not a storm");
+    assert!(retry[0].retransmit);
+}

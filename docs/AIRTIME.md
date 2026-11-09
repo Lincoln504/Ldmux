@@ -115,6 +115,16 @@ numbers belong to the tuple.
 - **The advert is a maintenance broadcast, and it is off by default**
   (`LDMUX_MESH_ADVERT_SECS`; 3600 turns it on at ≈0.07 % of a ten-percent allowance per advert at this
   tuple). Nothing depends on it: a peer is found by the request.
+- **A retransmission timer has to cover the burst it started.** The ARQ hands a whole window to the
+  radio at once, so the first timeout is `(window + 2) × airtime` — 6 s at 62.5 kHz. A shorter one
+  fires while the burst is still going out and re-sends its front, which is a record of air for
+  nothing; a non-advancing ack still pulls a genuinely lost record early, so the longer timer costs
+  no recovery time.
+- **A refused record is re-offered at one airtime, not at a fixed 350 ms.** The refusal is the
+  firmware's transmit table being full, and the table drains a record at a time.
+- **A resync asked for while a frame is in flight is deferred, so it costs one repaint.** The phone's
+  ladder is not what makes a slow paint expensive; obeying a reset while the answer is still going
+  out is, because it queues a second full frame behind the first.
 
 ## Method notes, so the numbers can be argued with
 

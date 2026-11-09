@@ -161,7 +161,15 @@ impl Config {
         let Some(airtime) = airtime_ms.filter(|a| *a > 0.0) else {
             return self;
         };
-        let scaled = (airtime * 6.0).round() as u64;
+        // **A burst, not a record.** `sent_at` is stamped when a record is handed to the radio, not
+        // when its bytes leave, and the ARQ hands over a whole window at once. On a 0.6 s preset the
+        // last record of an eight-record burst is still on the air four seconds after the first one's
+        // timer started, so a first timeout of six airtimes fired before its own burst had cleared:
+        // every full burst retransmitted its front, and a retransmission is a record of air. The
+        // window plus the ack is the shortest interval that cannot be a duplicate. It costs nothing
+        // on a real gap, because a non-advancing ack pulls the front early (`fast_due`).
+        let burst = self.window as f64 + 2.0;
+        let scaled = (airtime * burst).round() as u64;
         self.rto_initial_ms = self.rto_initial_ms.max(scaled).min(60_000);
         // **A pure ack must not cost its own record when a little patience avoids it.** An owed ack
         // used to wait a fixed 150 ms for outgoing data and then go as a record of its own, which at
@@ -293,6 +301,19 @@ pub struct Stats {
 /// shorter than the interval for a packet that really went out and went unanswered — a refusal says
 /// "not yet", not "lost".
 pub const REFUSED_RETRY_MS: u64 = 350;
+
+impl Arq {
+    /// How long to wait before re-offering a record the radio refused.
+    ///
+    /// [`REFUSED_RETRY_MS`] is the firmware's measured drain at a bench preset; on a slower one a
+    /// record occupies the transmit table for longer than that, so asking again at 350 ms is asking
+    /// again before a slot can possibly have freed — a serial round trip per attempt for an answer
+    /// the radio has already given. The airtime is the honest floor and the constant is the floor
+    /// for a fast link.
+    fn refused_retry_ms(&self) -> u64 {
+        REFUSED_RETRY_MS.max(self.cfg.airtime_ms)
+    }
+}
 
 /// How long one record may keep being refused before the session says the radio is not taking it.
 ///
@@ -630,7 +651,7 @@ impl Arq {
     pub fn next_deadline(&self) -> Option<u64> {
         let retx = self.inflight.front().map(|s| {
             if s.refused {
-                s.sent_at + REFUSED_RETRY_MS
+                s.sent_at + self.refused_retry_ms()
             } else {
                 s.sent_at + self.rto(s.attempts)
             }
@@ -672,9 +693,10 @@ impl Arq {
         let mut wanted = false;
 
         // 1. At most one retransmission: the oldest record, when its timer has run out.
+        let refused_retry = self.refused_retry_ms();
         let front_due = self.inflight.front().map(|s| {
             if s.refused {
-                s.sent_at + REFUSED_RETRY_MS
+                s.sent_at + refused_retry
             } else if s.fast_due {
                 // The peer proved this record is missing, so the timer is not what decides.
                 s.sent_at

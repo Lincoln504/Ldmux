@@ -1117,11 +1117,25 @@ async fn session<C: Carrier>(
                 u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
             );
         }
+        // **A refusal is put back, not dropped.** `SessionHost::send` refuses when the ARQ queue is
+        // at its ceiling, which is a moment: the bridge's differ has already counted those rows as
+        // delivered, so a dropped record is a hole the phone can only repair by asking for the whole
+        // screen again — several records to replace one. Putting the bytes back at the front keeps
+        // them in order and makes the refusal what it is, backpressure.
+        let mut refused: Vec<(u8, Vec<u8>)> = Vec::new();
         for (shell, bytes) in queued {
             if let Err(e) = h.send(shell, &bytes) {
                 set(snapshot, |s| {
                     s.last_error = Some(format!("session send refused: {e}"))
                 });
+                refused.push((shell, bytes));
+            }
+        }
+        if !refused.is_empty()
+            && let Ok(mut ex) = runtime.exchange.lock()
+        {
+            for item in refused.into_iter().rev() {
+                ex.outbound.push_front(item);
             }
         }
 
@@ -1192,6 +1206,12 @@ async fn session<C: Carrier>(
         // and the window still has room, go round again now; a poll that returns nothing falls
         // through to the normal wait, so this cannot spin.
         if sent_now > 0 && awaiting.len() < usize::from(CREDIT_WINDOW) && pending_now > 0 {
+            // **The bridge gates on `pending`, so publish it before going round again.** The
+            // snapshot used to be written only at the bottom of the loop, so a bridge tick that
+            // landed inside a burst saw the count from before it and built the next frame into a
+            // window that was already full.
+            let view = h.snapshot();
+            set(snapshot, |s| s.session = view);
             continue;
         }
 
@@ -1220,7 +1240,14 @@ async fn session<C: Carrier>(
             // waiting, so a record queued while the bridge is busy is still noticed at once.
             runtime.inbound_wake.notify_one();
         }
-        set(snapshot, |s| s.session = view);
+        // Bytes the bridge queued and this loop has not handed to the ARQ yet are records the link
+        // still owes; counting them here is what stops the bridge building a frame into a queue it
+        // cannot see. Read before the snapshot lock: the two locks are never nested in either order.
+        let waiting = runtime.exchange.lock().map_or(0, |ex| ex.outbound.len());
+        set(snapshot, |s| {
+            s.session = view;
+            s.session.pending = s.session.pending.saturating_add(waiting);
+        });
     }
 }
 
@@ -1263,6 +1290,26 @@ mod tests {
             // Never resolves: the loop must not need an event to fall through and send.
             std::future::pending().await
         }
+    }
+
+    /// **The bridge packs to the session's own payload, not to the record size.** A record carries
+    /// 24 bytes of session overhead and a 5-byte ARQ header before any application byte, and the ARQ
+    /// chunks at that ceiling. Packing to `record - 5` made the two layers disagree about what a
+    /// record is: one bridge record of more than 142 bytes became two ARQ records.
+    #[test]
+    fn the_bridge_packs_to_the_sessions_own_payload() {
+        use crate::mesh_bridge::Link as _;
+        let rt = test_runtime();
+        set(&rt.snapshot, |s| s.uplink_record_max = Some(171));
+        assert_eq!(rt.record_payload(), 142, "171 - 24 - 5");
+        set(&rt.snapshot, |s| s.uplink_record_max = Some(172));
+        assert_eq!(rt.record_payload(), 143, "the protocol's own ceiling");
+        set(&rt.snapshot, |s| s.uplink_record_max = Some(114));
+        assert_eq!(
+            rt.record_payload(),
+            85,
+            "a long path takes its bytes out of the payload"
+        );
     }
 
     fn test_runtime() -> MeshRuntime {
