@@ -150,10 +150,25 @@ class MeshTerminalSource(
     /** The mode is engaged: typing is held and the view is frozen until a sync. */
     val publicChannel: Boolean get() = hold.on
 
-    /** A sync is out and its answer has not arrived. */
+    /** A sync is out and its answer has not arrived: the view follows incoming screens. */
     val awaitingSync: Boolean get() = hold.awaiting
 
-    /** A screen the hold is keeping back, waiting for something to release it. */
+    /**
+     * A press that actually sent something is waiting for its answer.
+     *
+     * What the bar may claim. A `show` press with an empty buffer unfreezes the view but owes no
+     * answer, so "waiting for answer" about it would be a control describing a send that never
+     * happened.
+     */
+    val awaitingAnswer: Boolean get() = hold.awaiting && hold.waitingOnSend
+
+    /**
+     * A screen the hold is keeping back, waiting for something to release it.
+     *
+     * The bar draws it as "output waiting · show": without that line the two states a `show` press
+     * can be in (nothing new was sent, or a newer screen is held) read the same, so the one press
+     * that would reveal a command's output had nothing advertising it.
+     */
     val heldScreenWaiting: Boolean get() = pendingScreen != null
 
     /** When the last sync was pressed, on the same clock this class reads. */

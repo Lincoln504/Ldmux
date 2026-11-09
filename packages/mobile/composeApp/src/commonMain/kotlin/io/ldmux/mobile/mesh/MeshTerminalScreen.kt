@@ -789,6 +789,11 @@ fun MeshTerminalScreen(
     // is sent from here, so there is one place to look when it does not answer.
     val openList = {
         chosen = emptyList(); showList = true; resumeShell = ""
+        // **The grid measured here belongs to the shell being left.** `onGrid` returns early on the
+        // launcher, so a re-attach would carry the previous shell's grid — measured in chrome that
+        // may have changed — fit the pane to it, paint a full frame, and then correct itself with
+        // the real length: two full paints where one belongs.
+        scope.launch { conn.driver.forgetGrid() }
         Unit
     }
     // The notification's Disconnect, answered here as the launcher button is: let go of the shell
@@ -921,9 +926,10 @@ fun MeshTerminalScreen(
         { m ->
             PublicChannelBar(
                 summary = handle.heldSummary,
-                awaiting = source.awaitingSync,
+                awaiting = source.awaitingAnswer,
                 reported = source.answerOverdue,
                 flushing = source.flushingHeld,
+                held = source.heldScreenWaiting,
                 onSync = { source.sync() },
                 modifier = m,
             )

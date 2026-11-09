@@ -52,6 +52,16 @@ internal class PublicChannelHold {
         private set
 
     /**
+     * The last press actually sent something, so an answer is owed.
+     *
+     * Separate from [awaiting], which is the draw gate: a press with an empty buffer still unfreezes
+     * the view (the next screen is newer than the one the user asked to see) but nobody is owed an
+     * answer, and the bar must not say "waiting for answer" about a send that never happened.
+     */
+    var waitingOnSend: Boolean by mutableStateOf(false)
+        private set
+
+    /**
      * The buffer is being drained right now, so the pump may send.
      *
      * Deliberately separate from [awaiting], and the separation is load-bearing: a wait for the
@@ -98,6 +108,7 @@ internal class PublicChannelHold {
         if (on == value) return
         on = value
         awaiting = false
+        waitingOnSend = false
         flushing = false
         reported = false
     }
@@ -113,6 +124,7 @@ internal class PublicChannelHold {
      */
     fun settle() {
         awaiting = false
+        waitingOnSend = false
         reported = false
     }
 
@@ -124,6 +136,7 @@ internal class PublicChannelHold {
      */
     fun forget() {
         awaiting = false
+        waitingOnSend = false
         flushing = false
         reported = false
     }
@@ -192,6 +205,7 @@ internal class PublicChannelHold {
         if (!awaiting || lastPaintAt == 0L) return false
         if (nowMs - lastPaintAt < quietMs) return false
         awaiting = false
+        waitingOnSend = false
         reported = false
         return true
     }
@@ -206,6 +220,7 @@ internal class PublicChannelHold {
     fun answered(): Boolean {
         if (!awaiting) return false
         awaiting = false
+        waitingOnSend = false
         reported = false
         return true
     }
@@ -219,6 +234,11 @@ internal class PublicChannelHold {
      */
     fun sync(pending: Boolean, nowMs: Long = 0L): Boolean {
         if (!on) return false
+        // **A press with nothing typed unfreezes the view, but it is not a wait for an answer.**
+        // `awaiting` is the draw gate and stays true either way, because the next screen is newer
+        // than the one the user asked to see. What changes is what the bar may say: [waitingOnSend]
+        // is false, so "waiting for answer" is not claimed over a send that never happened.
+        waitingOnSend = pending
         awaiting = true
         lastPaintAt = nowMs
         // **A press never stops a drain that is already running.** `flushing = pending` cleared it

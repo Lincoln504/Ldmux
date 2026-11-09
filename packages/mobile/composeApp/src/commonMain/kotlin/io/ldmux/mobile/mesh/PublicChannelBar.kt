@@ -66,6 +66,8 @@ internal fun PublicChannelBar(
     flushing: Boolean,
     onSync: () -> Unit,
     modifier: Modifier = Modifier,
+    /** A newer screen is being kept unread: `show` would draw it. */
+    held: Boolean = false,
 ) {
     // **A row of the terminal's chrome, not a card floating over the shell.** Portrait puts it
     // where the key pad begins — the space above the keyboard — and landscape puts it at the
@@ -89,6 +91,13 @@ internal fun PublicChannelBar(
         // **"Nothing typed", not "nothing held".** The line sits beside a button that says `show`,
         // and the mode may still be holding a screen the host sent: what is empty here is the
         // typed buffer, which is the only thing this summary counts.
+        //
+        // **A held screen is said out loud.** `show` with nothing typed did nothing anyone could
+        // see, and the two states it can be in (the host has sent nothing since the last paint, or
+        // there is a newer screen waiting) looked identical: both read "nothing typed", so the one
+        // press that would have shown the output of a command already on the host had no
+        // advertisement at all.
+        summary.isEmpty() && held -> "output waiting · show"
         summary.isEmpty() -> "nothing typed"
         else -> summary
     }
@@ -127,6 +136,7 @@ internal fun PublicChannelBar(
                 .semantics {
                     contentDescription = when {
                         flushing -> "sending: waiting for shell screen"
+                        summary.isEmpty() && held -> "show: draw the output waiting"
                         summary.isEmpty() -> "sync: show newest screen"
                         else -> "sync: send $summary, show screen"
                     }

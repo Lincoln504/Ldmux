@@ -247,4 +247,24 @@ class PublicChannelHoldTest {
         // A marker with no wait running is not an event.
         assertFalse(h.answered(), "nothing to end")
     }
+
+    /// **A show press unfreezes the view without claiming an answer is coming.**
+    ///
+    /// `awaiting` is the draw gate and a press with an empty buffer still sets it: the next screen
+    /// is newer than the one the user asked to see. What must not be claimed is a wait for an
+    /// answer to a send that never happened — the bar said "waiting for answer" over a screen that
+    /// had already been drawn, for the whole quiet window.
+    @Test
+    fun `a press with nothing typed is not a wait for an answer`() {
+        val h = PublicChannelHold()
+        h.set(true)
+        assertTrue(h.sync(pending = true, nowMs = 1_000))
+        assertTrue(h.waitingOnSend, "something was sent, so an answer is owed")
+        assertTrue(h.answered())
+        assertFalse(h.waitingOnSend, "the answer ended it")
+
+        assertFalse(h.sync(pending = false, nowMs = 2_000), "nothing to send")
+        assertTrue(h.awaiting, "the view still follows the next screen")
+        assertFalse(h.waitingOnSend, "but no answer is owed")
+    }
 }
