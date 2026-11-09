@@ -105,7 +105,18 @@ fun IconBtn(
             // 9sp and the quiet grey: this sits under a glyph inside a control the size of a
             // key, so it has to stay small — but 8sp was under the size at which the shapes
             // survive at all, and it is still read, not decoration.
-            Text(caption, color = Muted, fontFamily = MonoFont, fontSize = 9.sp)
+            // **`Dim` on a filled button.** `Muted` on `Raised` is 4.41:1 in Dark, 4.16:1 in
+            // Daybreak and 4.46:1 in Nerv — under the 4.5:1 body-text floor, and 9 sp gets no
+            // large-text allowance. `Theme.kt` says in so many words that nothing draws `Muted` on
+            // `Raised` for exactly this reason; the caption was the one path that ignored it, and
+            // it only stayed invisible because no caller passes a caption *and* `filled` today.
+            // `Dim` on `Raised` is 8.96-11.59:1.
+            Text(
+                caption,
+                color = if (filled) Dim else Muted,
+                fontFamily = MonoFont,
+                fontSize = 9.sp,
+            )
         }
     }
 }

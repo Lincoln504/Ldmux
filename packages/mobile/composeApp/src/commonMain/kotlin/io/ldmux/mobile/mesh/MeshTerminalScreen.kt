@@ -884,8 +884,15 @@ fun MeshTerminalScreen(
     // back underneath, so this is a pause drawn as a pause.
     // The last whole screen, kept across connections by the screen rather than by the source, so a
     // rebuild can re-show it into a fresh source without carrying anything addressed to a session.
-    var heldScreen by remember(plan) { mutableStateOf<MeshScreen?>(null) }
-    LaunchedEffect(source, view) { meshScreenToShow(view)?.let { heldScreen = it } }
+    // **The shell id travels with the screen.** `heldScreen` is kept across connections, and a
+    // rebuild can land on a *different* shell than the one whose rows it holds: showing it then drew
+    // one shell's terminal under another's page header, which is exactly what `show(screen, shell)`
+    // exists to prevent.
+    var heldScreen by remember(plan) { mutableStateOf<Pair<String, MeshScreen>?>(null) }
+    LaunchedEffect(source, view, shells.current) {
+        val shell = shells.current ?: return@LaunchedEffect
+        meshScreenToShow(view)?.let { heldScreen = shell to it }
+    }
     val holding = !terminalLive && !showList && resumeShell.isNotEmpty() && heldScreen != null &&
         (view is MeshTermView.LinkDown || view is MeshTermView.Handshaking || view is MeshTermView.Idle)
 
@@ -977,11 +984,15 @@ fun MeshTerminalScreen(
                 // for the one on screen.
                 val keep = heldScreen.takeIf { view is MeshTermView.LinkDown }
                 val handshaking = view is MeshTermView.Handshaking || view is MeshTermView.NoAnswer
-                LaunchedEffect(source, keep, shells.current, handshaking) {
+                LaunchedEffect(source, keep, handshaking) {
                     when {
-                        keep != null -> source.show(keep, shells.current)
+                        keep != null -> source.show(keep.second, keep.first)
+                        // **One owner of "a new session shows nothing".** A *shell change* is
+                        // already cleared where the held text is discarded (see `heldFor`), which
+                        // is the effect that also knows what else must go with it. Clearing here
+                        // as well made the ordering of two effects the only thing keeping it
+                        // correct.
                         handshaking -> source.clear()
-                        source.shell != null && source.shell != shells.current -> source.clear()
                     }
                 }
                 TerminalSurfaceFor(

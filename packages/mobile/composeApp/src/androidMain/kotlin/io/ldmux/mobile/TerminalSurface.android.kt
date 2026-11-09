@@ -1105,10 +1105,12 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawScrollbar(
     val pos = if (maxOffset <= 0f) 0f else (f.scrollOffset.toFloat() / maxOffset).coerceIn(0f, 1f)
     val top = (height - barH) * pos
     val x = placement.dx + placement.gridWidth - 6f
-    // The theme's foreground at a third alpha, not a hard-coded white wash: on a white page a
-    // translucent white scrollbar is a scrollbar nobody can see.
+    // **A control boundary, and the floor for one is 3:1.** This was `Dim` at 45 %, which composites
+    // to 2.15:1 on the light themes and 2.7-2.8:1 on the dark ones; `TerminalScrollbar` is the
+    // theme's foreground at half — 3.2:1 on the light themes, 3.9-4.8:1 on the dark ones — and
+    // `ThemesTest` holds every theme to it.
     drawRect(
-        color = Dim.copy(alpha = 0.45f),
+        color = TerminalScrollbar,
         topLeft = Offset(x, top),
         size = androidx.compose.ui.geometry.Size(4f, barH),
     )

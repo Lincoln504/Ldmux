@@ -45,6 +45,24 @@ val Bg: Color get() = ThemeState.theme.palette.base
  * a terminal is read at arm's length in bad light, and this is the colour that does most of the
  * reading.
  */
+/**
+ * The history scrollbar's colour: **[Fg] at a third of its strength, over the terminal's ground.**
+ *
+ * **A 4 px bar is a control boundary, and the floor for one is 3:1.** This was `Dim` at 45 % alpha,
+ * which composites to 2.15:1 on the two light themes and 2.7-2.8:1 on the dark ones — the one
+ * indicator a person scrolls the radio route with (the route deliberately has no scroll gestures)
+ * was the faintest thing on the screen. `Fg` at **half** is **3.2:1 on the light themes and 3.9-4.8:1
+ * on the dark ones** (measured per theme by `ThemesTest`; a third was still 2.15:1 on white), and it
+ * still reads as a quiet overlay rather than as a bar of text.
+ *
+ * A named accessor rather than an expression at the draw call, because `ThemesTest` has to be able
+ * to hold every theme to the floor, and a colour picked inline cannot be checked.
+ */
+val TerminalScrollbar: Color get() = Fg.copy(alpha = TERMINAL_SCROLLBAR_ALPHA)
+
+/** The scrollbar's alpha, named so `ThemesTest` can composite the same value it draws. */
+const val TERMINAL_SCROLLBAR_ALPHA = 0.5f
+
 val Fg: Color get() = ThemeState.theme.palette.fg
 
 /**

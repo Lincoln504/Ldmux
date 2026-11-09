@@ -860,7 +860,14 @@ class MeshTermDriver(
         val (cols, rows) = wantedGrid ?: return
         val profile = mirror.profile ?: return
         if (hostVersion < MeshTerm.RESIZE_VERSION) return
-        val key = Triple(attachedId ?: mirror.shell, cols, rows)
+        // **Nothing is fitted while nothing is attached.** On the launcher `mirror` still holds the
+        // last shell's profile, and the surface measures a new grid as the keyboard closes: that
+        // sent a `Resize` for a shell this link no longer holds — a record of airtime for a message
+        // the host drops on the floor (measured on the device 2026-11-09: one record per trip back
+        // to the list). `Pick.Attached` keeps the case where an empty-selector attach has not yet
+        // named the shell.
+        val shell = attachedId ?: mirror.shell.takeIf { pick == Pick.Attached } ?: return
+        val key = Triple(shell, cols, rows)
         // This exact grid for this exact shell is already on its way.
         if (requestedFit == key) return
         // Nothing has been asked for on this connection and the host already fits: the first

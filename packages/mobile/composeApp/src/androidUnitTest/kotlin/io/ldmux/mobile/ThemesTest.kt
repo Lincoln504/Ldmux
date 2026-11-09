@@ -94,6 +94,59 @@ class ThemesTest {
         }
     }
 
+    /**
+     * **The history scrollbar is a control boundary, so it has a 3:1 floor.**
+     *
+     * It was `Dim` at 45 %, which composites to 2.15:1 on the two light themes and 2.7-2.8:1 on the
+     * dark ones — the one indicator a person scrolls the radio route with, because that route
+     * deliberately has no scroll gestures. `TerminalScrollbar` is the theme's foreground at half;
+     * this is the arithmetic that says it clears the floor on every theme, not just the one that
+     * happened to be on screen. (A third, the first attempt, was 2.15:1 on white — which is why the
+     * assertion is per theme and arithmetic rather than a judgement from a screenshot.)
+     */
+    @Test
+    fun theHistoryScrollbarIsVisibleOnEveryTheme() {
+        for (theme in LdmuxTheme.entries) {
+            val t = theme.palette.terminal
+            val over = composite(theme.palette.fg, TERMINAL_SCROLLBAR_ALPHA, t.background)
+            val ratio = contrast(over, t.background)
+            assertTrue(
+                ratio >= 3.0,
+                "${theme.label}: the scrollbar is ${"%.2f".format(ratio)}:1 on the shell's ground, below 3:1",
+            )
+        }
+    }
+
+    /** The same arithmetic for the old value, so the finding above stays checkable. */
+    @Test
+    fun theOldScrollbarColourWouldHaveFailedOnEveryTheme() {
+        val failures = LdmuxTheme.entries.count { theme ->
+            val over = composite(theme.palette.dim, 0.45f, theme.palette.terminal.background)
+            contrast(over, theme.palette.terminal.background) < 3.0
+        }
+        assertEquals(
+            LdmuxTheme.entries.size,
+            failures,
+            "every theme was under the floor, which is why the colour changed rather than one theme",
+        )
+    }
+
+    /** A caption on a `filled` icon button is `Dim`, never `Muted`: 4.16-4.46:1 is under 4.5. */
+    @Test
+    fun aCaptionOnAFilledControlReadsItsOwnFill() {
+        for (theme in LdmuxTheme.entries) {
+            val p = theme.palette
+            val dim = contrast(p.dim, p.raised)
+            assertTrue(dim >= 4.5, "${theme.label}: Dim on Raised is ${"%.2f".format(dim)}:1")
+        }
+    }
+
+    /** [over] at [alpha] composited onto [under], as the canvas would. */
+    private fun composite(over: Color, alpha: Float, under: Color): Color {
+        fun mix(a: Float, b: Float) = a * alpha + b * (1f - alpha)
+        return Color(mix(over.red, under.red), mix(over.green, under.green), mix(over.blue, under.blue))
+    }
+
     /** `Color` as `0xAARRGGBB`, without depending on the Android-only `toArgb` in a JVM test. */
     private fun argb(c: Color): Int {
         fun ch(v: Float) = (v.coerceIn(0f, 1f) * 255f).toInt() and 0xFF
