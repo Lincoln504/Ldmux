@@ -483,11 +483,18 @@ class MeshTerminalSource(
         if (screen != notedScreen) history.note(notedScreen ?: previous, screen)
         notedScreen = screen
         if (engine == null || c != cols || r != rows) {
+            val reflow = engine != null && c != cols
             engine?.close()
             engine = newEngine(c, r)
             cols = c
             rows = r
-            history.toBottom()
+            // **A width change is a reflow; a height change is not a reason to leave history.** The
+            // view used to go to the live bottom whenever either changed, so a shell whose last row
+            // appeared and disappeared (a prompt, a status line) yanked the operator out of the
+            // history they had scrolled to — measured on the device 2026-11-09 as `offset 33` then
+            // `offset 0` two screens later. The offset counts rows above the live bottom, and
+            // `window()` clamps it, so a shorter grid keeps the position it can.
+            if (reflow) history.toBottom()
             hasSelection = false
         }
         last = screen

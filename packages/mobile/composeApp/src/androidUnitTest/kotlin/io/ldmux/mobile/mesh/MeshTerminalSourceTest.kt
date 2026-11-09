@@ -56,6 +56,72 @@ class MeshTerminalSourceTest {
     /// screen to draw — and `show` used to return early on exactly that condition. The button did
     /// nothing at all on a batch shell (measured 2026-11-09), and the operator concluded the link
     /// was dead. Releasing the host is what makes the press mean "show me the shell now".
+    /// **A screen with one row more or less does not throw the operator out of history.**
+    ///
+    /// The view used to return to the live bottom whenever the grid changed at all, so a shell
+    /// whose last row came and went — a prompt, a status line — yanked a reader back to live two
+    /// screens after they scrolled up (measured on the device 2026-11-09: offset 33, then offset 0).
+    /// The offset counts rows above the live bottom and the window clamps it, so a height change
+    /// keeps the position; only a *width* change is a reflow that invalidates it.
+    @Test
+    fun `a height change keeps the view where the operator put it`() {
+        val (s, _, _) = source()
+        s.show(
+            MeshScreen(
+                listOf("a", "b", "c", "d"), 0, 3,
+                alternate = false, dead = false, epoch = 1, cols = 20, firstLine = 10,
+            ),
+            "aa11",
+        )
+        s.show(
+            MeshScreen(
+                listOf("c", "d", "e", "f"), 0, 3,
+                alternate = false, dead = false, epoch = 2, cols = 20, firstLine = 12,
+            ),
+            "aa11",
+        )
+        assertEquals(-2, s.scrollBy(-2), "two rows of history to read")
+        assertEquals(2, s.scrolledRows)
+        // One row shorter, same width: a prompt line came or went.
+        s.show(
+            MeshScreen(
+                listOf("d", "e", "f"), 0, 2,
+                alternate = false, dead = false, epoch = 3, cols = 20, firstLine = 13,
+            ),
+            "aa11",
+        )
+        assertEquals(2, s.scrolledRows, "still reading history after a height change")
+    }
+
+    /// **A width change is a reflow, and the view starts again at the live screen.**
+    @Test
+    fun `a width change returns the view to live`() {
+        val (s, _, _) = source()
+        s.show(
+            MeshScreen(
+                listOf("a", "b", "c"), 0, 2,
+                alternate = false, dead = false, epoch = 1, cols = 20, firstLine = 10,
+            ),
+            "aa11",
+        )
+        s.show(
+            MeshScreen(
+                listOf("c", "d", "e"), 0, 2,
+                alternate = false, dead = false, epoch = 2, cols = 20, firstLine = 12,
+            ),
+            "aa11",
+        )
+        assertEquals(-2, s.scrollBy(-2))
+        s.show(
+            MeshScreen(
+                listOf("d", "e", "f"), 0, 2,
+                alternate = false, dead = false, epoch = 3, cols = 30, firstLine = 13,
+            ),
+            "aa11",
+        )
+        assertEquals(0, s.scrolledRows, "a reflow starts again at the live screen")
+    }
+
     /// **An up key with no history asks the host for the page above.**
     ///
     /// The keeper holds the pane's history and the link carries only the live screen, so "no
