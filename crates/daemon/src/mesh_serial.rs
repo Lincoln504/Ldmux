@@ -1263,36 +1263,18 @@ fn serve_loop<L: ByteLink>(
                     // peer for a route: the reply is one direct record and it crosses whatever
                     // distance the mesh actually carries, which an advert does not (a repeater
                     // drops an advert after 8 hops by default).
-                    // **An existing route is not a working route.** The peer may have moved since
-                    // the advert that taught it; a request is one flood and its reply re-establishes
-                    // both directions, so a route older than `PEER_ROUTE_STALE` is asked about again
-                    // rather than trusted until something fails.
-                    let route_stale = peer_path_heard
-                        .is_none_or(|t| t.elapsed() >= PEER_ROUTE_STALE);
-                    if (peer_path.is_none() || route_stale)
-                        && let Some(peer) = peer_radio
-                        && last_ping.is_none_or(|t| t.elapsed() >= PEER_PING_FLOOR)
-                        && left(budget, sent) != Some(0)
-                    {
-                        last_ping = Some(Instant::now());
-                        let ok = send_route_request(
-                            &mut companion,
-                            &settings.preset.public_key,
-                            settings.hash_size,
-                            &peer,
-                            scope.as_ref(),
-                        );
-                        route_log_rare(
-                            &mut last_ping_log,
-                            &format!("request sent (no route) ok={ok}"),
-                        );
-                        if ok {
-                            sent = sent.saturating_add(1);
-                            if let Some(path) = settings.window_record.as_deref() {
-                                save_window(path, window_start_unix, sent);
-                            }
-                        }
-                    }
+                    // **The host does not ask for a route, because nothing can answer it.**
+                    //
+                    // A route request is a flooded `REQ` payload, and the only end that parses one
+                    // is the daemon's own reader: the phone's `RadioRoute` builds requests and
+                    // parses *replies*, and a `REQ` never reaches it as a raw record. So a request
+                    // sent from here was a dead letter — one flood plus a neighbourhood's forwarding
+                    // every `PEER_PING_FLOOR` (no route) and every `PEER_ROUTE_STALE`, answered by
+                    // nobody, for as long as the daemon ran without a phone in range.
+                    //
+                    // The route comes from the phone's own request (this end answers it directly, and
+                    // the request's path is the way back), and freshness now comes from a record
+                    // actually arriving. A host with no route and no traffic to send needs neither.
                 }
                 // The countdown, refreshed while the link is idle. Not a transmission: it is a
                 // message to this process only, and it is what lets the session see the hour roll
@@ -1713,6 +1695,14 @@ fn serve_loop<L: ByteLink>(
                         {
                             last_route_ask = Some(Instant::now());
                             refresh_peer_route(&mut companion, peer_radio.as_ref(), &mut peer_path, &mut peer_path_heard);
+                        }
+                        // **A record that arrived on the path is the proof the path works.** Nothing
+                        // stamped this before, so `route_stale` aged out on a link that was busy in
+                        // both directions, and the host re-flooded a route request every
+                        // `PEER_ROUTE_STALE` for no reason. Arrival is stronger evidence than any
+                        // timer: the peer's own record came down this path.
+                        if peer_path.is_some() {
+                            peer_path_heard = Some(Instant::now());
                         }
                         if events
                             .blocking_send(Ok(Event::Recv(incoming.record)))

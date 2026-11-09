@@ -380,10 +380,17 @@ fn print_mesh_session(v: &serde_json::Value) {
         number("handshakes"),
         number("handshakesRefused")
     );
+    let fast = number("fastRetransmits");
     println!(
-        "  records      {} sent, {} retransmitted, {} dropped, {} pending",
+        "  records      {} sent, {} retransmitted{}{}, {} dropped, {} pending",
         number("sent"),
         number("retransmits"),
+        if fast > 0 { ", " } else { "" },
+        if fast > 0 {
+            format!("{fast} of them pulled early by the peer's own ack")
+        } else {
+            String::new()
+        },
         number("dropped"),
         number("pending")
     );

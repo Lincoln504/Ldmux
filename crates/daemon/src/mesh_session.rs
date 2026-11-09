@@ -52,6 +52,8 @@ pub struct SessionSnapshot {
     pub handshakes_refused: u32,
     pub sent: u32,
     pub retransmits: u32,
+    /// Of those retransmissions, the ones the peer's own ack pulled early rather than a timer.
+    pub fast_retransmits: u32,
     pub received_bytes: u64,
     pub dropped: u32,
     pub pending: usize,
@@ -77,6 +79,7 @@ impl SessionSnapshot {
             "handshakesRefused": self.handshakes_refused,
             "sent": self.sent,
             "retransmits": self.retransmits,
+            "fastRetransmits": self.fast_retransmits,
             "receivedBytes": self.received_bytes,
             "dropped": self.dropped,
             "pending": self.pending,
@@ -319,9 +322,13 @@ impl SessionHost {
         if let Some(session) = self.session.as_mut() {
             // A handshake reply still waiting for budget must not be overtaken by data.
             if self.outbox.is_empty() {
+                // **The slot count is not the budget.** Passing `budget` for both told the ARQ there
+                // was no room for a retransmission, a pure ack or the close once the hour was spent —
+                // traffic the ARQ deliberately does not charge — so a spent EU budget stalled the
+                // link instead of just the new data. The phone already passes them separately.
                 let rest = Limits {
                     records_left: budget,
-                    l2_slots: budget,
+                    l2_slots: data_slots,
                 };
                 match session.poll_with_seq(now_ms, rest) {
                     Ok(records) => out.extend(records),
@@ -391,6 +398,7 @@ impl SessionHost {
             handshakes_refused: self.refused,
             sent: stats.sent,
             retransmits: stats.retransmits,
+            fast_retransmits: stats.fast_retransmits,
             received_bytes: stats.delivered_bytes,
             dropped: self.session.as_ref().map_or(0, |s| s.dropped),
             pending: self.session.as_ref().map_or(0, |s| s.arq().pending()),

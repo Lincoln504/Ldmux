@@ -98,6 +98,12 @@ pub struct Config {
     pub max_attempts: u8,
     /// How long an owed acknowledgement may wait for outgoing data to ride on.
     pub ack_delay_ms: u64,
+    /// One record's airtime, when the caller knows it; **0 means unknown**.
+    ///
+    /// Used only as the floor for a fast retransmission: a record that has demonstrably not arrived
+    /// is re-sent early, but never sooner than it could still be in the air on its first
+    /// transmission, because that would put two copies on the air for nothing.
+    pub airtime_ms: u64,
     /// How long an idle link may stay silent before it says something; **0 means never**.
     ///
     /// Silence is how both ends decide the other is gone, but only while something is
@@ -135,6 +141,7 @@ impl Config {
             rto_max_ms: 30_000,
             max_attempts: 5,
             ack_delay_ms: 150,
+            airtime_ms: 0,
             heartbeat_ms: 0,
             queue_max: 64,
             max_payload,
@@ -163,6 +170,7 @@ impl Config {
         // before anything is retransmitted (`rto_initial` is ≥ 6 airtimes), so the window never
         // stalls on it, and in the common case the next frame's data carries the ack instead.
         self.ack_delay_ms = self.ack_delay_ms.max(self.rto_initial_ms / 3).min(self.rto_max_ms / 2);
+        self.airtime_ms = airtime.round() as u64;
         let cap = (airtime * 40.0).round() as u64;
         self.rto_max_ms = self.rto_max_ms.max(cap).min(600_000);
         self
@@ -267,6 +275,8 @@ pub struct Limits {
 pub struct Stats {
     pub sent: u32,
     pub retransmits: u32,
+    /// Retransmissions pulled early by the peer's own non-advancing ack, rather than by a timer.
+    pub fast_retransmits: u32,
     pub delivered_bytes: u64,
     pub duplicates: u32,
     pub out_of_window: u32,
@@ -308,6 +318,9 @@ struct Slot {
     /// When this slot's refusal run began, so a radio that never takes the record fails the
     /// session after [`REFUSAL_DEADLINE_MS`] instead of retrying it forever.
     refused_since: Option<u64>,
+    /// The peer's own acknowledgement proved this record has not arrived, so it may be re-sent
+    /// ahead of its timer.
+    fast_due: bool,
 }
 
 pub struct Arq {
@@ -319,6 +332,8 @@ pub struct Arq {
     /// Out-of-order data held until the gap fills, keyed by distance from `next_expected`.
     held: Vec<Option<(u8, Vec<u8>)>>,
     ack_owed_since: Option<u64>,
+    /// The owed ack comes from a **gap**, so it goes out at once rather than riding outgoing data.
+    ack_urgent: bool,
     /// When something was last sent, for the heartbeat. `None` before the first record.
     last_sent_at: Option<u64>,
     /// Smoothed round-trip estimate, in milliseconds, from first-transmission acks only.
@@ -358,6 +373,7 @@ impl Arq {
             next_expected: 0,
             held: vec![None; usize::from(MAX_WINDOW)],
             ack_owed_since: None,
+            ack_urgent: false,
             last_sent_at: None,
             srtt_ms: None,
             next_mark: 0,
@@ -473,6 +489,13 @@ impl Arq {
         } else {
             self.stats.out_of_window += 1;
         }
+        // **A gap's ack does not wait.** An ack owed by in-order data rides the next outgoing record,
+        // which is what `ack_delay` is for. An ack owed because a record was *held* is the one ack
+        // that carries information the sender is waiting on, so it goes at once: same record, sent
+        // earlier, and it is what lets the sender retransmit the gap in half the time.
+        if ahead != 0 && ahead < 0x8000 {
+            self.ack_urgent = true;
+        }
         // New data, a duplicate or a gap all leave an ack owed; one flag, not one per record.
         self.ack_owed_since.get_or_insert(now_ms);
         out
@@ -505,6 +528,27 @@ impl Arq {
         let acked = ack.wrapping_sub(base);
         if usize::from(acked) > self.inflight.len() || acked >= 0x8000 {
             self.stats.bad_acks += 1;
+            return;
+        }
+        if acked == 0 {
+            // **A cumulative ack that does not advance is evidence, and it used to be thrown away.**
+            //
+            // The peer only owes an ack because a record arrived. If that record had been the front,
+            // this ack would have advanced. So the front was absent when the ack was built, and
+            // waiting out the retransmission timer afterwards is waiting on a die that already fell:
+            // measured at the public preset, that wait was 0.7 s of the 4.3 s a gap cost.
+            //
+            // The floor is what keeps a merely *late* record from being sent twice: `srtt/2` is the
+            // measured one-way time including every repeater's forward delay, so a slow path raises
+            // its own floor, and one airtime is the hard minimum before any RTT exists.
+            let floor = self.fast_retx_floor();
+            if let Some(front) = self
+                .inflight
+                .front_mut()
+                .filter(|s| !s.refused && now_ms.saturating_sub(s.sent_at) >= floor)
+            {
+                front.fast_due = true;
+            }
             return;
         }
         if acked > 0 {
@@ -555,6 +599,18 @@ impl Arq {
         // bounds "this radio is not taking this record", not "the radio is busy right now".
         slot.refused_since.get_or_insert(now_ms);
         true
+    }
+
+    /// How long a record must have been outstanding before a non-advancing ack may pull it early.
+    ///
+    /// `max(one airtime, srtt/2)`. The half-round-trip term is the honest one: it is the measured
+    /// time for a record to reach the peer by *this* path, repeaters included, so a long path
+    /// raises its own floor instead of being punished for being long. One airtime is the floor
+    /// before any sample exists, and also the floor for a link so lossy that only first
+    /// transmissions are sampled (Karn's rule), which is exactly a link with many gaps.
+    fn fast_retx_floor(&self) -> u64 {
+        let rtt = self.srtt_ms.map_or(0, |s| s / 2);
+        self.cfg.airtime_ms.max(rtt).max(200)
     }
 
     /// The retry interval for a slot that has been sent `attempts` times.
@@ -619,6 +675,9 @@ impl Arq {
         let front_due = self.inflight.front().map(|s| {
             if s.refused {
                 s.sent_at + REFUSED_RETRY_MS
+            } else if s.fast_due {
+                // The peer proved this record is missing, so the timer is not what decides.
+                s.sent_at
             } else {
                 s.sent_at + self.rto(s.attempts)
             }
@@ -647,10 +706,18 @@ impl Arq {
             if usize::from(limits.l2_slots) > out.len() {
                 let ack = self.next_expected;
                 let front = self.inflight.front_mut().expect("checked above");
+                // **A fast retransmission is a transmission.** It counts an attempt, so five of them
+                // still end the session instead of looping for ever, and it clears the flag so the
+                // next non-advancing ack has to clear the floor again before pulling it a second time.
+                let fast = front.fast_due;
                 front.attempts += 1;
                 front.sent_at = now_ms;
                 front.refused = false;
                 front.refused_since = None;
+                front.fast_due = false;
+                if fast {
+                    self.stats.fast_retransmits += 1;
+                }
                 out.push(Outgoing {
                     kind: Kind::Data,
                     seq: front.seq,
@@ -695,6 +762,7 @@ impl Arq {
                 sent_at: now_ms,
                 refused: false,
                 refused_since: None,
+                fast_due: false,
             });
             out.push(Outgoing {
                 kind: Kind::Data,
@@ -711,7 +779,7 @@ impl Arq {
         if out.is_empty()
             && self
                 .ack_owed_since
-                .is_some_and(|t| now_ms >= t + self.cfg.ack_delay_ms)
+                .is_some_and(|t| now_ms >= t + if self.ack_urgent { 0 } else { self.cfg.ack_delay_ms })
         {
             wanted = true;
             if limits.l2_slots > 0 {
@@ -760,6 +828,7 @@ impl Arq {
                 self.next_mark = self.next_mark.wrapping_add(1);
             }
             self.ack_owed_since = None;
+            self.ack_urgent = false;
             self.last_sent_at = Some(now_ms);
             self.stats.sent += out.len() as u32;
         }

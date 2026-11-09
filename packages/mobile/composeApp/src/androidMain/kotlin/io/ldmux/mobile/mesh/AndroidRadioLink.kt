@@ -264,7 +264,6 @@ class AndroidRadioLink(
      * "never configured", asked for two, and the panel then said the radio "keeps its own path
      * width".
      */
-    private val widthPrefs = context.getSharedPreferences("ldmux_radio_width", Context.MODE_PRIVATE)
     private val airtimeKeyStart = "window_start_$address"
     private val airtimeKeyUsed = "used_ms_$address"
     private var airtimeWindowStartMs: Long = airtimePrefs.getLong(airtimeKeyStart, 0L)
@@ -356,6 +355,12 @@ class AndroidRadioLink(
                 adoptRoute(it, "reply")
                 return
             }
+            // **A record that arrived on the path is proof the path works.** Nothing stamped this
+            // before, so `routeIsFresh` aged out on a link that was carrying traffic in both
+            // directions, and the path-refresh loop then re-flooded a route request every ten
+            // seconds on a working link. Arrival is stronger evidence than any timer: the host's own
+            // record came down this path.
+            if (advertPath != null) routeHeardAt = System.currentTimeMillis()
             if (!inbox.trySend(payload).isSuccess) {
                 appLog("mesh radio inbox full, dropping one raw record")
             }
@@ -551,31 +556,23 @@ class AndroidRadioLink(
             // radio has - asked here, after the tracked contact query has settled, so it cannot
             // race the one answer window the companion has.
             if (s.isIdle()) s.requestBatteryStorage()
-            // **Two bytes per path hop, unless this radio was deliberately set otherwise.** The
-            // firmware ships at mode 0 (one byte), indistinguishable from "never configured": 254
-            // usable values collide at ≈20 co-channel repeaters, and a collision makes two
-            // repeaters forward a direct message meant for one of them. Two bytes still allows 32
-            // hops, above every observed regional path length. Only mode 0 is upgraded, once per
-            // bind; a radio an operator set to three bytes keeps it.
+            // **The radio's path width is the radio's, and this end does not write it.**
             //
-            // This is the radio's *own* advert width — it forwards whatever width arrives either
-            // way — and it is the same rule the daemon applies to the host's radio.
-            // **Asked here, not only from the settings panel.** `deviceInfo` used to be filled by
-            // the radio page, so on a fresh start this check saw nothing and the upgrade never ran.
-            // One `DEVICE_QUERY` per connect is the price of knowing a fact about the radio that
-            // decides how many neighbours it can name.
-            val info = deviceInfo.value ?: readDeviceInfo()
-            // Once per radio, and never over a width somebody chose: the flag is set by this
-            // upgrade and by every deliberate write in `applyPreset`.
-            val widthConfigured = widthPrefs.getBoolean(address, false)
-            if (info != null && info.pathHashMode == 0 && !widthConfigured && s.isIdle()) {
-                s.setPathHashMode(DEFAULT_PATH_HASH_MODE)
-                withTimeoutOrNull(PATH_MODE_SETTLE_MS) { while (!s.isIdle()) delay(10) }
-                widthPrefs.edit().putBoolean(address, true).apply()
-                // A refusal is not a failure: `currentPreset` still reports two bytes for ldmux's
-                // own sends, and the radio's advert keeps its old width.
-                appLog("mesh radio was on one-byte paths; asked for two")
-            }
+            // It used to raise a radio reporting mode 0 to two bytes, on the argument that 254
+            // one-byte hashes collide at about twenty co-channel repeaters. That argument is real
+            // and it is not ours to act on: ldmux is optimising for the **public MeshCore mesh**,
+            // where one byte is the convention every client and repeater shares, and a node that
+            // quietly widens itself pays a byte per hop in every record it sends for a property only
+            // its neighbours see. The daemon follows the radio too, so the two ends of one channel
+            // agree about the width by construction rather than by both writing it.
+            //
+            // An operator who wants two or three bytes sets it in their own MeshCore app, or
+            // explicitly through `applyPreset`, which is now the only writer.
+            //
+            // **The query is still asked.** `deviceInfo` used to be filled only by the radio page,
+            // so on a fresh start nothing knew the radio's width and no preset readout could say it;
+            // one `DEVICE_QUERY` per connect is the price of knowing a fact about the radio.
+            if (deviceInfo.value == null) readDeviceInfo()
             // **Set the radio's clock**, because that clock is what stamps every advert it hears and
             // this end reads those stamps as route ages. A companion boots at zero, so without this
             // every route would look as old as the epoch and a cache answer could never be judged.
@@ -768,7 +765,6 @@ class AndroidRadioLink(
             } else {
                 // **Recorded before the reconnect**, which re-reads the radio: a one-byte width
                 // written here must not be mistaken for the factory default and upgraded back.
-                widthPrefs.edit().putBoolean(address, true).apply()
             }
             withTimeoutOrNull(PRESET_COMMAND_WAIT_MS) { while (!s.isIdle()) delay(25) }
         }
@@ -920,14 +916,6 @@ class AndroidRadioLink(
         s.deviceQuery(3)
         return withTimeoutOrNull(DEVICE_INFO_WAIT_MS) { again.await() }
     }
-
-    /**
-     * The path-hash width ldmux puts a radio on when it has never been configured: two bytes.
-     *
-     * One byte is the firmware's factory default and the legacy width, and the 2026 MeshCore
-     * guidance is explicit that new deployments should not use it. Two bytes is still 32 hops.
-     */
-    private val DEFAULT_PATH_HASH_MODE = 1
 
     private fun currentPreset(): RadioPreset {
         val s = selfInfo.value ?: return RadioPreset.BENCH

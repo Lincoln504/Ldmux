@@ -16,6 +16,7 @@ fn cfg() -> Config {
         rto_max_ms: 8_000,
         max_attempts: 4,
         ack_delay_ms: 100,
+        airtime_ms: 0,
         queue_max: 16,
         max_payload: 10,
     }
@@ -687,3 +688,106 @@ fn queued_bytes_fall_as_records_are_delivered() {
     assert_eq!(a.queued_bytes(), 0, "delivered bytes are no longer held");
     assert_eq!(a.pending(), 0);
 }
+
+/// A config whose airtime is known, so the fast-retransmit floor is real rather than a default.
+fn cfg_air() -> Config {
+    Config {
+        airtime_ms: 600,
+        ..cfg()
+    }
+}
+
+/// **A cumulative ack that does not advance retransmits the front without waiting for the timer.**
+///
+/// The peer only owes an ack because a record arrived; if that record were the front, the ack would
+/// have advanced. So a non-advancing ack is proof the front is missing, and the timer is a die that
+/// has already fallen — 0.7 s of the 4.3 s a gap cost at the public preset.
+#[test]
+fn a_non_advancing_ack_retransmits_the_front_before_the_timer() {
+    let (mut a, mut b) = (Arq::new(cfg_air()), Arq::new(cfg_air()));
+    a.send(0, b"AAAAAAAAAA").unwrap();
+    a.send(0, b"BBBBBBBBBB").unwrap();
+    let out = a.poll(0, PLENTY);
+    // Record 0 is lost; record 1 arrives and is held, so the peer's ack stays at 0.
+    let gap_ack = b.on_incoming(5, &inc(&out[1]));
+    assert!(gap_ack.is_empty());
+    let held = b.poll(5, PLENTY);
+    assert_eq!(held.len(), 1, "the gap owes an ack");
+    assert_eq!(held[0].ack, 0, "cumulative: nothing advanced");
+    // The floor here is one airtime (600 ms), because no RTT has been sampled yet.
+    a.on_incoming(700, &inc(&held[0]));
+    let fast = a.poll(700, PLENTY);
+    assert_eq!(fast.len(), 1, "the front is re-sent before its 1 s timer: {fast:?}");
+    assert!(fast[0].retransmit);
+    assert_eq!(fast[0].seq, 0);
+    assert_eq!(a.stats().fast_retransmits, 1);
+    // And the gap fills in order.
+    let got = b.on_incoming(1_200, &inc(&fast[0]));
+    assert_eq!(bytes(&got), b"AAAAAAAAAABBBBBBBBBB");
+}
+
+/// **A late record is not a lost one.** Inside the floor, the same evidence must not pull the front:
+/// the record may still be in the air, and a second copy would be airtime spent twice.
+#[test]
+fn a_merely_late_record_is_not_retransmitted_before_the_floor() {
+    let (mut a, mut b) = (Arq::new(cfg_air()), Arq::new(cfg_air()));
+    a.send(0, b"AAAAAAAAAA").unwrap();
+    a.send(0, b"BBBBBBBBBB").unwrap();
+    let out = a.poll(0, PLENTY);
+    b.on_incoming(5, &inc(&out[1]));
+    let held = b.poll(5, PLENTY);
+    // 599 ms after the front went out: one millisecond short of one airtime.
+    a.on_incoming(599, &inc(&held[0]));
+    assert!(
+        a.poll(599, PLENTY).is_empty(),
+        "a record that may still be in the air is not re-sent"
+    );
+    // The timer still repairs it, exactly as before.
+    let retx = a.poll(1_000, PLENTY);
+    assert_eq!(retx.len(), 1);
+    assert_eq!(retx[0].seq, 0);
+}
+
+/// **One pull per proof.** A duplicate of the same ack inside the floor must not send a second copy;
+/// the fast retransmission restarts the clock, so the floor has to be cleared again.
+#[test]
+fn a_stale_duplicate_ack_does_not_retransmit_twice_within_the_floor() {
+    let (mut a, mut b) = (Arq::new(cfg_air()), Arq::new(cfg_air()));
+    a.send(0, b"AAAAAAAAAA").unwrap();
+    a.send(0, b"BBBBBBBBBB").unwrap();
+    let out = a.poll(0, PLENTY);
+    b.on_incoming(5, &inc(&out[1]));
+    let held = b.poll(5, PLENTY);
+    a.on_incoming(700, &inc(&held[0]));
+    assert_eq!(a.poll(700, PLENTY).len(), 1, "the first pull");
+    // The same ack again, immediately: nothing has been re-sent long enough to be missing again.
+    a.on_incoming(750, &inc(&held[0]));
+    assert!(a.poll(750, PLENTY).is_empty(), "one retransmission per gap");
+    assert_eq!(a.stats().fast_retransmits, 1);
+}
+
+/// **A gap's ack does not wait for outgoing data**; an in-order record's ack still does.
+#[test]
+fn an_ack_owed_by_a_gap_goes_out_at_once() {
+    let (mut a, mut b) = (Arq::new(cfg_air()), Arq::new(cfg_air()));
+    a.send(0, b"AAAAAAAAAA").unwrap();
+    a.send(0, b"BBBBBBBBBB").unwrap();
+    let out = a.poll(0, PLENTY);
+    // In order: the ack waits `ack_delay_ms` (100 in this config), as it always did.
+    b.on_incoming(0, &inc(&out[0]));
+    assert!(b.poll(1, PLENTY).is_empty(), "an in-order ack rides the next record");
+    assert_eq!(b.poll(100, PLENTY).len(), 1);
+    // Out of order: the ack goes at once, because it is the sender's only evidence of the gap.
+    let mut b2 = Arq::new(cfg_air());
+    b2.on_incoming(0, &inc(&out[0]));
+    b2.poll(100, PLENTY); // the first ack has gone
+    b2.on_incoming(5, &inc(&out[0])); // a duplicate, in order
+    assert!(b2.poll(6, PLENTY).is_empty(), "a duplicate is not a gap");
+    let mut b3 = Arq::new(cfg_air());
+    b3.on_incoming(0, &inc(&out[1])); // record 1 before record 0: a gap
+    let urgent = b3.poll(1, PLENTY);
+    assert_eq!(urgent.len(), 1, "the gap's ack does not wait: {urgent:?}");
+    assert_eq!(urgent[0].kind, Kind::Ack);
+    assert_eq!(urgent[0].ack, 0);
+}
+
