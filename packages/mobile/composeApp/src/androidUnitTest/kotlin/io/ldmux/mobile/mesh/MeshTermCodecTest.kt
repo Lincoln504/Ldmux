@@ -48,6 +48,7 @@ class MeshTermCodecTest {
             "historyPage" -> TermMessage.HistoryPage(
                 i("from"),
                 o["last"]!!.jsonPrimitive.boolean,
+                o["older"]!!.jsonPrimitive.boolean,
                 o["lines"]!!.jsonArray.map { it.jsonPrimitive.content },
             )
             "detach" -> TermMessage.Detach

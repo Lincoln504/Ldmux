@@ -475,13 +475,24 @@ pub enum Message {
         rows: u8,
     },
     /// Host → phone: those lines, oldest first. **Paged**, because a screenful of 46-column rows
-    /// is more than one message body allows: `last` marks the final page, and the phone prepends
-    /// each as it arrives.
+    /// is more than one message body allows; the phone prepends each page as it arrives, in the
+    /// numbering `from` gives it.
+    ///
+    /// **Two separate facts, deliberately not one bit.** `last` ends this answer — the phone
+    /// stops waiting for more. `older` says whether the pane holds history *above* the page,
+    /// which is how the phone knows that pressing up again can fetch something, or that the
+    /// operator has reached the oldest row the shell kept. Overloading one flag with both would
+    /// either make a multi-page answer look unfinished or cost a whole record at the top of the
+    /// history to discover there is nothing above.
     HistoryPage {
-        /// The absolute line number of `lines[0]`; the host clamps what it can serve, so this may
-        /// differ from the request.
+        /// The absolute line number of `lines[0]`. The host clamps what it can serve, so this may
+        /// differ from the request — a page that cannot be placed is worse than no page, which is
+        /// why it is stated rather than implied by the request.
         from: u32,
+        /// The final page of this answer.
         last: bool,
+        /// The pane holds history above this page.
+        older: bool,
         lines: Vec<String>,
     },
 }
@@ -813,9 +824,15 @@ impl Message {
                 body.push(*rows);
                 T_HISTORY
             }
-            Self::HistoryPage { from, last, lines } => {
+            Self::HistoryPage {
+                from,
+                last,
+                older,
+                lines,
+            } => {
                 body.extend_from_slice(&from.to_le_bytes());
-                body.push(u8::from(*last));
+                // bit 0 = last, bit 1 = older; the rest must be zero, which the decoder enforces.
+                body.push(u8::from(*last) | (u8::from(*older) << 1));
                 for line in lines {
                     if line.len() > MAX_SEGMENT {
                         return Err(EncodeError::TooLong);
@@ -1062,7 +1079,12 @@ impl Message {
                     return Err(bad);
                 }
                 let from = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
-                let last = body[4] & 1 == 1;
+                let flags = body[4];
+                if flags & !0b11 != 0 {
+                    return Err(bad);
+                }
+                let last = flags & 0b01 != 0;
+                let older = flags & 0b10 != 0;
                 let mut lines = Vec::new();
                 let mut rest = &body[5..];
                 while let Some((&n, tail)) = rest.split_first() {
@@ -1079,7 +1101,12 @@ impl Message {
                     lines.push(text.to_owned());
                     rest = &tail[n..];
                 }
-                Self::HistoryPage { from, last, lines }
+                Self::HistoryPage {
+                    from,
+                    last,
+                    older,
+                    lines,
+                }
             }
             T_CREATE => {
                 let (&version, rest) = body.split_first().ok_or(bad.clone())?;
@@ -1471,6 +1498,30 @@ impl Screen {
         self.bracketed_paste = bracketed_paste;
         self
     }
+}
+
+/// **The longest prefix of a row that fits the wire**, measured in **bytes**.
+///
+/// [`MAX_SEGMENT`] is a byte limit (`message.len()` against `MAX_BODY`, and the encoder checks
+/// `line.len()`), so clamping by character count is not the same thing and lets a row of box
+/// drawing or a wide glyph through by up to four times: `─` is three bytes, and a hundred and
+/// twenty of them is 360. A row that will not encode takes the whole message with it, so this is
+/// the guarantee that a page cannot disappear because of how its text happens to be drawn.
+///
+/// Never splits a character: it stops at the last one that fits whole.
+#[must_use]
+pub fn clamp_row(line: &str) -> String {
+    if line.len() <= MAX_SEGMENT {
+        return line.to_owned();
+    }
+    let mut out = String::with_capacity(MAX_SEGMENT);
+    for ch in line.chars() {
+        if out.len() + ch.len_utf8() > MAX_SEGMENT {
+            break;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// One row as plain text: escape sequences removed, trailing spaces trimmed.
@@ -2269,6 +2320,34 @@ mod tests {
         assert_eq!(got, vec![Ok(m.clone())]);
     }
 
+    /// **The row clamp counts bytes, and the wire agrees with it.**
+    ///
+    /// A pane full of box drawing is the normal case on this client, and a row that will not
+    /// encode takes its whole message with it — so this has to be measured in bytes and stop
+    /// between characters.
+    #[test]
+    fn a_row_is_clamped_by_bytes_and_never_mid_character() {
+        assert_eq!(clamp_row("short"), "short");
+        let ascii = "x".repeat(MAX_SEGMENT);
+        assert_eq!(clamp_row(&ascii), ascii, "exactly the limit passes through");
+        assert_eq!(clamp_row(&"x".repeat(MAX_SEGMENT + 9)).len(), MAX_SEGMENT);
+
+        // Three-byte glyphs: forty of them are the limit, and the forty-first is dropped whole.
+        let clamped = clamp_row(&"─".repeat(100));
+        assert_eq!(clamped.len(), MAX_SEGMENT);
+        assert_eq!(clamped.chars().count(), MAX_SEGMENT / 3);
+        assert!(clamped.chars().all(|c| c == '─'), "no replacement characters");
+
+        // And what the clamp produces always encodes, which is the point of it.
+        let page = Message::HistoryPage {
+            from: 0,
+            last: true,
+            older: false,
+            lines: vec![clamp_row(&"─".repeat(200))],
+        };
+        assert!(page.encode().is_ok());
+    }
+
     #[test]
     fn every_message_round_trips() {
         roundtrip(&Message::Attach {
@@ -2311,7 +2390,14 @@ mod tests {
         roundtrip(&Message::HistoryPage {
             from: 1_234,
             last: true,
+            older: false,
             lines: vec!["$ ls".into(), "a.txt".into()],
+        });
+        roundtrip(&Message::HistoryPage {
+            from: 9,
+            last: false,
+            older: true,
+            lines: vec!["older".into()],
         });
         roundtrip(&Message::Detach);
         roundtrip(&Message::Profile {
@@ -3224,9 +3310,13 @@ mod tests {
             Message::WantHistory { from, rows } => {
                 json!({"kind":"wantHistory","from":from,"rows":rows})
             }
-            Message::HistoryPage { from, last, lines } => {
-                json!({"kind":"historyPage","from":from,"last":last,"lines":lines})
-            }
+            Message::HistoryPage {
+                from,
+                last,
+                older,
+                lines,
+            } => json!({
+                "kind":"historyPage","from":from,"last":last,"older":older,"lines":lines}),
             Message::Detach => json!({"kind":"detach"}),
             Message::Profile {
                 version,
@@ -3357,6 +3447,7 @@ mod tests {
             Message::HistoryPage {
                 from: 40,
                 last: true,
+                older: false,
                 lines: vec!["$ ldmux mesh status".into(), "state    ready".into()],
             },
             Message::Detach,

@@ -1124,7 +1124,7 @@ class MeshTermDriver(
     }
 
     /** Wired by the screen: a page of history arrived, oldest first. */
-    var onHistoryPage: ((List<String>) -> Unit)? = null
+    var onHistoryPage: ((TermMessage.HistoryPage) -> Unit)? = null
 
     /** Ask the host for the whole screen again. */
     suspend fun resync() = lock.withLock {
@@ -1553,7 +1553,7 @@ class MeshTermDriver(
             // **A page of the shell's own scrollback**, asked for by the up key when this client had
             // none of its own. The screen prepends it and draws it; an empty page is the host
             // saying there is nothing above.
-            is TermMessage.HistoryPage -> onHistoryPage?.invoke(m.lines)
+            is TermMessage.HistoryPage -> onHistoryPage?.invoke(m)
             // **The host has started a shell for us.** Attach to exactly that id: the list is not
             // consulted, so another client's shell cannot be picked up by accident between the
             // request and the answer.

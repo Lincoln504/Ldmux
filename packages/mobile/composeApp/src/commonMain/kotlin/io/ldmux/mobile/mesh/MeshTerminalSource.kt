@@ -769,6 +769,8 @@ class MeshTerminalSource(
             scrollNotice = if (history.size == 0) "no history yet on this link" else "start of history"
             return
         }
+        // **`rows` counts what the press wants, `want` is a page.** The host serves at most one
+        // page-sized answer per press, so a press never costs two records.
         if (awaitingHistory) return
         awaitingHistory = true
         scrollNotice = "fetching history"
@@ -794,19 +796,61 @@ class MeshTerminalSource(
      * An empty page is the host's answer that nothing is above — `last` alone cannot say that, since
      * a full page and an empty one are both "last" of their answer.
      */
-    fun prependHistory(lines: List<String>) {
+    /**
+     * **The answer to an up key: rows from the shell's own scrollback, placed where they belong.**
+     *
+     * The page states the absolute line of its first row, so it is placed by what it says rather
+     * than by what was asked for. Three cases, and all three are real:
+     * - it ends exactly at this client's oldest row (the normal case): prepend it;
+     * - it overlaps rows already held (the host served from a line this client has): trim the tail,
+     *   so nothing is shown twice;
+     * - it ends above this client's oldest row (the pane dropped those rows since the request): the
+     *   gap is named in the notice rather than spliced over, because inventing rows is worse than
+     *   showing a break.
+     *
+     * `older` says whether the pane holds more history above, so the operator learns "start of
+     * history" without spending a record to find out.
+     */
+    fun prependHistory(page: TermMessage.HistoryPage) {
         awaitingHistory = false
-        if (lines.isEmpty()) {
-            scrollNotice = "start of history"
+        // The press that asked owns its movement, once: a later page must not inherit it.
+        val advance = pendingAdvance
+        pendingAdvance = 1
+        val screen = last ?: return
+        if (page.lines.isEmpty()) {
+            // An empty answer is a fact: the pane had nothing to serve, and `older` says whether
+            // that is the top of the history or a request the host could only clamp.
+            scrollNotice = if (page.older) "history is above this" else "start of history"
             paint()
             return
         }
-        val before = history.size
-        scrollNotice = null
-        history.prepend(lines)
-        // The press that asked for the page decides how far the view moves: a page key lands on the
-        // new top, a one-row key lands one row above where it was. The page is in hand either way.
-        history.park(before + pendingAdvance)
+        // **Where the page belongs, in the host's own numbering.** `top` is the absolute line of
+        // this client's oldest held row, so rows at or above it are new and rows below it are ones
+        // already on screen. Placing by number is what makes an overlap harmless and a gap visible:
+        // the alternative, assuming every page joins, shows rows twice or splices a hole shut.
+        val top = if (screen.firstLine > 0) screen.firstLine.toInt() - history.size else 0
+        val pageEnd = page.from + page.lines.size
+        val take = (minOf(pageEnd, top) - page.from).coerceAtLeast(0)
+        val missing = (top - pageEnd).coerceAtLeast(0)
+        if (take == 0) {
+            // Every row of the page is one this client already holds, or below it.
+            scrollNotice = if (page.older) null else "start of history"
+            paint()
+            return
+        }
+        val keep = page.lines.subList(0, take)
+        scrollNotice = when {
+            missing > 0 -> "history has a gap here"
+            page.older -> null
+            else -> "start of history"
+        }
+        // `offset` is read **before** the prepend: `MeshHistory.prepend` parks itself on the new
+        // top, so asking afterwards would measure the wrong position.
+        val held = history.size
+        val was = history.offset
+        val atTop = was >= held
+        history.prepend(keep)
+        history.park(if (atTop) held + advance else was + keep.size)
         paint()
     }
 

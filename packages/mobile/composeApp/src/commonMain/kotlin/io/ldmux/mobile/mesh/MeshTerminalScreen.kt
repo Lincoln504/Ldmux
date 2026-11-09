@@ -416,7 +416,7 @@ fun MeshTerminalScreen(
         // history and the link carries only the live screen, so a shell joined late — or printed
         // while the view was frozen — has rows this client cannot have. The request names the
         // absolute line above the oldest row it holds, so a page joins what it has.
-        conn.driver.onHistoryPage = { lines -> source.prependHistory(lines) }
+        conn.driver.onHistoryPage = { page -> source.prependHistory(page) }
         source.onWantHistory = { from, rows -> scope.launch { conn.driver.wantHistory(from, rows) } }
         onDispose {
             conn.onIdle = null

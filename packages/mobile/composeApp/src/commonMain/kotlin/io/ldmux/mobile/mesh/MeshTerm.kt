@@ -313,7 +313,22 @@ sealed interface TermMessage {
      * [last] marks the final page of one answer; the phone prepends each as it arrives, so a page
      * joins the history it already holds rather than overlapping it.
      */
-    data class HistoryPage(val from: Int, val last: Boolean, val lines: List<String>) : TermMessage
+    /**
+     * Host → phone: rows from the shell's own scrollback, oldest first.
+     *
+     * [last] ends the answer; [older] says the pane holds history **above** this page, which is
+     * what tells the operator they can keep pressing up, or that they have reached the oldest row
+     * the shell kept. Two flags, because they answer two questions and one bit cannot.
+     *
+     * [from] is the absolute line of `lines[0]`: the host clamps to what the pane still has, so a
+     * page is placed by what it says rather than by what was asked for.
+     */
+    data class HistoryPage(
+        val from: Int,
+        val last: Boolean,
+        val older: Boolean,
+        val lines: List<String>,
+    ) : TermMessage
     data object Detach : TermMessage
     /** [shell] is the attached shell's id (version 2; empty from a version-1 host). */
     data class Profile(val version: Int, val cols: Int, val rows: Int, val unsupported: Int, val shell: String = "") : TermMessage
@@ -476,7 +491,8 @@ fun TermMessage.encode(): ByteArray {
         // Encoded for the fixture test's sake (the Rust side writes it); the phone only decodes it.
         is TermMessage.HistoryPage -> {
             body.addAll(u32(from, "from"))
-            body.add(if (last) 1 else 0)
+            // bit 0 = last, bit 1 = older; the decoder rejects any other bit.
+            body.add((((if (last) 1 else 0) or (if (older) 2 else 0))).toByte())
             for (line in lines) {
                 val bytes = line.encodeToByteArray()
                 if (bytes.size > MeshTerm.MAX_SEGMENT) throw TermEncodeException("history line too long")
@@ -753,7 +769,9 @@ class TermDecoder {
                 if (body.size < 5) Parsed.Bad
                 else {
                     val from = le32(body, 0)
-                    val last = body[4].toInt() and 1 == 1
+                    val flags = body[4].toInt() and 0xff
+                    val last = (flags and 1) != 0
+                    val older = (flags and 2) != 0
                     val lines = ArrayList<String>()
                     var at = 5
                     var bad = false
@@ -764,8 +782,8 @@ class TermDecoder {
                         lines.add(body.decodeToString(at, at + n))
                         at += n
                     }
-                    if (bad) Parsed.Bad
-                    else ok(TermMessage.HistoryPage(from, last, lines))
+                    if (bad || (flags and 3.inv()) != 0) Parsed.Bad
+                    else ok(TermMessage.HistoryPage(from, last, older, lines))
                 }
             }
             MeshTerm.T_DETACH -> if (body.isEmpty()) ok(TermMessage.Detach) else Parsed.Bad

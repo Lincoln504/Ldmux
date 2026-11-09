@@ -2121,11 +2121,16 @@ impl LdmuxDaemon {
                         record.ended_reason.as_deref().unwrap_or(&record.status)
                     ));
                 }
-                // Take a snapshot (the keeper's `Snapshot` message).
+                // Take a snapshot (the keeper's `Snapshot` message). **`historyLines` is a
+                // request, and dropping it silently was a bug with a long tail**: the keeper then
+                // answers with the visible screen only, and a caller that wanted scrollback gets a
+                // screen it can place and no rows above it. It is `None` unless asked, because a
+                // CLI capture must not carry a pane's whole scrollback.
+                let history_lines = params.get("historyLines").and_then(|v| v.as_u64());
                 let resp = self
                     .keeper_call(&km::KeeperMessage::Snapshot(km::Snapshot {
                         session_id: record.keeper_name.clone(),
-                        history_lines: None,
+                        history_lines,
                         drain_output: false,
                     }))
                     .await?;

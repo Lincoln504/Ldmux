@@ -149,11 +149,77 @@ class MeshTerminalSourceTest {
 
         // The page is now in hand **and the press has been honoured**: the view sits one row up,
         // which is what the press asked for. The rest of the page costs nothing more.
-        s.prependHistory(listOf("w", "x", "y", "z"))
+        s.prependHistory(page(from = 96, lines = listOf("w", "x", "y", "z"), older = true))
         assertEquals(1, s.scrolledRows, "the press moved one row, into the fetched page")
         asked = null
         assertEquals(-2, s.scrollBy(-2), "two more rows, still inside the page")
         assertEquals(null, asked, "no request for a row the page already covers")
+    }
+
+    /// A page as the host sends it: `from` is the absolute line of its first row.
+    private fun page(
+        from: Int,
+        lines: List<String>,
+        last: Boolean = true,
+        older: Boolean = false,
+    ) = TermMessage.HistoryPage(from, last, older, lines)
+
+    private fun screenOf(first: Int, vararg lines: String) = MeshScreen(
+        lines.toList(), 0, lines.lastIndex,
+        alternate = false, dead = false, epoch = 1, cols = 20, firstLine = first,
+    )
+
+    /// **A page is placed by the numbering it carries, and all three cases happen.**
+    ///
+    /// Contiguous is the normal answer. An *overlap* is the host serving from a line this client
+    /// already holds (a request made from a stale top), and showing those rows twice is worse than
+    /// showing them once. A *gap* is the pane having dropped rows since the request; the operator
+    /// is told, because splicing the page onto the older rows would quietly invent history.
+    @Test
+    fun `a page is trimmed where it overlaps and named where it leaves a gap`() {
+        val (s, _, _) = source()
+        s.show(screenOf(100, "a", "b", "c", "d"), "aa11")
+
+        // Contiguous: lines 96..99 end exactly at the live screen's first line, and the press that
+        // asked for them moves one row in.
+        s.prependHistory(page(96, listOf("w", "x", "y", "z"), older = true))
+        assertEquals(1, s.scrolledRows, "the press moved one row into the page")
+        assertNull(s.scrollNotice, "nothing to warn about, and more history above")
+
+        // Overlap: 94..97 straddles the oldest row held (96), so only 94 and 95 are new. The view
+        // is not at the top here, so it does not move: the two rows are added above it.
+        s.prependHistory(page(94, listOf("m", "n", "o", "p"), older = true))
+        assertEquals(3, s.scrolledRows, "the view stayed on its row, two rows added above it")
+
+        // A page this client already holds entirely adds nothing and moves nothing.
+        s.prependHistory(page(97, listOf("q", "r"), older = true))
+        assertEquals(3, s.scrolledRows, "nothing was added, so nothing moved")
+
+        // Gap: the oldest row held is 94 and the page ends at 90, so 86..89 join across a hole the
+        // pane has already dropped.
+        s.prependHistory(page(86, listOf("e", "f", "g", "h"), older = true))
+        assertEquals("history has a gap here", s.scrollNotice)
+    }
+
+    /// **`older` is how the operator learns the top is reached, without spending a record.**
+    @Test
+    fun `a page with nothing above it says so`() {
+        val (s, _, _) = source()
+        s.show(screenOf(100, "a", "b", "c", "d"), "aa11")
+        s.prependHistory(page(96, listOf("w", "x", "y", "z"), older = false))
+        assertEquals("start of history", s.scrollNotice)
+    }
+
+    /// **An empty answer above the live screen is still placed, not drawn as silence.**
+    @Test
+    fun `an empty page says whether history exists above it`() {
+        val (s, _, _) = source()
+        s.show(screenOf(100, "a", "b", "c", "d"), "aa11")
+        s.prependHistory(page(100, emptyList(), older = true))
+        assertEquals("history is above this", s.scrollNotice, "the request was clamped to the live screen")
+        s.prependHistory(page(0, emptyList(), older = false))
+        assertEquals("start of history", s.scrollNotice)
+        assertEquals(0, s.scrolledRows, "an empty answer moves nothing")
     }
 
     @Test

@@ -97,15 +97,21 @@ pub trait Host {
         )
     }
     async fn screen(&mut self, id: &str) -> Result<Screen, String>;
-    /// **The shell's own scrollback**, from the keeper's line numbering.
+    /// **The shell's own scrollback**, in the keeper's line numbering.
     ///
-    /// `from` is an absolute line number; the answer is the lines starting there, oldest first,
-    /// and whether anything exists above them. `None` when the host cannot answer — a link with no
-    /// history and a failed read are different facts, and only the first may be drawn as "nothing
-    /// above this".
+    /// `from` is an absolute line number and `rows` how many rows the caller wants. The answer is
+    /// `(start, older, lines)`:
+    /// - `start` the absolute line of `lines[0]`, which is `from` whenever the pane still has that
+    ///   line, and the oldest line it kept when the caller asked for more than exists — so a caller
+    ///   never receives a page it cannot place;
+    /// - `older` whether the pane holds history **above** that page, which is how a caller knows
+    ///   whether pressing up again can fetch anything;
+    /// - `lines` oldest first, with no live-screen rows ever included (the caller already has them).
     ///
-    /// The keeper already sends its whole pane (`SnapshotResult.text` is history and live), so this
-    /// is a read it already pays for, asked for only when the operator scrolls up.
+    /// `None` means the host could not answer — a failed read, which is a different fact from
+    /// "nothing above this" and must not be drawn as one.
+    ///
+    /// Called only when the operator scrolls up, so a link that never scrolls pays nothing.
     async fn history(&mut self, id: &str, from: u32, rows: u8) -> Option<(u32, bool, Vec<String>)> {
         let _ = (id, from, rows);
         None
@@ -1603,13 +1609,21 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                 let Some(session) = self.shells.get(&shell).map(|a| a.session.clone()) else {
                     return;
                 };
-                let Some((start, _older, lines)) = self.host.history(&session, from, rows).await
+                let Some((start, older, lines)) = self.host.history(&session, from, rows).await
                 else {
                     return;
                 };
+                // One line per history request, only when the operator scrolls: the numbers a "the
+                // page did not arrive" report needs (asked, served, how many).
+                eprintln!(
+                    "ldmuxd: history {from}+{rows} -> {start}, {} line(s), older={older}",
+                    lines.len()
+                );
                 // **Paged by bytes, not by line count.** A body is at most 600 bytes and a 46-column
-                // row is ~46, so a screenful is two messages; `last` marks the final one and the
-                // phone prepends each as it arrives.
+                // row is ~46, so a screenful is two messages. Each page states the absolute line of
+                // its first row, so the phone places it exactly rather than assuming the page joins
+                // what it holds. `last` ends the answer; `older` rides every page because it is a
+                // fact about the answer, not about one page.
                 let mut pages: Vec<Message> = Vec::new();
                 let mut page: Vec<String> = Vec::new();
                 let mut used = 5usize;
@@ -1617,6 +1631,11 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                 // not by its byte count.
                 let mut at = start;
                 for line in lines {
+                    // **A row is clamped here, at the wire, because a row that cannot be encoded
+                    // takes the whole page with it.** The host clamps too; this is the guarantee
+                    // that no host can make a page silently disappear, which is what a `reply`
+                    // skips when a message will not encode.
+                    let line = ldmux_protocol::mesh_term::clamp_row(&line);
                     let cost = 1 + line.len();
                     if !page.is_empty() && used + cost > 560 {
                         let from = at;
@@ -1624,6 +1643,7 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                         pages.push(Message::HistoryPage {
                             from,
                             last: false,
+                            older,
                             lines: std::mem::take(&mut page),
                         });
                         used = 5;
@@ -1634,6 +1654,7 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                 pages.push(Message::HistoryPage {
                     from: at,
                     last: true,
+                    older,
                     lines: page,
                 });
                 self.reply(shell, &pages);
@@ -1959,43 +1980,67 @@ impl Host for DaemonHost {
     }
 
     async fn history(&mut self, id: &str, from: u32, rows: u8) -> Option<(u32, bool, Vec<String>)> {
-        let v = self
-            .0
-            .lock()
-            .await
-            .handle("snapshot", serde_json::json!({ "id": id }))
-            .await
-            .ok()?;
-        let s: SnapshotResult = serde_json::from_value(v).ok()?;
-        // **The keeper's numbering, not the viewport's.** `text` is every line the pane has,
-        // history first; `oldest` is the absolute number of its first line, and the live screen
-        // occupies the last `rows` of them. A page is served only from above that, because the
-        // phone already holds the screen.
-        let all: Vec<String> = s
+        // **Two reads, because the keeper's `historyLines` counts back from the live screen.**
+        // Asking for "a page plus a margin" is wrong the moment the operator scrolls further back
+        // than the margin: the keeper would return the newest N lines above live, the page would
+        // not join what the client holds, and the missing rows would go unnoticed. The first read
+        // is the geometry (`totalRows`, `rows`, `historySize`), which the keeper reports whether or
+        // not it sends any history; the second asks for exactly the lines between `from` and the
+        // live screen. Both are local socket calls, so the extra one costs microseconds and not a
+        // single byte of airtime.
+        let want = u32::from(rows.max(1));
+        let info: SnapshotResult = serde_json::from_value(
+            self.0
+                .lock()
+                .await
+                .handle("snapshot", serde_json::json!({ "id": id }))
+                .await
+                .ok()?,
+        )
+        .ok()?;
+        let total = u32::try_from(info.total_rows).unwrap_or(u32::MAX);
+        let live_top = total.saturating_sub(u32::try_from(info.rows).unwrap_or(0));
+        let available = u32::try_from(info.history_size).unwrap_or(0);
+        // **Nothing to serve, but two different reasons, and `older` tells them apart.** A request
+        // at or past the live screen never receives live rows, and whether the pane still holds
+        // history above that point is exactly what the caller needs to know: `older` false means
+        // "you are at the oldest row this shell kept", true means "ask again lower down".
+        let above = live_top > total.saturating_sub(available);
+        if from >= live_top {
+            return Some((live_top, above, Vec::new()));
+        }
+        let need = live_top.saturating_sub(from).min(available);
+        if need == 0 {
+            return Some((live_top, above, Vec::new()));
+        }
+        let snap: SnapshotResult = serde_json::from_value(
+            self.0
+                .lock()
+                .await
+                .handle(
+                    "snapshot",
+                    serde_json::json!({ "id": id, "historyLines": need }),
+                )
+                .await
+                .ok()?,
+        )
+        .ok()?;
+        // **Second answer, second geometry.** The pane may have scrolled between the two reads, and
+        // this snapshot is the one the text belongs to, so every count is taken from it.
+        let all: Vec<String> = snap
             .text
             .split('\n')
             .map(ldmux_protocol::mesh_term::plain_row)
             .collect();
-        let total = all.len() as u32;
-        let live_top = total.saturating_sub(s.rows.min(u64::from(u32::MAX)) as u32);
-        let oldest = total.saturating_sub(s.history_lines.min(u64::from(u32::MAX)) as u32);
-        let want = u32::from(rows.max(1));
-        // A request above the live screen serves only history; one that reaches the live screen is
-        // clamped back, so a page never re-sends rows the phone already has.
-        let start = from.max(oldest).min(live_top);
-        let end = start.saturating_add(want).min(live_top);
-        // **A row is clamped to what a message can carry.** The wire's line field is one byte and
-        // the protocol's segment bound is 120, so a wider pane would have its page silently
-        // shortened by a failed encode; the phone's own grid is never wider than this anyway.
-        let lines: Vec<String> = if end > start {
-            all[start as usize..end as usize]
-                .iter()
-                .map(|l| l.chars().take(ldmux_protocol::mesh_term::MAX_SEGMENT).collect())
-                .collect()
-        } else {
-            Vec::new()
-        };
-        Some((start, start > oldest, lines))
+        Some(history_page(
+            u32::try_from(snap.total_rows).unwrap_or(u32::MAX),
+            u32::try_from(snap.rows).unwrap_or(0),
+            u32::try_from(snap.history_lines).unwrap_or(0),
+            u32::try_from(snap.history_size).unwrap_or(0),
+            from,
+            want,
+            &all,
+        ))
     }
 
     async fn screen(&mut self, id: &str) -> Result<Screen, String> {
@@ -2153,6 +2198,55 @@ impl Host for DaemonHost {
             .await
             .map(|_| ())
     }
+}
+
+/// Slice a history page out of a keeper snapshot, in the keeper's own line numbering.
+///
+/// **Three counts, and confusing them is a silently empty page.** `total` is every line the pane
+/// has (history first, live last); `available` is how many history lines exist; `captured` is how
+/// many of them the keeper put in `text`, which is `available` clipped to what was asked for. The
+/// live screen is the last `rows` lines of `total`.
+///
+/// A request above the live screen serves only history; one that reaches the live screen is clamped
+/// back so a page never re-sends rows the phone already has; one older than what was fetched serves
+/// from the oldest line in hand, so the phone's next press walks up from there rather than skipping.
+///
+/// A pure function because this is where the bug was: with the measured pane (`total 9912`,
+/// `available 9895`, `rows 17`) the old arithmetic used `available`'s slot for `captured` and
+/// answered every request with nothing.
+fn history_page(
+    total: u32,
+    rows: u32,
+    captured: u32,
+    available: u32,
+    from: u32,
+    want: u32,
+    lines: &[String],
+) -> (u32, bool, Vec<String>) {
+    let live_top = total.saturating_sub(rows);
+    let oldest_captured = total.saturating_sub(captured);
+    let oldest_available = total.saturating_sub(available);
+    let start = from.max(oldest_captured).min(live_top);
+    let end = start.saturating_add(want).min(live_top);
+    // **A row is clamped to what a message can carry.** The wire's line field is one byte and the
+    // protocol's segment bound is 120, so a wider pane would have its page silently shortened by a
+    // failed encode; the phone's own grid is never wider than this anyway.
+    let out = if end > start {
+        let a = start.saturating_sub(oldest_captured) as usize;
+        let b = end.saturating_sub(oldest_captured) as usize;
+        lines
+            .get(a..b)
+            .map(|slice| {
+                slice
+                    .iter()
+                    .map(|l| ldmux_protocol::mesh_term::clamp_row(l))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    (start, start > oldest_available, out)
 }
 
 /// How often the bridge looks at the screen. Interactive echo wants this small, the airtime
@@ -2449,9 +2543,15 @@ mod tests {
 
         async fn history(&mut self, _id: &str, from: u32, rows: u8) -> Option<(u32, bool, Vec<String>)> {
             let s = self.0.lock().unwrap();
-            // The fake keeps `history` lines above a 4-row live screen, numbered from 0.
+            // **The fake answers like a pane with nothing dropped**: every history line is still
+            // there (`available` = all of it), so its numbering starts at 0 and `older` is "does a
+            // line exist above this page". A request at or past the live screen serves nothing and
+            // still reports the history above it, which is what the real host does.
             let live_top = s.history.len() as u32;
-            let start = from.min(live_top);
+            if from >= live_top {
+                return Some((live_top, live_top > 0, Vec::new()));
+            }
+            let start = from;
             let end = (start + u32::from(rows)).min(live_top);
             let lines = s.history[start as usize..end as usize].to_vec();
             Some((start, start > 0, lines))
@@ -3672,6 +3772,85 @@ mod tests {
     /// up key on a screen the phone joined late used to answer "no history yet on this link" — true
     /// and useless, because the rows exist on the host. This asks for them by absolute line number
     /// so a page joins what the phone holds.
+    /// **The three counts of a keeper snapshot, at the numbers the deployed pane reported.**
+    ///
+    /// `totalRows 9912`, `historySize 9895`, `rows 17`, and `historyLines` = whatever was asked
+    /// for. The bug this pins: the old code treated the *requested* history count as the captured
+    /// one, so `oldest` became `total` and every page was empty. The measured pane is also the
+    /// proof that `historySize` is the number a page is clamped against.
+    #[test]
+    fn a_history_page_is_sliced_in_the_keepers_numbering() {
+        // 64 history lines captured (lines 9848..9912) plus the 17 live rows (9912..9929).
+        let text: Vec<String> = (9848..9929).map(|n| format!("line {n}")).collect();
+        assert_eq!(text.len(), 81, "64 history + 17 live");
+        // One page just above the live screen: lines 9879..9895.
+        let (start, older, page) = history_page(9912, 17, 64, 9895, 9879, 16, &text);
+        assert_eq!(start, 9879);
+        assert!(older, "the pane kept 9895 lines, so there is more above this page");
+        assert_eq!(page.len(), 16);
+        assert_eq!(page[0], "line 9879");
+
+        // A request that reaches into the live screen is clamped back to its first row.
+        let (start, _, page) = history_page(9912, 17, 64, 9895, 9890, 16, &text);
+        assert_eq!(start, 9890);
+        assert_eq!(page.len(), 5, "9890..9895 is all the history left");
+
+        // Older than what this snapshot captured: serve from the oldest line in hand, and say so,
+        // so the phone's next press walks up from there instead of skipping a gap.
+        let (start, older, page) = history_page(9912, 17, 64, 9895, 100, 16, &text);
+        assert_eq!(start, 9848, "the oldest captured line");
+        assert!(older, "there is more history above this page");
+        assert_eq!(page[0], "line 9848");
+
+        // Nothing above the live screen at all (a fresh pane): an empty page, not a wrong one.
+        let (start, older, page) = history_page(17, 17, 0, 0, 0, 16, &text[..17]);
+        assert_eq!(start, 0);
+        assert!(!older);
+        assert!(page.is_empty());
+    }
+
+    /// Collect the history pages of one answer: their lines in order, and the flags the *final*
+    /// page carries (which is where `last` lives; `older` is on every page).
+    fn history_answer(link: &FakeLink, base: usize) -> (Vec<String>, bool, bool) {
+        let sent = link.0.lock().unwrap().sent[base..].to_vec();
+        let mut d = Decoder::new();
+        let pages: Vec<(u32, bool, bool, Vec<String>)> = sent
+            .iter()
+            .flat_map(|(_, bytes)| d.push(bytes).unwrap())
+            .filter_map(|m| m.ok())
+            .filter_map(|m| match m {
+                Message::HistoryPage {
+                    from,
+                    last,
+                    older,
+                    lines,
+                } => Some((from, last, older, lines)),
+                _ => None,
+            })
+            .collect();
+        assert!(!pages.is_empty(), "an answer, even an empty one");
+        let mut lines = Vec::new();
+        let mut older = true;
+        let mut last = false;
+        for (i, (from, l, o, ls)) in pages.iter().enumerate() {
+            // **Each page says where it starts**, so a caller can place it rather than assume it
+            // joins. Rows are consecutive: page n+1 starts where page n ended.
+            assert_eq!(*from, pages[0].0 + lines.len() as u32, "page {i} is misplaced");
+            lines.extend(ls.iter().cloned());
+            last = *l;
+            older = *o;
+            assert_eq!(*l, i + 1 == pages.len(), "only the final page ends the answer");
+        }
+        (lines, last, older)
+    }
+
+    /// **The scrollback contract, end to end through the wire.**
+    ///
+    /// The phone asks for an absolute line of the keeper's numbering; the answer is the rows from
+    /// there, `last` when the answer is complete, and `older` when the pane holds history above it.
+    /// The distinction is the whole point: an answer that ends without saying whether anything is
+    /// above forces the phone to spend a record discovering it, and one that says "no more" too
+    /// early strands the operator at the wrong top.
     #[tokio::test]
     async fn a_phone_can_ask_for_the_shells_own_scrollback() {
         let (mut b, host, link) = setup();
@@ -3685,50 +3864,87 @@ mod tests {
             },
         );
         b.tick().await;
+
+        // The middle of the history: four rows, and there is more above them.
         let base = sent_records(&link);
         phone_says(&link, 1, &Message::WantHistory { from: 6, rows: 4 });
         b.tick().await;
-        let sent = link.0.lock().unwrap().sent[base..].to_vec();
-        let mut d = Decoder::new();
-        let pages: Vec<Message> = sent
-            .iter()
-            .flat_map(|(_, bytes)| d.push(bytes).unwrap())
-            .filter_map(|m| m.ok())
-            .filter(|m| matches!(m, Message::HistoryPage { .. }))
-            .collect();
-        assert!(!pages.is_empty(), "a page came back");
-        let mut lines: Vec<String> = Vec::new();
-        let mut last = false;
-        for p in &pages {
-            if let Message::HistoryPage {
-                from: _,
-                last: l,
-                lines: ls,
-            } = p
-            {
-                lines.extend(ls.iter().cloned());
-                last = *l;
-            }
-        }
+        let (lines, last, older) = history_answer(&link, base);
         assert_eq!(lines, vec!["line 6", "line 7", "line 8", "line 9"]);
-        assert!(last, "the final page says so");
+        assert!(last, "one page answers the whole request");
+        assert!(older, "lines 0..5 are above this page");
 
-        // A request past the top is answered with an empty page, not with silence: "nothing above
-        // this" is a fact the phone can draw, and silence would look like a lost request.
+        // The oldest row the pane kept: nothing above it, so the phone can say "start of history"
+        // without spending a record to find out.
+        let base = sent_records(&link);
+        phone_says(&link, 1, &Message::WantHistory { from: 0, rows: 4 });
+        b.tick().await;
+        let (lines, last, older) = history_answer(&link, base);
+        assert_eq!(lines, vec!["line 0", "line 1", "line 2", "line 3"]);
+        assert!(last);
+        assert!(!older, "this is the oldest row the shell kept");
+
+        // A request that reaches the live screen is clamped to the history: the phone already has
+        // those rows, and re-sending them would cost a record to say nothing.
+        let base = sent_records(&link);
+        phone_says(&link, 1, &Message::WantHistory { from: 8, rows: 4 });
+        b.tick().await;
+        let (lines, last, older) = history_answer(&link, base);
+        assert_eq!(lines, vec!["line 8", "line 9"]);
+        assert!(last);
+        assert!(older);
+
+        // A request at or past the live screen is answered with an empty page, not with silence:
+        // silence is indistinguishable from a lost request, and the phone would wait for ever.
         let base = sent_records(&link);
         phone_says(&link, 1, &Message::WantHistory { from: 99, rows: 4 });
         b.tick().await;
-        let sent = link.0.lock().unwrap().sent[base..].to_vec();
-        let mut d = Decoder::new();
-        let empty = sent
-            .iter()
-            .flat_map(|(_, bytes)| d.push(bytes).unwrap())
-            .filter_map(|m| m.ok())
-            .find(|m| matches!(m, Message::HistoryPage { .. }));
-        assert!(
-            matches!(empty, Some(Message::HistoryPage { last: true, ref lines, .. }) if lines.is_empty()),
-            "an empty page, not silence: {empty:?}"
+        let (lines, last, older) = history_answer(&link, base);
+        assert!(lines.is_empty());
+        assert!(last);
+        assert!(older, "history exists above the live screen, so ask again lower down");
+    }
+
+    /// **A page too big for one message is split by bytes, and every page says where it starts.**
+    ///
+    /// A body is 600 bytes, so a screenful of wide rows is several pages. The absolute line of
+    /// each page is what makes them reassemble; `older` rides every page, and only the last ends
+    /// the answer. The rows here are box drawing, like a pane's own frames: three bytes each, which
+    /// is why the clamp has to count bytes (`clamp_row`) and not characters — a row that will not
+    /// encode takes its whole page with it, and the operator would press up into silence.
+    #[tokio::test]
+    async fn a_history_answer_pages_by_bytes_and_keeps_the_numbering() {
+        let (mut b, host, link) = setup();
+        host.0.lock().unwrap().history = (0..6)
+            .map(|i| format!("{i}{}", "─".repeat(120)))
+            .collect();
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+            },
         );
+        b.tick().await;
+        let base = sent_records(&link);
+        phone_says(&link, 1, &Message::WantHistory { from: 0, rows: 6 });
+        b.tick().await;
+        let (lines, last, older) = history_answer(&link, base);
+        assert_eq!(lines.len(), 6, "every row arrives");
+        // 120 bytes of three-byte characters is 40 of them, and the row still encodes. A clamp
+        // that counted characters would have passed 360 bytes to the encoder and lost the page.
+        assert_eq!(lines[0].chars().count(), 40, "clamped by bytes, never split mid-character");
+        assert_eq!(lines[0].len(), 118, "one ASCII digit plus thirty-nine dashes");
+        assert!(lines[0].len() <= ldmux_protocol::mesh_term::MAX_SEGMENT);
+        assert!(last);
+        assert!(!older);
+        // Six rows of 118 bytes cannot fit one body, so the answer pages — and still reassembles
+        // in order, which is what the per-page `from` guarantees (checked in `history_answer`).
+        // Records are not the unit here: identical rows compress into one frame, and that is a win,
+        // not a page.
+        assert!(lines[0].starts_with('0'), "the first row of the page");
+        assert!(lines[5].starts_with('5'), "and the last, five rows later");
     }
 
     /// **A list answered with nothing attached is framed too.**

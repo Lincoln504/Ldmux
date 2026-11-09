@@ -158,7 +158,8 @@
         "lines": [
           "$ ldmux mesh status",
           "state    ready"
-        ]
+        ],
+        "older": false
       }
     },
     {
