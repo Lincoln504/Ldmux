@@ -340,7 +340,7 @@ fn print_mesh_status(v: &serde_json::Value) {
     }
     if let Some(tenths) = v.get("txAirtimeTenths").and_then(serde_json::Value::as_u64) {
         println!(
-            "airtime  {:.1} s this hour (records sent x one record's air here)",
+            "airtime  {:.1} s this hour (the radio's own transmit meter)",
             f64::from(tenths as u32) / 10.0
         );
     }

@@ -180,6 +180,9 @@ class AndroidRadioLink(
     @Volatile
     private var routeHeardAt: Long = 0L
 
+    /** When this link last put a record on the air, so an idle path is not refreshed. */
+    private var lastSendAt: Long = 0L
+
     /** When the last route request went out, so a failing link cannot turn into a broadcaster. */
     @Volatile
     private var lastRequestAt: Long = 0L
@@ -652,6 +655,8 @@ class AndroidRadioLink(
         }
         val s = session ?: return RadioSendResult.Failed
         if (_state.value != MeshLinkState.Bound) return RadioSendResult.Failed
+        // The path-refresh loop reads this to leave an idle link alone: a route is a means to send.
+        lastSendAt = System.currentTimeMillis()
         if (budgetMode == RadioBudgetMode.Metered && remainingAirtimeMs() <= 0.0) {
             refreshStatus()
             return RadioSendResult.Budget
@@ -1097,7 +1102,15 @@ class AndroidRadioLink(
                 val wait = if (routeIsFresh(System.currentTimeMillis())) PATH_REFRESH_MS else PATH_RETRY_MS
                 delay(wait)
                 if (closing) continue
-                if (!routeIsFresh(System.currentTimeMillis())) ensureRoute(s)
+                // **A route is only worth asking for when something is about to use it.** The loop
+                // used to re-flood a request every ten seconds on a link whose route had merely
+                // aged past `ROUTE_FRESH_MS` while the two ends were idle — measured 2026-11-09, one
+                // request plus its reply every 130 s on a link carrying nothing, which is a flood
+                // and two records for a route no record needed. A send that finds no route asks for
+                // one itself (`refreshRoute`), so the only case this loop covers is an idle link,
+                // and on an idle link the answer is nothing.
+                val idle = System.currentTimeMillis() - lastSendAt > ROUTE_IDLE_MS
+                if (!idle && !routeIsFresh(System.currentTimeMillis())) ensureRoute(s)
                 if (!s.canSendRaw()) continue
                 // One command per tick: the companion has one answer window, and a second request
                 // inside it makes both answers ambiguous.
@@ -1217,6 +1230,15 @@ class AndroidRadioLink(
         const val PATH_RETRY_MS = 10_000L
         /** Re-ask once a path is known: paths move with the radios, but slowly. */
         const val PATH_REFRESH_MS = 60_000L
+
+        /**
+         * How long a link may be quiet before its route stops being refreshed.
+         *
+         * A route is a means to send, so refreshing one on a link that is sending nothing is a
+         * flood and a record for nobody. Longer than any burst gap, shorter than the freshness
+         * window the next send checks.
+         */
+        const val ROUTE_IDLE_MS = 30_000L
         /** A route older than this is not trusted for a new connection. */
         const val ROUTE_FRESH_MS = 120_000L
         /** The least gap between two route requests: a flood every repeater in range repeats. */

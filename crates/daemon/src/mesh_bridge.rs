@@ -234,6 +234,14 @@ struct Attached {
     /// The profile version the phone attached with. A phone on version 1 does not send `Key`,
     /// and one that does is not obeyed: it did not ask for the message's meaning.
     version: u8,
+    /// Messages a refused send left unsent, re-offered before anything new is built.
+    ///
+    /// **A refusal is a moment, not a fault, and it must not cost a whole screen.** The differ
+    /// advances its record of the phone's screen as it hands rows out, so a record the radio refused
+    /// is a row the phone never sees unless it is re-offered *as the same message*. Resyncing instead
+    /// reset that record, so the next frame was a full screen - measured 2026-11-09: a full screen
+    /// plus a profile every ten seconds on an idle link, ~34 records and 20 s of air a minute.
+    retry: Vec<Message>,
     /// The grid last accepted from this phone. A `Resize` to the size already set is not a
     /// change, and starting the screen over for it repaints the whole pane for nothing - which
     /// on this link is a burst of records the phone waits through, seen as a freeze while a
@@ -392,6 +400,13 @@ pub struct Bridge<H, L> {
     /// frame is built, so there is nothing to race.
     grids: HashMap<u8, (u8, u8)>,
     generation: u32,
+    /// When the holder of each attached shell was last checked.
+    ///
+    /// **Ownership can leave without the geometry moving.** A desk window that takes a shell may keep
+    /// the same grid, so the resize signal never fires; the phone then drew a shell it no longer
+    /// owned and nothing said so until it typed. One listing call every few seconds is a keeper round
+    /// trip, not airtime.
+    owner_check: Option<Instant>,
     /// The window was full on the previous pass. The first pass with room after a stall is a
     /// phone coming back, not a burst: its diff goes at once rather than waiting out a coalescing
     /// window that belongs to output it never saw.
@@ -471,6 +486,7 @@ impl<H: Host, L: Link> Bridge<H, L> {
             decoders: HashMap::new(),
             versions: HashMap::new(),
             generation: 0,
+            owner_check: None,
             stalled: false,
             stats: BridgeStats::default(),
             quiet_ticks: 0,
@@ -710,6 +726,29 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
             }
         }
 
+        // **Who holds each attached shell, checked on a cadence.** The desk may take a shell without
+        // changing its geometry, and the write path only learns that when the phone types; until
+        // then the phone draws a pane that is no longer its own and looks broken.
+        let owner_due = self
+            .owner_check
+            .is_none_or(|t| (self.clock)().saturating_duration_since(t) >= OWNER_CHECK);
+        if owner_due && !self.shells.is_empty() {
+            self.owner_check = Some((self.clock)());
+            if let Some(rows) = self.host.listing().await {
+                let taken: Vec<u8> = self
+                    .shells
+                    .iter()
+                    .filter(|(_, a)| {
+                        rows.iter()
+                            .any(|r| r.id == a.shell && !r.owner.is_empty() && r.owner != "mesh")
+                    })
+                    .map(|(shell, _)| *shell)
+                    .collect();
+                for shell in taken {
+                    self.refuse_held_write(shell).await;
+                }
+            }
+        }
         let ids: Vec<u8> = self.shells.keys().copied().collect();
         for shell in ids {
             // **Keep the pipe full, do not build a backlog.** This used to stop looking at the
@@ -776,6 +815,25 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
             {
                 a.original = Some((screen.cols, screen.rows));
             }
+            // **What a refusal left unsent goes first.** The differ already counts those rows as
+            // delivered, so they are only recoverable here; anything built after them would be the
+            // *next* change, and the phone would keep a gap for ever.
+            let retry = self
+                .shells
+                .get(&shell)
+                .map(|a| a.retry.clone())
+                .unwrap_or_default();
+            if !retry.is_empty() {
+                if self.reply(shell, &retry) {
+                    if let Some(a) = self.shells.get_mut(&shell) {
+                        a.retry.clear();
+                        a.last_push = Some((self.clock)());
+                    }
+                } else {
+                    self.stalled = true;
+                }
+                continue;
+            }
             if self.shells.get(&shell).is_some_and(|a| a.differ.up_to_date(&screen)) {
                 let now = (self.clock)();
                 // **Tell the phone the answer has finished arriving.** It holds the screen already,
@@ -833,12 +891,18 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
             }
             self.stats.updates += 1;
             if !self.reply(shell, &messages) {
+                // **Keep them, do not start the screen over.** `reply` fails when the ARQ queue is
+                // full, which is a moment: the differ has already advanced over the rows it handed
+                // out, so the same messages are the only way to deliver them. Resyncing made the
+                // next frame a full screen into a queue that was already full.
                 if let Some(a) = self.shells.get_mut(&shell) {
-                    a.resync();
+                    a.retry = messages;
                 }
+                self.stalled = true;
                 continue;
             }
             if let Some(a) = self.shells.get_mut(&shell) {
+                a.retry.clear();
                 a.last_push = Some(now);
                 a.changed_last_tick = true;
                 a.idle_sent = false;
@@ -1028,6 +1092,7 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
                                 pushes_since_input: 0,
                                 version,
                                 geometry: remembered,
+                                retry: Vec::new(),
                                 last_push: None,
                                 hold: Some(
                                     Instant::now() + ATTACH_GRACE,
@@ -1734,6 +1799,13 @@ pub const BURST_GAP: Duration = Duration::from_millis(1000);
 /// its own grid arrived, which is exactly the case this constant exists to prevent. A `Resize` still
 /// clears the hold outright, so this bounds only the fallback path.
 const ATTACH_GRACE: Duration = Duration::from_millis(1_400);
+
+/// How often the holder of an attached shell is re-checked.
+///
+/// Ownership can leave without the pane's geometry moving, so this is the only reliable signal. One
+/// listing call every few seconds is a keeper round trip; it costs no airtime and it is what stops
+/// the phone drawing a shell the desk has taken.
+const OWNER_CHECK: Duration = Duration::from_millis(5_000);
 
 /// Wait until either the link has something to say or the cadence expires.
 ///
@@ -3284,6 +3356,91 @@ mod tests {
             .next_back()
             .expect("a profile");
         assert_eq!(profile, (46, 17), "the remembered grid, not the desk's");
+    }
+
+    /// **A refused send re-offers the same messages, and does not start the screen over.**
+    ///
+    /// The differ advances its record of the phone's screen as it hands rows out, so a record the
+    /// radio refused is a row the phone never sees unless it is offered again as *that* message.
+    /// Resyncing reset the record and made the next frame a full screen — measured 2026-11-09, a
+    /// full screen plus a profile every ten seconds on an idle link.
+    #[tokio::test]
+    async fn a_refused_send_is_offered_again_rather_than_reset() {
+        let (mut b, host, link) = setup();
+        let clock = FakeClock::new();
+        b.clock = clock.reader();
+        paced(&host, &["$ one", "$ two"]);
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: "abcd-1".into(),
+            },
+        );
+        b.tick().await;
+        clock.advance(1_200);
+        b.tick().await;
+        // The radio refuses everything for one tick.
+        link.0.lock().unwrap().refuse = true;
+        paced(&host, &["$ one", "$ two", "$ three"]);
+        clock.advance(1_100);
+        b.tick().await;
+        let refusals = b.stats.refused_sends;
+        assert!(refusals > 0, "the send was refused");
+        // The link takes records again: the refused rows arrive without a full repaint.
+        link.0.lock().unwrap().refuse = false;
+        clock.advance(1_100);
+        b.tick().await;
+        assert_eq!(
+            phone_view(&link, 1).lines,
+            ["$ one", "$ two", "$ three"],
+            "the refused frame is delivered, not abandoned"
+        );
+    }
+
+    /// **Ownership can leave without the geometry moving, and the phone is told anyway.**
+    #[tokio::test]
+    async fn a_shell_taken_at_the_same_grid_is_still_a_takeover() {
+        let (mut b, host, link) = setup();
+        let clock = FakeClock::new();
+        b.clock = clock.reader();
+        paced(&host, &["a phone frame"]);
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: "abcd-1".into(),
+            },
+        );
+        b.tick().await;
+        phone_says(&link, 1, &Message::Resize { cols: 46, rows: 17 });
+        b.tick().await;
+        let before = link.0.lock().unwrap().sent.len();
+        // The desk takes the shell. The pane keeps the phone's grid, so nothing about the screen
+        // says so; only the holder does.
+        host.0
+            .lock()
+            .unwrap()
+            .holders
+            .insert("abcd-1".into(), "desktop".into());
+        clock.advance(6_000);
+        b.tick().await;
+        let sent: Vec<Message> = link
+            .0
+            .lock()
+            .unwrap()
+            .sent[before..]
+            .iter()
+            .flat_map(|(_, bytes)| Decoder::new().push(bytes).unwrap())
+            .filter_map(Result::ok)
+            .collect();
+        assert!(
+            sent.iter().any(|m| matches!(m, Message::Closed { reason } if *reason == closed::HELD)),
+            "the phone is told: {sent:?}"
+        );
+        assert!(!b.attached(1), "and it is detached");
     }
 
     /// **A screen that does not compress still paints.**
