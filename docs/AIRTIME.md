@@ -84,18 +84,30 @@ conclusion that holds at both ends is a conclusion about the modes rather than a
 
 | what | live mode | batched mode |
 |---|---|---|
-| typing a 40-character command | 21.6 s | 1.4 s |
-| the answer to the command (30 lines) | 2.4 s | 2.4 s (the same work) |
-| **a whole command, typing plus answer** | **52.3 s** | **3.9 s** |
-| an agent turn: 8 typed commands, each answered | 234.2 s | 24.9 s |
+| typing a 40-character command | 24.5 s | 2.4 s |
+| the answer to the command (30 lines) | 0.9 s | 0.9 s (the same work) |
+| **a whole command, typing plus answer** | **25.4 s** | **3.3 s** |
+| an agent turn: 8 typed commands, each answered | 103.4 s | 13.6 s |
 
-- **Typing costs 97.2 % less air batched** (35x cheaper), and the saving is almost entirely the
-  echo: one record per keystroke each way becomes one record per command.
-- **A whole command is 7.4 % of live mode's air batched** — the answer is identical work in both
+**Live mode got cheaper, so the ratio between the modes got smaller — and that is the honest
+direction.** Both of the following are now true, and they were not before:
+
+- **An echo follows the link's own pace.** One echo per keystroke cost 38 records down for a
+  40-character line where one echo per record costs **6**: the echo cannot arrive before the record
+  carrying the keystroke has left, so the extra frames lost the race and carried nothing new. The
+  same rule shapes the phone's typing window (`MeshInputBatcher.pace`): on the public preset a
+  pause's text waits one airtime, on the bench tuple 100 ms as before.
+- **A synced line's echo rides its answer.** In batch mode the phone draws the line it sent, and the
+  answer's frame carries the echoed row anyway, so the echo waits one airtime and the two leave as
+  **one frame** — 2 records down per command instead of 4.
+
+- **Typing is 90.4 % cheaper batched** (10.4x), and what is left of live mode's cost is still
+  almost entirely the echo: one record per keystroke each way becomes one record per command.
+- **A whole command is 12.8 % of live mode's air batched** — the answer is identical work in both
   modes, so the difference is everything the typing did not have to repeat.
-- **An agent turn is 89.4 % less air batched.** A 1 % duty cycle (36 s an hour) buys 0.15 typed
-  turns or 1.44 batched ones at this tuple; the 10 % allowance outside the European sub-band buys
-  1.5 typed or 14.4 batched.
+- **An agent turn is 86.8 % less air batched.** A 1 % duty cycle (36 s an hour) buys **0.35** typed
+  turns or **2.64** batched ones at this tuple; the 10 % allowance outside the European sub-band
+  buys 3.5 typed or 26 batched. Batch mode is still the only way an agent turn fits a 1 % hour.
 
 At the bench tuple (500 kHz, SF7, CR5) every record is eight times cheaper in air, so the same turn
 is ≈16 s typed and 2.0 s batched. The ratio between the modes belongs to the modes; the absolute

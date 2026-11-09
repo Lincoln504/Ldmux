@@ -291,6 +291,11 @@ pub struct MeshSnapshot {
     /// Records of the current size left in this hour's airtime budget, from a status report.
     /// `None` until the radio has reported one.
     pub records_left: Option<u8>,
+    /// How long one full record takes on the air at this radio's tuple, when the carrier knows it.
+    ///
+    /// The session scales its retransmission timers by it, and the bridge paces a synced line's
+    /// echo by it: a deferral is only worth making when it is shorter than the record it saves.
+    pub airtime_ms: Option<u32>,
     /// How many repeaters the route to the peer uses, when one is known.
     pub peer_hops: Option<u8>,
     /// The radio's own reading of the air: noise floor, last packet's SNR and RSSI, and its
@@ -331,6 +336,7 @@ impl MeshSnapshot {
             serial: Some(cfg.serial.clone()),
             uplink_record_max: None,
             records_left: None,
+            airtime_ms: None,
             peer_hops: None,
             snr_quarter_db: None,
             noise_floor_dbm: None,
@@ -813,6 +819,7 @@ async fn session<C: Carrier>(
     set(snapshot, |s| {
         s.state = "ready";
         s.uplink_record_max = Some(promise.uplink_record_max);
+        s.airtime_ms = promise.airtime_ms.map(|a| a.round() as u32);
         s.radio_state = Some(promise.radio_state);
         s.last_error = None;
     });

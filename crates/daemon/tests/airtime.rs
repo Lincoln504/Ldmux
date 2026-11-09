@@ -60,6 +60,11 @@ impl Link for CountingLink {
     fn take_inbound(&self) -> Vec<(u8, Vec<u8>)> {
         std::mem::take(&mut self.0.lock().unwrap().inbound)
     }
+    /// The public preset's own pace, so the bridge's synced-echo deferral is the real one:
+    /// one full record on the air is 602.6 ms at 62.5 kHz/SF7/CR5.
+    fn airtime_ms(&self) -> Option<u32> {
+        Some(603)
+    }
 }
 
 impl CountingLink {
@@ -199,12 +204,17 @@ async fn measure(
     }
     let mut down = Spend::default();
     let mut quiet = 0;
-    for _ in 0..80 {
+    // **Quiet means "past the link's own pace".** 300 ms was shorter than one record on the public
+    // preset, and shorter than the bridge's synced-echo deferral (one airtime), so a batch command
+    // that was merely waiting its turn counted as silence and the frame landed in the next
+    // measurement — or in none.
+    let quiet_after = 12 + i32::try_from(link.airtime_ms().unwrap_or(0) / 25).unwrap_or(0);
+    for _ in 0..120 {
         bridge.tick().await;
         let got = link.take();
         if got.records == 0 {
             quiet += 1;
-            if quiet >= 12 {
+            if quiet >= quiet_after {
                 break;
             }
         } else {
@@ -242,11 +252,18 @@ async fn live_against_batched_mode() {
     settle(&mut bridge, 300).await;
     let _ = link.take();
 
-    let batch = [Message::Input(line.as_bytes().to_vec())];
+    // **The batch path as the phone sends it**: release the hold, then the line, then hold again.
+    let batch = [
+        Message::Hold { on: false },
+        Message::Input(line.as_bytes().to_vec()),
+    ];
     let (batch_up, batch_down) = measure(&mut bridge, &link, &batch, false).await;
 
     // The command's answer is the same work in either mode, so it is measured apart.
-    let answer_script = [Message::Input(b"seq 1 30\r".to_vec())];
+    let answer_script = [
+        Message::Hold { on: false },
+        Message::Input(b"seq 1 30\r".to_vec()),
+    ];
     let (_, answer) = measure(&mut bridge, &link, &answer_script, false).await;
 
     // A whole agent turn: eight typed commands, each answered.
@@ -262,7 +279,10 @@ async fn live_against_batched_mode() {
     let mut bturn_up = Spend::default();
     let mut bturn_down = Spend::default();
     for i in 0..8 {
-        let one = [Message::Input(format!("echo run-{i} && seq 1 30\r").into_bytes())];
+        let one = [
+            Message::Hold { on: false },
+            Message::Input(format!("echo run-{i} && seq 1 30\r").into_bytes()),
+        ];
         let (u, d) = measure(&mut bridge, &link, &one, false).await;
         bturn_up = bturn_up.plus(u);
         bturn_down = bturn_down.plus(d);

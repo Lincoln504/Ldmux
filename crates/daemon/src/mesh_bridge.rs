@@ -55,6 +55,16 @@ pub trait Link {
     fn record_payload(&self) -> usize {
         ldmux_protocol::mesh_term::RECORD_PAYLOAD
     }
+    /// How long one full record takes on the air, when the carrier knows its tuple.
+    ///
+    /// **A pace is only worth keeping when it is shorter than the record it saves.** On the public
+    /// 62.5 kHz preset a record is 600 ms, so deferring a synced line's echo by one airtime is free
+    /// in felt latency (the phone draws the line itself) and saves a whole record. On the bench
+    /// 500 kHz tuple a record is 75 ms, and the same rule defers for 75 ms rather than half a
+    /// second — which is why this is asked of the link instead of being a constant.
+    fn airtime_ms(&self) -> Option<u32> {
+        None
+    }
     /// A handle that resolves when records may be waiting to be taken.
     ///
     /// Without one the timer alone decides when a keystroke is noticed, so the idle cadence is a
@@ -180,6 +190,9 @@ impl Link for crate::mesh::MeshRuntime {
     fn incoming(&self) -> Option<Arc<tokio::sync::Notify>> {
         Some(Arc::clone(&self.inbound_wake))
     }
+    fn airtime_ms(&self) -> Option<u32> {
+        self.snapshot().airtime_ms
+    }
     fn record_payload(&self) -> usize {
         // **The record is not the payload.** `uplink_record_max` is what the peer said a *record*
         // may be, and a record carries a 24-byte session overhead (6 clear header + 2 inner header
@@ -291,9 +304,35 @@ struct Attached {
     /// (that is a command's output appearing); a screen that keeps changing is a burst and is
     /// held to [`BURST_GAP`].
     changed_last_tick: bool,
-    /// The user typed into this shell and the echo has not been read yet. Input echo never
-    /// waits for the pacing: the keystroke is what the user is looking for.
+    /// The user typed into this shell and the echo has not been read yet.
+    ///
+    /// **The first echo of a burst goes at once; the rest wait for the coalescing window.** The
+    /// keystroke is what the user is looking for, so the first one must not be paced — but on a
+    /// radio a person typing continuously produces an input record every few hundred milliseconds,
+    /// and pushing an echo for every one of them is one record down per record up, at 0.6 s each.
+    /// `pushes_since_input` already counts the frames since the input arrived, so "the first echo"
+    /// is that counter at zero.
     echo: bool,
+    /// The earliest instant a frame for this shell may be built: a synced line's echo waits one
+    /// record's airtime for its answer, so the two are one frame.
+    defer_until: Option<Instant>,
+    /// What one record costs on this link, learned when the shell was attached.
+    ///
+    /// The pace for an echo. **A keystroke's echo cannot leave sooner than a record**, so pushing
+    /// one per keystroke spends records on frames that lose the race against the next keystroke:
+    /// measured on the airtime harness, a 40-character line cost **38 records down** at one echo per
+    /// key, where the same line at one echo per airtime is two or three. Nothing about the typing
+    /// changes — the echoes carry every character typed so far, which is the same picture.
+    airtime: Option<Duration>,
+    /// The shell was held (batch mode's frozen view) and has just been released, so this echo is
+    /// the echo of a *synced line*.
+    ///
+    /// **A synced line's echo is not worth a record of its own.** The phone already draws the line
+    /// it sent (its local echo), and the answer's frame carries the echoed row anyway because the
+    /// differ has not sent it yet — so the echo goes with the next change instead of costing a
+    /// record first. Measured on the airtime harness: one record per command, on a link where a
+    /// command's whole answer is six or seven.
+    released_by_sync: bool,
     /// When the phone asked the host to stop drawing this shell, if it has.
     ///
     /// **A frozen view is a screen nobody reads.** Batch mode holds the picture on the phone until
@@ -400,11 +439,35 @@ impl Attached {
         if self.hold.is_some_and(|until| now < until) {
             return false;
         }
-        if self.echo || !self.changed_last_tick {
+        // A synced line's echo waits a moment for the answer it belongs with (see `defer_until`).
+        if self.defer_until.is_some_and(|until| now < until) {
+            return false;
+        }
+        if self.echo {
+            // **One echo per record, at best.** A keystroke's echo cannot reach the phone sooner
+            // than a record takes to send, so the echo follows the link's pace: a person typing
+            // continuously then gets one frame per airtime carrying the whole line so far, instead
+            // of one frame per key racing the next key. On a fast link this is 200 ms; on the
+            // public preset it is one airtime.
+            let gap = self.echo_gap();
+            return self
+                .last_push
+                .is_none_or(|t| now.saturating_duration_since(t) >= gap);
+        }
+        if !self.changed_last_tick {
             return true;
         }
         self.last_push
             .is_none_or(|t| now.saturating_duration_since(t) >= BURST_GAP)
+    }
+
+    /// How long an echo waits: one record's airtime, floored so a fast link still feels live.
+    fn echo_gap(&self) -> Duration {
+        // A link that did not report its airtime is assumed fast: being wrong there costs a record
+        // or two, where assuming slow costs a second of lag on every keystroke.
+        self.airtime
+            .unwrap_or(Duration::from_millis(200))
+            .clamp(Duration::from_millis(200), BURST_GAP)
     }
 
     /// Start the screen over: the differ forgets what the phone holds, and so does the pacing.
@@ -450,6 +513,9 @@ impl Attached {
         }
         self.held_since = None;
         self.held_read_at = None;
+        self.defer_until = None;
+        // The line that follows this release is a synced line: its echo is not worth a record.
+        self.released_by_sync = true;
         self.last_push = None;
         self.changed_last_tick = false;
         self.echo = false;
@@ -1295,6 +1361,12 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                                     .then(|| Instant::now() + ATTACH_GRACE),
                                 resync_wanted: false,
                                 held_since: None,
+                                released_by_sync: false,
+                                defer_until: None,
+                                airtime: self
+                                    .link
+                                    .airtime_ms()
+                                    .map(|ms| Duration::from_millis(u64::from(ms))),
                                 held_read_at: None,
                                 changed_last_tick: false,
                                 echo: false,
@@ -1520,8 +1592,24 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                     return;
                 }
                 self.stats.inputs += 1;
+                let synced = self.shells.get(&shell).is_some_and(|a| a.released_by_sync);
+                // **One record's airtime, no more.** The deferral exists to merge the echo into the
+                // answer's frame; paying longer than the record it saves is a latency loss dressed
+                // as an airtime win, so the pace is the link's own airtime (600 ms at the public
+                // preset, 75 ms on the bench) capped by the burst window.
+                let defer = self
+                    .link
+                    .airtime_ms()
+                    .map(|ms| Duration::from_millis(u64::from(ms)))
+                    .unwrap_or_default()
+                    .min(BURST_GAP);
+                let now = (self.clock)();
                 if let Some(a) = self.shells.get_mut(&shell) {
-                    a.echo = true;
+                    // A line that arrived with its own release from a hold is a synced line: its
+                    // echo rides the answer's frame instead of costing a record first.
+                    a.echo = !synced;
+                    a.released_by_sync = false;
+                    a.defer_until = synced.then(|| now + defer);
                     a.answer_owed = true;
                     a.idle_sent = false;
                     a.pushes_since_input = 0;
@@ -1560,8 +1648,18 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                     return;
                 }
                 self.stats.keys += 1;
+                let synced = self.shells.get(&shell).is_some_and(|a| a.released_by_sync);
+                let defer = self
+                    .link
+                    .airtime_ms()
+                    .map(|ms| Duration::from_millis(u64::from(ms)))
+                    .unwrap_or_default()
+                    .min(BURST_GAP);
+                let now = (self.clock)();
                 if let Some(a) = self.shells.get_mut(&shell) {
-                    a.echo = true;
+                    a.echo = !synced;
+                    a.released_by_sync = false;
+                    a.defer_until = synced.then(|| now + defer);
                     a.answer_owed = true;
                     a.idle_sent = false;
                     a.pushes_since_input = 0;
@@ -2111,6 +2209,8 @@ mod tests {
         /// Refuse every send once this many records have been handed over: a link that takes
         /// part of a reply, which is how a full queue really behaves.
         refuse_after: Option<usize>,
+        /// What one record costs on this link, when a test sets it.
+        airtime: Option<u32>,
     }
     #[derive(Clone, Default)]
     struct FakeLink(Arc<Mutex<LinkState>>);
@@ -2134,6 +2234,9 @@ mod tests {
         }
         fn take_inbound(&self) -> Vec<(u8, Vec<u8>)> {
             std::mem::take(&mut self.0.lock().unwrap().inbound)
+        }
+        fn airtime_ms(&self) -> Option<u32> {
+            self.0.lock().unwrap().airtime
         }
     }
 
@@ -3457,6 +3560,43 @@ mod tests {
         );
     }
 
+    /// **A synced line's echo waits one airtime for its answer, and they leave together.**
+    ///
+    /// The phone draws the line it sent, so the echo is not news; the answer's frame carries the
+    /// echoed row anyway. Waiting one record's airtime merges them into one frame — and waiting
+    /// longer than a record would be a latency loss dressed as an airtime win, so the wait is the
+    /// link's own airtime, not a constant.
+    #[tokio::test]
+    async fn a_synced_lines_echo_rides_its_answer() {
+        let (mut b, host, link, clock) = attached_paced().await;
+        // The host reports a 600 ms record, as the public preset does.
+        link.0.lock().unwrap().airtime = Some(600);
+        let base = sent_records(&link);
+        // The phone releases the hold and sends the line in one turn (two messages, two records
+        // only because this link does not pack; the host's own answers are what is counted).
+        phone_says(&link, 1, &Message::Hold { on: false });
+        phone_says(&link, 1, &Message::Input(b"echo hi".to_vec()));
+        b.tick().await;
+        // The pty echoes the line; nothing may go out yet.
+        paced(&host, &["$ echo hi", ""]);
+        clock.advance(50);
+        b.tick().await;
+        assert_eq!(
+            sent_records(&link),
+            base,
+            "the echo waits for the answer it belongs with"
+        );
+        // The answer lands inside the same airtime: one frame, not two.
+        paced(&host, &["$ echo hi", "hi", ""]);
+        clock.advance(600);
+        b.tick().await;
+        assert_eq!(
+            sent_records(&link) - base,
+            1,
+            "echo and answer are one frame"
+        );
+    }
+
     /// **A full launcher list travels in fewer records than its pages.**
     ///
     /// The pages are the other answer the host spends several records on: a dozen shells is ~700
@@ -4210,26 +4350,47 @@ mod tests {
         assert_eq!(sent_records(&link) - base, 1);
     }
 
+    /// **An echo follows the link's record pace, not the tick.**
+    ///
+    /// A keystroke's echo cannot reach the phone before the record carrying that keystroke has left,
+    /// so pushing one echo per keystroke spends records on frames that lose the race against the
+    /// next keystroke. Measured on the airtime harness at 62.5 kHz: a 40-character line cost **38
+    /// records down** at one echo per key, and **6** at one per record. The frame that does go
+    /// carries every character typed so far, so nothing about the picture changes.
     #[tokio::test]
-    async fn input_echo_is_never_paced() {
+    async fn an_echo_follows_the_links_record_pace() {
         let (mut b, host, link, clock) = attached_paced().await;
         let base = sent_records(&link);
 
-        // Put the link into a burst: a change just went out.
-        clock.advance(50);
-        paced(&host, &["before", ""]);
-        b.tick().await;
-        assert_eq!(sent_records(&link) - base, 1);
-
-        // The user types; the shell answers inside the same window.
-        clock.advance(60);
+        // **The first echo of a burst is immediate** — that is the keystroke the user is watching.
+        clock.advance(2_000);
         phone_says(&link, 1, &Message::Input(b"x".to_vec()));
-        paced(&host, &["beforex", ""]);
+        paced(&host, &["$ x", ""]);
+        b.tick().await;
+        assert_eq!(
+            sent_records(&link) - base,
+            1,
+            "the first echo of a burst goes now, not at a window boundary"
+        );
+
+        // **The next one waits for the record it would race.** A keystroke's echo cannot reach the
+        // phone before the record carrying the keystroke has left, so one echo per record is the
+        // most the link can deliver; the frame carries the whole line typed so far.
+        clock.advance(50);
+        phone_says(&link, 1, &Message::Input(b"y".to_vec()));
+        paced(&host, &["$ xy", ""]);
+        b.tick().await;
+        assert_eq!(
+            sent_records(&link) - base,
+            1,
+            "a second echo inside one record's time waits for it"
+        );
+        clock.advance(200);
         b.tick().await;
         assert_eq!(
             sent_records(&link) - base,
             2,
-            "the echo goes now, not at the next window boundary"
+            "and goes when the record's time is up"
         );
     }
 

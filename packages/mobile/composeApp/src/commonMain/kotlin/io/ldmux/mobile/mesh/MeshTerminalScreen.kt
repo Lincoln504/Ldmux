@@ -513,6 +513,11 @@ fun MeshTerminalScreen(
                 // stamp width cannot change this answer; 1 stands in for "not read here".
                 pathHashSize = 1,
             )
+            // **The typing window follows the record the link can actually carry.** A 100 ms
+            // pause is one record on a 75 ms bench tuple and a wasted record on the public preset,
+            // where a record is 602.6 ms: `pace` sets both windows to one airtime (floored, so a
+            // fast link keeps its old feel).
+            batcher.pace(RadioAirtime.timeOnAirMs(preset, MeshTerm.RECORD_PAYLOAD + 29))
             val public = isPublicChannel(preset)
             if (public != classifiedNow) onRadioClassified(public)
         }

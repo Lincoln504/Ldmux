@@ -135,8 +135,8 @@ class MeshInputBatcher(
     fun due(nowMs: Long): Boolean = when {
         runs.isEmpty() -> false
         urgent || size >= maxBytes -> true
-        nowMs - lastAt >= IDLE_MS -> true
-        nowMs - firstAt >= MAX_HOLD_MS -> true
+        nowMs - lastAt >= idleMs -> true
+        nowMs - firstAt >= maxHoldMs -> true
         else -> false
     }
 
@@ -144,7 +144,7 @@ class MeshInputBatcher(
     fun nextDueMs(): Long? = when {
         runs.isEmpty() -> null
         urgent || size >= maxBytes -> 0L
-        else -> minOf(lastAt + IDLE_MS, firstAt + MAX_HOLD_MS)
+        else -> minOf(lastAt + idleMs, firstAt + maxHoldMs)
     }
 
     /**
@@ -192,6 +192,31 @@ class MeshInputBatcher(
     }
 
     private fun isPlain(b: Byte): Boolean = b.toInt() in 0x20..0x7e
+
+    /**
+     * Set the windows from what one record actually costs on this link.
+     *
+     * **The windows were written for a 500 kHz bench, where a record is 75 ms.** On the public
+     * preset a record is 602.6 ms, so a 100 ms idle window sends a *record per pause*: a person
+     * typing at conversational speed produces one upload per word, none of which can leave sooner
+     * than a record anyway. Each window becomes one record's airtime, floored at the old values (so
+     * a fast link is unchanged) and capped so a keystroke never waits more than a record.
+     *
+     * The phone draws what it types while this waits, and the host's echo is paced by the same
+     * airtime, so both ends are waiting for the same record rather than one of them racing it.
+     */
+    fun pace(airtimeMs: Double) {
+        val one = airtimeMs.takeIf { it.isFinite() && it > 0.0 } ?: return
+        val ms = one.toLong().coerceIn(IDLE_MS, 900L)
+        idleMs = ms
+        maxHoldMs = maxOf(ms, MAX_HOLD_MS)
+    }
+
+    /** Quiet that sends a pause's text. See [pace]. */
+    private var idleMs: Long = IDLE_MS
+
+    /** The longest a byte waits, however steadily the user types. See [pace]. */
+    private var maxHoldMs: Long = MAX_HOLD_MS
 
     companion object {
         /** Quiet that means "done typing for now": ≈1 round trip at the default preset. */
