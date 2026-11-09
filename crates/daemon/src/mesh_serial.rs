@@ -36,7 +36,7 @@ use ldmux_companion::codec::{
 };
 use ldmux_companion::{
     ByteLink, Companion, FloodScope, KNOWN_SCOPE_TAGS, RouteRequest, SerialLink, SessionError,
-    build_route_request_in_scope, identify_scope,
+    identify_scope,
 };
 use ldmux_mesh::carrier::{Bound, Budget, Carrier, Event, Signal};
 use ldmux_mesh::constants::{
@@ -149,12 +149,6 @@ const PEER_ROUTE_STALE: Duration = Duration::from_secs(120);
 /// below anything a working connection needs.
 const ROUTE_REPLY_FLOOR: Duration = Duration::from_secs(5);
 
-/// The least time between two **route requests** sent to the same peer.
-///
-/// A request is a broadcast, so every repeater in range forwards it: ten seconds is the shortest
-/// gap that still lets a moved peer be found within a couple of attempts, and the longest rate a
-/// failing connection can spend air on discovery is bounded by it.
-const PEER_PING_FLOOR: Duration = Duration::from_secs(10);
 
 /// The four bytes that mark a record as a **route hint** rather than a session message.
 const ROUTE_HINT_MAGIC: &[u8; 4] = b"LDRH";
@@ -237,28 +231,6 @@ fn route_hint(record: &[u8]) -> Option<[u8; 32]> {
     record.get(4..36).and_then(|k| k.try_into().ok())
 }
 
-/// Send a **flooded route request** for `peer`: one packet, every repeater in range forwards it.
-///
-/// This is the on-demand half of route discovery, and the reason it exists is measured: a repeater
-/// drops an advert after `flood_max_advert` hops — 8 by default — while `REQ` floods were seen
-/// arriving at 18-29 hops on this machine's local mesh (2026-11-08). A peer further than eight hops
-/// away can therefore never learn a route from an advert, and the app waits for one for ever.
-///
-/// The peer answers with a direct `LDRR` record carrying the path it used, and both ends then hold a
-/// route. It needs no contact, no telemetry permission and no firmware change — the envelope is a
-/// `REQ`, which is the same payload type MeshCore's own `sendRequest` uses when the path is unknown.
-fn send_route_request<L: ByteLink>(
-    companion: &mut Companion<L>,
-    own_key: &[u8; 32],
-    hash_size: u8,
-    peer: &[u8; 32],
-    scope: Option<&FloodScope>,
-) -> bool {
-    let Ok(packet) = build_route_request_in_scope(hash_size, peer, own_key, scope) else {
-        return false;
-    };
-    companion.send_packet(&packet).is_ok()
-}
 
 /// Answer one route request: the **path this end uses to reach the requester**, so the requester can
 /// reverse it and hold a route of its own.
@@ -1032,9 +1004,9 @@ fn serve_loop<L: ByteLink>(
     // When a request from an unpinned radio was last reported, so a mesh of strangers cannot fill
     // the journal with the same line.
     let mut last_stranger_log: Option<Instant> = None;
-    let mut last_ping: Option<Instant> = None;
+
     // When the "request sent" line last went to the journal, so a failing link cannot flood it.
-    let mut last_ping_log: Option<Instant> = None;
+
     let mut last_reply: Option<Instant> = None;
     // When the peer's route was last asked for, so a quiet link does not ask on every tick.
     let mut last_route_ask: Option<Instant> = None;
@@ -1269,8 +1241,8 @@ fn serve_loop<L: ByteLink>(
                     // is the daemon's own reader: the phone's `RadioRoute` builds requests and
                     // parses *replies*, and a `REQ` never reaches it as a raw record. So a request
                     // sent from here was a dead letter — one flood plus a neighbourhood's forwarding
-                    // every `PEER_PING_FLOOR` (no route) and every `PEER_ROUTE_STALE`, answered by
-                    // nobody, for as long as the daemon ran without a phone in range.
+                    // every ten seconds with no route, answered by nobody, for as long as the daemon
+                    // ran without a phone in range.
                     //
                     // The route comes from the phone's own request (this end answers it directly, and
                     // the request's path is the way back), and freshness now comes from a record
@@ -1630,39 +1602,16 @@ fn serve_loop<L: ByteLink>(
                             &hex_key(&key)[..8],
                             peer_path.is_some()
                         ));
-                        // **The peer has just said hello, so ask it for a route.** A hint is a
-                        // direct record: it arrives only when the peer already reaches us, and it
-                        // leaves us holding nothing to answer with. A flooded route request costs
-                        // one broadcast and comes back as one direct reply carrying the route in
-                        // both directions — where an advert would be a broadcast every repeater in
-                        // range repeats, and would not cross more than eight hops anyway.
+                        // **A hint is already a working route, and nothing can answer a request.**
+                        // It arrives as a direct record, which means the peer reaches this radio;
+                        // an empty path is therefore the *correct* way to answer a direct neighbour,
+                        // and the advert cache is re-read below for a path when the peer is not one.
                         //
-                        // Once a route exists the hint costs no air at all, which is what stops a
-                        // peer whose session keeps failing from turning this radio into an
-                        // amplifier.
-                        if peer_path.is_none()
-                            && last_ping.is_none_or(|t| t.elapsed() >= PEER_PING_FLOOR)
-                            && left(budget, sent) != Some(0)
-                        {
-                            last_ping = Some(Instant::now());
-                            let ok = send_route_request(
-                                &mut companion,
-                                &settings.preset.public_key,
-                                settings.hash_size,
-                                &key,
-                                scope.as_ref(),
-                            );
-                            route_log_rare(
-                                &mut last_ping_log,
-                                &format!("request sent (hint) ok={ok}"),
-                            );
-                            if ok {
-                                sent = sent.saturating_add(1);
-                                if let Some(path) = settings.window_record.as_deref() {
-                                    save_window(path, window_start_unix, sent);
-                                }
-                            }
-                        }
+                        // A flooded request from here would be a dead letter: only the daemon parses
+                        // a request, and the phone builds requests and parses *replies*. Measured on
+                        // a direct-neighbour link this was one flood per hint, floored at ten
+                        // seconds, for as long as the peer kept trying to start a session.
+
                         // Remember who the peer is, so a restarted daemon can address it.
                         if settings.peer_key != Some(key) {
                             settings.peer_key = Some(key);
