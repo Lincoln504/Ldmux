@@ -231,9 +231,19 @@ class MeshTerminalSource(
         // is nothing to send and nothing to show. Starting a wait here would be a wait for an
         // answer that cannot come, and the deadline would report a failure that did not happen.
         if (!pending && pendingScreen == null) {
-            // Nothing to send and nothing to show, so a wait left over from an earlier press must
-            // end here: the bar said "waiting for the answer" while the button it belongs to could
-            // do nothing about it. Nothing is drawn, because there is nothing held to draw.
+            // **"Show me the shell now", even when nothing is held.** The host is not drawing a
+            // frozen view (see the hold effect), so a `show` with nothing typed has to *release*
+            // it or the button does nothing at all: measured 2026-11-09, `show` on a batch shell
+            // never refreshed the screen, because with the hold there is never a pending screen to
+            // draw. Releasing lets the host send the difference, which is usually nothing — and
+            // that is the correct answer when the screen is already current.
+            if (hold.on && last != null) {
+                hold.sync(pending = false, nowMs = now())
+                return false
+            }
+            // Nothing to send, nothing held and nothing to release: a wait left over from an
+            // earlier press must end here, or the bar would describe a wait the button cannot act
+            // on.
             hold.settle()
             return false
         }

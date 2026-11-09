@@ -122,6 +122,11 @@ numbers belong to the tuple.
   no recovery time.
 - **A refused record is re-offered at one airtime, not at a fixed 350 ms.** The refusal is the
   firmware's transmit table being full, and the table drains a record at a time.
+- **The launcher list is framed even though nothing is attached.** A list is asked for *because* the
+  phone is not attached, and the version that gates framing came from the attach: the answer was one
+  record per 137-byte page, eleven records for nineteen shells, when the same bytes framed are two.
+  A run too big for one message body is split into as many frames as it needs, so the ceiling on a
+  list is its deflated size rather than the frame body.
 - **One answer is one frame when deflating pays.** A screen was the first case; a launcher list is
   the other, and it is the one the app pays for on every start: six pages of shell rows are 822
   bytes of repeated words and travel as **147 bytes**, two records instead of six. A message bigger

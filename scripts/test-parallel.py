@@ -29,6 +29,8 @@ import argparse
 import json
 import os
 import shutil
+import signal
+import tempfile
 import subprocess
 import sys
 import threading
@@ -101,6 +103,52 @@ def run_one(b: Binary, args: list[str], threads: int) -> tuple[Binary, int, floa
 #: Binaries that spawn a real daemon, keeper and shell and push megabytes through them.
 #: They run one at a time; see the comment at the scheduling site for the measurements.
 HEAVY_BINARIES = ("flood_and_endings", "wire_compression", "desk_attach_flood", "remote_e2e")
+
+
+#: Where a test's scratch keeper socket lives. A keeper named with a socket under the temp
+#: directory is a *test* keeper: the deployment's own keeper is named with a socket under the
+#: runtime directory, so this can never match it.
+def test_keeper_pids() -> list[int]:
+    out: list[int] = []
+    tmp = os.path.realpath(tempfile.gettempdir())
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            raw = open(f"/proc/{entry}/cmdline", "rb").read()
+        except OSError:
+            continue
+        args = raw.split(b"\0")
+        if len(args) < 2:
+            continue
+        if os.path.basename(args[0].decode("utf-8", "replace")) != "ldmux-keeper":
+            continue
+        sock = args[1].decode("utf-8", "replace")
+        if sock.startswith(tmp + os.sep):
+            out.append(int(entry))
+    return out
+
+
+def sweep_test_keepers() -> int:
+    """Kill keepers a test left behind, and say how many.
+
+    **A killed test leaks a keeper.** The `Reaper` guard in the test helpers runs on a panic, but
+    nothing runs when the process is killed outright (a timeout, a cancelled run, an OOM): the
+    keeper keeps its PTYs, its shells and its socket for the life of the machine. Measured here
+    2026-11-09: two of them, 33 and 40 hours old, each holding a scope and a shell, plus six scope
+    units whose processes outlived their shell. The sweep is by socket path, so it cannot touch the
+    deployed keeper (`$XDG_RUNTIME_DIR/ldmux/keeper.sock`).
+    """
+    killed = 0
+    for pid in test_keeper_pids():
+        try:
+            os.kill(pid, signal.SIGTERM)
+            killed += 1
+        except OSError:
+            pass
+    if killed:
+        time.sleep(0.5)
+    return killed
 
 
 def main() -> int:
@@ -177,6 +225,9 @@ def main() -> int:
     # runs at four jobs were green; the suite is a gate, so it is sized for correctness
     # rather than for the shortest wall time.
     jobs = jobs or int(os.environ.get("LDMUX_TEST_JOBS") or 0) or max(4, cores // 4)
+    stale = sweep_test_keepers()
+    if stale:
+        print(f"test-parallel: swept {stale} keeper(s) a killed run left behind", flush=True)
     binaries, build_s = build(cargo_flags)
     if not binaries:
         print("test-parallel: nothing to run", file=sys.stderr)
@@ -236,6 +287,9 @@ def main() -> int:
     with ThreadPoolExecutor(max_workers=jobs) as pool:
         list(pool.map(one, light))
 
+    swept = sweep_test_keepers()
+    if swept:
+        print(f"test-parallel: swept {swept} keeper(s) left behind", flush=True)
     wall = time.monotonic() - t0
     results.sort(key=lambda r: -r[1])
     print()

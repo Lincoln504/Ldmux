@@ -364,6 +364,14 @@ by the host radio, by the app before it retunes, and by every budget below.
   The release is the difference from the screen the phone holds (the differ is not reset), and it
   expires after ten minutes so a client that stops sending cannot leave a shell unlit. A tag a host
   does not know is skipped, so an old host simply keeps drawing.
+- **A frame is the phone's, not the attach's.** A list is answered *because* nothing is attached, so
+  the version that gates packing and framing comes from what the phone attached with (`versions`),
+  not from the live attach. Reading it from the attach made every launcher answer one record per
+  page: nineteen shells, eleven records, six seconds, where the same bytes framed are two.
+- **A run too big for one message body is framed in pieces.** A frame is one message and a message
+  body is capped, so a forty-eight shell list is split into as many frames as its deflated size
+  needs; each piece is a complete frame and the phone's mirror accumulates an open frame until its
+  `Commit`. The alternative — falling back to one record per page — is twenty-odd records.
 - **Any run of host-to-phone messages is one frame when deflating pays.** A screen was the first
   case; the launcher is the second, and it is the bigger one — six pages of shell rows are 822
   bytes of repeated words (`bash`, `~/Documents/`, the ids) and travel as 147. The phone inflates

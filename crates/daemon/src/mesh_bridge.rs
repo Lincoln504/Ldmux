@@ -303,6 +303,13 @@ struct Attached {
     /// every control message still arrive — and the release sends the difference from the screen the
     /// phone holds, so nothing is repainted.
     held_since: Option<Instant>,
+    /// When this shell's screen was last read while the phone had it held.
+    ///
+    /// **A frozen view is not worth a keeper round trip twenty times a second.** While held nothing
+    /// is built, but the tick still read the screen on every pass — with `screen()` taking the
+    /// daemon-wide mutex, which a desk client also needs. A held shell's screen is read once a
+    /// second: enough to notice a dead shell, cheap enough not to contend.
+    held_read_at: Option<Instant>,
     /// A `Resync` the phone asked for while records were still in flight.
     ///
     /// **Asking for the screen while it is already on its way is not a reason to paint it twice.**
@@ -442,6 +449,7 @@ impl Attached {
             return;
         }
         self.held_since = None;
+        self.held_read_at = None;
         self.last_push = None;
         self.changed_last_tick = false;
         self.echo = false;
@@ -587,7 +595,7 @@ fn plain_len(messages: &[Message]) -> usize {
 }
 
 fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
-    use ldmux_protocol::mesh_term::{FRAME_COMPRESS_MIN, FRAME_MAX_INFLATED, Message as M};
+    use ldmux_protocol::mesh_term::Message as M;
     let is_screen = |m: &Message| matches!(m, M::Rows { .. } | M::Commit { .. });
     // **A run of messages is a frame, not only a screen.** The launcher is the other place the host
     // spends several records on one answer: a dozen shells is about 700 bytes of repeated words
@@ -607,42 +615,68 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
         // No screen at all: the whole answer, when there is enough of it to pay for the frame.
         None => (0, messages.len()),
     };
+    let mut out: Vec<Message> = messages[..start].to_vec();
+    out.extend(Self::frame_run(&messages[start..end], with_dict));
+    out.extend_from_slice(&messages[end..]);
+    out
+}
+
+/// Compress a run of messages into **as few frames as its encoded size allows**.
+///
+/// **One frame is one *message*, and a message body has a ceiling.** A forty-eight shell list is
+/// about 2.6 KB of text, and it deflates to more than the 598-byte body a frame may carry: a single
+/// frame then cannot encode, and the caller fell back to one record per 137-byte page — twenty-odd
+/// records for a list that is two. The run is therefore split, in halves, until each piece fits; a
+/// frame is `Rows`/`Commit`/`Sessions` among other messages and each is complete in itself, and the
+/// phone's mirror accumulates an open frame until its `Commit` whatever record it arrived in.
+fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
+    use ldmux_protocol::mesh_term::{FRAME_COMPRESS_MIN, FRAME_MAX_INFLATED, Message as M};
+    if run.is_empty() {
+        return Vec::new();
+    }
     let mut inner = Vec::new();
-    for m in &messages[start..end] {
+    for m in run {
         let Ok(bytes) = m.encode() else {
-            return messages.to_vec();
+            return run.to_vec();
         };
         inner.extend_from_slice(&bytes);
     }
-    if inner.len() < FRAME_COMPRESS_MIN || inner.len() > FRAME_MAX_INFLATED {
-        return messages.to_vec();
+    if inner.len() < FRAME_COMPRESS_MIN {
+        return run.to_vec();
     }
-    // **The dictionary frame first, the plain one as the fallback.** A phone that reported version 12
-    // carries [`FRAME_DICTIONARY`], and against it the same screen deflates ~20 % smaller — 419 -> 325
-    // bytes on a real status screen, which is the difference between three records and two.
-    let dict_frame = with_dict.then_some(M::FrameDict {
-        inner: inner.clone(),
-    });
-    let plain_frame = M::Frame { inner };
-    // **The frame must encode, and it must be smaller than what it replaces.** Both are measured
-    // here rather than assumed: on text that does not repeat (a hex dump, a table of digits) deflate
-    // can come out larger than the input, and an encode refusal used to fail the whole reply — the
-    // bridge resynced, rebuilt the identical frame and refused it again, so a screen that could not
-    // be compressed was a screen that never painted.
-    let plain = Self::plain_len(&messages[start..end]);
-    let frame = match dict_frame {
-        Some(f) if f.encode().is_ok_and(|b| b.len() < plain) => f,
-        _ => plain_frame,
-    };
-    let Ok(bytes) = frame.encode() else {
-        return messages.to_vec();
-    };
-    if bytes.len() >= Self::plain_len(&messages[start..end]) {
-        return messages.to_vec();
+    if inner.len() <= FRAME_MAX_INFLATED {
+        // **The dictionary frame first, the plain one as the fallback.** A phone that reported
+        // version 12 carries [`FRAME_DICTIONARY`], and against it the same screen deflates ~20 %
+        // smaller — 419 -> 325 bytes on a real status screen, which is the difference between three
+        // records and two.
+        let dict_frame = with_dict.then_some(M::FrameDict {
+            inner: inner.clone(),
+        });
+        let plain_frame = M::Frame { inner };
+        // **The frame must encode, and it must be smaller than what it replaces.** Both are measured
+        // here rather than assumed: on text that does not repeat (a hex dump, a table of digits)
+        // deflate can come out larger than the input, and an encode refusal used to fail the whole
+        // reply — the bridge resynced, rebuilt the identical frame and refused it again, so a screen
+        // that could not be compressed was a screen that never painted.
+        let plain = Self::plain_len(run);
+        let frame = match dict_frame {
+            Some(f) if f.encode().is_ok_and(|b| b.len() < plain) => f,
+            _ => plain_frame,
+        };
+        if let Ok(bytes) = frame.encode()
+            && bytes.len() < plain
+        {
+            return vec![frame];
+        }
     }
-    let mut out: Vec<Message> = messages[..start].to_vec();
-    out.push(frame);
-    out.extend_from_slice(&messages[end..]);
+    // Either too big for one body, or not worth a frame as a whole: split and try each half. A run
+    // of one message that will not frame is sent as it is.
+    if run.len() == 1 {
+        return run.to_vec();
+    }
+    let mid = run.len() / 2;
+    let mut out = Self::frame_run(&run[..mid], with_dict);
+    out.extend(Self::frame_run(&run[mid..], with_dict));
     out
 }
 
@@ -664,20 +698,26 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
         // cost a whole 176-byte frame per message: a one-row echo paid two frames (`Rows` and
         // its `Commit`) where the pair is 30-40 bytes. Packed, the same echo is one frame.
         //
-        // A phone that attached below [STREAM_VERSION] is not assumed to decode a record with
-        // more than one message, so it keeps one record per message.
-        let streamed = self
+        // **The version is the phone's, not the attach's.** A `List` is answered *because* nothing
+        // is attached: the launcher asks before it opens anything, and a `Close` asks for the list
+        // after the attach was removed. Reading the version from the live attach therefore made
+        // every launcher answer one record per message and unframed — a nineteen-shell list was
+        // eleven records, about 6 s of air, when the same bytes framed are two or three. The
+        // version the phone attached with is already remembered in `versions`, refused or accepted,
+        // and the `List` handler twenty lines away uses it for exactly this reason.
+        let version = self
             .shells
             .get(&shell)
-            .map(|s| s.version >= STREAM_VERSION)
-            .unwrap_or(false);
+            .map(|s| s.version)
+            .or_else(|| self.versions.get(&shell).copied())
+            .unwrap_or(0);
+        let streamed = version >= STREAM_VERSION;
         // **A big frame is compressed as one frame, not one record at a time.** A record is 143 B
         // and one screen is 900, so compressing a record saves nothing (the record still goes out
         // whole). Compressing the frame is 1.7x to 8x on real terminal text — measured, raw deflate:
         // a build log 936 → 554, a TUI 971 → 413, a code listing 894 → 112 — which is seven records
         // becoming three to one. `Profile` stays outside it: the phone must know the grid before the
         // rows mean anything, and it is 16 bytes.
-        let version = self.shells.get(&shell).map(|s| s.version).unwrap_or(0);
         let framed: Vec<Message> = if streamed && version >= ldmux_protocol::mesh_term::FRAME_VERSION {
             Self::pack_frame(messages, version >= ldmux_protocol::mesh_term::FRAME_DICT_VERSION)
         } else {
@@ -850,6 +890,22 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
             // (2 records once compressed, well inside the window); with the pipe busy, the old
             // record-for-message budget stands, because that is what keeps a keyboard echo from
             // queueing behind a repaint.
+            // **A held shell is looked at once a second.** Nothing is built for it, and the tick
+            // otherwise reads the keeper's snapshot on every pass for a picture nobody draws.
+            if let Some(a) = self.shells.get(&shell)
+                && a.held()
+            {
+                let now = (self.clock)();
+                let due = a
+                    .held_read_at
+                    .is_none_or(|t| now.saturating_duration_since(t) >= HELD_SCREEN_MS);
+                if !due {
+                    continue;
+                }
+                if let Some(a) = self.shells.get_mut(&shell) {
+                    a.held_read_at = Some(now);
+                }
+            }
             let pending = self.link.pending();
             // **A resync asked for while the link owed records is honoured now.** It was deferred so
             // the screen it asked for was not queued twice; the pipe is empty, so this is the one
@@ -1239,6 +1295,7 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
                                     .then(|| Instant::now() + ATTACH_GRACE),
                                 resync_wanted: false,
                                 held_since: None,
+                                held_read_at: None,
                                 changed_last_tick: false,
                                 echo: false,
                                 original,
@@ -1398,12 +1455,11 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
                 // radio route called the daemon's bare `close`, which has no holder rule, so the
                 // same button that was refused over the network destroyed a shell a desk window was
                 // working in. Two routes doing one thing is the whole point of having two routes.
-                let holder = self
-                    .host
-                    .listing()
-                    .await
-                    .and_then(|rows| rows.into_iter().find(|r| r.id == id).map(|r| r.owner))
-                    .unwrap_or_default();
+                // **A claim-table question, not a listing.** `listing` asks the keeper about every
+                // shell, and this answer is in the daemon's memory: the same read was made twice
+                // in this handler (here and for the reply below), so a close cost two keeper round
+                // trips before the shell was even ended.
+                let holder = self.host.holder(&id).await.unwrap_or_default();
                 if !holder.is_empty() && holder != "mesh" {
                     self.reply(shell, &[Message::Closed { reason: closed::HELD }]);
                     return;
@@ -1978,6 +2034,12 @@ const OWNER_CHECK: Duration = Duration::from_millis(5_000);
 /// view and then stopped sending — because a shell nobody draws and nobody releases is a shell the
 /// next viewer finds blank for a reason nothing records.
 const HOLD_MAX: Duration = Duration::from_secs(600);
+
+/// How often a held shell's screen is read.
+///
+/// Enough to notice a shell that ended, and a sixtieth of the tick's own cadence: a held shell
+/// builds nothing, so the only reason to read it is to see whether it is still there.
+const HELD_SCREEN_MS: Duration = Duration::from_millis(1_000);
 
 /// Wait until either the link has something to say or the cadence expires.
 ///
@@ -3328,6 +3390,73 @@ mod tests {
         assert_eq!(sent_records(&link), settled, "one repaint, not a loop");
     }
 
+    /// **A list answered with nothing attached is framed too.**
+    ///
+    /// The launcher asks *because* it is not attached, and a `Close` asks for the list after the
+    /// attach was removed: reading the version from the live attach made every such answer one
+    /// record per page and unframed — eleven records for a nineteen-shell list, about 6 s of air.
+    /// The host's own decoder inflates a frame, so "framed" is visible as pages arriving in fewer
+    /// records than there are pages.
+    #[tokio::test]
+    async fn a_list_answered_without_an_attach_is_framed() {
+        let (mut b, host, link) = setup();
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+            },
+        );
+        b.tick().await;
+        // The phone closes the page it opened: the version is remembered, the attach is gone.
+        phone_says(&link, 1, &Message::Detach);
+        b.tick().await;
+        host.0.lock().unwrap().running = (0..12).map(|i| format!("shell-{i:02}")).collect();
+        let base = sent_records(&link);
+        phone_says(&link, 1, &Message::List);
+        b.tick().await;
+        let sent = link.0.lock().unwrap().sent[base..].to_vec();
+        let pages = count_pages(&sent);
+        assert!(pages >= 3, "twelve shells are paged: {pages} pages");
+        assert!(
+            sent.len() < pages,
+            "{pages} pages must travel in fewer than {pages} records, got {}",
+            sent.len()
+        );
+    }
+
+    /// **A list too big for one frame body is split between frames, not pages.**
+    ///
+    /// A frame is one message and a message body has a ceiling; forty-eight shells deflate past it.
+    /// Falling back to one record per page would spend twenty-odd records on a list that is four.
+    #[tokio::test]
+    async fn a_full_list_is_split_between_frames_not_pages() {
+        let (mut b, host, link) = setup();
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+            },
+        );
+        b.tick().await;
+        host.0.lock().unwrap().running = (0..48).map(|i| format!("shell-{i:02}")).collect();
+        let base = sent_records(&link);
+        phone_says(&link, 1, &Message::List);
+        b.tick().await;
+        let sent = link.0.lock().unwrap().sent[base..].to_vec();
+        let pages = count_pages(&sent);
+        assert!(pages >= 8, "forty-eight shells are paged: {pages} pages");
+        assert!(
+            sent.len() < pages / 2,
+            "{pages} pages in fewer than {} records, got {}",
+            pages / 2,
+            sent.len()
+        );
+    }
+
     /// **A full launcher list travels in fewer records than its pages.**
     ///
     /// The pages are the other answer the host spends several records on: a dozen shells is ~700
@@ -3489,6 +3618,23 @@ mod tests {
         clock.advance(2_000);
         b.tick().await;
         (b, host, link, clock)
+    }
+
+    /// How many `Sessions` pages a list answer carried, whether framed or plain.
+    ///
+    /// The host's decoder inflates a frame into its inner messages, so a page is a page however it
+    /// travelled; the record count against the page count is what says whether it was framed.
+    fn count_pages(sent: &[(u8, Vec<u8>)]) -> usize {
+        let mut pages = 0usize;
+        let mut d = Decoder::new();
+        for (_, bytes) in sent {
+            for item in d.push(bytes).unwrap() {
+                if matches!(item.unwrap(), Message::Sessions { .. }) {
+                    pages += 1;
+                }
+            }
+        }
+        pages
     }
 
     fn sent_records(link: &FakeLink) -> usize {

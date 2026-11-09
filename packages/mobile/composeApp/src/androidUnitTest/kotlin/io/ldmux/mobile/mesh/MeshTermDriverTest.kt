@@ -387,21 +387,87 @@ class MeshTermDriverTest {
     ///
     /// The screen re-asserts the hold whenever its state changes (mode, waiting, first paint), and
     /// a repeated `Hold` would be a record of airtime for a fact the host already knows.
+    /// **A shell ending between two pages does not truncate the list.**
+    ///
+    /// A `Closed` is the other thing that asks for a list mid-run (`backToList`), and emptying the
+    /// buffer there had the same symptom as a refresh: the run's tail became the row set. This is
+    /// the failure measured on the device 2026-11-09 (eleven shells, two rows).
+    @Test
+    fun `a shell ending between pages does not truncate the list`() = runBlocking<Unit> {
+        val d = driver(); probed(d)
+        deliver(d, TermMessage.Closed(MeshTerm.Closed.AMBIGUOUS), TermMessage.Sessions(false, listOf(ent("aa11"), ent("bb22"))))
+        assertEquals(MeshTermView.Listing, d.view.value, "one page is not the answer")
+        deliver(d, TermMessage.Closed(MeshTerm.Closed.EXITED))
+        deliver(d, TermMessage.Sessions(true, listOf(ent("cc33"))))
+        val shown = (d.view.value as? MeshTermView.Choose)?.entries?.map { it.id }
+        assertEquals(listOf("aa11", "bb22", "cc33"), shown, "the whole run, not its last page")
+    }
+
     @Test
     fun `a repeated hold is not a second record`() = runBlocking<Unit> {
         val d = driver(); probed(d)
         deliver(d, TermMessage.Closed(MeshTerm.Closed.AMBIGUOUS), TermMessage.Sessions(true, listOf(ent("aa11"), ent("bb22"))))
         assertTrue(d.open("aa11"), "the list's id is opened")
 
+        // **A hold with nothing drawn is not sent.** The host had nothing to draw, so a record
+        // saying "stop" would buy nothing.
         d.setHold(true)
         d.flush()
+        assertEquals(0, sess.messages().count { it == TermMessage.Hold(true) }, "a silent host is left alone")
+
+        // A frame arrives: now the host is drawing, and the hold is worth its record.
+        deliver(d, TermMessage.Profile(12, 46, 17, 0), rows(1, true, 0 to "$ "), TermMessage.Commit(1, 2, 0, 0))
+        d.flush()
         assertEquals(1, sess.messages().count { it == TermMessage.Hold(true) })
+
         d.setHold(true)
         d.flush()
         assertEquals(1, sess.messages().count { it == TermMessage.Hold(true) }, "a re-assert is not a record")
         d.setHold(false)
         d.flush()
         assertEquals(1, sess.messages().count { it == TermMessage.Hold(false) })
+    }
+
+    /// **A refused hold is retried, and the host is never left believing the wrong state.**
+    ///
+    /// The old code recorded `holdSent` before the send, so a full queue at that moment suppressed
+    /// every retry: the host kept drawing a frozen view at a record a second, or a released shell
+    /// stayed unlit until the host's ten-minute expiry.
+    @Test
+    fun `a hold the session refused is sent again on the next flush`() = runBlocking<Unit> {
+        val d = driver(); probed(d)
+        deliver(d, TermMessage.Closed(MeshTerm.Closed.AMBIGUOUS), TermMessage.Sessions(true, listOf(ent("aa11"), ent("bb22"))))
+        assertTrue(d.open("aa11"))
+        deliver(d, TermMessage.Profile(12, 46, 17, 0), rows(1, true, 0 to "$ "), TermMessage.Commit(1, 2, 0, 0))
+
+        sess.queueOutcome = QueueOutcome.Full
+        d.setHold(true)
+        d.flush()
+        assertEquals(0, sess.messages().count { it == TermMessage.Hold(true) }, "the queue refused it")
+
+        sess.queueOutcome = QueueOutcome.Queued
+        d.setHold(true)
+        d.flush()
+        assertEquals(1, sess.messages().count { it == TermMessage.Hold(true) }, "and it is sent when there is room")
+    }
+
+    /// **A frame from a host that was told to hold means the hold is gone.** Its ten-minute expiry,
+    /// or a rebuilt attach, leaves the phone believing a state the host has left; the phone says so
+    /// again rather than drawing nothing for ten minutes.
+    @Test
+    fun `a frame while held re-asserts the hold once`() = runBlocking<Unit> {
+        val d = driver(); probed(d)
+        deliver(d, TermMessage.Closed(MeshTerm.Closed.AMBIGUOUS), TermMessage.Sessions(true, listOf(ent("aa11"), ent("bb22"))))
+        assertTrue(d.open("aa11"))
+        deliver(d, TermMessage.Profile(12, 46, 17, 0), rows(1, true, 0 to "$ "), TermMessage.Commit(1, 2, 0, 0))
+        d.setHold(true)
+        d.flush()
+        assertEquals(1, sess.messages().count { it == TermMessage.Hold(true) })
+
+        // The host draws anyway: it is no longer holding.
+        deliver(d, rows(2, false, 1 to "out"), TermMessage.Commit(2, 2, 1, 0))
+        d.flush()
+        assertEquals(2, sess.messages().count { it == TermMessage.Hold(true) }, "the hold is re-asserted")
     }
 
     @Test

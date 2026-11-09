@@ -557,6 +557,8 @@ class MeshTermDriver(
      */
     private fun rekey() {
         outgoing.clear()
+        holdSent = false
+        holdQueued = false
         handshake?.abandon()
         handshake = null
         session?.close()
@@ -575,6 +577,8 @@ class MeshTermDriver(
         // session holds keys and a queue that only a fresh handshake should replace. Held messages
         // go too: an `Attach` or an `Input` built for a session that ended is not for the next one.
         outgoing.clear()
+        holdSent = false
+        holdQueued = false
         handshake?.abandon()
         handshake = null
         // The verdict was about *this* link; the next one starts its own clock.
@@ -1118,14 +1122,33 @@ class MeshTermDriver(
      * as before, which is why nothing here waits for an acknowledgement.
      */
     suspend fun setHold(on: Boolean) = lock.withLock {
-        if (holdSent == on) return@withLock
+        holdWanted = on
         if (session == null || terminalView != null) return@withLock
         if (attachedId == null && pick != Pick.Attached) return@withLock
-        holdSent = on
-        // Buffered: the release rides the line the press is about to send, and the hold itself
-        // rides whatever the next flush carries. The screen's pump loop flushes this turn.
-        queue(TermMessage.Hold(on))
+        // **A release always goes; a hold only if the host has drawn since the release.** A hold
+        // sent when the host had nothing to draw is a record for nothing, and after a `show` on an
+        // idle shell that is exactly the case. `holdWanted` still records the wish, so the first
+        // frame that arrives afterwards is what sends it (see `onFrame`).
+        if (!on || drewSinceRelease) {
+            queueHold()
+            pump()
+        }
         publish()
+    }
+
+    /**
+     * Queue the hold the view wants, if the host has not already been told.
+     *
+     * **The hold is a state, not a message.** Whatever is sent at flush time is the state the view
+     * wants *now*, so a release that overtakes a queued hold can never leave the host holding a
+     * shell the operator is looking at.
+     */
+    private fun queueHold() {
+        // **One hold per state, not one per frame.** A screen arrives as `Rows` and a `Commit`, and
+        // both are frames; queueing the hold on each put two copies in the queue.
+        if (holdQueued || holdWanted == holdSent) return
+        outgoing.addFirst(TermMessage.Hold(holdWanted).encode())
+        holdQueued = true
     }
 
     /**
@@ -1139,6 +1162,17 @@ class MeshTermDriver(
 
     /** What the host was last told about the view, so a re-assert is not a record. */
     private var holdSent = false
+    /** What the view wants the host to do, which may differ from [holdSent] until a flush lands. */
+    private var holdWanted = false
+    /** A hold message is in the queue and has not reached the session yet. */
+    private var holdQueued = false
+    /**
+     * A frame arrived while the host was released.
+     *
+     * The only honest evidence that the host *has* something to draw. Without it a `show` on an
+     * idle shell would send `Hold{on}` and stop a stream that was already silent.
+     */
+    private var drewSinceRelease = false
 
     /** Whether the attached shell has never delivered a screen: the page has nothing to draw. */
     val screenUnpainted: Boolean
@@ -1269,6 +1303,8 @@ class MeshTermDriver(
      */
     private fun flushOutgoing(): QueueOutcome {
         val s = session ?: return QueueOutcome.NotOpen
+        // The hold goes first, and it is always the state the view wants.
+        queueHold()
         var first = QueueOutcome.Queued
         while (outgoing.isNotEmpty()) {
             // **Take the front run without removing it.** A refusal then costs nothing but the next
@@ -1293,10 +1329,20 @@ class MeshTermDriver(
             val outcome = s.send(SHELL, joined)
             if (outcome != QueueOutcome.Queued) {
                 outgoing.clear()
+                // **A refusal is not a state change.** `holdSent` still names what the host was
+                // told, so the next flush re-sends the hold the view wants. It used to be recorded
+                // before the send, and a refusal then suppressed every retry: the host drew a
+                // frozen view for ever, or a released shell stayed unlit until the host's own
+                // ten-minute expiry.
+                holdQueued = false
                 if (first == QueueOutcome.Queued) first = outcome
                 break
             }
             repeat(count) { outgoing.removeFirst() }
+        }
+        if (holdQueued && outgoing.isEmpty()) {
+            holdSent = holdWanted
+            holdQueued = false
         }
         return first
     }
@@ -1513,12 +1559,37 @@ class MeshTermDriver(
     private fun handleScreen(m: TermMessage) {
         when (m) {
             is TermMessage.Rows -> {
+                onFrame()
                 if (held.isNotEmpty() && held[0].epoch != m.epoch) held.clear()
                 held += m
             }
-            is TermMessage.Commit -> commit(m)
+            is TermMessage.Commit -> {
+                onFrame()
+                commit(m)
+            }
             else -> {}
         }
+    }
+
+    /**
+     * A frame arrived: the host *is* drawing.
+     *
+     * Two facts come from that. If the view wants the host held and it is not, this is the proof
+     * that holding it now would save something, so the hold goes. And if the host was already told
+     * to hold, a frame means it is no longer holding — its ten-minute expiry fired, or a rebuilt
+     * attach started unheld — so the phone says so again instead of believing a state the host has
+     * left.
+     */
+    private fun onFrame() {
+        drewSinceRelease = true
+        if (!holdWanted) return
+        if (!holdSent) {
+            queueHold()
+            return
+        }
+        // Held, and still drawing: the host has forgotten. Re-assert once.
+        holdSent = false
+        queueHold()
     }
 
     /**
@@ -1535,7 +1606,10 @@ class MeshTermDriver(
         terminalView = null
         forgetMarkPage()
         pick = Pick.Listing
-        pages = ArrayList()
+        // **The page buffer is not cleared here.** A run of pages already on the air would lose
+        // every page but its last, and the tail would then complete a fresh buffer and become the
+        // row set — measured on the device 2026-11-09 as a two-row launcher over eleven shells.
+        // A completed run empties it; a request only says what the next completed run means.
         choices = emptyList()
         publishShells()
         queue(TermMessage.ListRequest)
@@ -1636,8 +1710,11 @@ class MeshTermDriver(
      */
     private fun queueAttach(selector: String) {
         // A fresh attach is a fresh shell on the host, and it starts unheld: whatever this phone
-        // told the previous one does not carry over.
+        // told the previous one does not carry over. Nothing has been drawn for it either, so the
+        // first hold waits for the first frame.
         holdSent = false
+        holdQueued = false
+        drewSinceRelease = false
         val grid = wantedGrid
         if (grid == null) {
             queue(TermMessage.Attach(MeshTerm.VERSION, selector))

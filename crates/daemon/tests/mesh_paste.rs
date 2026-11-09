@@ -67,10 +67,21 @@ async fn settle(bridge: &mut Bridge<DaemonHost, FakeLink>, rig: &Rig) -> Vec<Str
             bridge.tick().await;
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        if all_empty(&read_pane(rig).await) && std::time::Instant::now() < deadline {
-            continue;
+        if all_empty(&read_pane(rig).await) {
+            if std::time::Instant::now() < deadline {
+                continue;
+            }
+            break;
         }
         break;
+    }
+    // **One more pass after the prompt is visible.** The bridge records the pane's paste mode from
+    // the screen a pass reads, and the snapshot can show the prompt one pass before the tick that
+    // sees it: the paste then travelled as ordinary text and both lines ran. Two passes make the
+    // flag and the picture agree.
+    for _ in 0..2 {
+        bridge.tick().await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
     read_pane(rig).await
 }

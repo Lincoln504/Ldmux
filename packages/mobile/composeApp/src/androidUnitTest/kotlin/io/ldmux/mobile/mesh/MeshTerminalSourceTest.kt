@@ -50,6 +50,25 @@ class MeshTerminalSourceTest {
         assertTrue(h.modifiers.armed, "the user armed Ctrl for their next keystroke, not for a tap")
     }
 
+    /// **`show` on a frozen view releases the host instead of doing nothing.**
+    ///
+    /// With `Hold`, the host sends no screens while the view is frozen, so there is never a held
+    /// screen to draw — and `show` used to return early on exactly that condition. The button did
+    /// nothing at all on a batch shell (measured 2026-11-09), and the operator concluded the link
+    /// was dead. Releasing the host is what makes the press mean "show me the shell now".
+    @Test
+    fun `show on a frozen view unfreezes it so the host draws again`() {
+        val (s, _, b) = source()
+        s.setPublicChannel(true)
+        s.show(MeshScreen(listOf("$ one", "$ "), 2, 1, alternate = false, dead = false, epoch = 1, cols = 20), "aa11")
+        assertTrue(s.hasScreen, "the first screen paints")
+        assertTrue(b.isEmpty, "nothing was typed")
+
+        assertFalse(s.sync(), "nothing to send, so the press does not send")
+        assertTrue(s.awaitingSync, "but the view follows the host again, which is what releases the hold")
+        assertFalse(s.awaitingAnswer, "and the bar does not claim an answer is owed")
+    }
+
     @Test
     fun `nothing to scroll before a screen arrives, and the measured grid goes out as a resize request`() {
         val (s, _, _) = source()
