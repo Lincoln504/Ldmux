@@ -227,6 +227,9 @@ struct Detached {
 
 struct Attached {
     session: String,
+    /// The shell id this attach names: the `Profile` says it, and the marks that ride the attach
+    /// are looked up by it.
+    shell: String,
     differ: Differ,
     /// The profile version the phone attached with. A phone on version 1 does not send `Key`,
     /// and one that does is not obeyed: it did not ask for the message's meaning.
@@ -380,6 +383,14 @@ pub struct Bridge<H, L> {
     /// phone speaks (`CWD_VERSION`), so the version is remembered from the `Attach` that always
     /// precedes it rather than guessed.
     versions: HashMap<u8, u8>,
+    /// The grid the phone last asked for, per shell, kept across a detach.
+    ///
+    /// **The desk's pty is not the phone's, and waiting for a resize is a race.** A shell left at a
+    /// desk window's geometry was drawn at that geometry for the first second of every attach — a
+    /// 158x82 or 255x82 pane is twenty thousand cells and twenty-odd records — unless the phone's
+    /// `Resize` won. Remembering the grid here means a re-attach fits the pane *before* the first
+    /// frame is built, so there is nothing to race.
+    grids: HashMap<u8, (u8, u8)>,
     generation: u32,
     /// The window was full on the previous pass. The first pass with room after a stall is a
     /// phone coming back, not a burst: its diff goes at once rather than waiting out a coalescing
@@ -456,6 +467,7 @@ impl<H: Host, L: Link> Bridge<H, L> {
             host,
             link,
             shells: HashMap::new(),
+            grids: HashMap::new(),
             decoders: HashMap::new(),
             versions: HashMap::new(),
             generation: 0,
@@ -987,6 +999,16 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
                         // phone's own size or (when the fit had set `geometry`) was skipped
                         // entirely — measured 2026-11-05: a desk shell left at 46x35 after the
                         // phone returned to its list.
+                        // **Fit the pane to the grid this phone used last time, before reading it.**
+                        // Otherwise the first frame is the desk's geometry and the phone's `Resize`
+                        // is a race the desk usually wins: measured 2026-11-09, a 255x82 desk pane
+                        // was drawn and committed before a 46x17 grid arrived, twenty-odd records
+                        // for a screen nobody would see. The remembered grid is a hint, not a
+                        // promise: the phone resizes on its first relayout and corrects it.
+                        let remembered = self.grids.get(&shell).copied();
+                        if let Some((cols, rows)) = remembered {
+                            let _ = self.host.resize(one, cols, rows).await;
+                        }
                         let original = self.host.screen(one).await.ok();
                         // The pane's own paste mode rides the same read: the first keystroke can
                         // beat the next tick, and a paste that arrived before it would execute
@@ -997,6 +1019,7 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
                             shell,
                             Attached {
                                 session: (*one).clone(),
+                                shell: (*one).clone(),
                                 // Answered in the version asked for, naming the shell the host
                                 // chose, so a phone that sent an empty selector learns which.
                                 differ: Differ::for_attach(version, one),
@@ -1004,7 +1027,7 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
                                 idle_sent: false,
                                 pushes_since_input: 0,
                                 version,
-                                geometry: None,
+                                geometry: remembered,
                                 last_push: None,
                                 hold: Some(
                                     Instant::now() + ATTACH_GRACE,
@@ -1015,6 +1038,28 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
                                 bracketed_paste,
                             },
                         );
+                        // **The profile goes out at once, before any row.** A phone asks for its own
+                        // grid only once it knows the pane's, so withholding the profile until the
+                        // rows are due is a deadlock: measured 2026-11-09, the host drew a 255x82
+                        // desk pane (twenty thousand cells, twenty-odd records) because the profile
+                        // that would have made the phone ask for 46x17 was held with the rows behind
+                        // the grace. Eighteen bytes now, and the phone's `Resize` follows one round
+                        // trip later.
+                        if let Some(a) = self.shells.get(&shell) {
+                            let profile = Message::Profile {
+                                version: a.version,
+                                cols: original.map_or(0, |(c, _)| c),
+                                rows: original.map_or(0, |(_, r)| r),
+                                unsupported: if a.version >= RESIZE_VERSION {
+                                    ldmux_protocol::mesh_term::unsupported::ALL_V1
+                                        & !ldmux_protocol::mesh_term::unsupported::RESIZE
+                                } else {
+                                    ldmux_protocol::mesh_term::unsupported::ALL_V1
+                                },
+                                shell: a.shell.clone(),
+                            };
+                            self.reply(shell, &[profile]);
+                        }
                         // **What this phone missed, sent once.** The marks that are true now go
                         // with the attach, because the radio cannot reach a phone that is not
                         // connected and this is the only moment delivery is possible. A phone on a
@@ -1273,9 +1318,12 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
                 // Only a resize the pane accepted starts the screen over: a refused one leaves
                 // the grid as it was and the phone keeps what it has.
                 let accepted = self.host.resize(&session, cols, rows).await.is_ok();
-                if accepted && let Some(a) = self.shells.get_mut(&shell) {
-                    a.geometry = Some((cols, rows));
-                    a.resync();
+                if accepted {
+                    if let Some(a) = self.shells.get_mut(&shell) {
+                        a.geometry = Some((cols, rows));
+                        a.resync();
+                    }
+                    self.grids.insert(shell, (cols, rows));
                 }
             }
             Message::Resync => {
@@ -1679,11 +1727,13 @@ pub const BURST_GAP: Duration = Duration::from_millis(1000);
 
 /// How long the first frame after an attach waits for the phone's grid.
 ///
-/// The grid now rides **inside** the attach record (22 bytes of payload, ~193 ms on air at the public
-/// tuple), so the wait only has to cover that record plus a tick; it was two records' worth of air
-/// when the grid was a message of its own. The grace is a fallback for a phone whose grid never
-/// arrives, and a `Resize` clears it outright, so this bounds only the fallback path.
-const ATTACH_GRACE: Duration = Duration::from_millis(700);
+/// **Measured, not derived from the attach alone.** The grid rides inside the attach record, but that
+/// record leaves *after* the handshake: hint ~0.19 s, msg1 ~0.46 s, msg2 ~0.25 s, attach ~0.19 s, so
+/// the phone's `Resize` lands about 1.1 s after the attach begins. A 700 ms grace expired first and
+/// the phone was drawn a 255x82 desk pane — about twenty thousand cells, twenty-odd records — before
+/// its own grid arrived, which is exactly the case this constant exists to prevent. A `Resize` still
+/// clears the hold outright, so this bounds only the fallback path.
+const ATTACH_GRACE: Duration = Duration::from_millis(1_400);
 
 /// Wait until either the link has something to say or the cadence expires.
 ///
@@ -3163,15 +3213,77 @@ mod tests {
         clock.advance(50);
         b.tick().await;
         let records = link.0.lock().unwrap().sent.iter().filter(|(s, _)| *s == 1).count();
+        // The attach answers with the pane's geometry at once (so the phone can ask for its own),
+        // then the frame: one profile record, then the compressed frame in two or three.
         assert!(
-            records <= 3,
-            "a 46x17 first paint is profile + one compressed frame: {records} records"
+            records <= 4,
+            "a 46x17 first paint is one profile plus one compressed frame: {records} records"
         );
         assert_eq!(
             phone_view(&link, 1).lines,
             lines,
             "and it is paintable after one tick"
         );
+    }
+
+    /// **A re-attach is drawn at the phone's grid, not the desk's.** The pty keeps whatever a desk
+    /// window left it at, and waiting for the phone's `Resize` is a race: measured 2026-11-09, a
+    /// 255x82 desk pane was committed before a 46x17 grid arrived. The grid from the last attach is
+    /// remembered per shell and applied *before* the first frame is read.
+    #[tokio::test]
+    async fn a_reattach_fits_the_pane_before_the_first_frame() {
+        let (mut b, host, link) = setup();
+        let clock = FakeClock::new();
+        b.clock = clock.reader();
+        // The desk has left this shell at a wide geometry.
+        host.0
+            .lock()
+            .unwrap()
+            .screens
+            .insert("abcd-1".into(), screen(&["a desk frame"]));
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: "abcd-1".into(),
+            },
+        );
+        b.tick().await;
+        // The phone says its own grid and later detaches.
+        phone_says(&link, 1, &Message::Resize { cols: 46, rows: 17 });
+        b.tick().await;
+        phone_says(&link, 1, &Message::Detach);
+        b.tick().await;
+        // Re-attach: the pane is fitted to 46x17 before a frame is built, so the desk geometry is
+        // never what the phone is drawn with.
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: "abcd-1".into(),
+            },
+        );
+        b.tick().await;
+        clock.advance(200);
+        b.tick().await;
+        let profile = link
+            .0
+            .lock()
+            .unwrap()
+            .sent
+            .iter()
+            .filter(|(s, _)| *s == 1)
+            .flat_map(|(_, bytes)| Decoder::new().push(bytes).unwrap())
+            .filter_map(|m| m.ok())
+            .filter_map(|m| match m {
+                Message::Profile { cols, rows, .. } => Some((cols, rows)),
+                _ => None,
+            })
+            .next_back()
+            .expect("a profile");
+        assert_eq!(profile, (46, 17), "the remembered grid, not the desk's");
     }
 
     /// **A screen that does not compress still paints.**
@@ -3363,14 +3475,21 @@ mod tests {
             },
         );
         b.tick().await;
-        // Inside the grace: the pane is attached, the phone has been answered, and nothing of the
-        // screen has been sent yet.
+        // Inside the grace: the pane is attached, the phone has been told the pane's geometry (so it
+        // can ask for its own), and **no row** has been sent yet.
         clock.advance(200);
         b.tick().await;
-        assert!(
-            phone_view(&link, 1).lines.is_empty() || phone_view(&link, 1).lines == [""],
-            "no screen before the phone's grid can arrive"
-        );
+        let rows_sent = link
+            .0
+            .lock()
+            .unwrap()
+            .sent
+            .iter()
+            .filter(|(s, _)| *s == 1)
+            .flat_map(|(_, bytes)| Decoder::new().push(bytes).unwrap())
+            .filter(|m| matches!(m, Ok(Message::Rows { .. })))
+            .count();
+        assert_eq!(rows_sent, 0, "no rows before the phone's grid can arrive");
         // The phone's grid, then the frame: at the grid it asked for, not the desk's.
         phone_says(&link, 1, &Message::Resize { cols: 46, rows: 17 });
         b.tick().await;
