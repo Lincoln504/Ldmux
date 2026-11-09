@@ -508,17 +508,23 @@ class MeshTermDriver(
         // refusal here is a transient one; sending the handshake anyway costs a whole rung of the
         // ladder (8 s, doubling) for a session the host could not answer. Bounded, so a radio that
         // will not take it still gets the handshake.
-        gateway.radioPublicKey?.let { key ->
-            val hint = RouteHint.record(key)
-            if (hint != null) {
-                // **A loop, not `repeat`.** `return@repeat` continues the iteration loop, so the
-                // hint was sent three times on every connect — three records of airtime for a
-                // message that had already arrived. Measured on the device 2026-11-08: three
-                // `route hint` lines in the host's log for one connect.
-                for (attempt in 0 until HINT_TRIES) {
-                    if (gateway.send(hint).outcome == MeshSendOutcome.SentDirect) break
-                    delay(HINT_RETRY_MS)
+        // **Once a minute, not once a retry.** The host records this radio's key durably (it
+        // survives a daemon restart), so a retry of the handshake ladder is asking the same host
+        // that already knows where to answer: re-sending the hint spent a record per rung of a
+        // ladder that can climb for a minute.
+        val hintDue = hintSentAt == 0L || clock() - hintSentAt >= HINT_REFRESH_MS
+        val hint = if (hintDue) gateway.radioPublicKey?.let(RouteHint::record) else null
+        if (hint != null) {
+            // **A loop, not `repeat`.** `return@repeat` continues the iteration loop, so the hint
+            // was sent three times on every connect - three records of airtime for a message that
+            // had already arrived. Measured on the device 2026-11-08: three `route hint` lines in
+            // the host's log for one connect.
+            for (attempt in 0 until HINT_TRIES) {
+                if (gateway.send(hint).outcome == MeshSendOutcome.SentDirect) {
+                    hintSentAt = clock()
+                    break
                 }
+                delay(HINT_RETRY_MS)
             }
         }
         handshake = h
@@ -829,6 +835,9 @@ class MeshTermDriver(
 
     private var wantedGrid: Pair<Int, Int>? = null
     private var requestedFit: Triple<String, Int, Int>? = null
+
+    /** When this radio's route hint last went out, so a retry does not repeat it. */
+    private var hintSentAt: Long = 0L
     private var hostVersion = 0
 
     private fun fitHost() {
@@ -1674,6 +1683,15 @@ class MeshTermDriver(
          */
         const val HINT_TRIES = 3
         const val HINT_RETRY_MS = 250L
+
+        /**
+         * How long a hint is trusted before another one is worth a record.
+         *
+         * The host keeps this radio's key durably, so a retry of the handshake ladder is asking a
+         * host that already knows where to answer. A minute is longer than any rung of the ladder
+         * and short enough that a host which lost its state is re-taught quickly.
+         */
+        const val HINT_REFRESH_MS = 60_000L
     }
 }
 

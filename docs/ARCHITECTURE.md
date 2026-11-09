@@ -488,6 +488,15 @@ it, **325** with — three records become two. The dictionary is a wire contract
 carries its exact bytes and both ends compare against them; it rides a separate message tag so a
 phone that predates it is never sent one.
 
+**A lost record is repaired in about two and a half seconds, not four.** The ARQ's cumulative ack
+is also its loss evidence: the peer only owes an ack because a record arrived, so an ack that does
+***not*** advance proves the front is missing, and waiting out the retransmission timer afterwards is
+waiting on a die that already fell. A gap's ack therefore goes out at once, and a non-advancing ack
+pulls the front early — floored at `max(one airtime, srtt/2)`, so a merely *late* record is never
+sent twice, and a long path raises its own floor. One retransmission per poll and one attempt per
+retransmission: the repair gets earlier, it does not get louder, which is what keeps a channel that
+is already losing a quarter of its records from being flooded by its own repair traffic.
+
 **Small messages share a record, on both sides.** A record is the unit of air, so `Attach` and its
 `Resize` travel together (17 bytes in one record instead of two), and the host packs its replies to
 the record's *live* payload — 143 at an empty path, up to 166 at range — rather than to a constant.
