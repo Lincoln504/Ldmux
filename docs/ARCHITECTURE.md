@@ -358,6 +358,17 @@ by the host radio, by the app before it retunes, and by every budget below.
   only when the pipe is empty, so a request the phone repeated while its screen was already on the
   way costs one repaint instead of two — the deferral, not the ladder, is what stops a slow paint
   from turning into a repaint loop.
+- **The phone can freeze the host's drawing, and does.** Batch mode holds the picture until the
+  operator presses sync, so a `Hold { on }` record tells the host to build nothing for that shell:
+  not the screen, not the idle marker, while a dead shell and every control message still arrive.
+  The release is the difference from the screen the phone holds (the differ is not reset), and it
+  expires after ten minutes so a client that stops sending cannot leave a shell unlit. A tag a host
+  does not know is skipped, so an old host simply keeps drawing.
+- **Any run of host-to-phone messages is one frame when deflating pays.** A screen was the first
+  case; the launcher is the second, and it is the bigger one — six pages of shell rows are 822
+  bytes of repeated words (`bash`, `~/Documents/`, the ids) and travel as 147. The phone inflates
+  the frame and re-feeds its own decoder, so paging, `last` and every message's meaning are
+  unchanged.
 - **Neither the echo nor its answer is paced.** The echo of input goes at once, and the change it
   produces is due at once too; only a screen that keeps changing is coalesced to one update per
   second. Before this, marking the echo push as a burst held every command's output for a whole

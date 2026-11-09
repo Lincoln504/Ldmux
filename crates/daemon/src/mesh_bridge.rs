@@ -13,9 +13,14 @@
 //!   has room, so an echo does not wait for the previous record's ack; the bound is the session's
 //!   own window ([`PENDING_LIMIT`]), past which the queue would only grow. An earlier design sent
 //!   one update at a time and measured 16 s from keystroke to echo.
-//! - **A failed send resets the diff.** If any message of an update cannot be queued, the
-//!   differ forgets what the phone holds, so the next update is a full screen. The phone is
-//!   never left holding half of a change the host believes it delivered.
+//! - **A failed send keeps exactly what did not go, and nothing is rebuilt.** `reply_upto` says how
+//!   many messages reached the link, so the retry re-offers the tail and the differ is not reset:
+//!   the phone is never left holding half a change, and the other half costs what it costs rather
+//!   than a whole repaint. (It used to reset the differ, which made a full queue cost a full
+//!   screen every ten seconds.)
+//! - **A frozen view is not drawn.** A phone in batch mode sends `Hold`; the host builds no frames
+//!   for that shell until it is released, and the release is the difference from the screen the
+//!   phone holds.
 //! - **A new handshake drops every attach.** The phone must `Attach` again; nothing carries over
 //!   a session that ended.
 //! - **Nothing here knows a radio.** The section 13 grep over the daemon crates stays at zero hits.
@@ -223,6 +228,9 @@ pub struct BridgeStats {
     /// Claims the host refused to give back. A claim that cannot be released keeps the shell held
     /// by a device that is not there, which is the state that stops a desk window reclaiming it.
     pub release_failed: u32,
+    /// Holds the phone asked for (batch mode's frozen view). Not frames withheld: a hold that saves
+    /// nothing costs one small record, and this is what says whether the feature is being used.
+    pub holds: u32,
 }
 
 /// What a dropped attach still owes the host: the shell to give back, and the grid to put back.
@@ -286,6 +294,15 @@ struct Attached {
     /// The user typed into this shell and the echo has not been read yet. Input echo never
     /// waits for the pacing: the keystroke is what the user is looking for.
     echo: bool,
+    /// When the phone asked the host to stop drawing this shell, if it has.
+    ///
+    /// **A frozen view is a screen nobody reads.** Batch mode holds the picture on the phone until
+    /// the operator presses sync, and the host kept sending a frame a second to a phone that kept
+    /// the newest and dropped the rest: on a shell printing a build log that is the hour's allowance
+    /// spent on a picture in a drawer. `Hold` stops the building, not the looking — a dead shell and
+    /// every control message still arrive — and the release sends the difference from the screen the
+    /// phone holds, so nothing is repainted.
+    held_since: Option<Instant>,
     /// A `Resync` the phone asked for while records were still in flight.
     ///
     /// **Asking for the screen while it is already on its way is not a reason to paint it twice.**
@@ -412,6 +429,26 @@ impl Attached {
         } else {
             self.resync_wanted = true;
         }
+    }
+
+    /// Stop or resume drawing this shell, on the phone's word.
+    ///
+    /// The differ is deliberately **not** reset: it still records the screen the phone holds, so the
+    /// release sends what changed while the view was frozen rather than the whole pane. The pacing is
+    /// cleared because the change the release exists for is due now.
+    fn hold(&mut self, on: bool, now: Instant) {
+        if on {
+            self.held_since.get_or_insert(now);
+            return;
+        }
+        self.held_since = None;
+        self.last_push = None;
+        self.changed_last_tick = false;
+        self.echo = false;
+    }
+
+    fn held(&self) -> bool {
+        self.held_since.is_some()
     }
 }
 
@@ -552,16 +589,24 @@ fn plain_len(messages: &[Message]) -> usize {
 fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
     use ldmux_protocol::mesh_term::{FRAME_COMPRESS_MIN, FRAME_MAX_INFLATED, Message as M};
     let is_screen = |m: &Message| matches!(m, M::Rows { .. } | M::Commit { .. });
-    let Some(start) = messages.iter().position(&is_screen) else {
-        return messages.to_vec();
+    // **A run of messages is a frame, not only a screen.** The launcher is the other place the host
+    // spends several records on one answer: a dozen shells is about 700 bytes of repeated words
+    // (`bash`, `~/Documents/`, the ids) and deflates to a fraction of that. A frame's inner bytes
+    // are fed back through the phone's own decoder, so nothing about a page's meaning changes.
+    let (start, end) = match messages.iter().position(&is_screen) {
+        Some(start) => {
+            let end = messages
+                .iter()
+                .rposition(&is_screen)
+                .map_or(start, |i| i + 1);
+            if messages[start..end].iter().any(|m| !is_screen(m)) {
+                return messages.to_vec();
+            }
+            (start, end)
+        }
+        // No screen at all: the whole answer, when there is enough of it to pay for the frame.
+        None => (0, messages.len()),
     };
-    let end = messages
-        .iter()
-        .rposition(&is_screen)
-        .map_or(start, |i| i + 1);
-    if messages[start..end].iter().any(|m| !is_screen(m)) {
-        return messages.to_vec();
-    }
     let mut inner = Vec::new();
     for m in &messages[start..end] {
         let Ok(bytes) = m.encode() else {
@@ -863,6 +908,30 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
                 && a.geometry.is_none()
             {
                 a.original = Some((screen.cols, screen.rows));
+            }
+            // **A held shell builds nothing.** The screen is still read (that is how a dead shell is
+            // noticed) and every control message still goes, but no frame is built, because the
+            // phone is not drawing it. The hold expires so a phone that never releases cannot leave
+            // a shell permanently unlit.
+            let now = (self.clock)();
+            if let Some(a) = self.shells.get_mut(&shell)
+                && a
+                    .held_since
+                    .is_some_and(|t| now.saturating_duration_since(t) >= HOLD_MAX)
+            {
+                a.hold(false, now);
+            }
+            if self.shells.get(&shell).is_some_and(Attached::held) {
+                if screen.dead {
+                    self.reply(
+                        shell,
+                        &[Message::Closed {
+                            reason: closed::EXITED,
+                        }],
+                    );
+                    self.shells.remove(&shell);
+                }
+                continue;
             }
             // **What a refusal left unsent goes first.** The differ already counts those rows as
             // delivered, so they are only recoverable here; anything built after them would be the
@@ -1169,6 +1238,7 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
                                     .is_none()
                                     .then(|| Instant::now() + ATTACH_GRACE),
                                 resync_wanted: false,
+                                held_since: None,
                                 changed_last_tick: false,
                                 echo: false,
                                 original,
@@ -1477,6 +1547,15 @@ fn pack_frame(messages: &[Message], with_dict: bool) -> Vec<Message> {
                 let pending = self.link.pending();
                 if let Some(a) = self.shells.get_mut(&shell) {
                     a.defer_resync(pending);
+                }
+            }
+            // **The phone's view is frozen, so nothing is built for it.** A version-12 host ignores
+            // the tag and behaves exactly as before, which is why this needs no version gate.
+            Message::Hold { on } => {
+                let now = (self.clock)();
+                if let Some(a) = self.shells.get_mut(&shell) {
+                    a.hold(on, now);
+                    self.stats.holds += u32::from(on);
                 }
             }
             Message::Detach => {
@@ -1846,6 +1925,7 @@ fn work(stats: &BridgeStats) -> u64 {
         + u64::from(stats.malformed)
         + u64::from(stats.refused_sends)
         + u64::from(stats.host_unanswered)
+        + u64::from(stats.holds)
 }
 
 /// How many unacked records may be in flight before the bridge stops looking at the screen. It is
@@ -1889,6 +1969,15 @@ const ATTACH_GRACE: Duration = Duration::from_millis(1_400);
 /// listing call every few seconds is a keeper round trip; it costs no airtime and it is what stops
 /// the phone drawing a shell the desk has taken.
 const OWNER_CHECK: Duration = Duration::from_millis(5_000);
+
+/// How long a phone may keep a shell unlit before the host starts drawing it again.
+///
+/// **A hold must not outlive the phone that asked for it.** The normal release is the phone's own
+/// `Hold { on: false }` when the operator presses sync or show, and a phone that goes away ends the
+/// session with it. This is the backstop for the case neither happens — a client that froze the
+/// view and then stopped sending — because a shell nobody draws and nobody releases is a shell the
+/// next viewer finds blank for a reason nothing records.
+const HOLD_MAX: Duration = Duration::from_secs(600);
 
 /// Wait until either the link has something to say or the cadence expires.
 ///
@@ -3239,6 +3328,55 @@ mod tests {
         assert_eq!(sent_records(&link), settled, "one repaint, not a loop");
     }
 
+    /// **A full launcher list travels in fewer records than its pages.**
+    ///
+    /// The pages are the other answer the host spends several records on: a dozen shells is ~700
+    /// bytes of repeated words, and a frame's inner bytes are fed back through the phone's own
+    /// decoder, so the paging and its `last` flag are unchanged.
+    #[tokio::test]
+    async fn a_full_launcher_list_is_framed_into_fewer_records() {
+        let (mut b, host, link) = setup();
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+            },
+        );
+        b.tick().await;
+        // A dozen shells, and the attached one still among them: this is a launcher refresh.
+        host.0.lock().unwrap().running = (0..12).map(|i| format!("shell-{i:02}")).collect();
+        let base = sent_records(&link);
+        phone_says(&link, 1, &Message::List);
+        b.tick().await;
+        let sent = link.0.lock().unwrap().sent[base..].to_vec();
+        let mut pages = 0usize;
+        let mut d = Decoder::new();
+        for (_, bytes) in &sent {
+            for item in d.push(bytes).unwrap() {
+                match item.unwrap() {
+                    Message::Frame { inner } | Message::FrameDict { inner } => {
+                        let mut inner_decoder = Decoder::new();
+                        for m in inner_decoder.push(&inner).unwrap() {
+                            if matches!(m.unwrap(), Message::Sessions { .. }) {
+                                pages += 1;
+                            }
+                        }
+                    }
+                    Message::Sessions { .. } => pages += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(pages >= 3, "twelve shells are paged: {pages} pages");
+        assert!(
+            sent.len() < pages,
+            "{pages} pages must travel in fewer than {pages} records, got {}",
+            sent.len()
+        );
+    }
+
     /// **The profile and the marks are one record.** Two replies were two records, and the attach
     /// page is usually an empty one: 0.6 s of air at the public preset for nothing.
     #[tokio::test]
@@ -3946,6 +4084,64 @@ mod tests {
             sent_records(&link) - base,
             2,
             "the echo goes now, not at the next window boundary"
+        );
+    }
+
+    /// **A held shell is not drawn, and its release is the difference.**
+    ///
+    /// Batch mode freezes the picture until the operator presses sync, and the host had no way to
+    /// know: a shell printing a build log cost a record a second for screens the phone kept and
+    /// dropped. The release must not repaint — the differ still records what the phone holds.
+    #[tokio::test]
+    async fn a_held_shell_is_not_drawn_until_it_is_released() {
+        let (mut b, host, link, clock) = attached_paced().await;
+        phone_says(&link, 1, &Message::Hold { on: true });
+        b.tick().await;
+        let base = sent_records(&link);
+        // The shell prints, over two coalescing windows.
+        // The same grid as the attach, so the release is a row change and not a new geometry.
+        clock.advance(2_000);
+        paced(&host, &["$ ls", "one"]);
+        b.tick().await;
+        clock.advance(2_000);
+        paced(&host, &["$ ls", "two"]);
+        b.tick().await;
+        assert_eq!(sent_records(&link), base, "nothing is built for a frozen view");
+
+        phone_says(&link, 1, &Message::Hold { on: false });
+        b.tick().await;
+        let after = link.0.lock().unwrap().sent[base..].to_vec();
+        assert!(!after.is_empty(), "the release draws what changed while held");
+        let mut d = Decoder::new();
+        let msgs: Vec<Message> = after
+            .iter()
+            .flat_map(|(_, bytes)| d.push(bytes).unwrap())
+            .filter_map(|m| m.ok())
+            .collect();
+        assert!(
+            !msgs.iter().any(|m| matches!(m, Message::Profile { .. })),
+            "the release is a difference, not a repaint: {msgs:?}"
+        );
+    }
+
+    /// **A hold nobody releases expires.** A client that froze the view and then stopped sending
+    /// must not leave a shell unlit for the next viewer, with nothing recording why.
+    #[tokio::test]
+    async fn a_hold_that_outlives_the_phone_starts_drawing_again() {
+        let (mut b, host, link, clock) = attached_paced().await;
+        phone_says(&link, 1, &Message::Hold { on: true });
+        b.tick().await;
+        let base = sent_records(&link);
+        clock.advance(2_000);
+        paced(&host, &["$ ls", "one"]);
+        b.tick().await;
+        assert_eq!(sent_records(&link), base);
+
+        clock.advance(601_000);
+        b.tick().await;
+        assert!(
+            sent_records(&link) > base,
+            "the hold expires and the present screen goes out"
         );
     }
 

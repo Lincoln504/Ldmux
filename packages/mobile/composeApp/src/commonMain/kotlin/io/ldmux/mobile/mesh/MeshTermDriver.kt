@@ -417,8 +417,17 @@ class MeshTermDriver(
     /** A list was asked for while attached: its answer fills [shells] and attaches nothing. */
     private var listingForHeader = false
 
-    /** Pages of a list the host pushed (it was not asked for), accumulated until `last`. */
-    private var pushedPages: ArrayList<SessionEntry>? = null
+    /**
+     * Whether the run of pages now arriving answers a list this link asked for.
+     *
+     * **Decided once, on the run's first page.** The old code kept two buffers and chose between
+     * them per page from `pick`/`listingForHeader`, which are UI state and can change while a reply
+     * is still arriving: when they did, the last page of a run landed in a *fresh* buffer and the
+     * row set became that page alone. Measured on the device 2026-11-09: twelve shells, two rows
+     * (`~/Documents/bparameter` and `~/Documents/RCNT`), which is exactly the final page, and the
+     * same list appeared whole after a refresh.
+     */
+    private var pagesAsked = false
     private val _shells = MutableStateFlow(MeshShells(emptyList(), null))
 
     /**
@@ -992,7 +1001,10 @@ class MeshTermDriver(
         attachedId = null
         listHoldsNothing = true
         pick = Pick.Listing
-        pages = ArrayList()
+        // **The buffer is not cleared here.** A run of pages already on the air would lose every
+        // page but its last, which is how a twelve-shell list became a two-row one: the tail then
+        // completed a fresh buffer. A completed run empties it; a request only says what to do
+        // with the next one.
         listingForHeader = true
         queue(TermMessage.ListRequest)
         pump(); publish()
@@ -1005,7 +1017,7 @@ class MeshTermDriver(
         // showing the list and has no entries, which is once per frame until the answer lands;
         // without this guard that is a record per frame on a link that allows ≈58 an hour.
         if (listingForHeader) return@withLock
-        listingForHeader = true; pages = ArrayList()
+        listingForHeader = true
         queue(TermMessage.ListRequest); pump(); publish()
     }
 
@@ -1061,7 +1073,7 @@ class MeshTermDriver(
         if (left.isEmpty()) pick = Pick.None
         queue(TermMessage.Close(id))
         queue(TermMessage.ListRequest)
-        listingForHeader = true; pages = ArrayList()
+        listingForHeader = true
         pump(); publish()
         true
     }
@@ -1078,7 +1090,7 @@ class MeshTermDriver(
     suspend fun refresh() = lock.withLock {
         if (session == null || terminalView != null) return@withLock
         if (pick == Pick.None || pick == Pick.Choosing) {
-            pick = Pick.Listing; pages = ArrayList()
+            pick = Pick.Listing
             queue(TermMessage.ListRequest); pump(); publish()
         }
     }
@@ -1087,6 +1099,32 @@ class MeshTermDriver(
     suspend fun resync() = lock.withLock {
         if (session != null && terminalView == null) { requestResync(); pump(); publish() }
     }
+
+    /**
+     * Tell the host whether this phone is drawing the shell.
+     *
+     * **A frozen view is a screen nobody reads.** Batch mode holds the picture until the operator
+     * presses sync, and the host has no way to know that: a shell printing a build log sends about
+     * one frame a second, each of which this phone keeps and replaces. `false` releases it, and the
+     * host answers with the difference from the screen this phone holds — it remembers what it
+     * sent, so a release costs what the change costs and not a repaint.
+     *
+     * A new attach starts unheld on the host, so `holdSent` is cleared there and the caller's next
+     * `setHold(true)` is a real message. A host that predates the tag skips it and behaves exactly
+     * as before, which is why nothing here waits for an acknowledgement.
+     */
+    suspend fun setHold(on: Boolean) = lock.withLock {
+        if (holdSent == on) return@withLock
+        if (session == null || terminalView != null) return@withLock
+        if (attachedId == null && pick != Pick.Attached) return@withLock
+        holdSent = on
+        queue(TermMessage.Hold(on))
+        pump()
+        publish()
+    }
+
+    /** What the host was last told about the view, so a re-assert is not a record. */
+    private var holdSent = false
 
     /** Whether the attached shell has never delivered a screen: the page has nothing to draw. */
     val screenUnpainted: Boolean
@@ -1392,7 +1430,6 @@ class MeshTermDriver(
                     // which reads as "create did nothing" and, later, as a ✕ that cannot be found
                     // to press. One record, once, after the shell exists.
                     listingForHeader = true
-                    pages = ArrayList()
                     queue(TermMessage.ListRequest)
                 }
             }
@@ -1442,15 +1479,18 @@ class MeshTermDriver(
      * is as authoritative as an asked-for one, so it is applied the same way.
      */
     private fun onSessions(m: TermMessage.Sessions) {
-        if (pick != Pick.Listing && !listingForHeader) {
-            // Pushed: accumulate its pages and replace the row set, without touching what the
-            // screen is showing (this runs while a shell is open, or on the list).
-            val buf = pushedPages ?: ArrayList<SessionEntry>().also { pushedPages = it }
-            buf.addAll(m.entries)
-            if (!m.last) return
-            pushedPages = null
-            val all = buf.distinctBy { it.id }.take(MeshTerm.MAX_SESSIONS)
-            // The shell this link was on may be the one that just ended.
+        // **One buffer, one decision.** A page belongs to the run that started with the first page
+        // after an empty buffer; whether that run was asked for is read once, there, because the UI
+        // state that answers it (`pick`, `listingForHeader`) is allowed to change mid-reply.
+        if (pages.isEmpty()) pagesAsked = listingForHeader || pick == Pick.Listing
+        pages.addAll(m.entries)
+        if (!m.last) return
+        val all = pages.distinctBy { it.id }.take(MeshTerm.MAX_SESSIONS)
+        pages = ArrayList()
+        val asked = pagesAsked
+        pagesAsked = false
+        if (!asked) {
+            // Pushed: replace the row set, without touching what the screen is showing.
             if (attachedId != null && all.none { it.id == attachedId }) attachedId = null
             _shells.value = MeshShells(all, attachedId)
             // Same rule as `closeShell`: `Choose` draws its own list.
@@ -1461,10 +1501,6 @@ class MeshTermDriver(
             publish()
             return
         }
-        pages.addAll(m.entries)
-        if (!m.last) return
-        val all = pages.distinctBy { it.id }.take(MeshTerm.MAX_SESSIONS)
-        pages = ArrayList()
         if (listingForHeader && pick != Pick.Listing) {
             listingForHeader = false
             // Exactly one shell and we did not know which we took: it is that one.
@@ -1472,6 +1508,7 @@ class MeshTermDriver(
             _shells.value = MeshShells(all, attachedId)
             return
         }
+        listingForHeader = false
         when (all.size) {
             0 -> pick = Pick.None
             // Showing the one shell as a row rather than opening it: see [listHoldsNothing].
@@ -1526,6 +1563,9 @@ class MeshTermDriver(
      * the phone's size rather than the desk's).
      */
     private fun queueAttach(selector: String) {
+        // A fresh attach is a fresh shell on the host, and it starts unheld: whatever this phone
+        // told the previous one does not carry over.
+        holdSent = false
         val grid = wantedGrid
         if (grid == null) {
             queue(TermMessage.Attach(MeshTerm.VERSION, selector))

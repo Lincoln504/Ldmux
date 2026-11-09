@@ -122,6 +122,14 @@ numbers belong to the tuple.
   no recovery time.
 - **A refused record is re-offered at one airtime, not at a fixed 350 ms.** The refusal is the
   firmware's transmit table being full, and the table drains a record at a time.
+- **One answer is one frame when deflating pays.** A screen was the first case; a launcher list is
+  the other, and it is the one the app pays for on every start: six pages of shell rows are 822
+  bytes of repeated words and travel as **147 bytes**, two records instead of six. A message bigger
+  than a record is carried across records, so this costs the phone no wire change.
+- **A frozen view costs nothing.** Batch mode holds the picture until the operator presses sync; a
+  `Hold` record tells the host to build no frames for that shell, and the release sends only what
+  changed while it was held. Without it a shell printing a build log spent about a record a second
+  on screens the phone kept and dropped.
 - **A resync asked for while a frame is in flight is deferred, so it costs one repaint.** The phone's
   ladder is not what makes a slow paint expensive; obeying a reset while the answer is still going
   out is, because it queues a second full frame behind the first.

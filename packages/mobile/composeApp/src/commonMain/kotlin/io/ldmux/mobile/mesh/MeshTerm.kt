@@ -140,6 +140,8 @@ object MeshTerm {
     internal const val T_ATTACH = 0x01
     internal const val T_INPUT = 0x02
     internal const val T_RESYNC = 0x03
+    /** Phone to host: hold or release the screen while batch mode's view is frozen. */
+    internal const val T_HOLD = 0x0c
     internal const val T_DETACH = 0x04
     internal const val T_LIST = 0x05
     internal const val T_KEY = 0x06
@@ -277,6 +279,15 @@ sealed interface TermMessage {
         override fun toString() = "Input(${bytes.size} bytes)"
     }
     data object Resync : TermMessage
+    /**
+     * Phone to host: stop drawing this shell ([on] = true) or start again.
+     *
+     * Batch mode freezes the picture until the operator presses sync, and the host had no way to
+     * know: a shell printing a build log spent a record a second on screens the phone kept and
+     * dropped. A host that predates the tag skips it, so sending it is always safe — the screens
+     * then arrive exactly as they did before.
+     */
+    data class Hold(val on: Boolean) : TermMessage
     data object Detach : TermMessage
     /** [shell] is the attached shell's id (version 2; empty from a version-1 host). */
     data class Profile(val version: Int, val cols: Int, val rows: Int, val unsupported: Int, val shell: String = "") : TermMessage
@@ -419,6 +430,10 @@ fun TermMessage.encode(): ByteArray {
             MeshTerm.T_INPUT
         }
         TermMessage.Resync -> MeshTerm.T_RESYNC
+        is TermMessage.Hold -> {
+            body.add(if (on) 1 else 0)
+            MeshTerm.T_HOLD
+        }
         TermMessage.Detach -> MeshTerm.T_DETACH
         is TermMessage.Profile -> {
             body.add(u8(version, "version")); body.add(u8(cols, "cols")); body.add(u8(rows, "rows"))
@@ -674,6 +689,8 @@ class TermDecoder {
             MeshTerm.T_INPUT ->
                 if (body.isEmpty() || body.size > MeshTerm.MAX_INPUT) Parsed.Bad else ok(TermMessage.Input(body))
             MeshTerm.T_RESYNC -> if (body.isEmpty()) ok(TermMessage.Resync) else Parsed.Bad
+            MeshTerm.T_HOLD ->
+                if (body.size == 1 && body[0] <= 1) ok(TermMessage.Hold(body[0].toInt() == 1)) else Parsed.Bad
             MeshTerm.T_DETACH -> if (body.isEmpty()) ok(TermMessage.Detach) else Parsed.Bad
             // Version 1 is exactly five bytes and is never an error; a longer body is version 2 and
             // must carry its shell id.

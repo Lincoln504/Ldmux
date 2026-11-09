@@ -128,6 +128,20 @@
       }
     },
     {
+      "hex": "0c0101",
+      "message": {
+        "kind": "hold",
+        "on": true
+      }
+    },
+    {
+      "hex": "0c0100",
+      "message": {
+        "kind": "hold",
+        "on": false
+      }
+    },
+    {
       "hex": "0400",
       "message": {
         "kind": "detach"

@@ -375,6 +375,44 @@ class MeshTermDriverTest {
         assertEquals(MeshTermView.Choose(listOf(ent("aa11"), ent("bb22"))), d.view.value)
     }
 
+    /// **A refresh between pages does not truncate the list.**
+    ///
+    /// The page buffer was emptied whenever a list was asked for, and asking again while the answer
+    /// was still arriving threw away every page already in hand: the run's last page then completed
+    /// a fresh buffer and the row set became that page alone. Measured on the device 2026-11-09:
+    /// twelve shells on the host, two rows on the launcher (the final page), and a refresh showed
+    /// all twelve. A request now only says what the next completed run means; the run empties the
+    /// buffer.
+    /// **A hold is one record per change of state, never one per frame.**
+    ///
+    /// The screen re-asserts the hold whenever its state changes (mode, waiting, first paint), and
+    /// a repeated `Hold` would be a record of airtime for a fact the host already knows.
+    @Test
+    fun `a repeated hold is not a second record`() = runBlocking<Unit> {
+        val d = driver(); probed(d)
+        deliver(d, TermMessage.Closed(MeshTerm.Closed.AMBIGUOUS), TermMessage.Sessions(true, listOf(ent("aa11"), ent("bb22"))))
+        assertTrue(d.open("aa11"), "the list's id is opened")
+
+        d.setHold(true)
+        assertEquals(1, sess.messages().count { it == TermMessage.Hold(true) })
+        d.setHold(true)
+        assertEquals(1, sess.messages().count { it == TermMessage.Hold(true) }, "a re-assert is not a record")
+        d.setHold(false)
+        assertEquals(1, sess.messages().count { it == TermMessage.Hold(false) })
+    }
+
+    @Test
+    fun `a page run is not truncated by a request arriving between its pages`() = runBlocking<Unit> {
+        val d = driver(); probed(d)
+        deliver(d, TermMessage.Closed(MeshTerm.Closed.AMBIGUOUS), TermMessage.Sessions(false, listOf(ent("aa11"), ent("bb22"))))
+        assertEquals(MeshTermView.Listing, d.view.value, "one page is not the answer")
+        // The user comes back to the launcher while the rest of the run is on the air.
+        d.launcher()
+        deliver(d, TermMessage.Sessions(true, listOf(ent("cc33"))))
+        val shown = (d.view.value as? MeshTermView.Choose)?.entries?.map { it.id }
+        assertEquals(listOf("aa11", "bb22", "cc33"), shown, "the whole run, not its last page")
+    }
+
     @Test
     fun `no shell is its own state, and asking again that finds exactly one attaches it`() = runBlocking<Unit> {
         val d = driver(); probed(d)

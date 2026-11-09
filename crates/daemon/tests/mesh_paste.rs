@@ -55,11 +55,32 @@ impl FakeLink {
 }
 
 /// Let the pane and the bridge work, then read the pane as the host sees it.
+///
+/// **A fixed wait is a bug in a test.** Half a second was enough on an idle machine and not enough
+/// on a loaded one — measured 2026-11-09 at load 29, where `bash` had not drawn a prompt and the
+/// test read a blank pane — so the loop keeps going while the pane is entirely empty, with a
+/// deadline that only a broken shell can reach.
 async fn settle(bridge: &mut Bridge<DaemonHost, FakeLink>, rig: &Rig) -> Vec<String> {
-    for _ in 0..40 {
-        bridge.tick().await;
-        tokio::time::sleep(Duration::from_millis(25)).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        for _ in 0..4 {
+            bridge.tick().await;
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        if all_empty(&read_pane(rig).await) && std::time::Instant::now() < deadline {
+            continue;
+        }
+        break;
     }
+    read_pane(rig).await
+}
+
+fn all_empty(lines: &[String]) -> bool {
+    lines.iter().all(|l| l.trim().is_empty())
+}
+
+/// The pane as the host sees it.
+async fn read_pane(rig: &Rig) -> Vec<String> {
     let v = rig
         .arc
         .lock()

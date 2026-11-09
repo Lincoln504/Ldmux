@@ -163,6 +163,14 @@ class MeshTerminalSource(
     val awaitingAnswer: Boolean get() = hold.awaiting && hold.waitingOnSend
 
     /**
+     * Whether a screen has been drawn at all.
+     *
+     * Before the first paint there is nothing to freeze, and the first paint has to arrive: the host
+     * is not asked to hold until this is true.
+     */
+    val hasScreen: Boolean get() = last != null
+
+    /**
      * A screen the hold is keeping back, waiting for something to release it.
      *
      * The bar draws it as "output waiting · show": without that line the two states a `show` press

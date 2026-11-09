@@ -43,6 +43,7 @@ class MeshTermCodecTest {
             "attach" -> TermMessage.Attach(i("version"), o["selector"]!!.jsonPrimitive.content)
             "input" -> TermMessage.Input(unhex(o["bytes"]!!.jsonPrimitive.content))
             "resync" -> TermMessage.Resync
+            "hold" -> TermMessage.Hold(o["on"]!!.jsonPrimitive.boolean)
             "detach" -> TermMessage.Detach
             "profile" -> TermMessage.Profile(i("version"), i("cols"), i("rows"), i("unsupported"), o["shell"]!!.jsonPrimitive.content)
             "resize" -> TermMessage.Resize(i("cols"), i("rows"))

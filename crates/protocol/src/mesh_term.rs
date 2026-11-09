@@ -322,6 +322,18 @@ pub enum Message {
     },
     Input(Vec<u8>),
     Resync,
+    /// Phone → host: stop drawing this shell until told otherwise.
+    ///
+    /// **A frozen view is a screen nobody reads.** Batch mode holds the picture on the phone until
+    /// the operator presses sync, and the host had no way to know that: a shell printing a build
+    /// log spent a record a second on screens the phone kept and replaced. `on = true` stops the
+    /// frames (control messages, `Closed` and a dead shell still arrive); the first `on = false`
+    /// releases them, and the next frame is the difference from the screen the phone holds, not a
+    /// repaint. It is honest about being optional: a host that predates the tag skips it, and the
+    /// phone then simply keeps receiving screens it does not draw.
+    Hold {
+        on: bool,
+    },
     Detach,
     Profile {
         version: u8,
@@ -460,6 +472,8 @@ const T_CREATE: u8 = 0x08;
 const T_CLOSE: u8 = 0x09;
 const T_MAKE_LIVE: u8 = 0x0a;
 const T_TAKEOVER: u8 = 0x0b;
+/// Phone → host: hold or release the screen (batch mode's frozen view).
+const T_HOLD: u8 = 0x0c;
 const T_CREATED: u8 = 0x86;
 const T_ATTACH: u8 = 0x01;
 const T_INPUT: u8 = 0x02;
@@ -644,6 +658,10 @@ impl Message {
                 T_INPUT
             }
             Self::Resync => T_RESYNC,
+            Self::Hold { on } => {
+                body.push(u8::from(*on));
+                T_HOLD
+            }
             Self::Detach => T_DETACH,
             Self::Profile {
                 version,
@@ -871,6 +889,7 @@ impl Message {
                 Self::Input(body.to_vec())
             }
             T_RESYNC if body.is_empty() => Self::Resync,
+            T_HOLD if body.len() == 1 && body[0] <= 1 => Self::Hold { on: body[0] == 1 },
             T_DETACH if body.is_empty() => Self::Detach,
             // Version 1 is exactly five bytes. A longer body is a version-2 body and must carry its
             // shell id: an old five-byte `Profile` is never an error.
@@ -1115,7 +1134,7 @@ impl Message {
                     Self::Frame { inner }
                 }
             }
-            T_RESYNC | T_DETACH | T_COMMIT | T_CLOSED | T_LIST | T_RESIZE => {
+            T_RESYNC | T_HOLD | T_DETACH | T_COMMIT | T_CLOSED | T_LIST | T_RESIZE => {
                 return Err(bad);
             }
             _ => return Ok(None), // unknown tag: skipped, not fatal
@@ -2186,6 +2205,8 @@ mod tests {
             id: "ab12".into(),
         });
         roundtrip(&Message::Resync);
+        roundtrip(&Message::Hold { on: true });
+        roundtrip(&Message::Hold { on: false });
         roundtrip(&Message::Detach);
         roundtrip(&Message::Profile {
             version: 1,
@@ -3093,6 +3114,7 @@ mod tests {
             }
             Message::Input(b) => json!({"kind":"input","bytes":hex(b)}),
             Message::Resync => json!({"kind":"resync"}),
+            Message::Hold { on } => json!({"kind":"hold","on":on}),
             Message::Detach => json!({"kind":"detach"}),
             Message::Profile {
                 version,
@@ -3217,6 +3239,8 @@ mod tests {
             Message::Input(b"\x03".to_vec()),
             Message::Input(b"ls -la\r".to_vec()),
             Message::Resync,
+            Message::Hold { on: true },
+            Message::Hold { on: false },
             Message::Detach,
             Message::Profile {
                 version: 1,

@@ -520,6 +520,16 @@ fun MeshTerminalScreen(
         if (source.publicChannel) source.echoHeld(handle.echoText) else source.echoHeld("")
     }
 
+    // **A frozen view is a screen nobody reads, so the host is told to stop drawing it.** Batch
+    // mode freezes the picture between presses and the host went on building a frame a second for a
+    // phone that kept the newest and dropped the rest: on a shell printing a build log that is the
+    // hour's allowance spent on a picture in a drawer. Released whenever the view is following an
+    // answer (a sync, or `show`), and only after the first screen: before that there is nothing to
+    // hold and the first paint has to arrive.
+    LaunchedEffect(source.publicChannel, source.awaitingSync, source.hasScreen) {
+        conn.driver.setHold(source.publicChannel && !source.awaitingSync && source.hasScreen)
+    }
+
     // A sync whose answer never comes must not leave the screen frozen with no word about it: the
     // link may be out of budget or down, and the honest answer is "here is the newest screen we
     // hold, and no answer came". Twenty seconds is several radio round trips — long enough not to
