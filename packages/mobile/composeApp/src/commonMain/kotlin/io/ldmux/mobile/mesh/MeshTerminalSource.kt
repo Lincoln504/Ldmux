@@ -729,18 +729,68 @@ class MeshTerminalSource(
         val moved = history.scroll(rows)
         if (moved != 0) {
             scrollNotice = null
+            awaitingHistory = false
             paint()
         } else if (rows < 0) {
-            // The host sends no history and this client accumulates its own, so "up" can be a tap
-            // with no answer: either nothing has scrolled off yet, or the view is already at the
-            // oldest row. Two different sentences, because the second one means "this is all of
-            // it" and the first means "nothing yet" — and a button that says nothing at all
-            // reads as broken either way.
-            scrollNotice = if (history.size == 0) "no history yet on this link" else "start of history"
+            askForHistory(rows)
         } else {
             scrollNotice = null
         }
         return moved
+    }
+
+    /**
+     * The up key ran out of locally accumulated history, so **ask the host for the page above**.
+     *
+     * **The keeper has the rows; the link only carries the live screen.** A phone that joined a
+     * shell late, or was frozen while the shell printed, cannot have them from its own
+     * accumulation — and answering "no history yet on this link" was true of this client and
+     * useless to the operator, whose up key means "fetch a page". The request names the absolute
+     * line immediately above the oldest row held here, so a page joins what is held instead of
+     * overlapping it.
+     *
+     * A host that cannot number its lines (`firstLine == 0`) has no line to ask for, and a keeper
+     * with no history above has nothing to give: the first keeps the old sentence, the second gets
+     * "start of history" from the empty page.
+     */
+    private fun askForHistory(rows: Int) {
+        val screen = last
+        val top = screen?.let { if (it.firstLine > 0) it.firstLine.toInt() - history.size else 0 } ?: 0
+        val want = (screen?.lines?.size ?: 17).coerceIn(1, MeshTerm.MAX_HISTORY_ROWS)
+        val ask = onWantHistory
+        if (top <= 0 || ask == null) {
+            scrollNotice = if (history.size == 0) "no history yet on this link" else "start of history"
+            return
+        }
+        if (awaitingHistory) return
+        awaitingHistory = true
+        scrollNotice = "fetching history"
+        // One page up: the page above this client's oldest row, as many lines as fit the view.
+        ask((top - (-rows).coerceIn(1, want)).coerceAtLeast(0), want)
+    }
+
+    /** Wired by the screen to the driver: ask the host for [rows] lines from absolute line [from]. */
+    var onWantHistory: ((Int, Int) -> Unit)? = null
+
+    /** A history request is in flight, so an up key pressed again does not queue another. */
+    private var awaitingHistory = false
+
+    /**
+     * A page of the shell's own scrollback arrived: prepend it and draw it.
+     *
+     * An empty page is the host's answer that nothing is above — `last` alone cannot say that, since
+     * a full page and an empty one are both "last" of their answer.
+     */
+    fun prependHistory(lines: List<String>) {
+        awaitingHistory = false
+        if (lines.isEmpty()) {
+            scrollNotice = "start of history"
+            paint()
+            return
+        }
+        scrollNotice = null
+        history.prepend(lines)
+        paint()
     }
 
     override fun scrollToBottom() {

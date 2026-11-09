@@ -459,7 +459,35 @@ pub enum Message {
     Created {
         id: String,
     },
+    /// Phone → host: **a page of the shell's own scrollback**, starting at absolute line `from`.
+    ///
+    /// **The keeper has the history; the link never sends it.** Every screen carries the absolute
+    /// number of its top row (`Commit.first_line`), and the phone accumulates the rows that leave —
+    /// but a screen the phone never saw, or one it joined late, is history it cannot have. Pressing
+    /// the scroll pad's up key on such a screen used to answer "no history yet on this link", which
+    /// is true and useless: the rows exist, on the host, in the keeper's emulator. This is the
+    /// request for them, made only when the operator asks, so it costs nothing until then.
+    WantHistory {
+        /// The keeper's own line number to start at. The phone computes it from the top of what it
+        /// holds, so a page joins the history it already has rather than overlapping it.
+        from: u32,
+        /// How many lines, at most [`MAX_HISTORY_ROWS`].
+        rows: u8,
+    },
+    /// Host → phone: those lines, oldest first. **Paged**, because a screenful of 46-column rows
+    /// is more than one message body allows: `last` marks the final page, and the phone prepends
+    /// each as it arrives.
+    HistoryPage {
+        /// The absolute line number of `lines[0]`; the host clamps what it can serve, so this may
+        /// differ from the request.
+        from: u32,
+        last: bool,
+        lines: Vec<String>,
+    },
 }
+
+/// The most lines one history request may ask for.
+pub const MAX_HISTORY_ROWS: u8 = 64;
 
 /// One row of [`Message::Marks`]: a shell and the word about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -479,6 +507,8 @@ const T_MAKE_LIVE: u8 = 0x0a;
 const T_TAKEOVER: u8 = 0x0b;
 /// Phone → host: hold or release the screen (batch mode's frozen view).
 const T_HOLD: u8 = 0x0c;
+/// Phone → host: a page of the shell's own scrollback.
+const T_HISTORY: u8 = 0x0d;
 const T_CREATED: u8 = 0x86;
 const T_ATTACH: u8 = 0x01;
 const T_INPUT: u8 = 0x02;
@@ -490,6 +520,8 @@ const T_COMMIT: u8 = 0x83;
 const T_CLOSED: u8 = 0x84;
 /// The marks table (version 9). Host to phone only.
 const T_MARKS: u8 = 0x87;
+/// A page of the shell's own scrollback. Host to phone only.
+const T_HISTORY_PAGE: u8 = 0x8C;
 /// A **compressed group of screen messages** (version 11). Host to phone only.
 ///
 /// **Frame-level, not record-level.** A record is 143 bytes and one screen is about 900, so
@@ -773,6 +805,29 @@ impl Message {
                 body.extend_from_slice(id.as_bytes());
                 T_CREATED
             }
+            Self::WantHistory { from, rows } => {
+                if *rows == 0 || *rows > MAX_HISTORY_ROWS {
+                    return Err(EncodeError::TooLong);
+                }
+                body.extend_from_slice(&from.to_le_bytes());
+                body.push(*rows);
+                T_HISTORY
+            }
+            Self::HistoryPage { from, last, lines } => {
+                body.extend_from_slice(&from.to_le_bytes());
+                body.push(u8::from(*last));
+                for line in lines {
+                    if line.len() > MAX_SEGMENT {
+                        return Err(EncodeError::TooLong);
+                    }
+                    body.push(line.len() as u8);
+                    body.extend_from_slice(line.as_bytes());
+                    if body.len() > MAX_BODY {
+                        return Err(EncodeError::TooLong);
+                    }
+                }
+                T_HISTORY_PAGE
+            }
             Self::Marks {
                 first,
                 last,
@@ -989,6 +1044,43 @@ impl Message {
                 cols: body[0],
                 rows: body[1],
             },
+            T_HISTORY => {
+                if body.len() != 5 {
+                    return Err(bad);
+                }
+                let rows = body[4];
+                if rows == 0 || rows > MAX_HISTORY_ROWS {
+                    return Err(bad);
+                }
+                Self::WantHistory {
+                    from: u32::from_le_bytes([body[0], body[1], body[2], body[3]]),
+                    rows,
+                }
+            }
+            T_HISTORY_PAGE => {
+                if body.len() < 5 {
+                    return Err(bad);
+                }
+                let from = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
+                let last = body[4] & 1 == 1;
+                let mut lines = Vec::new();
+                let mut rest = &body[5..];
+                while let Some((&n, tail)) = rest.split_first() {
+                    let n = usize::from(n);
+                    if tail.len() < n {
+                        return Err(bad.clone());
+                    }
+                    // A line is text: a control character would be a claim about a row the keeper
+                    // never drew, and the phone's engine would act on it.
+                    let text = std::str::from_utf8(&tail[..n]).map_err(|_| bad.clone())?;
+                    if text.chars().any(|c| c.is_control()) {
+                        return Err(bad.clone());
+                    }
+                    lines.push(text.to_owned());
+                    rest = &tail[n..];
+                }
+                Self::HistoryPage { from, last, lines }
+            }
             T_CREATE => {
                 let (&version, rest) = body.split_first().ok_or(bad.clone())?;
                 if rest.len() > MAX_CWD {
@@ -2212,6 +2304,15 @@ mod tests {
         roundtrip(&Message::Resync);
         roundtrip(&Message::Hold { on: true });
         roundtrip(&Message::Hold { on: false });
+        roundtrip(&Message::WantHistory {
+            from: 1_234,
+            rows: 17,
+        });
+        roundtrip(&Message::HistoryPage {
+            from: 1_234,
+            last: true,
+            lines: vec!["$ ls".into(), "a.txt".into()],
+        });
         roundtrip(&Message::Detach);
         roundtrip(&Message::Profile {
             version: 1,
@@ -3120,6 +3221,12 @@ mod tests {
             Message::Input(b) => json!({"kind":"input","bytes":hex(b)}),
             Message::Resync => json!({"kind":"resync"}),
             Message::Hold { on } => json!({"kind":"hold","on":on}),
+            Message::WantHistory { from, rows } => {
+                json!({"kind":"wantHistory","from":from,"rows":rows})
+            }
+            Message::HistoryPage { from, last, lines } => {
+                json!({"kind":"historyPage","from":from,"last":last,"lines":lines})
+            }
             Message::Detach => json!({"kind":"detach"}),
             Message::Profile {
                 version,
@@ -3246,6 +3353,12 @@ mod tests {
             Message::Resync,
             Message::Hold { on: true },
             Message::Hold { on: false },
+            Message::WantHistory { from: 40, rows: 17 },
+            Message::HistoryPage {
+                from: 40,
+                last: true,
+                lines: vec!["$ ldmux mesh status".into(), "state    ready".into()],
+            },
             Message::Detach,
             Message::Profile {
                 version: 1,

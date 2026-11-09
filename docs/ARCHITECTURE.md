@@ -363,6 +363,12 @@ by the host radio, by the app before it retunes, and by every budget below.
   only when the pipe is empty, so a request the phone repeated while its screen was already on the
   way costs one repaint instead of two — the deferral, not the ladder, is what stops a slow paint
   from turning into a repaint loop.
+- **Scrollback is asked for, not broadcast.** The link carries one screen; the keeper keeps the
+  pane's history, so the scroll pad's up key sends `WantHistory { from, rows }` naming the absolute
+  line above the oldest row the phone holds, and the host answers with `HistoryPage` messages taken
+  from the keeper's numbering above the live screen (paged by bytes, `last` on the final page). The
+  phone prepends the page, so the next press walks further up; an empty page is `start of history`.
+  Nothing is sent until the operator scrolls, which is why a session with no scrolling costs nothing.
 - **The phone can freeze the host's drawing, and does.** Batch mode holds the picture until the
   operator presses sync, so a `Hold { on }` record tells the host to build nothing for that shell:
   not the screen, not the idle marker, while a dead shell and every control message still arrive.

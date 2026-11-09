@@ -82,6 +82,8 @@ object MeshTerm {
     const val RECORD_PAYLOAD = 143
     const val MAX_INPUT = 96
     const val MAX_SEGMENT = 120
+    /** The most lines one history request may ask for. */
+    const val MAX_HISTORY_ROWS = 64
     const val MAX_SELECTOR = 40
     /** Longest shell label in a `Sessions` entry. */
     const val MAX_LABEL = 24
@@ -147,6 +149,10 @@ object MeshTerm {
     internal const val T_RESYNC = 0x03
     /** Phone to host: hold or release the screen while batch mode's view is frozen. */
     internal const val T_HOLD = 0x0c
+    /** Phone to host: a page of the shell's own scrollback. */
+    internal const val T_HISTORY = 0x0d
+    /** Host to phone: that page. */
+    internal const val T_HISTORY_PAGE = 0x8c
     internal const val T_DETACH = 0x04
     internal const val T_LIST = 0x05
     internal const val T_KEY = 0x06
@@ -293,6 +299,21 @@ sealed interface TermMessage {
      * then arrive exactly as they did before.
      */
     data class Hold(val on: Boolean) : TermMessage
+    /**
+     * Phone to host: **a page of the shell's own scrollback**, from absolute line [from].
+     *
+     * The keeper has the rows; the link only ever carries the live screen. A phone that joined a
+     * shell late, or was frozen while the shell printed, cannot have them from its own
+     * accumulation — so the scroll pad's up key asks for them.
+     */
+    data class WantHistory(val from: Int, val rows: Int) : TermMessage
+    /**
+     * Host to phone: those lines, oldest first, in as many messages as the body allows.
+     *
+     * [last] marks the final page of one answer; the phone prepends each as it arrives, so a page
+     * joins the history it already holds rather than overlapping it.
+     */
+    data class HistoryPage(val from: Int, val last: Boolean, val lines: List<String>) : TermMessage
     data object Detach : TermMessage
     /** [shell] is the attached shell's id (version 2; empty from a version-1 host). */
     data class Profile(val version: Int, val cols: Int, val rows: Int, val unsupported: Int, val shell: String = "") : TermMessage
@@ -413,6 +434,13 @@ private fun u32(v: Int, what: String): List<Byte> =
         ((v ushr 24) and 0xff).toByte(),
     )
 
+/** Four little-endian bytes at [at], as the host wrote them. */
+private fun le32(b: ByteArray, at: Int): Int =
+    (b[at].toInt() and 0xff) or
+        ((b[at + 1].toInt() and 0xff) shl 8) or
+        ((b[at + 2].toInt() and 0xff) shl 16) or
+        ((b[at + 3].toInt() and 0xff) shl 24)
+
 private fun u16(v: Int, what: String): List<Byte> {
     if (v !in 0..0xffff) throw TermEncodeException("$what does not fit two bytes")
     return listOf((v and 0xff).toByte(), ((v ushr 8) and 0xff).toByte())
@@ -438,6 +466,25 @@ fun TermMessage.encode(): ByteArray {
         is TermMessage.Hold -> {
             body.add(if (on) 1 else 0)
             MeshTerm.T_HOLD
+        }
+        is TermMessage.WantHistory -> {
+            if (rows !in 1..MeshTerm.MAX_HISTORY_ROWS) throw TermEncodeException("history rows")
+            body.addAll(u32(from, "from"))
+            body.add(rows.toByte())
+            MeshTerm.T_HISTORY
+        }
+        // Encoded for the fixture test's sake (the Rust side writes it); the phone only decodes it.
+        is TermMessage.HistoryPage -> {
+            body.addAll(u32(from, "from"))
+            body.add(if (last) 1 else 0)
+            for (line in lines) {
+                val bytes = line.encodeToByteArray()
+                if (bytes.size > MeshTerm.MAX_SEGMENT) throw TermEncodeException("history line too long")
+                body.add(bytes.size.toByte())
+                bytes.forEach { body.add(it) }
+                if (body.size > MeshTerm.MAX_BODY) throw TermEncodeException("history page too long")
+            }
+            MeshTerm.T_HISTORY_PAGE
         }
         TermMessage.Detach -> MeshTerm.T_DETACH
         is TermMessage.Profile -> {
@@ -696,6 +743,31 @@ class TermDecoder {
             MeshTerm.T_RESYNC -> if (body.isEmpty()) ok(TermMessage.Resync) else Parsed.Bad
             MeshTerm.T_HOLD ->
                 if (body.size == 1 && body[0] <= 1) ok(TermMessage.Hold(body[0].toInt() == 1)) else Parsed.Bad
+            MeshTerm.T_HISTORY ->
+                if (body.size == 5 && (body[4].toInt() and 0xff) in 1..MeshTerm.MAX_HISTORY_ROWS) {
+                    ok(TermMessage.WantHistory(le32(body, 0), body[4].toInt() and 0xff))
+                } else {
+                    Parsed.Bad
+                }
+            MeshTerm.T_HISTORY_PAGE -> {
+                if (body.size < 5) Parsed.Bad
+                else {
+                    val from = le32(body, 0)
+                    val last = body[4].toInt() and 1 == 1
+                    val lines = ArrayList<String>()
+                    var at = 5
+                    var bad = false
+                    while (at < body.size) {
+                        val n = body[at].toInt() and 0xff
+                        at++
+                        if (n > MeshTerm.MAX_SEGMENT || at + n > body.size) { bad = true; break }
+                        lines.add(body.decodeToString(at, at + n))
+                        at += n
+                    }
+                    if (bad) Parsed.Bad
+                    else ok(TermMessage.HistoryPage(from, last, lines))
+                }
+            }
             MeshTerm.T_DETACH -> if (body.isEmpty()) ok(TermMessage.Detach) else Parsed.Bad
             // Version 1 is exactly five bytes and is never an error; a longer body is version 2 and
             // must carry its shell id.

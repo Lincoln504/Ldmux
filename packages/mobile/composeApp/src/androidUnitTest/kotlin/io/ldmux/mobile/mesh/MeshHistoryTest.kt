@@ -34,6 +34,38 @@ class MeshHistoryTest {
         assertEquals(listOf("c", "d"), h.window(screen(4, "d", "e"), 2))
     }
 
+    /// **A fetched page belongs above what this client accumulated, and the view goes to it.**
+    ///
+    /// The keeper holds the pane's history; the link carries only the live screen. A page arrives
+    /// oldest-first and ends where the local history begins, so it is prepended — and the operator
+    /// pressed up to get it, so the view parks on the new oldest row rather than where it was.
+    @Test
+    fun `a fetched page is prepended and the view lands on it`() {
+        val h = MeshHistory()
+        h.note(null, screen(1, "a", "b"))
+        h.note(screen(1, "a", "b"), screen(2, "b", "c"))
+        assertEquals(1, h.size, "one row left the top")
+
+        h.prepend(listOf("y", "z"))
+        assertEquals(3, h.size)
+        // The page is above the row this client already had, and all of it is reachable.
+        assertEquals(listOf("y", "z"), h.window(screen(2, "b", "c"), 2))
+        h.toBottom()
+        h.scroll(-1)
+        assertEquals(listOf("a", "b"), h.window(screen(2, "b", "c"), 2))
+    }
+
+    /// **An empty page changes nothing** — the host saying "nothing above" is not a page of blanks.
+    @Test
+    fun `an empty page leaves the history alone`() {
+        val h = MeshHistory()
+        h.note(null, screen(1, "a", "b"))
+        h.note(screen(1, "a", "b"), screen(2, "b", "c"))
+        val before = h.size
+        h.prepend(emptyList())
+        assertEquals(before, h.size)
+    }
+
     @Test
     fun `the window ends at the live bottom and moves by whole rows`() {
         val h = MeshHistory()

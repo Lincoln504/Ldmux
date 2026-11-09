@@ -142,6 +142,26 @@
       }
     },
     {
+      "hex": "0d052800000011",
+      "message": {
+        "from": 40,
+        "kind": "wantHistory",
+        "rows": 17
+      }
+    },
+    {
+      "hex": "8c2828000000011324206c646d7578206d657368207374617475730e7374617465202020207265616479",
+      "message": {
+        "from": 40,
+        "kind": "historyPage",
+        "last": true,
+        "lines": [
+          "$ ldmux mesh status",
+          "state    ready"
+        ]
+      }
+    },
+    {
       "hex": "0400",
       "message": {
         "kind": "detach"

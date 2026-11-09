@@ -412,7 +412,17 @@ fun MeshTerminalScreen(
     // host that does not send it.
     DisposableEffect(conn, source) {
         conn.onIdle = { source.answered() }
-        onDispose { conn.onIdle = null }
+        // **The scroll pad's up key asks the host for the page above.** The keeper holds the pane's
+        // history and the link carries only the live screen, so a shell joined late — or printed
+        // while the view was frozen — has rows this client cannot have. The request names the
+        // absolute line above the oldest row it holds, so a page joins what it has.
+        conn.driver.onHistoryPage = { lines -> source.prependHistory(lines) }
+        source.onWantHistory = { from, rows -> scope.launch { conn.driver.wantHistory(from, rows) } }
+        onDispose {
+            conn.onIdle = null
+            conn.driver.onHistoryPage = null
+            source.onWantHistory = null
+        }
     }
     // **A shell that was just opened shows itself, without a timer.** This used to be a 1.5 s
     // `LaunchedEffect` that pulled the held screen, and it was a workaround: the real cause was

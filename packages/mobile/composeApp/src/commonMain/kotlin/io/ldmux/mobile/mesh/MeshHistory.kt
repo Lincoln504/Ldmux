@@ -134,6 +134,27 @@ internal class MeshHistory(private val max: Int = 2_000) {
         return before - offset
     }
 
+    /**
+     * Add rows the host fetched **above** what this client already holds.
+     *
+     * The page is oldest-first and ends where the local history begins, so it belongs at the front.
+     * The view then moves to the new oldest row: the operator pressed up, and the page is the
+     * answer to that press — parking them where they were would make the fetch look like nothing.
+     *
+     * Nothing is prepended while the view is on the alternate screen (there is no scrollback
+     * there) or when the page is empty (the host has nothing above, which the caller reports as
+     * "start of history").
+     */
+    fun prepend(lines: List<String>) {
+        if (lines.isEmpty()) return
+        for (line in lines.asReversed()) rows.addFirst(line)
+        // Bounded from the *front*: the rows nearest the live screen are the ones the view is most
+        // likely to need next, and the page just fetched is the most distant.
+        while (rows.size > max) rows.removeFirst()
+        // The page is the answer to an up key, so the view goes to the new oldest row.
+        offset = rows.size
+    }
+
     fun toBottom() {
         offset = 0
     }

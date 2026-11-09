@@ -56,6 +56,36 @@ class MeshTerminalSourceTest {
     /// screen to draw — and `show` used to return early on exactly that condition. The button did
     /// nothing at all on a batch shell (measured 2026-11-09), and the operator concluded the link
     /// was dead. Releasing the host is what makes the press mean "show me the shell now".
+    /// **An up key with no history asks the host for the page above.**
+    ///
+    /// The keeper holds the pane's history and the link carries only the live screen, so "no
+    /// history yet on this link" was true of this client and useless to the operator. The request
+    /// names the absolute line above the oldest row held here — with nothing held, that is the page
+    /// immediately above the live screen. The page is then prepended, so the next up key asks for
+    /// the page above *that* rather than the same one again.
+    @Test
+    fun `an up key with no history asks the host for a page`() {
+        val (s, _, _) = source()
+        var asked: Pair<Int, Int>? = null
+        s.onWantHistory = { from, rows -> asked = from to rows }
+        s.show(
+            MeshScreen(
+                listOf("a", "b", "c", "d"), 0, 3,
+                alternate = false, dead = false, epoch = 1, cols = 20, firstLine = 100,
+            ),
+            "aa11",
+        )
+        assertEquals(0, s.scrollBy(-1), "nothing to scroll locally yet")
+        // **One row up asks for the line above this client's top**, not for a whole page: the host
+        // serves what exists and the view moves by what came. A page key passes a page-sized delta.
+        assertEquals(99 to 4, asked, "the line above a screen whose top is line 100")
+
+        s.prependHistory(listOf("w"))
+        asked = null
+        assertEquals(0, s.scrollBy(-2), "two rows up, past the oldest row held")
+        assertEquals(97 to 4, asked, "the ask walks up with what arrived")
+    }
+
     @Test
     fun `show on a frozen view unfreezes it so the host draws again`() {
         val (s, _, b) = source()

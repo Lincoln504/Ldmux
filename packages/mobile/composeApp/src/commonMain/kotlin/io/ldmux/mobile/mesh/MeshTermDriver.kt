@@ -1109,6 +1109,23 @@ class MeshTermDriver(
         }
     }
 
+    /**
+     * Ask the host for a page of the shell's own scrollback.
+     *
+     * The keeper holds the pane's history; the link only ever carries the live screen. Sent only
+     * when the operator scrolls past what this client accumulated, so it costs nothing until then.
+     */
+    suspend fun wantHistory(from: Int, rows: Int) = lock.withLock {
+        if (session == null || terminalView != null) return@withLock
+        if (attachedId == null && pick != Pick.Attached) return@withLock
+        queue(TermMessage.WantHistory(from, rows))
+        pump()
+        publish()
+    }
+
+    /** Wired by the screen: a page of history arrived, oldest first. */
+    var onHistoryPage: ((List<String>) -> Unit)? = null
+
     /** Ask the host for the whole screen again. */
     suspend fun resync() = lock.withLock {
         if (session != null && terminalView == null) { requestResync(); pump(); publish() }
@@ -1533,6 +1550,10 @@ class MeshTermDriver(
                 }
             }
             is TermMessage.Sessions -> onSessions(m)
+            // **A page of the shell's own scrollback**, asked for by the up key when this client had
+            // none of its own. The screen prepends it and draws it; an empty page is the host
+            // saying there is nothing above.
+            is TermMessage.HistoryPage -> onHistoryPage?.invoke(m.lines)
             // **The host has started a shell for us.** Attach to exactly that id: the list is not
             // consulted, so another client's shell cannot be picked up by accident between the
             // request and the answer.
