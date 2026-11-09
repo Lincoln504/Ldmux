@@ -35,8 +35,11 @@ private fun themeForeground(
         cell.invisible -> themeBg
         // Reverse video: the cell's foreground is the terminal's background.
         cell.inverse -> themeBg
-        // Faint: half intensity is half way to the cell's own background, per channel.
-        cell.faint -> TerminalFrame.blendTowards(themeFg, themeBg)
+        // Faint: half intensity is half way to the cell's own background, per channel. **Opaque
+        // again** — `blendTowards` works in `0xRRGGBB` and drops the alpha channel, so the blend of
+        // two opaque theme colours is a transparent one, and faint default text would vanish the
+        // same way every default cell did (see the call site).
+        cell.faint -> 0xFF000000.toInt() or TerminalFrame.blendTowards(themeFg, themeBg)
         else -> themeFg
     }
 }
@@ -130,8 +133,16 @@ actual class TerminalPainter actual constructor(private val fontSizePx: Float) {
         val m = metrics
         if (m.width <= 0f || m.height <= 0f) return
         refreshFaces()
-        val themeTermBg = TerminalColors.background.toArgb() and 0x00FFFFFF
-        val themeTermFg = TerminalColors.foreground.toArgb() and 0x00FFFFFF
+        // **Opaque, not "the RGB we happen to carry".** `toArgb()` already includes the theme's
+        // alpha; masking it to `0x00FFFFFF` left a *transparent* colour, and `Paint.color` with
+        // alpha 0 draws nothing at all. Every default-coloured cell — which on the mesh route is
+        // every cell, because a row arrives as plain text with no SGR — was therefore drawn fully
+        // transparent, while the cursor (its own paint, its own opaque colour) still blinked. That
+        // is the empty pane with a wandering cursor the operator reported on 2026-11-09, on this
+        // route only: the tailnet route sends the program's own SGR, so its cells take the opaque
+        // branch below and were unaffected.
+        val themeTermBg = TerminalColors.background.toArgb() or 0xFF000000.toInt()
+        val themeTermFg = TerminalColors.foreground.toArgb() or 0xFF000000.toInt()
         scope.drawIntoCanvas { canvas ->
             val nc = canvas.nativeCanvas
             val cols = frame.cols

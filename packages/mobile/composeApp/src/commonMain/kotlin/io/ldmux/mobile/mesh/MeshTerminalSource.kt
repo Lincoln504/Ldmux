@@ -171,6 +171,14 @@ class MeshTerminalSource(
     val hasScreen: Boolean get() = last != null
 
     /**
+     * The shell whose screen is on the engine, or null before the first one.
+     *
+     * The screen uses it to tell "this picture belongs to the shell I am on" from "this is the
+     * previous shell's", which is the difference between painting and wiping the pane.
+     */
+    val shell: String? get() = drawnShell
+
+    /**
      * A screen the hold is keeping back, waiting for something to release it.
      *
      * The bar draws it as "output waiting · show": without that line the two states a `show` press
@@ -593,6 +601,7 @@ class MeshTerminalSource(
     override fun repaint() {
         _frame.value = engine?.render()
     }
+
 
     /**
      * Forget the screen: the engine and its frame go, so the surface draws nothing until the next

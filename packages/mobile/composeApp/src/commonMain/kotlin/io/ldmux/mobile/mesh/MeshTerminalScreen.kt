@@ -966,9 +966,23 @@ fun MeshTerminalScreen(
                 // session that no longer exists, and drawing them made the pause look like a live
                 // terminal that had stopped responding. A link that merely dropped keeps its
                 // picture, because that pane is still the same session, waiting to be resumed.
+                //
+                // **But the picture of the shell we are on is not a dead one's.** This effect is
+                // keyed on `shells.current`, and the shell list is published again on every attach,
+                // every pushed list and every mark update: each of those ran `clear()` and threw
+                // away the frame that had just painted, which is why a batch shell sat blank with
+                // nothing on it but the keyboard's caret (measured on the device 2026-11-09, and
+                // reported by the operator as "an empty terminal, cursor in the wrong spot"). It
+                // clears for a new handshake, or for a screen drawn for a *different* shell — never
+                // for the one on screen.
                 val keep = heldScreen.takeIf { view is MeshTermView.LinkDown }
-                LaunchedEffect(source, keep, shells.current) {
-                    if (keep != null) source.show(keep, shells.current) else source.clear()
+                val handshaking = view is MeshTermView.Handshaking || view is MeshTermView.NoAnswer
+                LaunchedEffect(source, keep, shells.current, handshaking) {
+                    when {
+                        keep != null -> source.show(keep, shells.current)
+                        handshaking -> source.clear()
+                        source.shell != null && source.shell != shells.current -> source.clear()
+                    }
                 }
                 TerminalSurfaceFor(
                     source = source,
