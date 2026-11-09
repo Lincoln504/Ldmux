@@ -142,14 +142,18 @@ class MeshTerminalSourceTest {
             "aa11",
         )
         assertEquals(0, s.scrollBy(-1), "nothing to scroll locally yet")
-        // **One row up asks for the line above this client's top**, not for a whole page: the host
-        // serves what exists and the view moves by what came. A page key passes a page-sized delta.
-        assertEquals(99 to 4, asked, "the line above a screen whose top is line 100")
+        // **A page is fetched, and the press decides the movement.** One request either way, so a
+        // one-row key asks for the same page a page key does — the page above a screen whose top is
+        // line 100, four rows because this screen is four rows tall.
+        assertEquals(96 to 4, asked, "the page above a screen whose top is line 100")
 
-        s.prependHistory(listOf("w"))
+        // The page is now in hand **and the press has been honoured**: the view sits one row up,
+        // which is what the press asked for. The rest of the page costs nothing more.
+        s.prependHistory(listOf("w", "x", "y", "z"))
+        assertEquals(1, s.scrolledRows, "the press moved one row, into the fetched page")
         asked = null
-        assertEquals(0, s.scrollBy(-2), "two rows up, past the oldest row held")
-        assertEquals(97 to 4, asked, "the ask walks up with what arrived")
+        assertEquals(-2, s.scrollBy(-2), "two more rows, still inside the page")
+        assertEquals(null, asked, "no request for a row the page already covers")
     }
 
     @Test

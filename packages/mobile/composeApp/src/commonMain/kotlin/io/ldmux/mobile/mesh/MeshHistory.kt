@@ -151,8 +151,15 @@ internal class MeshHistory(private val max: Int = 2_000) {
         // Bounded from the *front*: the rows nearest the live screen are the ones the view is most
         // likely to need next, and the page just fetched is the most distant.
         while (rows.size > max) rows.removeFirst()
-        // The page is the answer to an up key, so the view goes to the new oldest row.
+        // The caller decides where the view lands: a page key lands on the new top, a one-row key
+        // lands one row above where it was — the page is in hand either way, which is why a key
+        // press fetches a page even when it moves a row.
         offset = rows.size
+    }
+
+    /** Park the view [rows] above the live bottom, clamped to what is held. */
+    fun park(rows: Int) {
+        offset = rows.coerceIn(0, this.rows.size)
     }
 
     fun toBottom() {

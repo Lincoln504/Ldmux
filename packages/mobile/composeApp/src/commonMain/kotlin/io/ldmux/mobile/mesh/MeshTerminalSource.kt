@@ -772,8 +772,11 @@ class MeshTerminalSource(
         if (awaitingHistory) return
         awaitingHistory = true
         scrollNotice = "fetching history"
-        // One page up: the page above this client's oldest row, as many lines as fit the view.
-        ask((top - (-rows).coerceIn(1, want)).coerceAtLeast(0), want)
+        // **Fetch a page, move by the press.** A page is one request either way, so a one-row key
+        // asks for the same page a page key does and then lands one row above where it was: the
+        // rest of the page is already in hand for the next press, and no press costs two records.
+        pendingAdvance = (-rows).coerceIn(1, want)
+        ask((top - want).coerceAtLeast(0), want)
     }
 
     /** Wired by the screen to the driver: ask the host for [rows] lines from absolute line [from]. */
@@ -781,6 +784,9 @@ class MeshTerminalSource(
 
     /** A history request is in flight, so an up key pressed again does not queue another. */
     private var awaitingHistory = false
+
+    /** How many rows the press that asked for the page wanted to move. */
+    private var pendingAdvance = 1
 
     /**
      * A page of the shell's own scrollback arrived: prepend it and draw it.
@@ -795,8 +801,12 @@ class MeshTerminalSource(
             paint()
             return
         }
+        val before = history.size
         scrollNotice = null
         history.prepend(lines)
+        // The press that asked for the page decides how far the view moves: a page key lands on the
+        // new top, a one-row key lands one row above where it was. The page is in hand either way.
+        history.park(before + pendingAdvance)
         paint()
     }
 
