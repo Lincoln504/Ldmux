@@ -157,17 +157,31 @@ impl Config {
     /// channel still retries quickly, and the cap grows with the airtime so a slow preset does not
     /// exhaust its attempts inside one round trip.
     #[must_use]
-    pub fn with_airtime(mut self, airtime_ms: Option<f64>) -> Self {
+    pub fn with_airtime(self, airtime_ms: Option<f64>) -> Self {
+        self.with_path(airtime_ms, 1)
+    }
+
+    /// Retransmission timing for a route of `hops` repeaters, at `airtime_ms` per record.
+    ///
+    /// **MeshCore's own direct-send budget is six airtimes *per hop*** (`DIRECT_SEND_PERHOP_FACTOR`,
+    /// `Dispatcher.cpp`). A flat six airtimes is right for a direct neighbour and too short for a
+    /// route: at 0.6 s a record and ten hops, one copy is still travelling fifteen seconds one way,
+    /// so the timer fires twice over and the retransmissions cost the air the timer exists to save.
+    /// The measured round trip (`srtt`) corrects this after the first exchange, which is exactly why
+    /// the *first* one has to be right — it is the one that is wrong today.
+    #[must_use]
+    pub fn with_path(mut self, airtime_ms: Option<f64>, hops: u8) -> Self {
         let Some(airtime) = airtime_ms.filter(|a| *a > 0.0) else {
             return self;
         };
+        let hops = f64::from(hops.max(1));
         // **Six airtimes: a record, its ack, and two forward delays per hop.** The burst is no longer
         // a reason to stretch this, because a slot's timer starts at its own air slot (see `poll`):
         // the eighth record of a window is timed from two seconds later, not from the hand-over.
         // Stretching it to ten airtimes to cover the burst doubled the time a genuinely lost record
         // took to come back — measured 2026-11-09, a first paint waited eleven seconds for one lost
         // record on a noisy link — and a loss is the common case this timer exists for.
-        let scaled = (airtime * 6.0).round() as u64;
+        let scaled = (airtime * 6.0 * hops).round() as u64;
         self.rto_initial_ms = self.rto_initial_ms.max(scaled).min(60_000);
         // **A pure ack must not cost its own record when a little patience avoids it.** An owed ack
         // used to wait a fixed 150 ms for outgoing data and then go as a record of its own, which at

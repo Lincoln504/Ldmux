@@ -34,6 +34,7 @@ object NativeMeshSession : SessionLib {
     external override fun refuseSeq(h: Long, nowMs: Long, seq: Int): Int
     external override fun close(h: Long): Int
     external override fun setAirtime(h: Long, airtimeMs: Double): Int
+    external override fun setHops(h: Long, hops: Int): Int
     external override fun status(h: Long, nowMs: Long): Int
     external override fun pending(h: Long): Int
     external override fun nextDeadline(h: Long, out: LongArray): Int

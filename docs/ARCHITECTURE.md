@@ -349,11 +349,16 @@ by the host radio, by the app before it retunes, and by every budget below.
   packs to that figure (`Link::record_payload`), not to the record size: the session chunks at
   its own ceiling, so a bridge that handed over 166 bytes made the ARQ split it into two records,
   the second nearly empty. One arithmetic, one place, and a test pinning all three sizes.
-- **A retransmission timer starts when the record is handed to the radio, and the ARQ hands over
-  a whole window at once.** So the first timeout is at least `(window + 2) × airtime`: six
-  airtimes on a 0.6 s preset expired while the burst that record belonged to was still going out,
-  and every full burst retransmitted its front. A refusal is the opposite case and is paced at
-  `max(350 ms, one airtime)`, because a full transmit table drains a record at a time.
+- **A retransmission timer starts at the record's own turn on the air**, not at the hand-over: the
+  ARQ hands a whole window to the radio at once, so the eighth record's timer starts seven airtimes
+  later than the first's. Without that, six airtimes on a 0.6 s preset expired while the burst the
+  record belonged to was still going out, and every full burst retransmitted its front.
+- **The first timeout is six airtimes per hop**, which is MeshCore's own `DIRECT_SEND_PERHOP_FACTOR`
+  (`Dispatcher.cpp`) — a route of ten repeaters takes ten times as long for the first copy to
+  arrive, and a flat six retransmits twice over. The carrier reports the hop count (`Event::Limit`)
+  and the session re-derives the timer from it; the measured round trip then keeps it honest. A
+  refusal is the opposite case and is paced at `max(350 ms, one airtime)`, because a full transmit
+  table drains a record at a time.
 - **A `Resync` while records are still in flight is deferred, not obeyed.** The differ is reset
   only when the pipe is empty, so a request the phone repeated while its screen was already on the
   way costs one repaint instead of two — the deferral, not the ladder, is what stops a slow paint

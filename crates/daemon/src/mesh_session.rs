@@ -101,6 +101,8 @@ pub struct SessionHost {
     outbox: VecDeque<Vec<u8>>,
     next_index: u8,
     record_limit: usize,
+    /// Repeaters on the route to the phone, from the carrier's last `Limit`. See [`Self::set_hops`].
+    hops: u8,
     pub inbound: VecDeque<(u8, Vec<u8>)>,
     /// Records dropped because the queue was full. Counted so the loss is visible.
     pub dropped_inbound: u64,
@@ -127,6 +129,7 @@ impl SessionHost {
             outbox: VecDeque::new(),
             next_index: 1,
             record_limit,
+            hops: 1,
             inbound: VecDeque::new(),
             dropped_inbound: 0,
             refused: 0,
@@ -146,6 +149,20 @@ impl SessionHost {
         self.record_limit = record_limit;
         if let Some(session) = self.session.as_mut() {
             session.set_record_limit(record_limit);
+        }
+    }
+
+    /// How many repeaters the route to the phone crosses, from the carrier.
+    ///
+    /// **The first retransmission has to cover the whole path.** MeshCore's own direct-send budget is
+    /// six airtimes *per hop* (`DIRECT_SEND_PERHOP_FACTOR`); a flat six airtimes is right for a
+    /// neighbour and too short for a route, and the retransmissions it spends are records the
+    /// allowance paid for. The measured round trip corrects the timer after the first exchange,
+    /// which is why the first one is the one worth getting right. Kept for the next handshake too.
+    pub fn set_hops(&mut self, hops: u8) {
+        self.hops = hops.max(1);
+        if let Some(session) = self.session.as_mut() {
+            session.set_hops(self.hops);
         }
     }
 

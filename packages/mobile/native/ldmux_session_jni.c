@@ -254,6 +254,12 @@ JNIEXPORT jint JNICALL JNI(setAirtime)(JNIEnv *env, jclass cls, jlong h, jdouble
   return ldmux_session_set_airtime(session_of(h), (double)ms);
 }
 
+/* Repeaters on the route to the peer: the first retransmission is six airtimes *per hop*. */
+JNIEXPORT jint JNICALL JNI(setHops)(JNIEnv *env, jclass cls, jlong h, jint hops) {
+  (void)env; (void)cls;
+  return (jint)ldmux_session_set_hops(session_of(h), (uint32_t)(hops < 1 ? 1 : hops));
+}
+
 JNIEXPORT jint JNICALL JNI(pending)(JNIEnv *env, jclass cls, jlong h) {
   (void)env; (void)cls;
   return ldmux_session_pending(session_of(h));

@@ -372,6 +372,24 @@ pub unsafe extern "C" fn ldmux_session_set_airtime(s: *mut LdmuxSession, airtime
     }
 }
 
+/// How many repeaters the route to the peer crosses, from the radio's own advert path.
+///
+/// **The first retransmission has to cover the whole path.** MeshCore's own direct-send budget is
+/// six airtimes *per hop*, and a flat six is right for a neighbour and too short for a route of ten,
+/// where the first copy is still travelling fifteen seconds later and the timer retransmits twice
+/// over. The measured round trip corrects the timer after that, which is why the first one is the
+/// one worth getting right. Zero or one keeps the direct-neighbour timing.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_session_set_hops(s: *mut LdmuxSession, hops: u32) -> i32 {
+    // SAFETY: the caller passes a live handle from this ABI, or null (which `with_session` refuses).
+    unsafe {
+        with_session(s, |sess| {
+            sess.inner.set_hops(u8::try_from(hops).unwrap_or(u8::MAX));
+            LDMUX_OK
+        })
+    }
+}
+
 /// Run `f` on the session behind `*s`, or `LDMUX_ERR_NULL` if the slot or handle is null.
 unsafe fn with_session(s: *mut LdmuxSession, f: impl FnOnce(&mut LdmuxSession) -> i32) -> i32 {
     guard(|| {

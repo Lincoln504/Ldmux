@@ -978,6 +978,9 @@ async fn session<C: Carrier>(
                         // the handshake, so the carrier revises it here.
                         if let Some(h) = host.as_mut() {
                             h.set_record_limit(usize::from(limit));
+                            // The path also sets the first retransmission's budget (6 airtimes per
+                            // hop, which is MeshCore's own direct-send factor).
+                            h.set_hops(hops);
                         }
                         set(snapshot, |s| {
                             s.uplink_record_max = Some(limit);

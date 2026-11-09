@@ -85,6 +85,15 @@ interface SessionLib {
      */
     fun setAirtime(h: Long, airtimeMs: Double): Int
 
+    /**
+     * How many repeaters the route to the host crosses.
+     *
+     * The session's first retransmission is six airtimes *per hop* (MeshCore's own direct-send
+     * factor): a flat six is right for a neighbour and too short for a route, where the first copy
+     * is still travelling when the timer fires. The measured round trip corrects it after that.
+     */
+    fun setHops(h: Long, hops: Int): Int
+
     fun close(h: Long): Int
     fun status(h: Long, nowMs: Long): Int
     fun pending(h: Long): Int

@@ -144,6 +144,10 @@ int32_t ldmux_session_status(LdmuxSession *s, uint64_t now_ms);
  * Zero or less keeps the interactive defaults. Call once the preset is known. */
 int32_t ldmux_session_set_airtime(LdmuxSession *s, double airtime_ms);
 
+/* Repeaters on the route to the peer: the first retransmission is six airtimes per hop, which is
+   MeshCore's own direct-send budget. Zero or one keeps the direct-neighbour timing. */
+int32_t ldmux_session_set_hops(LdmuxSession *s, uint32_t hops);
+
 /* Chunks queued or in flight. */
 int32_t ldmux_session_pending(LdmuxSession *s);
 

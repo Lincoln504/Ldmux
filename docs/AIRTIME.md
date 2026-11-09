@@ -127,6 +127,11 @@ numbers belong to the tuple.
 - **The advert is a maintenance broadcast, and it is off by default**
   (`LDMUX_MESH_ADVERT_SECS`; 3600 turns it on at ≈0.07 % of a ten-percent allowance per advert at this
   tuple). Nothing depends on it: a peer is found by the request.
+- **The first retransmission is six airtimes per hop, and that is MeshCore's own factor.**
+  `DIRECT_SEND_PERHOP_FACTOR` in the firmware's `Dispatcher.cpp` is 6.0 airtimes per hop (its flood
+  factor is 16.0), which is the same arithmetic ldmux reached from the other end: a record, its ack,
+  and two forward delays per hop. A route of ten repeaters therefore budgets ten times as long for
+  the first copy, which is why the session is told the hop count rather than assuming a neighbour.
 - **A retransmission timer has to cover the burst it started.** The ARQ hands a whole window to the
   radio at once, so the first timeout is `(window + 2) × airtime` — 6 s at 62.5 kHz. A shorter one
   fires while the burst is still going out and re-sends its front, which is a record of air for

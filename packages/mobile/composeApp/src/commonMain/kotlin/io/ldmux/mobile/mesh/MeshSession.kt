@@ -62,6 +62,17 @@ class MeshSession internal constructor(
     }
 
     /**
+     * How many repeaters the route to the host crosses, from the radio's own advert path.
+     *
+     * Six airtimes *per hop* is MeshCore's own direct-send budget; a flat six retransmits while the
+     * first copy is still travelling on a long route, which costs exactly the airtime the timer
+     * exists to save.
+     */
+    override fun setHops(hops: Int) {
+        lib.setHops(live(), hops.coerceIn(1, 64))
+    }
+
+    /**
      * Feed one record from the gateway's `RECV`. A record that fails any check (tag, replay,
      * index, decode) changes no state and comes back as [Received.Rejected]: it is evidence of a
      * noisy link or an attacker, not of a broken session, so it does not end it.

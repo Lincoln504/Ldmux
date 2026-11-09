@@ -863,3 +863,27 @@ fn a_burst_is_timed_from_each_records_own_slot() {
     assert_eq!(retry.len(), 1, "one retransmission, not a storm");
     assert_eq!(retry[0].seq, out[0].seq, "the oldest record, whose timer is the one that expired");
 }
+
+/// **The first retransmission covers every hop of the route.**
+///
+/// MeshCore's own direct-send budget is `DIRECT_SEND_PERHOP_FACTOR` = six airtimes *per hop*
+/// (`Dispatcher.cpp`). A flat six is right for a direct neighbour and too short for a route: at
+/// 0.6 s a record and ten hops the first copy is still travelling six seconds later, so a flat
+/// timer retransmits twice over and spends exactly the air it exists to save. The measured round
+/// trip corrects the timer once an exchange has happened, which is why the first one matters.
+#[test]
+fn the_first_timeout_covers_each_hop_of_the_route() {
+    let direct = Config::for_payload(137).with_path(Some(603.0), 1);
+    assert_eq!(direct.rto_initial_ms, 3_618, "six airtimes for a neighbour");
+
+    let far = Config::for_payload(137).with_path(Some(603.0), 10);
+    assert_eq!(far.rto_initial_ms, 36_180, "the whole route, not one hop of it");
+
+    // The cap still holds: a route long enough to exceed a minute is not worth waiting for, and the
+    // non-advancing-ack pull covers the case where the estimate is too long.
+    let absurd = Config::for_payload(137).with_path(Some(3_660.0), 20);
+    assert_eq!(absurd.rto_initial_ms, 60_000);
+
+    // A route of one (or zero, meaning "unknown") is the direct case, unchanged.
+    assert_eq!(Config::for_payload(137).with_path(Some(603.0), 0).rto_initial_ms, 3_618);
+}

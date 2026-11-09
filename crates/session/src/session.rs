@@ -57,6 +57,8 @@ pub struct Session {
     arq: Arq,
     record_limit: usize,
     airtime_ms: Option<f64>,
+    /// Repeaters between this node and the peer, at least one. See [`Session::set_hops`].
+    hops: u8,
     started_ms: u64,
     pub dropped: u32,
 }
@@ -94,6 +96,7 @@ impl Session {
             arq: Arq::new(Config::for_payload(app - arq::HEADER).with_airtime(airtime_ms)),
             record_limit,
             airtime_ms,
+            hops: 1,
             started_ms: now_ms,
             dropped: 0,
         })
@@ -106,7 +109,21 @@ impl Session {
     /// rebuilding the session (which would throw away the keys and the queue).
     pub fn set_airtime(&mut self, airtime_ms: Option<f64>) {
         self.airtime_ms = airtime_ms;
-        self.arq.set_config(self.arq.config().with_airtime(airtime_ms));
+        self.arq
+            .set_config(self.arq.config().with_path(airtime_ms, self.hops));
+    }
+
+    /// Tell the session how many repeaters the route to the peer crosses.
+    ///
+    /// **The first retransmission has to cover the whole path.** MeshCore's own direct-send budget is
+    /// six airtimes per hop, and a route that crosses ten repeaters takes ten times as long for the
+    /// first copy to arrive; a flat six airtimes retransmits twice over and spends the air the timer
+    /// exists to save. The measured round trip corrects it after that, which is why the first one is
+    /// the one worth getting right.
+    pub fn set_hops(&mut self, hops: u8) {
+        self.hops = hops.max(1);
+        self.arq
+            .set_config(self.arq.config().with_path(self.airtime_ms, self.hops));
     }
 
     /// Re-size the record, because **the path changed**.

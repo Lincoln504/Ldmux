@@ -74,6 +74,15 @@ data class SealedRecord(
 interface SessionPort {
     fun send(shell: Int, bytes: ByteArray): QueueOutcome
     fun receive(nowMs: Long, record: ByteArray): Received
+    /**
+     * How many repeaters the route to the host crosses.
+     *
+     * Six airtimes *per hop* is MeshCore's own direct-send budget. A session that cannot be told
+     * keeps the direct-neighbour timing, which is right for a link with no repeater in the way, so
+     * this has a default.
+     */
+    fun setHops(hops: Int) {}
+
     fun poll(nowMs: Long, recordsLeft: Int, l2Slots: Int): List<ByteArray>
 
     /**
@@ -654,6 +663,12 @@ class MeshTermDriver(
             }
             session = s
             sessionLimit = gateway.uplinkRecordMax
+            // **The first retransmission covers the whole path.** Six airtimes per hop is
+            // MeshCore's own direct-send budget; a flat six is right for a neighbour and too short
+            // for a route, where the first copy is still travelling when the timer fires and every
+            // retry costs the air the timer exists to save. The route was refreshed by `connect()`
+            // just before this handshake, so the hop count is the one the session will use.
+            s.setHops(gateway.routeHops ?: 1)
             handshakeTries = 0
             // A session is up: the next handshake (after a drop) starts its own clock.
             handshakeBeganAt = 0L
