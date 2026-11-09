@@ -458,10 +458,25 @@ impl Attached {
             return true;
         }
         self.last_push
-            .is_none_or(|t| now.saturating_duration_since(t) >= BURST_GAP)
+            .is_none_or(|t| now.saturating_duration_since(t) >= self.burst_gap())
     }
 
     /// How long an echo waits: one record's airtime, floored so a fast link still feels live.
+    /// The coalescing window for a *burst*: how often a screen that keeps changing may go out.
+    ///
+    /// **A fixed second is a bench number.** It exists so a build log is one update a second rather
+    /// than twenty; on a 75 ms bench tuple that is thirteen records of coalescing where two would
+    /// do, and the user waits a second for a screen that could have been drawn in 150 ms. Two
+    /// airtimes is the same economy expressed in the link's own unit: 1.2 s at the public preset
+    /// (capped at the old second, so the slow link is unchanged) and 300 ms on the bench. A slow
+    /// link is never *made* slower by this — the cap is the old constant.
+    fn burst_gap(&self) -> Duration {
+        self.airtime
+            .map(|a| a.saturating_mul(2))
+            .unwrap_or(BURST_GAP)
+            .clamp(Duration::from_millis(300), BURST_GAP)
+    }
+
     fn echo_gap(&self) -> Duration {
         // A link that did not report its airtime is assumed fast: being wrong there costs a record
         // or two, where assuming slow costs a second of lag on every keystroke.
@@ -3448,6 +3463,57 @@ mod tests {
         assert!(
             matches!(first, Message::Profile { .. }),
             "a full screen starts with Profile"
+        );
+    }
+
+    /// **A burst coalesces for two airtimes, not for a fixed second.**
+    ///
+    /// The second was written on a 75 ms bench tuple, where it is thirteen records of coalescing
+    /// where two would do — the user waits a second for a screen that could have been drawn in
+    /// 150 ms. On the public preset two airtimes is 1.2 s, capped at the old second so the slow
+    /// link is unchanged.
+    #[tokio::test]
+    async fn a_burst_on_a_fast_link_coalesces_for_less_than_a_second() {
+        // The airtime is read **at attach**, so it is set before the attach: a link whose pace
+        // changes under a live attach keeps the pace the attach began with.
+        let (mut b, host, link) = setup();
+        let clock = FakeClock::new();
+        b.clock = clock.reader();
+        link.0.lock().unwrap().airtime = Some(75);
+        b.tick().await;
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+            },
+        );
+        b.tick().await;
+        clock.advance(ATTACH_GRACE.as_millis() as u64 + 50);
+        b.tick().await;
+        clock.advance(2_000);
+        b.tick().await;
+
+        let base = sent_records(&link);
+        clock.advance(500);
+        paced(&host, &["a", ""]);
+        b.tick().await;
+        assert_eq!(sent_records(&link) - base, 1, "the first change after quiet goes");
+        clock.advance(100);
+        paced(&host, &["a", "b"]);
+        b.tick().await;
+        assert_eq!(
+            sent_records(&link) - base,
+            1,
+            "a change inside the window is coalesced"
+        );
+        clock.advance(250);
+        b.tick().await;
+        assert_eq!(
+            sent_records(&link) - base,
+            2,
+            "and goes at two airtimes, not at a whole second"
         );
     }
 

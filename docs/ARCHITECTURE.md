@@ -382,6 +382,10 @@ by the host radio, by the app before it retunes, and by every budget below.
   bytes of repeated words (`bash`, `~/Documents/`, the ids) and travel as 147. The phone inflates
   the frame and re-feeds its own decoder, so paging, `last` and every message's meaning are
   unchanged.
+- **A burst coalesces for two airtimes, not for a fixed second.** One second was written on a
+  75 ms bench tuple; expressed in the link's own unit it is 1.2 s at the public preset (capped back
+  to the old second) and 300 ms on the bench, where a second of staleness was thirteen records of
+  coalescing for a screen that could be drawn 150 ms later.
 - **Neither the echo nor its answer is paced.** The echo of input goes at once, and the change it
   produces is due at once too; only a screen that keeps changing is coalesced to one update per
   second. Before this, marking the echo push as a burst held every command's output for a whole
