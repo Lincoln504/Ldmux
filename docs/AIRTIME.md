@@ -130,6 +130,9 @@ numbers belong to the tuple.
   `Hold` record tells the host to build no frames for that shell, and the release sends only what
   changed while it was held. Without it a shell printing a build log spent about a record a second
   on screens the phone kept and dropped.
+- **Two messages a turn are one record.** A close asks for the list, a `show` press releases the
+  hold and then sends the line: every message a turn queues now shares a record up to the 143-byte
+  payload, so the second half of an action stops costing 0.6 s of air.
 - **A resync asked for while a frame is in flight is deferred, so it costs one repaint.** The phone's
   ladder is not what makes a slow paint expensive; obeying a reset while the answer is still going
   out is, because it queues a second full frame behind the first.

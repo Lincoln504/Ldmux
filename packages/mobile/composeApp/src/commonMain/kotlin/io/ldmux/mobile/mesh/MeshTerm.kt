@@ -90,8 +90,13 @@ object MeshTerm {
 
     /** The longest origin word on the wire: `desktop` is the longest of phone/desktop/local. */
     const val MAX_ORIGIN = 7
-    /** Most shells a host lists. */
-    const val MAX_SESSIONS = 16
+    /**
+     * Most shells a host lists.
+     *
+     * Sixteen hid three shells on a host with nineteen. A list is one deflated frame now, so the
+     * cap is only the wire's own bound on one answer.
+     */
+    const val MAX_SESSIONS = 48
     const val MAX_BUFFER = 16_384
 
     /** `Profile.unsupported` bits: features this link does not carry. A set bit means "absent". */

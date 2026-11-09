@@ -394,10 +394,13 @@ class MeshTermDriverTest {
         assertTrue(d.open("aa11"), "the list's id is opened")
 
         d.setHold(true)
+        d.flush()
         assertEquals(1, sess.messages().count { it == TermMessage.Hold(true) })
         d.setHold(true)
+        d.flush()
         assertEquals(1, sess.messages().count { it == TermMessage.Hold(true) }, "a re-assert is not a record")
         d.setHold(false)
+        d.flush()
         assertEquals(1, sess.messages().count { it == TermMessage.Hold(false) })
     }
 
@@ -925,6 +928,25 @@ class MeshTermDriverTest {
             listOf<TermMessage>(TermMessage.Attach(MeshTerm.VERSION, "abcd-1"), TermMessage.Resize(46, 17)),
             sess.messages(),
         )
+    }
+
+    /// **Two things done at once are one record.**
+    ///
+    /// Closing a shell also asks for the list, and releasing a hold rides with the line it was
+    /// holding: each pair used to pay a whole record of air for the second half, which on this link
+    /// is 0.6 s. The driver packs every message it queues, not only the pairs someone wrapped in
+    /// `queueAll`.
+    @Test
+    fun `a close and the list it asks for travel as one record`() = runBlocking<Unit> {
+        val d = driver()
+        d.start(); d.onRecord(byteArrayOf(2))
+        deliver(d, TermMessage.Sessions(true, listOf(ent("aa11"), ent("bb22"))))
+        sess.queued.clear()
+        assertTrue(d.closeShell("aa11"))
+        assertEquals(1, sess.queued.size, "one record: ${sess.queued.map { it.second.size }}")
+        val sent = sess.messages()
+        assertTrue(sent.contains(TermMessage.Close("aa11")), "the close is in it: $sent")
+        assertTrue(sent.contains(TermMessage.ListRequest), "and so is the list: $sent")
     }
 
     @Test

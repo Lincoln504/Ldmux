@@ -19,7 +19,7 @@
     "maxRowsBody": 134,
     "maxSegment": 120,
     "maxSelector": 40,
-    "maxSessions": 16,
+    "maxSessions": 48,
     "minVersion": 1,
     "originVersion": 7,
     "ownerVersion": 8,

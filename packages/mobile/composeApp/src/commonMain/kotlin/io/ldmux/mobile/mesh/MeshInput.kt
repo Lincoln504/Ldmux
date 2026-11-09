@@ -205,8 +205,8 @@ class MeshInputBatcher(
          * and the pump splits a longer paste across records by itself, so a long command was never
          * one packet — the old 1 KB cap refused a paste that could be sent perfectly well, and told
          * the user "input refused: the held text is at its limit" for a limit that existed only to
-         * keep the queue small. The cost that matters is records, and the bar states it in records
-         * before the press (`about N records`), which is the honest place to see it.
+         * keep the queue small. The pump splits a long paste across records by itself, so the one
+         * bound here is the memory the text occupies.
          */
         const val CAPACITY = 65_536
         private const val CR: Byte = 0x0D
@@ -372,12 +372,13 @@ class MeshTerminalHandle(
     val hasPending: Boolean get() = !batcher.isEmpty
 
     /**
-     * What is waiting, counted: typed characters, named keys, and the records it will cost.
+     * What is waiting, counted: typed characters and named keys.
      *
-     * The record count is the number the user cannot otherwise see and the one that matters on
-     * this link: an `Input` record carries [MeshTerm.MAX_INPUT] bytes and the hour has ≈58
-     * records, so "12 characters" and "12 characters, 1 key, ≈2 records" are different
-     * promises. Counted as the driver will send it, not as bytes divided by a hopeful number.
+     * **Not records.** The bar used to append `≈N records`, an estimate of what the held text
+     * would cost on the air, and it was the one number on that line nobody can act on: the send is
+     * one press away, the price is already decided by the text, and the arithmetic was an
+     * approximation of a rule (`MAX_INPUT` pieces) the operator does not choose. The characters and
+     * keys are what the press will send; the link's own budget line says what is left.
      */
     var heldSummary: String by mutableStateOf("")
         private set
@@ -454,45 +455,15 @@ class MeshTerminalHandle(
         if (items.isEmpty()) return ""
         var chars = 0
         var keys = 0
-        var records = 0
         for (item in items) when (item) {
-            is MeshOut.Text -> {
-                chars += item.bytes.decodeToString().length
-                records += recordsFor(item.bytes)
-            }
-            is MeshOut.Keys -> {
-                keys += item.names.size
-                records += 1
-            }
+            is MeshOut.Text -> chars += item.bytes.decodeToString().length
+            is MeshOut.Keys -> keys += item.names.size
         }
         val parts = buildList {
             if (chars > 0) add(if (chars == 1) "1 character" else "$chars characters")
             if (keys > 0) add(if (keys == 1) "1 key" else "$keys keys")
         }
-        return parts.joinToString(" and ") + ", " + if (records == 1) "1 record" else "≈$records records"
-    }
-
-    /**
-     * The records [bytes] will cost, walking the same slice rule [peek] uses.
-     *
-     * Not `(size + 95) / 96`: [peek] backs off to a character boundary, so a 96-byte run ending in
-     * the middle of a character becomes a 95-byte piece and a second piece — two records where the
-     * division promises one. "≈2 records" being 3 is the kind of promise this app would rather
-     * keep, and the count is the one number the user cannot otherwise see.
-     */
-    private fun recordsFor(bytes: ByteArray): Int {
-        var left = bytes.size
-        var records = 0
-        while (left > 0) {
-            var take = minOf(left, MeshTerm.MAX_INPUT)
-            if (take < left) {
-                // A continuation byte (10xxxxxx) cannot start a piece: back off, as `peek` does.
-                while (take > 1 && (bytes[take].toInt() and 0xC0) == 0x80) take--
-            }
-            left -= take
-            records++
-        }
-        return records
+        return parts.joinToString(" and ")
     }
 
     private fun readable(items: List<MeshOut>): String = buildString {

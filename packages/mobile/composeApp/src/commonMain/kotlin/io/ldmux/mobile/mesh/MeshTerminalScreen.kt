@@ -456,7 +456,12 @@ fun MeshTerminalScreen(
             // last seconds, and typing during it must still be held. A single flag would send
             // everything typed while the answer was on its way.
             if (source.publicChannel && !source.flushingHeld) {
-                delay(120)
+                // **Flush, then wait for the gate instead of polling it.** A held view still owes
+                // acks, retries and whatever a press queued; and a 120 ms poll put up to that much
+                // delay on the first record of every sync while waking the CPU four times a second
+                // for a gate that changes only when the user presses.
+                conn.driver.flush()
+                snapshotFlow { source.flushingHeld }.first { it }
                 continue
             }
             val step = pump.step()

@@ -556,6 +556,7 @@ class MeshTermDriver(
      * brings a full screen, so the pane repaints at once.
      */
     private fun rekey() {
+        outgoing.clear()
         handshake?.abandon()
         handshake = null
         session?.close()
@@ -571,7 +572,9 @@ class MeshTermDriver(
      */
     private fun failed(state: MeshLinkState) {
         // Drop what failed. A retry that kept the dead session would never run, and the native
-        // session holds keys and a queue that only a fresh handshake should replace.
+        // session holds keys and a queue that only a fresh handshake should replace. Held messages
+        // go too: an `Attach` or an `Input` built for a session that ended is not for the next one.
+        outgoing.clear()
         handshake?.abandon()
         handshake = null
         // The verdict was about *this* link; the next one starts its own clock.
@@ -889,8 +892,9 @@ class MeshTermDriver(
         // dropped, so a fit that hit a full queue was silently lost and the screen kept the old
         // grid for the life of the page — the same failure the tailnet answers with
         // `retryGridAfterRefusal`. Clearing the record lets the next tick ask again.
-        val queued = queue(TermMessage.Resize(cols, rows))
-        queue(TermMessage.Resync)
+        // **One record, and an outcome worth trusting.** The pair is 6 + 1 bytes, and the flush is
+        // immediate so a full queue is reported here rather than silently losing the request.
+        val queued = queueAll(listOf(TermMessage.Resize(cols, rows), TermMessage.Resync))
         if (queued != QueueOutcome.Queued) {
             requestedFit = null
             appLog("mesh fit: resize not queued ($queued); will ask again")
@@ -1118,10 +1122,20 @@ class MeshTermDriver(
         if (session == null || terminalView != null) return@withLock
         if (attachedId == null && pick != Pick.Attached) return@withLock
         holdSent = on
+        // Buffered: the release rides the line the press is about to send, and the hold itself
+        // rides whatever the next flush carries. The screen's pump loop flushes this turn.
         queue(TermMessage.Hold(on))
-        pump()
         publish()
     }
+
+    /**
+     * Transmit whatever waits.
+     *
+     * The pump loop calls this while the view is frozen: a held view still owes acknowledgements,
+     * retransmissions and the messages a press has queued, and the loop is the only thing driving
+     * the session when no record is arriving.
+     */
+    suspend fun flush() = lock.withLock { pump() }
 
     /** What the host was last told about the view, so a re-assert is not a record. */
     private var holdSent = false
@@ -1215,38 +1229,96 @@ class MeshTermDriver(
      * know whether its request left (the fit, which retries) can tell a dropped record from a
      * sent one. Callers that do not care simply ignore the result.
      */
-    private fun queue(m: TermMessage): QueueOutcome = queueAll(listOf(m))
+    /**
+     * Messages encoded and waiting for the session, oldest first.
+     *
+     * **A record is the unit of air, so two small messages are one record.** Every `queue` used to
+     * hand its own message to the session, so a press that does two things at once — release the
+     * hold *and* send the line, close a shell *and* ask for the list — paid a whole record for each
+     * half. They are now packed greedily into `RECORD_PAYLOAD`-sized records, in order, and a
+     * refusal leaves the rest queued for the next pump instead of dropping them.
+     */
+    private val outgoing = ArrayDeque<ByteArray>()
+
+    private fun queue(m: TermMessage): QueueOutcome {
+        if (session == null) return QueueOutcome.NotOpen
+        val bytes = try {
+            m.encode()
+        } catch (_: TermEncodeException) {
+            // A message this build cannot encode is not a record and not a refusal: the old path
+            // returned "queued" for it, which was a lie only in the sense that nothing was sent.
+            return QueueOutcome.Queued
+        }
+        // **Buffered, not sent.** Everything one turn queues leaves in one record: a close and the
+        // list it asks for, a released hold and the line it was holding. `pump` flushes.
+        outgoing.addLast(bytes)
+        return QueueOutcome.Queued
+    }
 
     /**
-     * Queue several messages **as one record** when they fit, because a record is the unit of air.
+     * Hand the queued messages to the session, packing as many as fit into one record.
      *
-     * A record carries 143 bytes of payload and costs about 0.6 s on the public preset; `Attach` is
-     * 11 bytes and its `Resize` 6, so sending them as two records spent 0.6 s of air on 17 bytes of
-     * meaning. The host's decoder is a stream decoder (it has accepted several messages per record
-     * since `STREAM_VERSION` 4), so the pair travels as one.
+     * A message bigger than a record goes alone and whole: the phone never sends one (a paste is
+     * sliced by [MeshInput] and a `Key` list is bounded), but a size the wire cannot take must not
+     * silently vanish.
      *
-     * Falls back to one record per message when a group does not fit, and returns the *first*
-     * failure so a caller that cares about a refusal still sees it.
+     * **A refusal drops what is left, and the caller retries.** That is the contract the session
+     * already has (`QueueOutcome.Full` means "not now", and the pump re-offers the text it still
+     * holds), and keeping a refused message here as well would send it twice: `fitHost` answers a
+     * refusal by asking again.
      */
-    private fun queueAll(messages: List<TermMessage>): QueueOutcome {
+    private fun flushOutgoing(): QueueOutcome {
         val s = session ?: return QueueOutcome.NotOpen
-        val parts = messages.map { it.encode() }
-        val total = parts.sumOf { it.size }
-        if (parts.size > 1 && total <= MeshTerm.RECORD_PAYLOAD) {
+        var first = QueueOutcome.Queued
+        while (outgoing.isNotEmpty()) {
+            // **Take the front run without removing it.** A refusal then costs nothing but the next
+            // pump: the messages are still here, in order, exactly as the user produced them.
+            var total = 0
+            var count = 0
+            for (part in outgoing) {
+                if (count > 0 && total + part.size > MeshTerm.RECORD_PAYLOAD) break
+                total += part.size
+                count++
+                if (total >= MeshTerm.RECORD_PAYLOAD) break
+            }
             val joined = ByteArray(total)
             var at = 0
-            for (p in parts) {
-                p.copyInto(joined, at)
-                at += p.size
+            var taken = 0
+            for (part in outgoing) {
+                if (taken == count) break
+                part.copyInto(joined, at)
+                at += part.size
+                taken++
             }
-            return s.send(SHELL, joined)
-        }
-        var first: QueueOutcome = QueueOutcome.Queued
-        for (p in parts) {
-            val outcome = s.send(SHELL, p)
-            if (outcome != QueueOutcome.Queued && first == QueueOutcome.Queued) first = outcome
+            val outcome = s.send(SHELL, joined)
+            if (outcome != QueueOutcome.Queued) {
+                outgoing.clear()
+                if (first == QueueOutcome.Queued) first = outcome
+                break
+            }
+            repeat(count) { outgoing.removeFirst() }
         }
         return first
+    }
+
+    /**
+     * Queue several messages, packed together when they fit.
+     *
+     * Kept as the named form for the one caller that cares about the group as a unit (an attach and
+     * the grid it carries), but the packing is [flushOutgoing]'s now: it applies to every message,
+     * not only to the pairs someone remembered to wrap.
+     */
+    private fun queueAll(messages: List<TermMessage>): QueueOutcome {
+        if (session == null) return QueueOutcome.NotOpen
+        for (m in messages) {
+            val bytes = try {
+                m.encode()
+            } catch (_: TermEncodeException) {
+                return QueueOutcome.Queued
+            }
+            outgoing.addLast(bytes)
+        }
+        return flushOutgoing()
     }
 
     /**
@@ -1589,6 +1661,8 @@ class MeshTermDriver(
     private suspend fun pump() {
         // See `left`: the session is only muted by a gateway that says so.
         val s = session ?: return
+        // A message a refusal left queued goes before anything new: the order is the user's.
+        if (outgoing.isNotEmpty()) flushOutgoing()
         // A gateway that has not spoken yet has not said "none": treating silence as zero mutes
         // the session, including the acks that keep it alive.
         val left = gateway.status.value?.opsLeftThisHour ?: UNKNOWN_BUDGET

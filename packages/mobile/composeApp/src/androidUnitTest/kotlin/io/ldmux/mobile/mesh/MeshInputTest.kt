@@ -251,26 +251,26 @@ class MeshInputTest {
     }
 
     @Test
-    fun `the held summary counts characters, keys and the records they will cost`() {
+    fun `the held summary counts the characters and keys the press will send`() {
         val handle = MeshTerminalHandle(MeshInputBatcher(), { 0L })
         handle.sendText("ls -l")
         handle.sendKey("Enter")
         handle.refreshPending()
-        // 5 characters and one named key. The key is its own record; five bytes fit one Input
-        // record. The summary is what the bar shows, so the arithmetic has to be honest about
-        // records rather than about bytes: an Input record carries MeshTerm.MAX_INPUT.
-        assertEquals("5 characters and 1 key, ≈2 records", handle.heldSummary)
+        // **No record estimate.** The bar used to append `≈N records`; it is a number nobody can
+        // act on (the price is decided by the text, and the link's own budget line says what is
+        // left), so the summary is only what is waiting.
+        assertEquals("5 characters and 1 key", handle.heldSummary)
         handle.discardHeld()
         assertEquals("", handle.heldSummary)
         assertFalse(handle.hasPending)
     }
 
     @Test
-    fun `a long paste is counted in the records it will actually take`() {
+    fun `a long paste is counted in characters, however many records it takes`() {
         val handle = MeshTerminalHandle(MeshInputBatcher(), { 0L })
         handle.sendText("x".repeat(MeshTerm.MAX_INPUT * 2 + 1))
         handle.refreshPending()
-        assertEquals("${MeshTerm.MAX_INPUT * 2 + 1} characters, ≈3 records", handle.heldSummary)
+        assertEquals("${MeshTerm.MAX_INPUT * 2 + 1} characters", handle.heldSummary)
     }
 
     @Test
@@ -291,10 +291,8 @@ class MeshInputTest {
         handle.sendKey("C-c")
         handle.refreshPending()
         assertEquals("ls\r\na\t\b \b", handle.echoText)
-        // Four characters ("ls" and "a\t"), four keys (Enter, BSpace, Up, C-c), and one record
-        // per run: text, keys, text, keys. That is the honest count — the record is the unit the
-        // link spends, not the byte.
-        assertEquals("4 characters and 4 keys, ≈4 records", handle.heldSummary)
+        // Four characters ("ls" and "a\t") and four keys (Enter, BSpace, Up, C-c).
+        assertEquals("4 characters and 4 keys", handle.heldSummary)
     }
 
     @Test

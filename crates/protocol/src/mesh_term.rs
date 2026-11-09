@@ -183,9 +183,14 @@ pub const MAX_LABEL: usize = 24;
 /// `2 + 40 (id) + 24 (label) + 61 (cwd) + 1 (origin) + 1 (owner) = 129` bytes, under
 /// [`MAX_ROWS_BODY`]'s 134, so an entry always fits one record however long its path is.
 pub const MAX_CWD: usize = 60;
-/// Most shells a host lists. A host with more lists the first this many and says nothing else:
-/// a picker of more than this is not usable at one record a minute anyway.
-pub const MAX_SESSIONS: usize = 16;
+/// Most shells a host lists. A host with more lists the first this many and says nothing else.
+///
+/// **Sixteen was chosen when a list cost a record per page and a picker of 40 was a minute of
+/// scrolling.** Neither is true now: a full list is deflated into one frame (48 entries are about
+/// 2.6 KB inflated, 500 bytes on the air), and the launcher scrolls. Sixteen silently hid three
+/// shells on a host with nineteen (measured 2026-11-09), which is a worse answer than a longer
+/// list: a row the operator cannot see is a shell they believe they closed.
+pub const MAX_SESSIONS: usize = 48;
 /// Most bytes of text in one row segment.
 pub const MAX_SEGMENT: usize = 120;
 /// Longest `Attach` selector.
