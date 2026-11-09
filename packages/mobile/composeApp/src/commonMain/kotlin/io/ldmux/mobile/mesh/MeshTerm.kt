@@ -73,7 +73,7 @@ object MeshTerm {
     }
     /** Most key names in one `Key` message. */
     const val MAX_KEYS = 16
-    const val MAX_BODY = 300
+    const val MAX_BODY = 600
     // 134, not 130: a version-7 entry is `2 + id 40 + label 24 + cwd 61 + origin 7`, and a page
     // must hold at least one entry. The message is 137 bytes, inside one record's 143.
     const val MAX_ROWS_BODY = 134
@@ -92,7 +92,7 @@ object MeshTerm {
     const val MAX_ORIGIN = 7
     /** Most shells a host lists. */
     const val MAX_SESSIONS = 16
-    const val MAX_BUFFER = 4096
+    const val MAX_BUFFER = 16_384
 
     /** `Profile.unsupported` bits: features this link does not carry. A set bit means "absent". */
     object Unsupported {
@@ -604,11 +604,27 @@ class TermDecoder {
                 } else {
                     null
                 }
-                if (inner == null) {
-                    out += TermItem.Malformed(tag)
-                    pos += head + len
-                } else {
-                    buf = buf.copyOfRange(0, pos) + inner + buf.copyOfRange(pos + head + len, buf.size)
+                when {
+                    inner == null -> {
+                        out += TermItem.Malformed(tag)
+                        pos += head + len
+                    }
+                    // **A frame inside a frame is refused.** Only the host sends frames and it never
+                    // nests them, so a nested one is a bug or a forged record, and inflating it would
+                    // multiply by up to ~1365 per level inside one record.
+                    inner.size >= 1 && (inner[0].toInt() and 0xff) == MeshTerm.T_FRAME -> {
+                        out += TermItem.Malformed(tag)
+                        pos += head + len
+                    }
+                    // **The buffer bound is checked after the splice**, not only on entry: the
+                    // inflated bytes arrive after the entry check.
+                    buf.size - (head + len) + inner.size > MeshTerm.MAX_BUFFER -> {
+                        buf = ByteArray(0)
+                        throw TermStreamException(TermStreamException.Kind.Overflow)
+                    }
+                    else -> {
+                        buf = buf.copyOfRange(0, pos) + inner + buf.copyOfRange(pos + head + len, buf.size)
+                    }
                 }
                 continue
             }

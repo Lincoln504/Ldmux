@@ -473,7 +473,20 @@ comparison was measured, not assumed: zstd -19 gives 440 bytes on the same scree
 532, so deflate wins here as well as being the only choice with no new dependency (Android's
 `java.util.zip.Inflater`, and `flate2`/`miniz_oxide` on the host, which ADR-0019 already allows).
 Robustness is the reason it is a *frame* rather than a stream: a frame that will not inflate is one
-lost frame, not a corrupt stream, so the phone asks for the screen again.
+lost frame, not a corrupt stream, so the phone asks for the screen again. The frame is used **only
+when it encodes and is smaller than the messages it replaces** — deflate can grow text that does not
+repeat, and a frame that cannot be encoded is a screen that never paints — and a frame below
+200 bytes is never built, because its own header would cost more than the repeats. A frame is one
+message and one message is no longer one record: a 430-byte frame travels across three or four
+records, which the ARQ already does for any message larger than a record.
+
+**Small messages share a record, on both sides.** A record is the unit of air, so `Attach` and its
+`Resize` travel together (17 bytes in one record instead of two), and the host packs its replies to
+the record's *live* payload — 143 at an empty path, up to 166 at range — rather than to a constant.
+Two more records are saved by timing rather than packing: an owed ack waits `max(150 ms, rto/3)`
+before going out alone, so it rides the next outgoing record instead, and the "answer finished"
+marker is sent only when an answer took two or more frames, because a one-frame echo's own commit
+already ends the phone's wait.
 
 **One radio per side, each configured by the device that owns it.** The host radio
 stays plugged into the host over USB, where the daemon drives it and can retune it.

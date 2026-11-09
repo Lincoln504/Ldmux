@@ -397,14 +397,7 @@ fn refresh_peer_route<L: ByteLink>(
     }
 }
 
-/// The path-hash width ldmux configures a radio for, as the firmware's mode index: 1 = two bytes.
-///
-/// Two bytes is the 2026 community default for companions and the maintainer's stated minimum for
-/// new presets; one byte collides at ≈20 co-channel repeaters, and the cost of the wider hash
-/// (32 hops instead of 63) is above every observed regional path length. Named here rather than
-/// written as a literal because three places have to agree on it: this default, the phone's presets,
-/// and the app's own "path N B" readout.
-pub const DEFAULT_PATH_HASH_MODE: u8 = 1;
+
 
 /// The flood scope this node broadcasts under, and where it came from.
 ///
@@ -820,6 +813,10 @@ fn load_window(path: &std::path::Path) -> Option<(u64, u32)> {
 
 /// Record the hour's spend. Best effort: a state directory that cannot be written must not stop the
 /// radio from working, it only means the next restart forgets again.
+///
+/// **Written per record, deliberately.** A 20-byte file costs about 5 us and the page cache absorbs
+/// it, and the alternative — a counter flushed on the status beat — loses up to half a second of
+/// spend if the process dies, which is the one case this file exists for.
 fn save_window(path: &std::path::Path, start_unix: u64, sent: u32) {
     let _ = std::fs::write(path, format!("{start_unix} {sent}"));
 }
@@ -1106,7 +1103,17 @@ fn serve_loop<L: ByteLink>(
                     Some(p) => (p.hash_size, p.bytes.as_slice()),
                     None => (settings.hash_size, &[][..]),
                 };
-                let outcome = match companion.send_raw(hash_size, path, &record) {
+                // **Two seconds, not ten.** The firmware acknowledges `SEND_RAW_PACKET` *before* it
+                // transmits (`MyMesh.cpp:2003-2016`), so a 10-second wait bought nothing on a busy
+                // channel and meant one stalled radio held the command queue — and the route
+                // requests behind it — for ten seconds. Two is still 100x a 172-byte record at
+                // 115200 baud; the route reply already used the short form for the same reason.
+                let outcome = match companion.send_raw_within(
+                    hash_size,
+                    path,
+                    &record,
+                    std::time::Duration::from_secs(2),
+                ) {
                     Ok(()) => {
                         sent = sent.saturating_add(1);
                         if let Some(path) = settings.window_record.as_deref() {

@@ -150,9 +150,16 @@ pub const MARKS_VERSION: u8 = 9;
 pub const MAX_KEYS: usize = 16;
 
 /// A message body is at most this long.
-pub const MAX_BODY: usize = 300;
+///
+/// **600, because a compressed frame is one message and one screen is bigger than 300.** A realistic
+/// 46x17 screen is ~900 bytes of rows and deflates to ~430 (measured), so a 298-byte ceiling made a
+/// full screen *unencodable* — the frame was built, `encode` refused it, and the bridge's reply
+/// failed into a resync that rebuilt the identical frame, forever. The ceiling is a stream-decoder
+/// bound now, not a record bound: a message larger than one record travels across records, which the
+/// ARQ and both decoders already do.
+pub const MAX_BODY: usize = 600;
 /// A `Rows` body is packed up to this many bytes, so a whole message (tag + len + body) is at
-/// most [`MAX_MESSAGE`] and fits one record's 144-byte payload.
+/// most [`MAX_MESSAGE`] and normally fits one record's payload.
 ///
 /// **134, not 130, because a version-7 entry carries a third field.** The worst case is
 /// `2 + 40 (id) + 24 (label) + 61 (cwd) + 7 (origin)` = 134, and a page must hold at least one
@@ -223,7 +230,7 @@ fn holder_word(code: u8) -> String {
     .to_owned()
 }
 /// A decoder holds at most this much unparsed input.
-pub const MAX_BUFFER: usize = 4096;
+pub const MAX_BUFFER: usize = 16_384;
 
 /// Features the mesh profile does not carry (`Profile.unsupported`). The client shows these as
 /// absent rather than pretending: a set bit means "not available on this link".
@@ -1061,15 +1068,28 @@ impl Decoder {
             let body: Vec<u8> = self.buf.range(head..head + len).copied().collect();
             self.buf.drain(..head + len);
             if tag == T_FRAME {
+                // **A frame inside a frame is refused.** Only the host sends frames and it never
+                // nests them, so a nested one is either a bug or a forged record; inflating it would
+                // multiply the expansion by up to 1365 per level inside one record's payload.
                 // **Splice the inner stream back in, so a frame is transparent.** A frame that will
                 // not inflate is one lost frame (`Err` for that message), never a corrupt stream:
                 // the phone asks for the screen again.
                 match Message::parse(tag, &body) {
                     Ok(Some(Message::Frame { inner })) => {
-                        self.buf.reserve(inner.len());
-                        for (i, b) in inner.into_iter().enumerate() {
-                            self.buf.insert(i, b);
+                        // **The buffer bound is re-checked after the splice**, not only on entry: the
+                        // inflated bytes arrive after that check, so a frame could otherwise push the
+                        // reassembly buffer past its bound.
+                        if self.buf.len() + inner.len() > MAX_BUFFER {
+                            self.buf.clear();
+                            return Err(DecodeError::Overflow);
                         }
+                        if inner.starts_with(&[T_FRAME]) {
+                            out.push(Err(DecodeError::Malformed(T_FRAME)));
+                            continue;
+                        }
+                        let tail = std::mem::take(&mut self.buf);
+                        self.buf.extend(inner);
+                        self.buf.extend(tail);
                     }
                     other => match other {
                         Ok(_) => {}
@@ -2625,9 +2645,11 @@ mod tests {
 
     #[test]
     fn oversize_and_overflow_are_refused() {
-        // length 301 as LEB128: 0xAD 0x02
+        // length MAX_BODY + 1 as LEB128. The ceiling is a message bound, not a record bound, so it
+        // is one past the largest legal body rather than any specific byte count.
+        let over = (MAX_BODY + 1) as u16;
         assert_eq!(
-            Decoder::new().push(&[0x02, 0xAD, 0x02]),
+            Decoder::new().push(&[0x02, (over & 0x7f) as u8 | 0x80, (over >> 7) as u8]),
             Err(DecodeError::BodyTooLong)
         );
         // a three-byte length is not a length
@@ -3193,7 +3215,10 @@ mod tests {
         let malformed = [0x83, 0x01, 0x00, 0x04, 0x00]; // Commit with a 1-byte body, then Detach
         let mut d = Decoder::new();
         let malformed_out = d.push(&malformed).unwrap();
-        let oversize = [0x82, 0xad, 0x02]; // length 301
+        // One byte past the message bound, in LEB128, so the fixture follows MAX_BODY rather than
+        // repeating a number that changes.
+        let over = (MAX_BODY + 1) as u16;
+        let oversize = [0x82, (over & 0x7f) as u8 | 0x80, (over >> 7) as u8];
         let mut d = Decoder::new();
         let oversize_out = d.push(&oversize);
         let streams = json!({

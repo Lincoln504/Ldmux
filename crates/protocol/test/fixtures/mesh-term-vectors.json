@@ -5,8 +5,8 @@
     "cwdVersion": 6,
     "keyVersion": 2,
     "lineVersion": 5,
-    "maxBody": 300,
-    "maxBuffer": 4096,
+    "maxBody": 600,
+    "maxBuffer": 16384,
     "maxCwd": 60,
     "maxInput": 96,
     "maxKeys": 16,
@@ -887,7 +887,7 @@
     },
     "oversizeBody": {
       "fatal": true,
-      "hex": "82ad02"
+      "hex": "82d904"
     },
     "unknownTagSkipped": {
       "hex": "7e02aabb0400",

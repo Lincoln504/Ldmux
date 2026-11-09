@@ -654,7 +654,12 @@ class MeshTermDriverTest {
     @Test
     fun `a stream that cannot be trusted ends the attach visibly`() = runBlocking<Unit> {
         val d = driver(); live(d)
-        sess.nextReceive = Received.Data(listOf(Delivered(0, byteArrayOf(0x82.toByte(), 0xad.toByte(), 0x02))))
+        // A body one byte past the message bound (600), so the stream is unusable rather than merely
+        // malformed. The bound is the fixture's, not a literal repeated here.
+        val over = MeshTerm.MAX_BODY + 1
+        sess.nextReceive = Received.Data(
+            listOf(Delivered(0, byteArrayOf(0x82.toByte(), (over and 0x7f or 0x80).toByte(), (over shr 7).toByte())))
+        )
         d.onRecord(byteArrayOf(9))
         assertEquals(MeshTermView.LinkDown(MeshLinkState.SessionFailed), d.view.value)
         assertEquals(InputOutcome.NotLive, d.input(byteArrayOf(1)))
@@ -862,6 +867,26 @@ class MeshTermDriverTest {
     private suspend fun liveV3(d: MeshTermDriver) {
         d.start(); d.onRecord(byteArrayOf(2))
         deliver(d, TermMessage.Profile(3, 20, 10, 0), rows(1, true, 0 to "$ "), TermMessage.Commit(1, 2, 0, 0))
+    }
+
+    @Test
+    fun `an attach carries the grid in the same record`() = runBlocking<Unit> {
+        // **Two records for 17 bytes of meaning is 0.6 s of air.** A record is the unit that costs,
+        // so the attach and its resize travel as one: together they are 17 bytes against a 143-byte
+        // payload, and the host's decoder is a stream decoder.
+        val d = driver()
+        d.setGrid(46, 17)
+        d.start(); d.onRecord(byteArrayOf(2))
+        // The shell has to be one the phone has been told about, which is how `open` refuses an id
+        // it has never heard of.
+        deliver(d, TermMessage.Sessions(true, listOf(ent("abcd-1"))))
+        sess.queued.clear()
+        d.open("abcd-1")
+        assertEquals(1, sess.queued.size, "one record: ${sess.queued.map { it.second.size }}")
+        assertEquals(
+            listOf<TermMessage>(TermMessage.Attach(MeshTerm.VERSION, "abcd-1"), TermMessage.Resize(46, 17)),
+            sess.messages(),
+        )
     }
 
     @Test

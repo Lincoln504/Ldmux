@@ -156,6 +156,13 @@ impl Config {
         };
         let scaled = (airtime * 6.0).round() as u64;
         self.rto_initial_ms = self.rto_initial_ms.max(scaled).min(60_000);
+        // **A pure ack must not cost its own record when a little patience avoids it.** An owed ack
+        // used to wait a fixed 150 ms for outgoing data and then go as a record of its own, which at
+        // 0.6 s per record is 0.6 s of air for a 5-byte body — one record in every exchange where the
+        // host has nothing to send. Waiting a third of the retransmission timer still fires it long
+        // before anything is retransmitted (`rto_initial` is ≥ 6 airtimes), so the window never
+        // stalls on it, and in the common case the next frame's data carries the ack instead.
+        self.ack_delay_ms = self.ack_delay_ms.max(self.rto_initial_ms / 3).min(self.rto_max_ms / 2);
         let cap = (airtime * 40.0).round() as u64;
         self.rto_max_ms = self.rto_max_ms.max(cap).min(600_000);
         self

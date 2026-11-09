@@ -1152,9 +1152,38 @@ class MeshTermDriver(
      * know whether its request left (the fit, which retries) can tell a dropped record from a
      * sent one. Callers that do not care simply ignore the result.
      */
-    private fun queue(m: TermMessage): QueueOutcome {
+    private fun queue(m: TermMessage): QueueOutcome = queueAll(listOf(m))
+
+    /**
+     * Queue several messages **as one record** when they fit, because a record is the unit of air.
+     *
+     * A record carries 143 bytes of payload and costs about 0.6 s on the public preset; `Attach` is
+     * 11 bytes and its `Resize` 6, so sending them as two records spent 0.6 s of air on 17 bytes of
+     * meaning. The host's decoder is a stream decoder (it has accepted several messages per record
+     * since `STREAM_VERSION` 4), so the pair travels as one.
+     *
+     * Falls back to one record per message when a group does not fit, and returns the *first*
+     * failure so a caller that cares about a refusal still sees it.
+     */
+    private fun queueAll(messages: List<TermMessage>): QueueOutcome {
         val s = session ?: return QueueOutcome.NotOpen
-        return s.send(SHELL, m.encode())
+        val parts = messages.map { it.encode() }
+        val total = parts.sumOf { it.size }
+        if (parts.size > 1 && total <= MeshTerm.RECORD_PAYLOAD) {
+            val joined = ByteArray(total)
+            var at = 0
+            for (p in parts) {
+                p.copyInto(joined, at)
+                at += p.size
+            }
+            return s.send(SHELL, joined)
+        }
+        var first: QueueOutcome = QueueOutcome.Queued
+        for (p in parts) {
+            val outcome = s.send(SHELL, p)
+            if (outcome != QueueOutcome.Queued && first == QueueOutcome.Queued) first = outcome
+        }
+        return first
     }
 
     /**
@@ -1472,13 +1501,24 @@ class MeshTermDriver(
      * the phone's size rather than the desk's).
      */
     private fun queueAttach(selector: String) {
-        queue(TermMessage.Attach(MeshTerm.VERSION, selector))
-        val (cols, rows) = wantedGrid ?: return
-        // A host that predates `Resize` ignores the message and answers `Profile` with the flag
-        // clear; the version is not known on the first attach, so it is sent and judged by the
-        // answer rather than by a guess.
-        requestedFit = Triple(selector, cols, rows)
-        queue(TermMessage.Resize(cols, rows))
+        val grid = wantedGrid
+        if (grid == null) {
+            queue(TermMessage.Attach(MeshTerm.VERSION, selector))
+            return
+        }
+        // **The grid travels with the attach, in the same record.** Two records for 17 bytes of
+        // meaning cost a whole extra 0.6 s, and the host's grace then waits for a resize that is
+        // already in its hands. A host that predates `Resize` ignores the message and answers
+        // `Profile` with the flag clear; the version is not known on the first attach, so it is sent
+        // and judged by the answer rather than by a guess.
+        val (cols, rows) = grid
+        val outcome = queueAll(
+            listOf(TermMessage.Attach(MeshTerm.VERSION, selector), TermMessage.Resize(cols, rows)),
+        )
+        // **Remembered only when it queued.** `fitHost` starts with "already asked" and would never
+        // ask again, so a refusal recorded here left the pane at the desk's grid for the life of the
+        // connection - the very case `fitHost` clears the field for.
+        requestedFit = if (outcome == QueueOutcome.Queued) Triple(selector, cols, rows) else null
     }
 
     private suspend fun pump() {

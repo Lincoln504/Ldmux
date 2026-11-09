@@ -169,10 +169,32 @@ impl ByteLink for SerialLink {
         let mut poll = nix::poll::PollFd::new(self.fd.as_fd(), nix::poll::PollFlags::POLLIN);
         let ready = nix::poll::poll(std::slice::from_mut(&mut poll), nix::poll::PollTimeout::from(20u16))
             .map_err(io::Error::from)?;
+        // **A hung-up port is not a silent one.** Unplugging the radio closes the tty, and a closed
+        // tty polls readable and reads zero bytes — which this function's contract calls "nothing
+        // right now". So the carrier never saw an error, never ended, and the supervisor never
+        // reopened: `mesh status` kept saying ready, every send was refused as busy, and only a
+        // daemon restart recovered. `revents` is the only place the hang-up is visible.
+        let revents = poll.revents().unwrap_or_else(nix::poll::PollFlags::empty);
+        if revents.intersects(
+            nix::poll::PollFlags::POLLERR
+                | nix::poll::PollFlags::POLLHUP
+                | nix::poll::PollFlags::POLLNVAL,
+        ) {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                format!("{}: the radio hung up", self.path),
+            ));
+        }
         if ready == 0 {
             return Ok(0);
         }
         match nix::unistd::read(self.fd.as_raw_fd(), buf) {
+            // Zero bytes with a readable port is end-of-file, which for a tty means the other side
+            // is gone. Returning `Ok(0)` here would hide it for ever.
+            Ok(0) => Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                format!("{}: the radio closed the port", self.path),
+            )),
             Ok(n) => Ok(n),
             Err(nix::errno::Errno::EAGAIN) => Ok(0),
             Err(e) => Err(io::Error::from(e)),
@@ -238,6 +260,33 @@ mod tests {
         assert_eq!(link.written, b"abc");
         let mut buf = [0u8; 8];
         assert_eq!(link.read(&mut buf).unwrap(), 8);
+    }
+
+    /// **A hung-up tty reads a hang-up, not silence.** This is the difference between a radio that
+    /// was unplugged and a radio with nothing to say: a closed pty polls readable, reads zero bytes,
+    /// and `Ok(0)` means "nothing right now", so the carrier outlived the port and only a restart
+    /// recovered. A real pty is used, because the behaviour being tested is the kernel's.
+    #[test]
+    fn a_closed_port_is_a_hang_up_and_not_silence() {
+        let opened = nix::pty::openpty(None, None).expect("a pty");
+        let mut link = SerialLink {
+            fd: opened.slave,
+            path: "/dev/ttyHANGUP".into(),
+        };
+        drop(opened.master);
+        let mut buf = [0u8; 16];
+        let e = link.read(&mut buf).expect_err("a closed port is an error");
+        assert!(
+            e.kind() == io::ErrorKind::BrokenPipe || e.kind() == io::ErrorKind::Other,
+            "{e:?}"
+        );
+        assert!(e.to_string().contains("/dev/ttyHANGUP"), "{e}");
+        // The bound is one poll: it must not spin on the dead port.
+        let started = Instant::now();
+        for _ in 0..8 {
+            let _ = link.read(&mut buf);
+        }
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

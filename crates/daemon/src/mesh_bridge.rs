@@ -41,6 +41,15 @@ pub trait Link {
     fn pending(&self) -> usize;
     fn send(&self, shell: u8, bytes: &[u8]) -> Result<(), String>;
     fn take_inbound(&self) -> Vec<(u8, Vec<u8>)>;
+    /// The largest payload one record can carry **right now**.
+    ///
+    /// Not a constant: a record is 172 bytes including the ARQ header and the path, so the payload
+    /// shrinks with the number of repeats the record will cross. Packing to the empty-path figure
+    /// (143) is safe but wasteful at range - a 20-hop record still carries 147 - and it costs a whole
+    /// extra record on a compressed screen, which is 0.6 s of air.
+    fn record_payload(&self) -> usize {
+        ldmux_protocol::mesh_term::RECORD_PAYLOAD
+    }
     /// A handle that resolves when records may be waiting to be taken.
     ///
     /// Without one the timer alone decides when a keystroke is noticed, so the idle cadence is a
@@ -166,6 +175,15 @@ impl Link for crate::mesh::MeshRuntime {
     fn incoming(&self) -> Option<Arc<tokio::sync::Notify>> {
         Some(Arc::clone(&self.inbound_wake))
     }
+    fn record_payload(&self) -> usize {
+        // `uplink_record_max` is what the peer said a record may be; the ARQ header is 5 bytes. The
+        // clamp keeps a nonsensical advertisement from packing more than a record can hold.
+        let limit = ldmux_protocol::mesh_term::RECORD_PAYLOAD;
+        self.snapshot()
+            .uplink_record_max
+            .map_or(limit, |m| usize::from(m).saturating_sub(5))
+            .clamp(limit, 166)
+    }
 }
 
 /// What the bridge has done, for tests and for a future status field.
@@ -230,6 +248,14 @@ struct Attached {
     /// asked for (an attach, a resize, a scroll) would otherwise spend a record saying "nothing
     /// more" about a screen nobody was waiting on.
     answer_owed: bool,
+    /// How many frames the current answer has taken, counted from when the phone typed.
+    ///
+    /// **A one-frame answer needs no marker.** The marker's job is to end the phone's wait for an
+    /// answer, and the frame that *carries* the answer already ends it: a keystroke's echo is one
+    /// frame, and spending a second record (0.6 s of air, one whole record for a 5-byte body) to say
+    /// "and nothing more" was a third of the airtime of typing. Only an answer that took two or more
+    /// frames has a "more is coming" the phone cannot see for itself.
+    pushes_since_input: u32,
     /// Whether the "pane has stopped changing" marker went out for the burst that just ended.
     ///
     /// One marker per burst: the phone ends its wait for an answer on it, and a marker per tick
@@ -476,8 +502,24 @@ fn pack_frame(messages: &[Message]) -> Vec<Message> {
     if inner.len() < FRAME_COMPRESS_MIN || inner.len() > FRAME_MAX_INFLATED {
         return messages.to_vec();
     }
+    let frame = M::Frame { inner };
+    // **The frame must encode, and it must be smaller than what it replaces.** Both are measured
+    // here rather than assumed: on text that does not repeat (a hex dump, a table of digits) deflate
+    // can come out larger than the input, and an encode refusal used to fail the whole reply — the
+    // bridge resynced, rebuilt the identical frame and refused it again, so a screen that could not
+    // be compressed was a screen that never painted.
+    let Ok(bytes) = frame.encode() else {
+        return messages.to_vec();
+    };
+    let plain: usize = messages[start..end]
+        .iter()
+        .filter_map(|m| m.encode().ok().map(|b| b.len()))
+        .sum();
+    if bytes.len() >= plain {
+        return messages.to_vec();
+    }
     let mut out: Vec<Message> = messages[..start].to_vec();
-    out.push(M::Frame { inner });
+    out.push(frame);
     out.extend_from_slice(&messages[end..]);
     out
 }
@@ -524,6 +566,7 @@ fn pack_frame(messages: &[Message]) -> Vec<Message> {
                 }
                 record.clear();
             };
+        let payload = self.link.record_payload();
         let mut packed: usize = 0;
         for m in messages {
             let Ok(bytes) = m.encode() else {
@@ -540,9 +583,7 @@ fn pack_frame(messages: &[Message]) -> Vec<Message> {
                 }
                 continue;
             }
-            if !record.is_empty()
-                && record.len() + bytes.len() > ldmux_protocol::mesh_term::RECORD_PAYLOAD
-            {
+            if !record.is_empty() && record.len() + bytes.len() > payload {
                 flush(&mut record, &mut ok, &mut self.link, &mut self.stats);
                 if !ok {
                     break;
@@ -552,7 +593,7 @@ fn pack_frame(messages: &[Message]) -> Vec<Message> {
             // reassembles by length, so nothing about a message's meaning depends on it fitting one
             // record - and a compressed frame (a few hundred bytes for a screen that was seven
             // records) is exactly such a message.
-            if bytes.len() > ldmux_protocol::mesh_term::RECORD_PAYLOAD {
+            if bytes.len() > payload {
                 record.extend_from_slice(&bytes);
                 flush(&mut record, &mut ok, &mut self.link, &mut self.stats);
                 if !ok {
@@ -703,6 +744,8 @@ fn pack_frame(messages: &[Message]) -> Vec<Message> {
                 let due = self.shells.get(&shell).is_some_and(|a| {
                     a.answer_owed
                         && !a.idle_sent
+                        // One frame answered it: that frame ended the wait already.
+                        && a.pushes_since_input >= 2
                         && a.last_push
                             .is_some_and(|t| now.saturating_duration_since(t).as_millis() >= IDLE_AFTER_MS)
                 });
@@ -760,6 +803,7 @@ fn pack_frame(messages: &[Message]) -> Vec<Message> {
                 a.changed_last_tick = true;
                 a.idle_sent = false;
                 a.echo = false;
+                a.pushes_since_input = a.pushes_since_input.saturating_add(1);
             }
             if screen.dead {
                 self.reply(
@@ -930,6 +974,7 @@ fn pack_frame(messages: &[Message]) -> Vec<Message> {
                                 differ: Differ::for_attach(version, one),
                                 answer_owed: false,
                                 idle_sent: false,
+                                pushes_since_input: 0,
                                 version,
                                 geometry: None,
                                 last_push: None,
@@ -1134,6 +1179,7 @@ fn pack_frame(messages: &[Message]) -> Vec<Message> {
                     a.echo = true;
                     a.answer_owed = true;
                     a.idle_sent = false;
+                    a.pushes_since_input = 0;
                 }
                 // Timing probe, off unless asked for (`LDMUX_MESH_TIMING=1`): the phone's own
                 // screen is a native surface with no text to poll, so the only honest way to
@@ -1173,6 +1219,7 @@ fn pack_frame(messages: &[Message]) -> Vec<Message> {
                     a.echo = true;
                     a.answer_owed = true;
                     a.idle_sent = false;
+                    a.pushes_since_input = 0;
                 }
                 // A name the table refuses is the daemon's refusal: nothing reaches the shell.
                 let _ = self.host.keys(&session, &names).await;
@@ -2075,6 +2122,8 @@ mod tests {
     #[tokio::test]
     async fn the_host_says_when_a_pane_has_settled_after_input() {
         let (mut b, host, link) = setup();
+        let clock = FakeClock::new();
+        b.clock = clock.reader();
         phone_says(
             &link,
             3,
@@ -2086,6 +2135,7 @@ mod tests {
         b.tick().await;
         // Nobody typed: a settled pane is not worth a record.
         b.tick().await;
+        clock.advance(2_000);
         let quiet = link.0.lock().unwrap().sent.len();
 
         phone_says(&link, 3, &Message::Input(b"ls\r".to_vec()));
@@ -2094,8 +2144,16 @@ mod tests {
             .unwrap()
             .screens
             .insert("abcd-1".into(), screen(&["$ ls", "file"]));
+        clock.advance(60);
+        b.tick().await;
+        clock.advance(60);
+        b.tick().await;
+        clock.advance(900);
         b.tick().await;
         b.tick().await;
+        // **One frame answered it, so no marker.** The frame that carries the answer already ends
+        // the phone's wait; a second record to say "and nothing more" was a whole record (0.6 s of a
+        // 1 % duty cycle) per keystroke, a third of the airtime of typing.
         let after = link.0.lock().unwrap().sent[quiet..].to_vec();
         let mut decoded: Vec<Message> = Vec::new();
         for (_, bytes) in &after {
@@ -2104,14 +2162,53 @@ mod tests {
                 decoded.extend(items.into_iter().flatten());
             }
         }
-        let idle: Vec<_> = decoded
+        let markers: Vec<_> = decoded
             .iter()
             .filter(|m| {
                 matches!(m, Message::Commit { flags, .. }
                     if flags & ldmux_protocol::mesh_term::commit::IDLE != 0)
             })
             .collect();
-        assert_eq!(idle.len(), 1, "one marker for the burst, in {:?}", after.len());
+        assert_eq!(markers.len(), 0, "a one-frame answer needs no marker");
+
+        // An answer that takes two frames does need one: the phone cannot tell a slow answer from a
+        // finished one, so the host says it once the pane has settled.
+        phone_says(&link, 3, &Message::Input(b"x".to_vec()));
+        let n = link.0.lock().unwrap().sent.len();
+        host.0
+            .lock()
+            .unwrap()
+            .screens
+            .insert("abcd-1".into(), screen(&["$ ls", "file", "more"]));
+        clock.advance(60);
+        b.tick().await;
+        // A second frame for the same answer, past the burst gap so it is its own frame: now the
+        // phone cannot tell whether more is coming.
+        clock.advance(1_100);
+        host.0
+            .lock()
+            .unwrap()
+            .screens
+            .insert("abcd-1".into(), screen(&["$ ls", "file", "more", "again"]));
+        b.tick().await;
+        clock.advance(900);
+        b.tick().await;
+        b.tick().await;
+        let mut decoded: Vec<Message> = Vec::new();
+        for (_, bytes) in &link.0.lock().unwrap().sent[n..] {
+            let mut d = ldmux_protocol::mesh_term::Decoder::default();
+            if let Ok(items) = d.push(bytes) {
+                decoded.extend(items.into_iter().flatten());
+            }
+        }
+        let markers: Vec<_> = decoded
+            .iter()
+            .filter(|m| {
+                matches!(m, Message::Commit { flags, .. }
+                    if flags & ldmux_protocol::mesh_term::commit::IDLE != 0)
+            })
+            .collect();
+        assert_eq!(markers.len(), 1, "one marker for a two-frame answer, in {:?}", decoded);
 
         // Nothing more changes: no second marker.
         let n = link.0.lock().unwrap().sent.len();
@@ -2814,12 +2911,13 @@ mod tests {
         b.tick().await;
         assert!(b.attached(1));
         assert_eq!(b.stats.malformed, 1);
-        // A length over the cap ends the attach.
-        link.0
-            .lock()
-            .unwrap()
-            .inbound
-            .push((1, vec![0x02, 0xAD, 0x02]));
+        // A length over the cap ends the attach. The cap is a message bound now (600), so the
+        // oversize is one past it rather than a fixed 301.
+        let over = (ldmux_protocol::mesh_term::MAX_BODY + 1) as u16;
+        link.0.lock().unwrap().inbound.push((
+            1,
+            vec![0x02, (over & 0x7f) as u8 | 0x80, (over >> 7) as u8],
+        ));
         b.tick().await;
         assert!(!b.attached(1));
     }
@@ -2968,9 +3066,12 @@ mod tests {
         );
         b.tick().await;
         clock.advance(ATTACH_GRACE.as_millis() as u64 + 50);
-        b.tick().await;
-        clock.advance(100);
-        b.tick().await;
+        // A full screen is paced: the differ hands out a window of messages per tick, so the paint
+        // finishes over several ticks. Ten is more than this screen needs and still bounded.
+        for _ in 0..10 {
+            b.tick().await;
+            clock.advance(1_100);
+        }
         // **Records, not messages: the decoder makes a frame transparent**, so the assertion is on
         // what the air carried. This screen is ~527 bytes of rows (615 with the messages' own
         // headers), which uncompressed is five records; compressed it is two or three.
@@ -2987,6 +3088,173 @@ mod tests {
             "a 527-byte screen took {records} records; compression did not happen"
         );
         // The phone's decode of what was sent is still the screen itself.
+        assert_eq!(phone_view(&link, 1).lines, wide);
+    }
+
+    /// **A screen that does not compress still paints.**
+    ///
+    /// Deflate can come out *larger* than its input on text that does not repeat — a hex dump, a
+    /// column of random digits. The first version of the frame path measured nothing: it built the
+    /// frame, `encode` refused it when the deflated bytes passed the message bound, the reply failed,
+    /// the bridge resynced and rebuilt the identical frame, for ever — a screen that never arrived,
+    /// with no counter to show it. So the packer must fall back to plain messages whenever the frame
+    /// would not be *smaller*, and the screen must still paint.
+    #[test]
+    fn a_frame_carries_every_message_it_replaces() {
+        use ldmux_protocol::mesh_term::{Differ, Screen};
+        // Compressible on purpose: real terminal text repeats (paths, prompts, log prefixes).
+        let lines: Vec<String> = (0..17)
+            .map(|i| format!("   Compiling ldmux-protocol v0.1.0 (/home/ldeen/Documents/ldmux/crates/{i})"))
+            .collect();
+        let screen = Screen {
+            cols: 80,
+            rows: 17,
+            cursor_x: 0,
+            cursor_y: 0,
+            alternate: false,
+            dead: false,
+            bracketed_paste: false,
+            first_line: 0,
+            lines,
+        };
+        let mut differ = Differ::new();
+        // Enough room that the whole screen is one frame, which is the case the packer must get right.
+        let messages = differ.update_within(&screen, 40);
+        let packed = Bridge::<FakeHost, FakeLink>::pack_frame(&messages);
+        let replaced = messages.len() - 1; // the profile stays outside the frame
+        let frame = packed
+            .iter()
+            .find(|m| matches!(m, Message::Frame { .. }))
+            .cloned()
+            .expect("a 17-row screen of real text must be compressed");
+        let Message::Frame { inner: stream } = &frame else {
+            unreachable!("just matched a frame")
+        };
+        let mut d = Decoder::new();
+        let inner = d.push(stream).expect("the inner stream decodes");
+        assert_eq!(inner.len(), replaced, "every message the frame replaced is inside it");
+        assert!(inner.iter().all(Result::is_ok), "and none of them is malformed");
+        assert!(
+            matches!(inner.last(), Some(Ok(Message::Commit { .. }))),
+            "the commit travels inside the frame too, or the phone never sees the cursor"
+        );
+        // And the frame is smaller than what it replaces, which is the only reason to send it.
+        let plain: usize = messages[1..]
+            .iter()
+            .filter_map(|m| m.encode().ok())
+            .map(|b| b.len())
+            .sum();
+        let framed = frame.encode().expect("the frame encodes").len();
+        assert!(framed < plain, "frame {framed} vs plain {plain}");
+    }
+
+    #[tokio::test]
+    async fn a_screen_that_does_not_compress_still_paints() {
+        let (mut b, host, link) = setup();
+        let clock = FakeClock::new();
+        b.clock = clock.reader();
+        // Noise: every row is a different random-looking string, so there is nothing to repeat.
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let wide: Vec<String> = (0..17)
+            .map(|_| {
+                (0..44)
+                    .map(|_| {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 7;
+                        seed ^= seed << 17;
+                        char::from(b'!' + (seed % 90) as u8)
+                    })
+                    .collect()
+            })
+            .collect();
+        let refs: Vec<&str> = wide.iter().map(String::as_str).collect();
+        paced(&host, &refs);
+        b.tick().await;
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: "abcd-1".into(),
+            },
+        );
+        b.tick().await;
+        clock.advance(ATTACH_GRACE.as_millis() as u64 + 50);
+        // A full screen is paced: the differ hands out a window of messages per tick, so the paint
+        // finishes over several ticks. Ten is more than this screen needs and still bounded.
+        for _ in 0..10 {
+            b.tick().await;
+            clock.advance(1_100);
+        }
+        {
+            // What is inside the frame itself, before any splicing.
+            for (_, bytes) in link.0.lock().unwrap().sent.iter() {
+                let mut d = Decoder::new();
+                if let Ok(items) = d.push(bytes) {
+                    for i in items.into_iter().flatten() {
+                        if let Message::Frame { inner } = i {
+                            let mut dd = Decoder::new();
+                            let mut kinds: Vec<String> = Vec::new();
+                            for it in dd.push(&inner).unwrap() {
+                                kinds.push(match it { Ok(m) => format!("{:?}", std::mem::discriminant(&m)), Err(e) => format!("ERR{e:?}") });
+                            }
+                        }
+                    }
+                }
+            }
+            let mut d = Decoder::new();
+            let mut names: Vec<String> = Vec::new();
+            for (_, bytes) in link.0.lock().unwrap().sent.iter() {
+                match d.push(bytes) {
+                    Ok(items) => for i in items {
+                        names.push(match i { Ok(m) => format!("{:?}", std::mem::discriminant(&m)), Err(e) => format!("ERR {e:?}") });
+                    },
+                    Err(e) => names.push(format!("STREAM ERR {e:?}")),
+                }
+            }
+        }
+        assert_eq!(
+            phone_view(&link, 1).lines,
+            wide,
+            "an incompressible screen is sent plain, not dropped"
+        );
+        assert!(b.stats.records_sent > 0, "something reached the air");
+    }
+
+    /// **A phone below version 11 is never sent a compressed frame**, because it cannot read one.
+    #[tokio::test]
+    async fn a_version_10_phone_is_never_sent_a_frame() {
+        let (mut b, host, link) = setup();
+        let clock = FakeClock::new();
+        b.clock = clock.reader();
+        let wide: Vec<String> = (0..17).map(|i| format!("row {i:02} {}", "x".repeat(24))).collect();
+        let refs: Vec<&str> = wide.iter().map(String::as_str).collect();
+        paced(&host, &refs);
+        b.tick().await;
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: ldmux_protocol::mesh_term::FRAME_VERSION - 1,
+                selector: "abcd-1".into(),
+            },
+        );
+        b.tick().await;
+        clock.advance(ATTACH_GRACE.as_millis() as u64 + 50);
+        b.tick().await;
+        clock.advance(100);
+        b.tick().await;
+        // Every record of that screen decodes without a frame in it: the phone reads plain Rows.
+        for (_, bytes) in link.0.lock().unwrap().sent.iter() {
+            let items = Decoder::new().push(bytes).unwrap();
+            for item in items {
+                let m = item.expect("a version-10 phone's stream stays readable");
+                assert!(
+                    !matches!(m, Message::Frame { .. }),
+                    "a frame would be unreadable to this phone"
+                );
+            }
+        }
         assert_eq!(phone_view(&link, 1).lines, wide);
     }
 
