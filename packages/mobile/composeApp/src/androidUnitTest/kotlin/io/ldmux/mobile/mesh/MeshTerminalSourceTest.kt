@@ -201,6 +201,34 @@ class MeshTerminalSourceTest {
         assertEquals("history has a gap here", s.scrollNotice)
     }
 
+    /// **A lost request expires, so the up key never goes dead.**
+    ///
+    /// One request in flight at a time, or a fast press would queue a record per press. But a
+    /// request that never arrives — a lost record, a host that dropped it — must not leave the key
+    /// doing nothing for the rest of the session: past a deadline it may ask again.
+    @Test
+    fun `an unanswered history request expires and the key asks again`() {
+        val (s, _, _) = source()
+        var asks = 0
+        var lastAsked: Pair<Int, Int>? = null
+        s.onWantHistory = { from, rows ->
+            asks++
+            lastAsked = from to rows
+        }
+        s.show(screenOf(100, "a", "b", "c", "d"), "aa11")
+        assertEquals(0, s.scrollBy(-1))
+        assertEquals(1, asks, "the first press asks")
+        assertEquals(96 to 4, lastAsked)
+
+        assertEquals(0, s.scrollBy(-1))
+        assertEquals(1, asks, "a second press does not queue another while one is in flight")
+
+        // Past the deadline: the request is treated as lost and the key works again.
+        clock.now += 11_000
+        assertEquals(0, s.scrollBy(-1))
+        assertEquals(2, asks, "the key asks again once the wait is up")
+    }
+
     /// **`older` is how the operator learns the top is reached, without spending a record.**
     @Test
     fun `a page with nothing above it says so`() {

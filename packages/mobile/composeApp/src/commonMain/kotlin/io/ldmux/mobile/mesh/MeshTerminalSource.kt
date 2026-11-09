@@ -767,18 +767,24 @@ class MeshTerminalSource(
         val ask = onWantHistory
         if (top <= 0 || ask == null) {
             scrollNotice = if (history.size == 0) "no history yet on this link" else "start of history"
+            paint()
             return
         }
         // **`rows` counts what the press wants, `want` is a page.** The host serves at most one
         // page-sized answer per press, so a press never costs two records.
-        if (awaitingHistory) return
+        // **A lost request expires; it does not block the key for ever.** The radio's own
+        // retransmission is bounded (six airtimes per hop), so a page that has not arrived by
+        // [HISTORY_WAIT_MS] is treated as lost and the next press asks again.
+        if (awaitingHistory && now() - historyAsked < HISTORY_WAIT_MS) return
         awaitingHistory = true
+        historyAsked = now()
         scrollNotice = "fetching history"
         // **Fetch a page, move by the press.** A page is one request either way, so a one-row key
         // asks for the same page a page key does and then lands one row above where it was: the
         // rest of the page is already in hand for the next press, and no press costs two records.
         pendingAdvance = (-rows).coerceIn(1, want)
         ask((top - want).coerceAtLeast(0), want)
+        paint()
     }
 
     /** Wired by the screen to the driver: ask the host for [rows] lines from absolute line [from]. */
@@ -786,6 +792,9 @@ class MeshTerminalSource(
 
     /** A history request is in flight, so an up key pressed again does not queue another. */
     private var awaitingHistory = false
+
+    /** When it went out, so a lost request does not leave the up key dead for ever. */
+    private var historyAsked = 0L
 
     /** How many rows the press that asked for the page wanted to move. */
     private var pendingAdvance = 1
@@ -796,6 +805,11 @@ class MeshTerminalSource(
      * An empty page is the host's answer that nothing is above — `last` alone cannot say that, since
      * a full page and an empty one are both "last" of their answer.
      */
+    private companion object {
+        /** How long a history request may be in flight before the up key may ask again. */
+        const val HISTORY_WAIT_MS = 10_000L
+    }
+
     /**
      * **The answer to an up key: rows from the shell's own scrollback, placed where they belong.**
      *
