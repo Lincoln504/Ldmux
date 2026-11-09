@@ -247,6 +247,9 @@ class MeshTerminalSource(
             hold.settle()
             return false
         }
+        // **A press is not typing.** The batcher's windows coalesce keystrokes; the press that
+        // ends the composition should leave now, not one window later.
+        if (pending) input.flushNow()
         if (hold.sync(pending, now())) {
             drawThroughUntil = now() + SYNC_SETTLE_MS
             drawThroughCeiling = now() + SYNC_DRAW_MAX_MS

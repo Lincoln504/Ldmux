@@ -140,6 +140,18 @@ class MeshInputBatcher(
         else -> false
     }
 
+    /**
+     * Send what is waiting as soon as the pump looks, whatever the typing window says.
+     *
+     * **The windows exist to coalesce typing; a press is a decision.** In batch mode the operator
+     * composes a line and then presses sync, and that press should not wait out an idle window it
+     * has just made moot — on the public preset that window is one airtime (600 ms) because
+     * [pace] sizes it to the record.
+     */
+    fun flushNow() {
+        urgent = true
+    }
+
     /** When [due] becomes true by waiting alone, or null when nothing is waiting. */
     fun nextDueMs(): Long? = when {
         runs.isEmpty() -> null
@@ -395,6 +407,9 @@ class MeshTerminalHandle(
      * decides whether there is anything to send at all: an empty sync only shows the view.
      */
     val hasPending: Boolean get() = !batcher.isEmpty
+
+    /** The operator pressed sync: send the held text now, not at the next window boundary. */
+    fun flushNow() = batcher.flushNow()
 
     /**
      * What is waiting, counted: typed characters and named keys.

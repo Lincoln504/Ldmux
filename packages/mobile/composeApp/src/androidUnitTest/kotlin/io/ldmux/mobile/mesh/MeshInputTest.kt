@@ -250,6 +250,22 @@ class MeshInputTest {
         assertTrue(b.nextDueMs() == null, "nothing waiting means nothing to schedule")
     }
 
+    /// **A sync press sends the held text now, not after the typing window.**
+    ///
+    /// The windows coalesce keystrokes, and on the public preset each is one airtime (600 ms)
+    /// because `pace` sizes them to the record. A press is a decision, not more typing: it must not
+    /// wait out the window it has just made moot.
+    @Test
+    fun `a press sends the held text without waiting for the typing window`() {
+        val b = MeshInputBatcher()
+        b.appendText("abc".encodeToByteArray(), 0)
+        assertNull(b.peek(10), "nothing leaves inside the typing window")
+        b.flushNow()
+        val out = b.peek(10)
+        assertTrue(out is MeshOut.Text, "the held text is due at once: $out")
+        assertEquals("abc", (out as MeshOut.Text).bytes.decodeToString())
+    }
+
     @Test
     fun `the held summary counts the characters and keys the press will send`() {
         val handle = MeshTerminalHandle(MeshInputBatcher(), { 0L })
