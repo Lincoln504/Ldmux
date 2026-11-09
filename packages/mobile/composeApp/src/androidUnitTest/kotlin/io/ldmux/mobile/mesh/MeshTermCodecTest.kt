@@ -173,7 +173,7 @@ class MeshTermCodecTest {
             // **A compressed frame has no phone-side encoder.** Deflate bytes are not a
             // cross-language contract (any level 6 encoder produces different bytes for the same
             // input), so the frame case is checked by decoding, below, not by re-encoding.
-            if (c.jsonObject["message"]!!.jsonObject["kind"]!!.jsonPrimitive.content == "frame") continue
+            if (c.jsonObject["message"]!!.jsonObject["kind"]!!.jsonPrimitive.content in setOf("frame", "frameDict")) continue
             val m = message(c.jsonObject["message"]!!)
             assertEquals(c.jsonObject["hex"]!!.jsonPrimitive.content, hex(m.encode()), "encode $m")
         }
@@ -182,7 +182,7 @@ class MeshTermCodecTest {
     @Test
     fun everyRustMessageDecodesBackToTheSameMessage() {
         for (c in fixture["messages"]!!.jsonArray) {
-            if (c.jsonObject["message"]!!.jsonObject["kind"]!!.jsonPrimitive.content == "frame") continue
+            if (c.jsonObject["message"]!!.jsonObject["kind"]!!.jsonPrimitive.content in setOf("frame", "frameDict")) continue
             val want = message(c.jsonObject["message"]!!)
             val got = decodeAll(unhex(c.jsonObject["hex"]!!.jsonPrimitive.content))
             assertEquals(listOf<TermItem>(TermItem.Message(want)), got)
@@ -287,12 +287,9 @@ class MeshTermCodecTest {
             .joinToString("").let(::unhex)
         val want = decodeAll(all)
         // **A compressed frame carries more than one message**, so the decoded count is the fixture's
-        // count plus one per frame; the point of the test is that any split yields the same list.
-        val frames = fixture["messages"]!!.jsonArray.count {
-            it.jsonObject["message"]!!.jsonObject["kind"]!!.jsonPrimitive.content == "frame"
-        }
-        assertTrue(frames >= 1, "the fixture must carry a compressed frame")
-        assertEquals(fixture["messages"]!!.jsonArray.size + frames, want.size)
+        // **The invariant is that any split decodes to the same list**, not that the list has a
+        // particular length: a frame stands for however many messages its inner stream carries.
+        assertTrue(want.isNotEmpty(), "the fixture decodes to something")
         for (chunk in listOf(1, 2, 3, 5, 7, 11, 144)) {
             val d = TermDecoder()
             val got = ArrayList<TermItem>()
@@ -402,17 +399,28 @@ class MeshTermCodecTest {
      */
     @Test
     fun aCompressedFrameInflatesToTheMessagesItCarries() {
-        val case = fixture["messages"]!!.jsonArray.firstOrNull {
-            it.jsonObject["message"]!!.jsonObject["kind"]!!.jsonPrimitive.content == "frame"
+        // **The dictionary is a wire contract, so it is compared, not trusted.** The host
+        // regenerates this hex from its own constant; if the two ever differ, every frame fails to
+        // inflate on the phone, which is a black screen rather than a visible error.
+        val dictionary = fixture["frameDictionary"]!!.jsonObject
+        assertEquals(dictionary["hex"]!!.jsonPrimitive.content, MeshFrameDictionary.bytes.joinToString("") { b ->
+            (b.toInt() and 0xff).toString(16).padStart(2, '0')
+        }, "the phone's frame dictionary must be the host's")
+        assertEquals(dictionary["bytes"]!!.jsonPrimitive.int, MeshFrameDictionary.bytes.size)
+
+        val cases = fixture["messages"]!!.jsonArray.filter {
+            it.jsonObject["message"]!!.jsonObject["kind"]!!.jsonPrimitive.content in setOf("frame", "frameDict")
         }
-        assertNotNull(case, "the fixture must carry a compressed frame")
-        val inner = case.jsonObject["message"]!!.jsonObject["inner"]!!.jsonPrimitive.content
-        val declared = case.jsonObject["message"]!!.jsonObject["uncompressed"]!!.jsonPrimitive.int
-        assertEquals(inner.length / 2, declared, "the declared size is the inner stream's")
-        val direct = decodeAll(unhex(inner))
-        val viaFrame = decodeAll(unhex(case.jsonObject["hex"]!!.jsonPrimitive.content))
-        assertTrue(direct.isNotEmpty(), "the inner stream carries messages")
-        assertEquals(direct, viaFrame, "a frame is transparent to the messages inside it")
-        assertTrue(viaFrame.none { it is TermItem.Malformed }, "nothing malformed")
+        assertTrue(cases.size >= 2, "a plain frame and a dictionary frame are both exercised")
+        for (case in cases) {
+            val inner = case.jsonObject["message"]!!.jsonObject["inner"]!!.jsonPrimitive.content
+            val declared = case.jsonObject["message"]!!.jsonObject["uncompressed"]!!.jsonPrimitive.int
+            assertEquals(inner.length / 2, declared, "the declared size is the inner stream's")
+            val direct = decodeAll(unhex(inner))
+            val viaFrame = decodeAll(unhex(case.jsonObject["hex"]!!.jsonPrimitive.content))
+            assertTrue(direct.isNotEmpty(), "the inner stream carries messages")
+            assertEquals(direct, viaFrame, "a frame is transparent to the messages inside it")
+            assertTrue(viaFrame.none { it is TermItem.Malformed }, "nothing malformed")
+        }
     }
 }

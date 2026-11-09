@@ -7,11 +7,15 @@ import java.util.zip.Inflater
  * Raw-deflate, no wrapper — the host writes `DeflateEncoder` with `nowrap` semantics and a length
  * field of its own, so the zlib header must not be expected here.
  */
-internal actual fun inflateFrame(bytes: ByteArray, expected: Int): ByteArray? {
+internal actual fun inflateFrame(bytes: ByteArray, expected: Int, dictionary: Boolean): ByteArray? {
     if (expected <= 0 || expected > MeshTerm.FRAME_MAX_INFLATED) return null
     val out = ByteArray(expected)
     val inflater = Inflater(true)
     return try {
+        // **The preset dictionary, before any input.** `setDictionary` must be called on a
+        // nowrap inflater before the first byte, or the stream's back-references into it are
+        // invalid and every frame fails.
+        if (dictionary) inflater.setDictionary(MeshFrameDictionary.bytes)
         inflater.setInput(bytes)
         var filled = 0
         while (filled < expected) {

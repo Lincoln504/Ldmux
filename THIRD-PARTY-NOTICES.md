@@ -187,6 +187,7 @@ Resolved from `Cargo.lock` (registry crates only; enforced by `deny.toml`). Wher
 | errno | 0.3.14 | MIT OR Apache-2.0 |
 | fiat-crypto | 0.2.9 | MIT OR Apache-2.0 OR BSD-1-Clause |
 | flate2 | 1.1.10 | MIT OR Apache-2.0 |
+| zlib-rs | 0.6.4 | Zlib |
 | futures-core | 0.3.34 | MIT OR Apache-2.0 |
 | futures-macro | 0.3.34 | MIT OR Apache-2.0 |
 | futures-sink | 0.3.34 | MIT OR Apache-2.0 |

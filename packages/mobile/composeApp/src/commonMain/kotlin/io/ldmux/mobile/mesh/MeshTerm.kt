@@ -24,7 +24,7 @@ object MeshTerm {
      * Version 6 adds a shell's working directory to each `Sessions` entry, so the picker shows the
      * folder instead of the id it would send.
      */
-    const val VERSION = 11
+    const val VERSION = 12
     const val MIN_VERSION = 1
     /** The first version that has `Key` and the shell id in `Profile`. */
     const val KEY_VERSION = 2
@@ -174,6 +174,9 @@ object MeshTerm {
      * messages, so they are spliced back into this same decoder.
      */
     internal const val T_FRAME = 0x8A
+
+    /** The same frame, deflated against [MeshFrameDictionary] (version 12). */
+    internal const val T_FRAME_DICT = 0x8B
 
     /** Below this many uncompressed bytes a frame is not worth compressing (deflate header > gain). */
     const val FRAME_COMPRESS_MIN = 200
@@ -590,7 +593,7 @@ class TermDecoder {
             }
             if (buf.size - pos < head + len) break
             val body = buf.copyOfRange(pos + head, pos + head + len)
-            if (tag == MeshTerm.T_FRAME) {
+            if (tag == MeshTerm.T_FRAME || tag == MeshTerm.T_FRAME_DICT) {
                 // **Inflat and splice, so the inner messages are decoded by this same loop.** The
                 // frame is opaque to everything else: a frame that will not inflate is one lost
                 // frame, reported as a malformed message, never as a corrupt stream.
@@ -600,7 +603,7 @@ class TermDecoder {
                     -1
                 }
                 val inner = if (want in 1..MeshTerm.FRAME_MAX_INFLATED) {
-                    inflateFrame(body.copyOfRange(2, body.size), want)
+                    inflateFrame(body.copyOfRange(2, body.size), want, tag == MeshTerm.T_FRAME_DICT)
                 } else {
                     null
                 }
@@ -612,7 +615,9 @@ class TermDecoder {
                     // **A frame inside a frame is refused.** Only the host sends frames and it never
                     // nests them, so a nested one is a bug or a forged record, and inflating it would
                     // multiply by up to ~1365 per level inside one record.
-                    inner.size >= 1 && (inner[0].toInt() and 0xff) == MeshTerm.T_FRAME -> {
+                    inner.size >= 1 &&
+                        ((inner[0].toInt() and 0xff) == MeshTerm.T_FRAME ||
+                            (inner[0].toInt() and 0xff) == MeshTerm.T_FRAME_DICT) -> {
                         out += TermItem.Malformed(tag)
                         pos += head + len
                     }

@@ -11,4 +11,4 @@ package io.ldmux.mobile.mesh
  * frame — the screen it carried is asked for again — and must never be a stream error that kills
  * the session.
  */
-internal expect fun inflateFrame(bytes: ByteArray, expected: Int): ByteArray?
+internal expect fun inflateFrame(bytes: ByteArray, expected: Int, dictionary: Boolean = false): ByteArray?

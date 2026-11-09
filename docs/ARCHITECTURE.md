@@ -480,6 +480,14 @@ repeat, and a frame that cannot be encoded is a screen that never paints — and
 message and one message is no longer one record: a 430-byte frame travels across three or four
 records, which the ARQ already does for any message larger than a record.
 
+**The frame is deflated against a preset dictionary.** A single screen repeats no phrase twice, so
+deflate codes its vocabulary literally; a 945-byte dictionary of what a shell actually repeats
+(`crates/`, `cargo build`, `state    `, `error: `, `$ `) turns those into back-references, and it is
+compiled into both ends so it costs no airtime. Measured on a real status screen: 419 bytes without
+it, **325** with — three records become two. The dictionary is a wire contract, so the fixture
+carries its exact bytes and both ends compare against them; it rides a separate message tag so a
+phone that predates it is never sent one.
+
 **Small messages share a record, on both sides.** A record is the unit of air, so `Attach` and its
 `Resize` travel together (17 bytes in one record instead of two), and the host packs its replies to
 the record's *live* payload — 143 at an empty path, up to 166 at range — rather than to a constant.

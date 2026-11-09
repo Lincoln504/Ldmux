@@ -70,7 +70,7 @@ use std::collections::VecDeque;
 /// `Sessions` page is answered **before** an attach can succeed (the phone learns which shell to
 /// attach to from it), so it cannot be gated on a `Profile`'s version: the page carries a flag of
 /// its own and the host sets it only for a phone that has attached with version 6 or later.
-pub const VERSION: u8 = 11;
+pub const VERSION: u8 = 12;
 /// The oldest profile version a host still speaks.
 pub const MIN_VERSION: u8 = 1;
 /// The first version that has `Key` and the shell id in `Profile`.
@@ -405,6 +405,14 @@ pub enum Message {
         /// The uncompressed message stream.
         inner: Vec<u8>,
     },
+    /// The same thing, deflated **against [`FRAME_DICTIONARY`]** (version 12 and later).
+    ///
+    /// A separate message rather than a flag so an old phone's decoder never has to understand a
+    /// dictionary it does not carry: a version-11 phone is simply never sent one.
+    FrameDict {
+        /// The uncompressed message stream.
+        inner: Vec<u8>,
+    },
     /// Phone asks the host to start a shell in `cwd` (empty = the host's default directory).
     /// Version 7 and later only.
     Create {
@@ -474,11 +482,102 @@ const T_MARKS: u8 = 0x87;
 /// phone inflates and re-reads them through the same decoder, and a frame that fails to inflate is a
 /// frame that failed, not a stream that is corrupt.
 const T_FRAME: u8 = 0x8A;
+/// The same frame, deflated against [`FRAME_DICTIONARY`] (version 12). Host to phone only.
+const T_FRAME_DICT: u8 = 0x8B;
 /// The first version whose phone can read [`Frame`].
 pub const FRAME_VERSION: u8 = 11;
+/// The first version whose phone carries [`FRAME_DICTIONARY`] and can read [`FrameDict`].
+pub const FRAME_DICT_VERSION: u8 = 12;
+/// **The dictionary a compressed frame may be deflated against.**
+///
+/// A frame is 300-900 bytes of terminal text, and deflate's own match finder has nothing to work
+/// with at that size: the words a shell repeats (`crates/`, `cargo build`, `state    `, `error: `,
+/// `$ `) appear once each in a single frame, so they are coded literally. A *preset* dictionary turns
+/// those into short back-references, and the gain is measured rather than assumed: a real
+/// 46x17 `ldmux mesh status` screen goes from 419 bytes of plain deflate to **325** with this
+/// dictionary, which is the difference between three records and two on a public-preset link, i.e.
+/// 0.6 s of air per full screen. A frame of code goes 169 to 162, a box-drawn TUI 106 to 58.
+///
+/// **It is compiled into both ends, so it costs no airtime** - and it must be byte-identical on both
+/// ends or every frame fails to inflate. That equality is pinned twice: the protocol test compares
+/// this constant with the fixture's hex, and the phone's codec test compares its own constant with
+/// the same fixture. The bytes are ASCII on purpose: a dictionary is a wire contract, and a contract
+/// that depends on someone's editor encoding is not one.
+pub const FRAME_DICTIONARY: &[u8] = b"$ # > % ~ - -- : / . _ ( ) [ ] { } \" ' ` | & * = + ! ? @ /home/ldeen/Documents/ /home/ld\
+    een/ crates/ src/ tests/ target/ debug/ release/ docs/ cargo build test run clippy rustc \
+    npm node python git commit push pull add status log diff ldmux mesh session keeper daemo\
+    n radio preset scope capacity route signal airtime records sent retransmitted dropped pe\
+    nding received bytes established ready waiting link connected state error warning note i\
+    nfo failed ok done running idle busy refused timeout Compiling Finished profile optimize\
+    d target(s) in fn impl pub let mut return struct enum trait match self Self Ok Err Some \
+    None true false null nil usize u8 u16 u32 u64 String Vec Option Result Box Arc Mutex con\
+    st static async await move ref dyn where use mod crate super error: warning: help: note: \
+    --> = note = help kubectl docker systemctl journalctl service unit enable start restart       \t\r\n \
+    |  =>  -> ::()[]{}$ # \n$ the  and  to  of  in  is  a ";
+
 /// Below this many uncompressed bytes a frame is not worth compressing: deflate's own header and
 /// the length field cost more than the text repeats.
 pub const FRAME_COMPRESS_MIN: usize = 200;
+/// Deflate a frame's inner stream, optionally against [`FRAME_DICTIONARY`].
+///
+/// `None` when the compressor makes no progress, which the caller turns into "send the plain
+/// messages instead" — never into a lost screen.
+fn deflate_frame(inner: &[u8], with_dict: bool) -> Option<Vec<u8>> {
+    use flate2::{Compress, Compression, FlushCompress, Status};
+    let mut c = Compress::new(Compression::best(), false);
+    if with_dict && c.set_dictionary(FRAME_DICTIONARY).is_err() {
+        return None;
+    }
+    // Raw deflate of a few hundred bytes can expand slightly; the loop grows the buffer for a
+    // pathological payload rather than failing it.
+    let mut out = vec![0u8; inner.len() + 64];
+    loop {
+        let before_in = c.total_in() as usize;
+        let before_out = c.total_out() as usize;
+        let status = c
+            .compress(&inner[before_in..], &mut out[before_out..], FlushCompress::Finish)
+            .ok()?;
+        if status == Status::StreamEnd {
+            break;
+        }
+        let produced = c.total_out() as usize;
+        if c.total_in() as usize == before_in && produced == before_out {
+            return None;
+        }
+        if produced == out.len() {
+            out.resize(out.len() * 2, 0);
+        }
+    }
+    out.truncate(c.total_out() as usize);
+    Some(out)
+}
+
+/// Inflate exactly `want` bytes, optionally against [`FRAME_DICTIONARY`].
+fn inflate_frame(bytes: &[u8], want: usize, with_dict: bool) -> Option<Vec<u8>> {
+    use flate2::{Decompress, FlushDecompress, Status};
+    let mut d = Decompress::new(false);
+    if with_dict && d.set_dictionary(FRAME_DICTIONARY).is_err() {
+        return None;
+    }
+    let mut out = vec![0u8; want];
+    loop {
+        let before_in = d.total_in() as usize;
+        let before_out = d.total_out() as usize;
+        let status = d
+            .decompress(&bytes[before_in..], &mut out[before_out..], FlushDecompress::Finish)
+            .ok()?;
+        if d.total_out() as usize == want {
+            break;
+        }
+        if status == Status::StreamEnd
+            || (d.total_in() as usize == before_in && d.total_out() as usize == before_out)
+        {
+            return None;
+        }
+    }
+    Some(out)
+}
+
 /// The largest a frame may inflate to. A screen is a few hundred bytes; this bounds a hostile or
 /// corrupt length so an explosion cannot exhaust the phone.
 pub const FRAME_MAX_INFLATED: usize = 8_192;
@@ -672,21 +771,25 @@ impl Message {
                 if inner.is_empty() || inner.len() > FRAME_MAX_INFLATED {
                     return Err(EncodeError::TooLong);
                 }
-                let mut packed = Vec::new();
-                {
-                    use flate2::Compression as Level;
-                    use flate2::write::DeflateEncoder;
-                    use std::io::Write as _;
-                    let mut enc = DeflateEncoder::new(&mut packed, Level::best());
-                    enc.write_all(inner).map_err(|_| EncodeError::TooLong)?;
-                    enc.finish().map_err(|_| EncodeError::TooLong)?;
-                }
+                let packed = deflate_frame(inner, false).ok_or(EncodeError::TooLong)?;
                 if packed.len() > MAX_BODY - 2 {
                     return Err(EncodeError::TooLong);
                 }
                 body.extend_from_slice(&(inner.len() as u16).to_le_bytes());
                 body.extend_from_slice(&packed);
                 T_FRAME
+            }
+            Self::FrameDict { inner } => {
+                if inner.is_empty() || inner.len() > FRAME_MAX_INFLATED {
+                    return Err(EncodeError::TooLong);
+                }
+                let packed = deflate_frame(inner, true).ok_or(EncodeError::TooLong)?;
+                if packed.len() > MAX_BODY - 2 {
+                    return Err(EncodeError::TooLong);
+                }
+                body.extend_from_slice(&(inner.len() as u16).to_le_bytes());
+                body.extend_from_slice(&packed);
+                T_FRAME_DICT
             }
             Self::Sessions {
                 last,
@@ -995,7 +1098,7 @@ impl Message {
                     entries,
                 }
             }
-            T_FRAME => {
+            T_FRAME | T_FRAME_DICT => {
                 if body.len() < 3 {
                     return Err(bad);
                 }
@@ -1003,17 +1106,12 @@ impl Message {
                 if want == 0 || want > FRAME_MAX_INFLATED {
                     return Err(bad);
                 }
-                use flate2::read::DeflateDecoder;
-                use std::io::Read as _;
-                let mut inner = Vec::with_capacity(want);
-                // **Bounded by the declared size, not by trust.** A frame that inflates to more
-                // than it said is malformed rather than a reason to allocate the difference.
-                let mut d = DeflateDecoder::new(&body[2..]).take(want as u64 + 1);
-                d.read_to_end(&mut inner).map_err(|_| bad.clone())?;
-                if inner.len() != want {
-                    return Err(bad);
+                let inner = inflate_frame(&body[2..], want, tag == T_FRAME_DICT).ok_or(bad.clone())?;
+                if tag == T_FRAME_DICT {
+                    Self::FrameDict { inner }
+                } else {
+                    Self::Frame { inner }
                 }
-                Self::Frame { inner }
             }
             T_RESYNC | T_DETACH | T_COMMIT | T_CLOSED | T_LIST | T_RESIZE => {
                 return Err(bad);
@@ -1067,7 +1165,7 @@ impl Decoder {
             }
             let body: Vec<u8> = self.buf.range(head..head + len).copied().collect();
             self.buf.drain(..head + len);
-            if tag == T_FRAME {
+            if tag == T_FRAME || tag == T_FRAME_DICT {
                 // **A frame inside a frame is refused.** Only the host sends frames and it never
                 // nests them, so a nested one is either a bug or a forged record; inflating it would
                 // multiply the expansion by up to 1365 per level inside one record's payload.
@@ -1075,7 +1173,7 @@ impl Decoder {
                 // not inflate is one lost frame (`Err` for that message), never a corrupt stream:
                 // the phone asks for the screen again.
                 match Message::parse(tag, &body) {
-                    Ok(Some(Message::Frame { inner })) => {
+                    Ok(Some(Message::Frame { inner })) | Ok(Some(Message::FrameDict { inner })) => {
                         // **The buffer bound is re-checked after the splice**, not only on entry: the
                         // inflated bytes arrive after that check, so a frame could otherwise push the
                         // reassembly buffer past its bound.
@@ -1083,8 +1181,8 @@ impl Decoder {
                             self.buf.clear();
                             return Err(DecodeError::Overflow);
                         }
-                        if inner.starts_with(&[T_FRAME]) {
-                            out.push(Err(DecodeError::Malformed(T_FRAME)));
+                        if inner.starts_with(&[T_FRAME]) || inner.starts_with(&[T_FRAME_DICT]) {
+                            out.push(Err(DecodeError::Malformed(tag)));
                             continue;
                         }
                         let tail = std::mem::take(&mut self.buf);
@@ -2643,6 +2741,67 @@ mod tests {
         );
     }
 
+    /// **A dictionary frame round-trips, and is smaller than the plain one.** The dictionary is a
+    /// wire contract carried by both ends, so the case that matters is that a phone which has the same
+    /// bytes can read it; the fixture's `frameDict` vector is what proves that across languages.
+    #[test]
+    fn a_dictionary_frame_round_trips_and_beats_the_plain_one() {
+        // A real inner stream: rows and a commit, the shape the host actually packs.
+        let mut inner = Vec::new();
+        for y in 0..8u8 {
+            inner.extend(
+                Message::Rows {
+                    epoch: 3,
+                    full: y == 0,
+                    patches: vec![Patch {
+                        y,
+                        append: false,
+                        text: format!("   Compiling ldmux-protocol v0.1.0 (/home/ldeen/Documents/ldmux/crates/{y})"),
+                    }],
+                }
+                .encode()
+                .unwrap(),
+            );
+        }
+        inner.extend(
+            Message::Commit {
+                epoch: 3,
+                cursor_x: 2,
+                cursor_y: 8,
+                flags: 0,
+                first_line: 0,
+            }
+            .encode()
+            .unwrap(),
+        );
+        let plain = Message::Frame { inner: inner.clone() };
+        let dict = Message::FrameDict { inner: inner.clone() };
+        let plain_bytes = plain.encode().unwrap();
+        let dict_bytes = dict.encode().unwrap();
+        assert!(
+            dict_bytes.len() < plain_bytes.len(),
+            "the dictionary must pay for itself: {} vs {}",
+            dict_bytes.len(),
+            plain_bytes.len()
+        );
+        let mut d = Decoder::new();
+        // The frame is transparent in the decoder, so what comes back is the *inner* stream.
+        let items = d.push(&dict_bytes).unwrap();
+        assert!(items.iter().all(Result::is_ok), "{items:?}");
+        let mut back = Vec::new();
+        for m in items.into_iter().flatten() {
+            back.extend(m.encode().unwrap());
+        }
+        assert_eq!(back, inner, "the inner stream survives the dictionary round trip");
+        // A dictionary frame whose bytes are wrong must fail as one lost frame, not a corrupt stream.
+        let mut damaged = dict_bytes.clone();
+        let last = damaged.len() - 1;
+        damaged[last] ^= 0xff;
+        let mut d = Decoder::new();
+        let items = d.push(&damaged).unwrap_or_else(|e| panic!("stream must survive: {e:?}"));
+        assert!(items.iter().any(Result::is_err), "damage is a lost frame: {items:?}");
+    }
+
     #[test]
     fn oversize_and_overflow_are_refused() {
         // length MAX_BODY + 1 as LEB128. The ceiling is a message bound, not a record bound, so it
@@ -2927,6 +3086,9 @@ mod tests {
             // deflate bytes themselves are not a cross-language contract (any level 6 encoder
             // produces different bytes for the same input), only the length-plus-deflate shape is.
             Message::Frame { inner } => json!({"kind":"frame","uncompressed":inner.len(),"inner":hex(inner)}),
+            Message::FrameDict { inner } => {
+                json!({"kind":"frameDict","uncompressed":inner.len(),"inner":hex(inner)})
+            }
             Message::Input(b) => json!({"kind":"input","bytes":hex(b)}),
             Message::Resync => json!({"kind":"resync"}),
             Message::Detach => json!({"kind":"detach"}),
@@ -3036,6 +3198,19 @@ mod tests {
                     );
                     inner
                 },
+            },
+            Message::FrameDict {
+                inner: Message::Rows {
+                    epoch: 9,
+                    full: true,
+                    patches: vec![Patch {
+                        y: 0,
+                        append: false,
+                        text: "$ ldmux mesh status".into(),
+                    }],
+                }
+                .encode()
+                .unwrap(),
             },
             Message::Input(b"\x03".to_vec()),
             Message::Input(b"ls -la\r".to_vec()),
@@ -3243,6 +3418,10 @@ mod tests {
             "messages": msg_cases,
             "sessionPages": {"input": many.iter().map(|s| json!({"id":s.id,"label":s.label,"cwd":s.cwd,"origin":s.origin,"owner":s.owner,"shell":s.shell})).collect::<Vec<_>>(), "pages": page_cases},
             "script": steps,
+            // **The frame dictionary is a wire contract**, so the fixture carries its bytes and its
+            // digest: a Rust test compares the constant with this, and the phone's codec test
+            // compares its own constant with the same entry.
+            "frameDictionary": {"bytes": FRAME_DICTIONARY.len(), "hex": hex(FRAME_DICTIONARY)},
             "streams": streams,
         })
     }

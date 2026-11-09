@@ -14,7 +14,12 @@ tokio = { version = "1", features = ["net", "io-util", "time", "rt", "macros", "
 nix = { version = "0.29", features = ["user", "fs"] }
 uuid = { version = "1", features = ["v4"] }
 # A compressed screen frame (ADR-0019's dependency, already in the tree for permessage-deflate).
-flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+#
+# `zlib-rs`, not `rust_backend`: a frame may be deflated against a preset dictionary
+# (`FRAME_DICTIONARY`), and flate2 exposes `set_dictionary` only for the zlib-rs and C backends.
+# zlib-rs is a pure-Rust zlib — no C, which is what the dependency rule cares about — and the
+# dictionary is what takes a full screen from 419 bytes to 325, i.e. from three records to two.
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 
 [lints]
 workspace = true

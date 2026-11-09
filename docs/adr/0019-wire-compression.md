@@ -44,9 +44,15 @@ done on top of it.
    compressor. The decision is made *before* compressing: a message compressed and
    then discarded would leave the two ends' dictionaries out of step. A plain
    message is in neither dictionary, so mixing is lawful.
-6. **Level 3** of the pure-Rust `miniz_oxide` backend, via `flate2` with
-   `default-features = false, features = ["rust_backend"]` (no C, no zlib). This is
-   the one new dependency; `AGENTS.md`'s allowlist names it and says why.
+6. **Level 3**, via `flate2` with `default-features = false`. This is the one new
+   dependency; `AGENTS.md`'s allowlist names it and says why. Two backends are used,
+   both pure Rust and neither one C: `rust_backend` (`miniz_oxide`) for the
+   permessage-deflate this ADR is about, and `zlib-rs` for the mesh's compressed screen
+   frame, because a frame is deflated **against a preset dictionary** and `flate2` exposes
+   `set_dictionary` only for zlib-rs and the C zlib. zlib-rs is by the Trifecta Tech
+   Foundation, MIT/Apache-2.0, and is listed in `THIRD-PARTY-NOTICES.md`; the alternative
+   was a dictionary-free frame, which is ~25 % larger — three records instead of two on a
+   public-preset link, i.e. 0.6 s of air per full screen.
 7. **Compression cannot stall the connection loop.** A message over 16 KiB (a
    snapshot, a scrollback page) is compressed on the blocking pool (the compressor
    moves in and out; the connection is one task, so nothing else can reach it);
