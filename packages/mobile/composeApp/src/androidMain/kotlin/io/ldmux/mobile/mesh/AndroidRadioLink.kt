@@ -215,6 +215,8 @@ class AndroidRadioLink(
     private var adoptedScopeName: String? = null
     /** The radio's own region name, from `CMD_GET_DEFAULT_FLOOD_SCOPE`; null when it has none. */
     private var radioScopeName: String? = null
+    /** The width last written to the log, so one line per change rather than one per query. */
+    private var lastLoggedWidth: Int = 0
 
     /** When an overheard scoped flood was last tested against the known region names. */
     @Volatile
