@@ -1243,6 +1243,12 @@ fn serve_loop<L: ByteLink>(
     // neither send nor be understood, so a pathless host asks the peer while one of them is recent
     // and stays quiet when nothing has moved for a couple of minutes.
     let mut last_peer_record: Option<Instant> = None;
+    // **A flood gets exactly one flood back.** The peer used the flood carrier because the direct one
+    // was not carrying — measured 2026-11-10: the phone's handshake arrived by flood over an empty
+    // chain, the reply went out zero-hop to its neighbours, and the phone never heard it. One-for-one
+    // is bounded by construction (it cannot become the loop that mirroring every send was), and the
+    // phone's own rule sends direct immediately after, which re-establishes the cheap path.
+    let mut answer_flood_with_flood = false;
     // The RSSI and SNR the radio measured for the last record **from the peer**, from the receive
     // log frame that carried it (`[0x88][snr×4][rssi][packet]`). The radio's own `GET_STATS` answers
     // "the last packet I heard", which on a busy mesh is whatever a neighbour said most recently.
@@ -1369,7 +1375,8 @@ fn serve_loop<L: ByteLink>(
                 // near field once", not "flood immediately". Only after that attempt has produced
                 // nothing does the expensive carrier get used — and any arriving record resets the
                 // count, so a working neighbour never pays for a flood.
-                let want_flood = peer_path.is_none() || path_stale || direct_silent;
+                let want_flood =
+                    peer_path.is_none() || path_stale || direct_silent || answer_flood_with_flood;
                 let flood_when_pathless = want_flood && pathless_directs > 0;
                 // **Two seconds, not ten.** The firmware acknowledges `SEND_RAW_PACKET` *before* it
                 // transmits (`MyMesh.cpp:2003-2016`), so a 10-second wait bought nothing on a busy
@@ -1400,6 +1407,8 @@ fn serve_loop<L: ByteLink>(
                 // the reply is dropped without ever reaching the air. Measured 2026-11-10 at range:
                 // three consecutive `reply sent ok=false`, each one a handshake answer the phone
                 // never saw, so it re-handshook until it gave up.
+                // The debt is paid by this send, whatever it turns out to be.
+                answer_flood_with_flood = false;
                 let attempt: Result<SendOutcome, SessionError> = match flooded {
                     Some(packet) => send_retrying(|d| companion.send_packet_within(&packet, d))
                         .map(|()| SendOutcome::SentFlood),
@@ -2107,8 +2116,7 @@ fn serve_loop<L: ByteLink>(
                         peer_path_proven = true;
                     }
                     last_peer_record = Some(Instant::now());
-                    // The peer reached us over a flood, so the reply goes back the same way. The
-                    // cheap carrier is not what is working for this peer right now.
+                    answer_flood_with_flood = true;
                     if let (Some(&snr), Some(&rssi)) = (frame.get(1), frame.get(2)) {
                         peer_signal = Some((snr as i8, rssi as i8));
                     }
