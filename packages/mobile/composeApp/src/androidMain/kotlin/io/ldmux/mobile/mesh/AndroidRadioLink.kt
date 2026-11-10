@@ -440,8 +440,22 @@ class AndroidRadioLink(
                         // distance: the host answers a request that crossed repeaters with a flood,
                         // because a direct reply is one packet along one chain and one lost hop is a
                         // phone that never learns a route.
-                        RadioRoute.heardRouteReply(raw, host)?.let { adoptRoute(it, "flooded reply") }
-                            ?: RadioRoute.heardAdvert(raw, host)?.let { adoptRoute(it, "advert") }
+                        // **The route is the chain the reply itself crossed**, not the path the
+                        // host carried inside: that one was its "first packet wins" guess about the
+                        // other direction, and at range it handed the phone a one-hop chain while
+                        // the phone was twenty-eight hops out.
+                        RadioRoute.heardRouteReply(raw, host)?.let {
+                            adoptRoute(
+                                it,
+                                "flooded reply, proved by its arrival: " +
+                                    "${RadioRoute.pathHops(it.encoded, it.bytes.size)} hop(s)",
+                            )
+                        } ?: RadioRoute.heardAdvert(raw, host)?.let {
+                            adoptRoute(
+                                it,
+                                "advert ${RadioRoute.pathHops(it.encoded, it.bytes.size)} hop(s)",
+                            )
+                        }
                         // **A request from the host is answered, because the host cannot learn where
                         // we are any other way.** A direct packet's path is consumed in transit, so
                         // the session records we send teach it nothing: after a daemon restart it

@@ -248,17 +248,28 @@ class RadioRouteTest {
     @Test
     fun `a flooded reply in the receive log carries the route`() {
         val host = ByteArray(32) { 0xA1.toByte() }
+        // The inner path is the host's *belief*, and it says two hops throughout this test.
         val path = byteArrayOf(0x22, 0x11)
         val raw = floodReply(host, travelHops = 0, pathByte = 0x02, path = path)
         val route = RadioRoute.heardRouteReply(raw, host)
         assertNotNull(route)
-        assertEquals(2, route!!.encoded and 0x3F)
-        assertArrayEquals("reversed into sending order", byteArrayOf(0x11, 0x22), route.bytes)
+        // **A reply that arrived directly is a direct route**, and that beats a belief that says
+        // two hops: this is the ghost case, where the host's "first packet wins" guess described
+        // the other direction and sent every handshake down a chain that does not reach here.
+        assertEquals("arrival proves the route", 0, route!!.encoded and 0x3F)
+        assertArrayEquals(byteArrayOf(), route.bytes)
 
-        // **The travel path is skipped, not read.** A flood accumulates one hash per repeater, so by
-        // the time it arrives the packet carries three; the route is the one carried inside.
+        // **The travel chain is the route.** Three repeaters forwarded it, so the packet holds
+        // their hashes in travel order and the reverse is what this radio must send along.
         val travelled = floodReply(host, travelHops = 3, pathByte = 0x02, path = path)
-        assertArrayEquals(byteArrayOf(0x11, 0x22), RadioRoute.heardRouteReply(travelled, host)!!.bytes)
+        val proof = RadioRoute.heardRouteReply(travelled, host)
+        assertNotNull(proof)
+        assertEquals("three repeaters", 3, proof!!.encoded and 0x3F)
+        assertArrayEquals(
+            "the chain in sending order",
+            byteArrayOf(0xC2.toByte(), 0xC1.toByte(), 0xC0.toByte()),
+            proof.bytes,
+        )
 
         // Another node's reply is not our host's route, and a direct packet is not a flood.
         val other = ByteArray(32) { 0xB2.toByte() }
@@ -266,11 +277,14 @@ class RadioRouteTest {
         val direct = floodReply(host, travelHops = 0, pathByte = 0x02, path = path)
         direct[0] = 0x3E
         assertNull(RadioRoute.heardRouteReply(direct, host))
-        // **A lost nonce is not a lost route** — the tail is four bytes of it and the path is
-        // intact, so the reply still teaches the route. Cutting into the path is what fails, and a
-        // foreign marker is refused rather than half-read.
+        // **A lost nonce is not a lost route.** The tail is four bytes of it, the travel chain is
+        // intact, and the reply still teaches the route — because the route now comes from the
+        // chain and not from the record inside.
         assertNotNull(RadioRoute.heardRouteReply(raw.copyOfRange(0, raw.size - 4), host))
-        assertNull(RadioRoute.heardRouteReply(raw.copyOfRange(0, raw.size - 8), host))
+        // **A cut into the travel chain is not a route.** The path byte promises three hashes and
+        // the packet no longer holds them, so the frame is malformed and refused rather than
+        // half-read into a shorter route that would send down the wrong repeaters.
+        assertNull(RadioRoute.heardRouteReply(travelled.copyOfRange(0, travelled.size - 20), host))
         val foreign = floodReply(host, travelHops = 0, pathByte = 0x02, path = path)
         foreign[6] = 'X'.code.toByte()
         assertNull(RadioRoute.heardRouteReply(foreign, host))
@@ -294,10 +308,13 @@ class RadioRouteTest {
         assertNotNull("a request addressed to us is ours", heard)
         val reply = RadioRoute.replyFlood(phone, heard!!, RadioRoute.Path(0x02, path))
         assertNotNull(reply)
-        // Read it back the way the *host* would, with the phone's key as the sender.
+        // Read it back the way the *host* would, with the phone's key as the sender. At the origin
+        // the reply has crossed nothing, so the truthful answer is "direct" — the path carried
+        // inside is not evidence about the direction the host will send in.
         val route = RadioRoute.heardRouteReply(reply!!, phone)
         assertNotNull(route)
-        assertArrayEquals("the host reverses into its own", byteArrayOf(0x22, 0x11), route!!.bytes)
+        assertEquals("nothing forwarded it yet", 0, route!!.encoded and 0x3F)
+        assertArrayEquals(byteArrayOf(), route.bytes)
         // The same request read by another radio is not that radio's.
         assertNull(RadioRoute.heardRouteRequest(request, ByteArray(32) { 0x01 }, null))
         // And a request we send to the host is not ours to answer.
@@ -325,10 +342,10 @@ class RadioRouteTest {
         val code = (reply[1].toInt() and 0xFF) or ((reply[2].toInt() and 0xFF) shl 8)
         val payload = reply.copyOfRange(6, reply.size)
         assertEquals(RadioRoute.transportCode(RadioRoute.scopeKey("us-co"), 0, payload), code)
-        // And it still reads back as a route.
-        assertArrayEquals(
-            byteArrayOf(0x22, 0x11),
-            RadioRoute.heardRouteReply(reply, phone)!!.bytes,
+        // And it still reads back as a route: unscoped at the origin, so a direct one.
+        assertEquals(
+            0,
+            RadioRoute.heardRouteReply(reply, phone)!!.encoded and 0x3F,
         )
     }
 

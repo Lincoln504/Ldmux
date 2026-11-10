@@ -271,9 +271,22 @@ internal object RadioRoute {
      *
      * The layout is the host's `build_route_reply_flood`, and it is pinned on both sides:
      * `[0x01 flood][travel path byte][travel path][dest hash][src hash]["LDRR"][host key 32]
-     * [path byte][path][nonce]`. The travel path is ignored — the path that matters is the one the
-     * host carried inside, which is the route it uses towards us, so it is reversed into sending
-     * order here like any other.
+     * [path byte][path][nonce]`.
+     *
+     * **The travel path is the route; the path inside is the host's belief.** A flood accumulates
+     * one hash per repeater that forwards it (`Mesh::routeRecvPacket` appends this node's hash and
+     * raises the hop count), so the packet in hand carries the exact chain it crossed to reach this
+     * phone, and reversing it gives the chain back that every repeater accepts (`isHashMatch` on
+     * the first entry, then `removeSelfFromPath`). This is upstream's own construction
+     * (`createPathReturn(... pkt->path ...)`), and it is the reason the reply is flooded at all: only
+     * a flood arrives with its chain intact, because a direct packet's path is *consumed* hop by
+     * hop.
+     *
+     * The path carried inside was chosen by the host from whichever flood copy reached it first —
+     * MeshCore's own "first packet wins" — so a short copy means "a repeater near the host relayed
+     * it", not "this is the way to the phone". Measured 2026-11-10: the host answered with a
+     * one-hop candidate while the phone was twenty-eight hops out, and every handshake sent down it
+     * died at the first repeater.
      */
     fun heardRouteReply(raw: ByteArray, hostKey: ByteArray): Path? {
         if (hostKey.size != 32) return null
@@ -283,6 +296,10 @@ internal object RadioRoute {
         if (payload.size < 2 + REPLY_MAGIC.size + 32) return null
         for (i in REPLY_MAGIC.indices) if (payload[2 + i] != REPLY_MAGIC[i]) return null
         for (i in 0 until 32) if (payload[6 + i] != hostKey[i]) return null
+        // **What the packet did beats what the host thinks.** Zero hops is a neighbour and a fine
+        // route, so the proof wins even when it is empty; only an unusable encoding falls back to
+        // the carried path.
+        reversed(packet.pathEncoded, packet.path)?.let { return it }
         return routeReply(payload.copyOfRange(38, payload.size))
     }
 

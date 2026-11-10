@@ -374,8 +374,11 @@ fn print_mesh_status(v: &serde_json::Value) {
         println!("radio    {tx} s transmitted, {rx} s received since the radio booted");
     }
     if let Some(tenths) = v.get("txAirtimeTenths").and_then(serde_json::Value::as_u64) {
+        // **Whose number this is, said on the line.** It is records × airtime — ldmux's arithmetic
+        // against the band's allowance — not a meter the firmware keeps; the radio's own counter is
+        // the `radio` line above, taken from `CMD_GET_STATS`.
         println!(
-            "airtime  {:.1} s this hour (the radio's own transmit meter)",
+            "airtime  {:.1} s this hour, by ldmux's count (records x airtime)",
             f64::from(tenths as u32) / 10.0
         );
     }
