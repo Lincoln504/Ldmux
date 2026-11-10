@@ -114,6 +114,20 @@ class AndroidRadioLink(
     override var radioPublicKey: ByteArray? = null
         private set
 
+    /**
+     * What the radio has heard lately, counted rather than inferred.
+     *
+     * **This is the reading a range test never had.** A log of our own traffic cannot tell "the mesh
+     * does not cover this street" from "this radio has gone deaf": both look like silence, because
+     * the app ignores every packet that is not for it. The radio logs every packet it hears
+     * (`PUSH_CODE_LOG_RX_DATA`), so counting them answers it directly — forty packets a minute means
+     * the receiver works and the mesh is there; nothing at all while the city is covered means the
+     * radio stopped listening.
+     */
+    private var heardSinceReport = 0
+    private var heardReportAt = 0L
+    private var heardLast = ""
+
     private val _deviceInfo = MutableStateFlow<RadioDeviceInfo?>(null)
     override val deviceInfo: StateFlow<RadioDeviceInfo?> = _deviceInfo.asStateFlow()
 
@@ -434,6 +448,8 @@ class AndroidRadioLink(
                 // kept sending down the old one.
                 is RfLogFrame -> {
                     val raw = frame.log().raw()
+                    heardSinceReport++
+                    heardLast = describeHeard(frame)
                     val host = hostKey
                     if (host.size == 32) {
                         // **The flooded answer to our own request.** This is the one that arrives at
@@ -1232,6 +1248,66 @@ class AndroidRadioLink(
      * Bounded twice: by [ROUTE_REQUEST_FLOOR_MS] between requests, and by the radio's own answer
      * window. A request that cannot go out is not retried here; the caller's own loop comes back.
      */
+    /**
+     * Say what the receiver has heard since the last report, and start a new count.
+     *
+     * **The one line that tells "nobody covers this street" from "this radio stopped listening".**
+     * Both look identical in a log of our own traffic, because the app ignores every packet that is
+     * not for it. The radio pushes every packet it hears (`PUSH_CODE_LOG_RX_DATA`); counting them is
+     * free and answers it. Called on a timer and before every request, so a working link reports too
+     * — a reading nobody takes on a healthy link cannot be trusted on a broken one.
+     */
+    private fun reportHeard() {
+        val now = System.currentTimeMillis()
+        // The first call has no window to describe: it starts the clock, and a "nothing in 0 s" line
+        // is noise that reads like a finding.
+        if (heardReportAt == 0L) {
+            heardReportAt = now
+            heardSinceReport = 0
+            return
+        }
+        val forSecs = (now - heardReportAt) / 1000
+        if (forSecs <= 0) return
+        appLog(
+            if (heardSinceReport == 0) {
+                "mesh heard nothing in ${forSecs}s"
+            } else {
+                "mesh heard ${heardSinceReport} packet(s) in ${forSecs}s · last $heardLast"
+            },
+        )
+        heardSinceReport = 0
+        heardReportAt = now
+    }
+
+    /**
+     * One heard packet in a few words: what it was and how far it had come.
+     *
+     * Enough to tell a repeater's flood from a neighbour's advert, which is the difference between
+     * "the mesh is out there" and "something is on this desk".
+     */
+    private fun describeHeard(frame: RfLogFrame): String {
+        val log = frame.log()
+        // The model parses its own raw bytes (`RfLog.packet()`), which is the one place the wire
+        // layout lives; re-parsing here would be a second copy of it.
+        val packet = runCatching { log.packet() }.getOrNull()
+            ?: return "${log.snrDb()} dB ${log.rssi()} dBm (unparsed ${log.raw().size} B)"
+        val what = when (packet.payloadType()) {
+            0x02 -> "text"
+            0x04 -> "advert"
+            0x0F -> "raw"
+            0x03 -> "ack"
+            0x08 -> "path"
+            else -> "type ${packet.payloadType()}"
+        }
+        val route = when (packet.routeType()) {
+            0 -> "flood"
+            1 -> "flood"
+            2 -> "direct"
+            else -> "direct"
+        }
+        return "$route $what ${packet.hopCount()} hop(s) ${log.snrDb()} dB ${log.rssi()} dBm"
+    }
+
     private suspend fun ensureRoute(s: MeshcoreSession): Boolean {
         val key = hostKey.takeIf { it.size == 32 } ?: return false
         val own = radioPublicKey ?: return false
@@ -1244,6 +1320,10 @@ class AndroidRadioLink(
         // (`adoptRoute`) puts the first interval back.
         if (now - lastRequestAt < requestIntervalMs()) return false
         if (!s.canSendRaw()) return false
+        // **Say what the receiver has been doing before adding to the air.** A request every half
+        // minute is already the moment of maximum doubt, and the count that decides "no coverage"
+        // from "deaf" is only available here: the next line is the answer to "is anybody there".
+        reportHeard()
         val packet = RadioRoute.routeRequest(currentPreset().pathHashSize, key, own, scopeKey) ?: return false
         lastRequestAt = now
         routeAsks = (routeAsks + 1).coerceAtMost(8)
@@ -1363,6 +1443,11 @@ class AndroidRadioLink(
                 // is being sent *because* there is nowhere to send it, and going quiet there is a
                 // link that never recovers without a person pressing refresh.
                 val fresh = routeIsFresh(System.currentTimeMillis())
+                // **The receiver's own account goes out on its own timer.** Reporting it only beside
+                // a route request meant a working link, where nothing asks, never said what it heard
+                // — and the reading that matters most (`heard nothing for 30 s`) is exactly the one
+                // an idle link must be able to give.
+                reportHeard()
                 delay(if (fresh) PATH_REFRESH_MS else minOf(requestIntervalMs(), PATH_RETRY_MS))
                 if (closing) continue
                 // **A route is only worth asking for when something is about to use it.** The loop
