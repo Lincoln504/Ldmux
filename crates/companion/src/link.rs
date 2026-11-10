@@ -115,6 +115,23 @@ impl SerialLink {
         nix::sys::termios::tcsetattr(&fd, nix::sys::termios::SetArg::TCSANOW, &attrs)
             .map_err(io::Error::from)?;
 
+        // **Leave the modem lines low, once, before any frame is sent.** A CDC-ACM port comes up
+        // with DTR and RTS *asserted*, and on an ESP32-S3 that is the reset side of its auto-reset
+        // circuit: the chip holds in the ROM bootloader and answers nothing, which is exactly
+        // `no reply to 0x05` and needs a power cycle to clear. Measured 2026-11-10: the radio was
+        // found unresponsive immediately after four separate daemon restarts, and recovered only
+        // from the DTR/RTS reset sequence.
+        //
+        // This is not the toggle the note below warns about. A toggle is the lines moving while a
+        // session is running; this happens once, at open, before the first frame, and it ends in the
+        // stable state (both low) that the reset sequence itself finishes on.
+        //
+        // SAFETY: `fd` is open and owned here, and `TIOCMBIC` reads a `c_int` bit mask.
+        unsafe {
+            let mut clear: libc::c_int = libc::TIOCM_DTR | libc::TIOCM_RTS;
+            libc::ioctl(std::os::fd::AsRawFd::as_raw_fd(&fd), libc::TIOCMBIC, &mut clear);
+        }
+
         // **Do not drop the lines on close.** See the note on `open`: the transition is the
         // reset, so the only safe line-state change is the one that does not happen.
         let mut bits = nix::sys::termios::tcgetattr(&fd).map_err(io::Error::from)?;
