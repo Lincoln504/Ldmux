@@ -375,6 +375,19 @@ by the host radio, by the app before it retunes, and by every budget below.
   The release is the difference from the screen the phone holds (the differ is not reset), and it
   expires after ten minutes so a client that stops sending cannot leave a shell unlit. A tag a host
   does not know is skipped, so an old host simply keeps drawing.
+- **A hold bounds output, not validity** (ADR-0034). Two things still owe a frame to a frozen
+  shell, and nothing else does: an accepted `Resize` (a rotation or a keyboard — the pane was
+  reflowed, so the phone would otherwise draw the old grid into a new viewport) and a `Resync` from
+  a frozen view (the `show` press, which is "draw the current screen once"). The differ is reset for
+  both so the frame starts the screen over, the once-a-second read gate is bypassed because a stale
+  read would draw the pre-resize pane, and the hold resumes afterwards without a release or a
+  re-hold: a press is one record out and the difference back.
+- **The attach states the phone's grid** (protocol 13, ADR-0034). The phone has measured its grid
+  before it asks for a shell, so the pane is fitted to it *before* the first frame is built and
+  `ATTACH_GRACE` is skipped — it exists only to wait for a number the attach now carries. Without it
+  the host drew the pane at the geometry this phone used last time and then again at its own:
+  seventeen records to open a shell, against eight. A stated grid beats the remembered one; the
+  remembered one is the hint for a phone that states nothing.
 - **A frame is the phone's, not the attach's.** A list is answered *because* nothing is attached, so
   the version that gates packing and framing comes from what the phone attached with (`versions`),
   not from the live attach. Reading it from the attach made every launcher answer one record per
