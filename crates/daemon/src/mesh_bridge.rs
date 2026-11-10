@@ -1440,8 +1440,15 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                         let original = self.host.screen(one).await.ok();
                         let bracketed_paste = original.as_ref().is_some_and(|s| s.bracketed_paste);
                         let original = original.map(|s| (s.cols, s.rows));
-                        if let Some((cols, rows)) = remembered {
-                            let _ = self.host.resize(one, cols, rows).await;
+                        // **What the profile must say is the pane *now*, which is not what is put
+                        // back on detach.** The fit happens after the read above, so its answer is
+                        // taken from the resize itself: the keeper applies the size or says why
+                        // not, and a refused fit leaves the pane where the read found it.
+                        let mut fitted = original;
+                        if let Some((cols, rows)) = remembered
+                            && self.host.resize(one, cols, rows).await.is_ok()
+                        {
+                            fitted = Some((cols, rows));
                         }
                         self.shells.insert(
                             shell,
@@ -1493,8 +1500,8 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                         // trip later.
                         let profile = self.shells.get(&shell).map(|a| Message::Profile {
                             version: a.version,
-                            cols: original.map_or(0, |(c, _)| c),
-                            rows: original.map_or(0, |(_, r)| r),
+                            cols: fitted.map_or(0, |(c, _)| c),
+                            rows: fitted.map_or(0, |(_, r)| r),
                             unsupported: if a.version >= RESIZE_VERSION {
                                 ldmux_protocol::mesh_term::unsupported::ALL_V1
                                     & !ldmux_protocol::mesh_term::unsupported::RESIZE
@@ -5801,6 +5808,51 @@ mod tests {
     /// shell, which reads as the reader's own shell being broken (reported 2026-11-05 after a phone
     /// attached to `meshmore-sns` and detached). The bridge records the size the host had before the
     /// first fit and restores it on detach.
+    /// **The profile says what the pane is now, and the restore says what it was.**
+    ///
+    /// Two facts from one attach: the phone draws the pane from `Profile.cols`/`rows`, so it must
+    /// be the *fitted* grid (a profile naming the desk's 80 columns while the rows are 46 wide
+    /// paints a screen that does not exist), and the detach must put back the *pre-fit* grid (a
+    /// profile naming the phone's grid while the desk is 80 wide leaves the desk window narrow).
+    #[tokio::test]
+    async fn the_profile_names_the_fitted_grid_and_the_restore_the_panes_own() {
+        let (mut b, host, link) = setup();
+        let pane = {
+            let s = host.0.lock().unwrap();
+            let screen = s.screens.get("abcd-1").cloned().expect("the fixture screen");
+            (screen.cols, screen.rows)
+        };
+        assert_ne!(pane, (46, 17));
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+                cols: 46,
+                rows: 17,
+            },
+        );
+        b.tick().await;
+        let profile = sent_messages(&link, 1)
+            .into_iter()
+            .find(|m| matches!(m, Message::Profile { .. }))
+            .expect("the attach is answered with a profile");
+        assert!(
+            matches!(profile, Message::Profile { cols: 46, rows: 17, .. }),
+            "the profile names the grid the phone draws: {profile:?}"
+        );
+
+        phone_says(&link, 1, &Message::Detach);
+        b.tick().await;
+        let resized = host.0.lock().unwrap().resized.clone();
+        assert_eq!(
+            resized.last(),
+            Some(&("abcd-1".to_string(), pane.0, pane.1)),
+            "and the detach puts the pane back where it was: {resized:?}"
+        );
+    }
+
     /// **The grid to put back is the pane's, not the one this phone asked for last time.**
     ///
     /// The restore read the screen *after* fitting the pane to the remembered grid, so from the
