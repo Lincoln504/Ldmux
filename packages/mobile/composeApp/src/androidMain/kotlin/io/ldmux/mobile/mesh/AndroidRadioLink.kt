@@ -209,6 +209,9 @@ class AndroidRadioLink(
     /** When the last route request went out, so a failing link cannot turn into a broadcaster. */
     @Volatile
     private var lastRequestAt: Long = 0L
+    /** When this radio last announced itself, so a linkless spell does not flood the mesh with them. */
+    @Volatile
+    private var lastAdvertAt: Long = 0L
     /** Unanswered route requests since the last route learned, for the doubling interval. */
     private var routeAsks: Int = 0
     /** Whether a record has arrived down the route in hand, which is the only proof it works. */
@@ -1371,6 +1374,26 @@ class AndroidRadioLink(
         return "$route $what ${packet.hopCount()} hop(s) ${log.snrDb()} dB ${log.rssi()} dBm"
     }
 
+    /**
+     * Announce this radio when the mesh has stopped answering, so the far end can find *us*.
+     *
+     * A route request is a question and needs an answer to be useful, so it fails in both directions
+     * at once: if the host's reply cannot reach us, we learn nothing and it learns nothing. A flooded
+     * advert is one-way — the host hears it, writes our path into its own route, and can then ask us
+     * for one, which we answer with a flood. Two independent discovery directions instead of one
+     * that needs a round trip at the margin.
+     *
+     * Rate-limited hard: an advert is the packet every node on the network stores, and one every
+     * twenty seconds from every handset at the edge would be its own flood problem.
+     */
+    private suspend fun maybeAdvertise(s: MeshcoreSession, now: Long) {
+        if (now - lastAdvertAt < ADVERT_INTERVAL_MS) return
+        if (!s.canSendRaw() || !s.isIdle()) return
+        lastAdvertAt = now
+        runCatching { s.sendSelfAdvert(true) }
+        appLog("mesh advert sent (flood): no route, so the far end is told where this radio is")
+    }
+
     private suspend fun ensureRoute(s: MeshcoreSession): Boolean {
         val key = hostKey.takeIf { it.size == 32 } ?: return false
         val own = radioPublicKey ?: return false
@@ -1383,6 +1406,9 @@ class AndroidRadioLink(
         // (`adoptRoute`) puts the first interval back.
         if (now - lastRequestAt < requestIntervalMs()) return false
         if (!s.canSendRaw()) return false
+        // Every other attempt is an advert rather than a question: a question needs its answer to
+        // come back, an advert does not, and at the margin the answer is the half that gets lost.
+        if (routeAsks % 2 == 1) maybeAdvertise(s, now)
         // **Say what the receiver has been doing before adding to the air.** A request every half
         // minute is already the moment of maximum doubt, and the count that decides "no coverage"
         // from "deaf" is only available here: the next line is the answer to "is anybody there".
@@ -1732,6 +1758,15 @@ class AndroidRadioLink(
 
         /** How long to wait for the radio to accept the connect-time advert before carrying on. */
         const val ADVERT_WAIT_MS = 3_000L
+
+        /**
+         * The least time between two adverts sent because there is no route.
+         *
+         * An advert is stored by every node that hears it, so this is the one packet whose repetition
+         * costs the whole network something. A minute is the pace of a link that is trying, not of a
+         * radio that is panicking.
+         */
+        const val ADVERT_INTERVAL_MS = 60_000L
         /** How long to wait for the host's reply before connecting without it. */
         /**
          * How long to wait for an answer to our own route request, before the free cache reads.
