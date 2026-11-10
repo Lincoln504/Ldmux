@@ -515,6 +515,17 @@ class AndroidRadioLink(
                     val info = frame.info().toRadioDeviceInfo().copy(batteryMillivolts = batteryMv)
                     _deviceInfo.value = info
                     deviceInfoDone?.complete(info)
+                    // **The firmware build belongs in the record, not only in a settings sheet.** A
+                    // companion that is reachable but deaf is a known firmware fault on ESP32-S3
+                    // Heltec boards after a BLE reconnect (MeshCore #3582: LoRa TX and RX stop, BLE
+                    // still answers, only a reflash cures it). Without the build string in the log a
+                    // field failure cannot tell that apart from a protocol fault, and the two have
+                    // nothing in common but the symptom.
+                    appLog(
+                        "mesh radio firmware ${info.firmwareVersion}" +
+                            (if (info.firmwareBuildDate.isEmpty()) "" else " (${info.firmwareBuildDate})") +
+                            " · ${info.manufacturer} · path hashes ${info.pathHashMode + 1} B",
+                    )
                 }
                 is BatteryStorageFrame -> {
                     // May arrive before the device query's reply; kept so the device info carries it
