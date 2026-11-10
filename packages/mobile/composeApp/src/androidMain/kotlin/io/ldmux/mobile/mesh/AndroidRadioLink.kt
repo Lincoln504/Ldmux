@@ -476,6 +476,23 @@ class AndroidRadioLink(
                     val raw = frame.log().raw()
                     heardSinceReport++
                     heardLast = describeHeard(frame)
+                    // **A record that arrived as a flood, before anything else looks at the frame.**
+                    // This is the carrier that works with no route at all: the session gets the same
+                    // sealed record it would have got direct, and the path the flood travelled is
+                    // the chain to answer on, so one reception repairs both directions.
+                    val own = radioPublicKey
+                    if (own != null) {
+                        val record = RadioRoute.heardRecordFlood(raw, own)
+                        if (record != null) {
+                            RadioRoute.heardFloodPath(raw)?.let { path ->
+                                adoptRoute(path, "flooded record", proved = true)
+                            }
+                            if (!inbox.trySend(record).isSuccess) {
+                                appLog("mesh radio inbox full, dropping one flooded record")
+                            }
+                            return
+                        }
+                    }
                     val host = hostKey
                     if (host.size == 32) {
                         // **The flooded answer to our own request.** This is the one that arrives at
@@ -826,6 +843,39 @@ class AndroidRadioLink(
             withTimeoutOrNull(RAW_WINDOW_WAIT_MS) { while (!s.canSendRaw()) delay(10) }
             if (!s.canSendRaw()) return RadioSendResult.Failed
         }
+        // **No route is the other carrier, not the end of the attempt.** A direct record needs a
+        // path this end believes in; at the edge of coverage the path cannot be found at all
+        // (measured 2026-11-10: four minutes of requests that reached nobody), so the record goes as
+        // a `REQ` flood instead, which every repeater forwards. The record is sealed, so a repeater
+        // forwarding it reads none of it.
+        val fresh = routeIsFresh(System.currentTimeMillis())
+        if (!fresh) {
+            val own = radioPublicKey
+            val key = hostKey.takeIf { it.size == 32 }
+            if (own != null && key != null) {
+                val nonce = ByteArray(4).also { kotlin.random.Random.nextBytes(it) }
+                RadioRoute.recordFlood(
+                    currentPreset().pathHashSize,
+                    key,
+                    own,
+                    scopeKey,
+                    nonce,
+                    record,
+                )?.let { packet ->
+                    val answer = CompletableDeferred<RadioSendResult>()
+                    val callback = RawSendCallback { ok, errorCode ->
+                        answer.complete(if (ok) RadioSendResult.Accepted else errorFor(errorCode))
+                    }
+                    val queued = runCatching { s.sendRawPacket(0, packet, callback) }.getOrDefault(false)
+                    if (queued) {
+                        val result = withTimeoutOrNull(SEND_TIMEOUT_MS) { answer.await() }
+                        recordAirtime(packet.size + 3)
+                        appLog("mesh record by flood (no route): ${result ?: RadioSendResult.Failed}")
+                        return result ?: RadioSendResult.Failed
+                    }
+                }
+            }
+        }
         // One immutable path read for this send, including the packet build.
         val path = hostPath ?: RadioPath(0, ByteArray(0))
         val answer = CompletableDeferred<RadioSendResult>()
@@ -1106,7 +1156,13 @@ class AndroidRadioLink(
      * our own request is stamped now; a cache answer carries the time the radio heard it; a stored
      * contact path carries none, because on this transport it is never fresh information.
      */
-    private fun adoptRoute(path: RadioRoute.Path, source: String, heardAt: Long = System.currentTimeMillis()) {
+    private fun adoptRoute(
+        path: RadioRoute.Path,
+        source: String,
+        heardAt: Long = System.currentTimeMillis(),
+        /** The packet carrying this path already crossed it, so the chain is proven, not a guess. */
+        proved: Boolean = false,
+    ) {
         // **An older source must not age a newer route.** The advert-path cache answers on a timer
         // with whatever advert it holds, and a reply to our own request can be a second old: letting
         // the cache overwrite it made `routeIsFresh` false immediately, so every retry asked again
@@ -1171,8 +1227,10 @@ class AndroidRadioLink(
         // genuinely died is cleared by `forgetRoute`, which is the one thing allowed to unseat it.
         advertPath = RadioPath(path.encoded, path.bytes)
         routeHeardAt = heardAt
-        // A newly adopted route has carried nothing yet, whichever source named it.
-        routeProven = false
+        // **A route a record crossed is proven, not a candidate.** A direct packet's path is
+        // consumed in transit, so only a flood can show the chain it travelled; when one does, that
+        // chain has just carried something real and no shorter guess may displace it.
+        routeProven = proved
         // A route is an answer: the next time one is needed, ask at once rather than after backoff.
         routeAsks = 0
         appLog(

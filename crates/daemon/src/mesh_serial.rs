@@ -423,6 +423,19 @@ fn prefer_route(
 /// the receiver's is [`RECORD_RECEIVED_MAX`], because a radio does not push a frame it cannot fit in
 /// that same 176 bytes. `min` of the two is what a full record may be. A **fixed** 172 was the old
 /// answer, and it was refused by ldmux's own packet builder at the first path byte.
+/// Four fresh bytes for a flooded wrapper, so a retransmission is a different packet.
+///
+/// MeshCore dedupes on `SHA256(payload_type || payload)` and a repeat never leaves the first
+/// repeater, so a flood that is being retried has to differ in its wrapper even though the sealed
+/// record inside it is byte-identical.
+fn route_nonce() -> [u8; 4] {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    nanos.to_le_bytes()
+}
+
 fn record_limit(path: Option<&PeerPath>) -> u8 {
     let used = path.map_or(0, |p| p.bytes.len());
     let max = RECORD_MAX
@@ -1133,6 +1146,9 @@ fn serve_loop<L: ByteLink>(
     // When the "request sent" line last went to the journal, so a failing link cannot flood it.
 
     let mut last_reply: Option<Instant> = None;
+    // Pathless replies sent as a plain zero-hop packet since the peer was last heard: the counter
+    // that decides when a reply escalates to a flood.
+    let mut pathless_directs: u32 = 0;
     // The nonces this end has already answered, so one question forwarded by a dozen chains is
     // answered once while three distinct questions in one burst are answered three times.
     let mut answered_nonces: std::collections::VecDeque<[u8; 4]> = std::collections::VecDeque::new();
@@ -1216,25 +1232,62 @@ fn serve_loop<L: ByteLink>(
                 // this radio's own antenna.
                 let (hash_size, path) = match &peer_path {
                     Some(p) => (p.hash_size, p.bytes.as_slice()),
+                    // **No route is not the end of the attempt, it is the other carrier.** A direct
+                    // packet with no path travels only as far as this radio's own antenna, so a
+                    // handshake reply sent that way reaches nobody beyond the desk — which is what
+                    // "works at home, fails at range" is made of. A `REQ` flood is forward-routed by
+                    // every repeater, so the record goes that way instead, and it is still private:
+                    // a repeater forwards a sealed record without being able to open it.
                     None => (settings.hash_size, &[][..]),
                 };
+                // **Escalate, do not start at the expensive carrier.** With no path, the first
+                // attempt is a zero-hop direct packet, which is what a neighbour needs and costs
+                // one transmission; if the peer is still re-handshaking after that, the next reply
+                // goes as a flood, which every repeater in range forwards and only the edge case
+                // needs. Any record that arrives at all resets the count, because then the cheap
+                // carrier is working.
+                let flood_when_pathless = peer_path.is_none() && pathless_directs > 0;
                 // **Two seconds, not ten.** The firmware acknowledges `SEND_RAW_PACKET` *before* it
                 // transmits (`MyMesh.cpp:2003-2016`), so a 10-second wait bought nothing on a busy
                 // channel and meant one stalled radio held the command queue — and the route
                 // requests behind it — for ten seconds. Two is still 100x a 172-byte record at
                 // 115200 baud; the route reply already used the short form for the same reason.
-                let outcome = match companion.send_raw_within(
-                    hash_size,
-                    path,
-                    &record,
-                    std::time::Duration::from_secs(2),
-                ) {
-                    Ok(()) => {
+                // A flood when there is no path at all, so a handshake reply still crosses
+                // repeaters; a direct packet otherwise, which is the cheap carrier.
+                let flooded: Option<Vec<u8>> = if flood_when_pathless {
+                    let peer = settings.peer_key.unwrap_or([0u8; 32]);
+                    let own = settings.preset.public_key;
+                    let nonce = route_nonce();
+                    ldmux_companion::build_record_flood_in_scope(
+                        hash_size,
+                        &peer,
+                        &own,
+                        scope.as_ref(),
+                        &nonce,
+                        &record,
+                    )
+                    .ok()
+                } else {
+                    None
+                };
+                let attempt: Result<SendOutcome, SessionError> = match flooded {
+                    Some(packet) => companion
+                        .send_packet_within(&packet, std::time::Duration::from_secs(2))
+                        .map(|()| SendOutcome::SentFlood),
+                    None => companion
+                        .send_raw_within(hash_size, path, &record, std::time::Duration::from_secs(2))
+                        .map(|()| SendOutcome::SentDirect),
+                };
+                let outcome = match attempt {
+                    Ok(kind) => {
+                        if kind == SendOutcome::SentDirect && peer_path.is_none() {
+                            pathless_directs = pathless_directs.saturating_add(1);
+                        }
                         sent = sent.saturating_add(1);
                         if let Some(path) = settings.window_record.as_deref() {
                             save_window(path, window_start_unix, sent);
                         }
-                        SendOutcome::SentDirect
+                        kind
                     }
                     Err(e) => {
                         // The one refusal that is not about this record: a radio whose firmware
@@ -1668,6 +1721,11 @@ fn serve_loop<L: ByteLink>(
                 // record, and this ran it twice for every frame the radio pushed — twice the copying
                 // of every raw-custom packet on a busy mesh.
                 let incoming = incoming_record(&frame);
+                // **The flooded carrier, read before anything else looks at this frame.** A record
+                // that arrived as a `REQ` flood is still a record: the path the flood took is the
+                // phone's chain reversed, so this both delivers the record and repairs the route in
+                // the direction the answer needs.
+                let flooded_in = incoming_flooded_record(&frame, &settings.preset.public_key);
                 let answered = frame_route_request(&frame, &settings.preset.public_key).is_some()
                     || incoming
                         .as_ref()
@@ -1854,6 +1912,39 @@ fn serve_loop<L: ByteLink>(
                         peer_path = Some(candidate);
                         peer_path_heard = Some(Instant::now());
                     }
+                } else if let Some((record, path)) = flooded_in {
+                    // **A record that arrived as a flood: the fallback carrier.** Deliver it, and
+                    // take the route it travelled as the route back — the flood's path is the
+                    // phone's chain in travel order, and reversing it is the chain to answer on. The
+                    // record is sealed, so this costs nothing if it is not from the peer: it simply
+                    // fails to open.
+                    if let Some(candidate) = PeerPath::reversed(
+                        usize::from(path.hash_size),
+                        usize::from(path.hops),
+                        &path.bytes,
+                    ) && prefer_route(
+                        peer_path.as_ref(),
+                        peer_path_heard,
+                        peer_path_proven,
+                        false,
+                        &candidate,
+                    ) {
+                        route_log(&format!("route from a flooded record hops={}", candidate.hops));
+                        peer_path = Some(candidate);
+                        peer_path_heard = Some(Instant::now());
+                        // **A flooded record is proof of that chain in this direction.** The record
+                        // itself crossed it, which is stronger than any guess about a hop count.
+                        peer_path_proven = true;
+                    }
+                    last_peer_record = Some(Instant::now());
+                    // The peer reached us over a flood, so the cheap carrier is not what is
+                    // working: leave the counter where it is, and the next reply stays a flood.
+                    if let (Some(&snr), Some(&rssi)) = (frame.get(1), frame.get(2)) {
+                        peer_signal = Some((snr as i8, rssi as i8));
+                    }
+                    if events.blocking_send(Ok(Event::Recv(record))).is_err() {
+                        return;
+                    }
                 } else if let Some(incoming) = incoming {
                     // The peer announcing which radio it is, so the route above can be looked up.
                     if let Some(key) = route_hint(&incoming.record) {
@@ -1912,6 +2003,9 @@ fn serve_loop<L: ByteLink>(
                             peer_path_heard = Some(Instant::now());
                         }
                         last_peer_record = Some(Instant::now());
+                        // **The cheap carrier is working again.** A record arrives direct, so a
+                        // later pathless reply starts at zero-hop again instead of flooding.
+                        pathless_directs = 0;
                         // The frame's own reading: SNR in quarters of a dB, then RSSI in dBm.
                         if let (Some(&snr), Some(&rssi)) = (frame.get(1), frame.get(2)) {
                             peer_signal = Some((snr as i8, rssi as i8));
@@ -2076,6 +2170,22 @@ fn incoming_record(frame: &[u8]) -> Option<Incoming> {
     Some(Incoming {
         record: view.payload.to_vec(),
     })
+}
+
+/// A **session record carried by a flood**, and the route that flood arrived by.
+///
+/// The other carrier. A direct record needs a path this end believes in, and at the edge of coverage
+/// the path cannot always be found — measured 2026-11-10, four minutes of requests that never
+/// arrived — so the record rides a `REQ` flood instead, which every repeater forwards. The path the
+/// flood took is the phone's route reversed, so the same packet that carries the record also hands
+/// back the chain the answer should take: both directions from one reception.
+fn incoming_flooded_record(
+    frame: &[u8],
+    own_key: &[u8; 32],
+) -> Option<(Vec<u8>, ldmux_companion::AdvertPath)> {
+    let packet = frame.get(3..)?;
+    let flooded = ldmux_companion::parse_record_flood(packet, own_key)?;
+    Some((flooded.record.to_vec(), flooded.path))
 }
 
 /// The packet inside a receive-log frame, or `None` when the frame is not one.

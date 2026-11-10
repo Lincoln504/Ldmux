@@ -319,6 +319,77 @@ internal object RadioRoute {
      * one-hop candidate while the phone was twenty-eight hops out, and every handshake sent down it
      * died at the first repeater.
      */
+    /** The four bytes that mark a session record carried by a flood. Mirrors `RECORD_FLOOD_MAGIC`. */
+    const val RECORD_FLOOD_MAGIC = "LDMR"
+
+    /**
+     * A sealed session record as a `REQ` flood.
+     *
+     * **The other carrier, and the reason the link can exist at the edge.** A record is normally a
+     * `RAW_CUSTOM` direct packet, and the firmware delivers that only on a direct route: with no path
+     * it reaches the operator's neighbours and stops. A `REQ` flood is forward-routed by every
+     * repeater, so the same sealed record goes that way when no route is known. The nonce is outside
+     * the record and fresh per send, because MeshCore dedupes on `payload_type ‖ payload` and a retry
+     * must still be a different packet.
+     */
+    fun recordFlood(
+        hashSize: Int,
+        hostKey: ByteArray,
+        ownKey: ByteArray,
+        scope: ByteArray?,
+        nonce: ByteArray,
+        record: ByteArray,
+    ): ByteArray? {
+        if (hashSize !in 1..3) return null
+        if (hostKey.size != 32 || ownKey.size != 32 || nonce.size != 4) return null
+        if (scope != null && scope.size != 16) return null
+        val magic = RECORD_FLOOD_MAGIC.encodeToByteArray()
+        val payload = ByteArray(2 + magic.size + 4 + record.size)
+        payload[0] = hostKey[0]
+        payload[1] = ownKey[0]
+        magic.copyInto(payload, 2)
+        nonce.copyInto(payload, 2 + magic.size)
+        record.copyInto(payload, 2 + magic.size + 4)
+        val codes = if (scope == null) 0 else 4
+        val out = ByteArray(1 + codes + 1 + payload.size)
+        out[0] = if (scope == null) ROUTE_FLOOD.toByte() else ROUTE_TRANSPORT_FLOOD.toByte()
+        if (scope != null) {
+            val code = transportCode(scope, 0, payload)
+            out[1] = (code and 0xFF).toByte()
+            out[2] = ((code ushr 8) and 0xFF).toByte()
+            out[3] = 0
+            out[4] = 0
+        }
+        out[1 + codes] = ((hashSize - 1) shl 6).toByte()
+        payload.copyInto(out, 2 + codes)
+        return out
+    }
+
+    /**
+     * A session record carried by a flood, when the packet is one addressed to this radio.
+     *
+     * Who sent it is not carried: the record's own AEAD decides that, and a flood from a stranger
+     * costs one authentication check to refuse.
+     */
+    /** The route a flood travelled, reversed into a sending path for the way back. */
+    fun heardFloodPath(raw: ByteArray): Path? {
+        val packet = parse(raw) ?: return null
+        if (!packet.isFlood) return null
+        return reversed(packet.pathEncoded, packet.path)
+    }
+
+    fun heardRecordFlood(raw: ByteArray, ownKey: ByteArray): ByteArray? {
+        if (ownKey.size != 32) return null
+        val packet = parse(raw) ?: return null
+        if (!packet.isFlood || packet.payloadType != PAYLOAD_REQ) return null
+        val payload = packet.payload
+        val magic = RECORD_FLOOD_MAGIC.encodeToByteArray()
+        if (payload.size < 2 + magic.size + 4) return null
+        if (payload[0] != ownKey[0]) return null
+        for (i in magic.indices) if (payload[2 + i] != magic[i]) return null
+        return payload.copyOfRange(2 + magic.size + 4, payload.size)
+    }
+
     fun heardRouteReply(raw: ByteArray, hostKey: ByteArray): Path? {
         if (hostKey.size != 32) return null
         val packet = parse(raw) ?: return null

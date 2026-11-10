@@ -37,3 +37,4 @@ One file per decision, oldest first. A record says what was decided, what it cos
 - `0034-the-view-is-made-valid-while-frozen.md` — A hold bounds output, not validity: the attach states the grid, and a resize or a `show` owes exactly one frame.
 - `0035-a-request-is-answered-by-a-flood.md` — A route request is answered by a **flood**: an advert dies at eight hops, a `REQ` travels sixty-four, and without a path the phone cannot send a single record.
 - `0036-one-radio-one-app.md` — One radio, one app: the lease, because Android will not arbitrate, and a second BLE central is accepted then dropped rather than refused.
+- `0037-two-carriers-direct-by-default-flood-when-there-is-no-route.md` — A record rides a direct packet when a route is known and a `REQ` flood when none is, because `RAW_CUSTOM` cannot be flood-routed and the edge of coverage has no route to find.

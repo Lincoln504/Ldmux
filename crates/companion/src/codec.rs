@@ -630,6 +630,99 @@ pub fn build_route_request_with_nonce(
     Ok(out)
 }
 
+/// The four bytes that mark a **flooded session record**.
+///
+/// **Why a record ever needs a flood.** `RAW_CUSTOM` is delivered only on a direct route and is
+/// never forward-routed, so every session record depends on a path this end believes in. At the
+/// edge of coverage the path cannot always be found — measured 2026-11-10: the phone heard the
+/// nearest repeaters at -107 to -124 dBm, asked for a route for four minutes, and the host never
+/// heard one request — so the link had no way to bootstrap at all. A `REQ` flood *is* forward-routed
+/// by every repeater (that is what a route request is), so the same seam can carry a sealed record
+/// when the direct path is absent. The record is sealed with the session's own AEAD, so a flood is
+/// no less private: any repeater that forwards it can read none of it, exactly as it cannot read
+/// the payload of a direct record it forwards.
+pub const RECORD_FLOOD_MAGIC: &[u8; 4] = b"LDMR";
+
+/// A session record as a flood: header, path byte, then
+/// `[dest hash][source hash][magic][nonce][record]`.
+///
+/// The nonce is **outside** the sealed record and fresh per send, because MeshCore dedupes on
+/// `SHA256(payload_type ‖ payload)`: a repeat of the same bytes never leaves the first repeater,
+/// and a record that is genuinely being retransmitted must still be a different packet.
+pub fn build_record_flood_in_scope(
+    hash_size: u8,
+    peer_key: &[u8; 32],
+    own_key: &[u8; 32],
+    scope: Option<&FloodScope>,
+    nonce: &[u8; 4],
+    record: &[u8],
+) -> Result<Vec<u8>, CodecError> {
+    if !(1..=3).contains(&hash_size) {
+        return Err(CodecError::BadHashSize(hash_size));
+    }
+    let mut payload = Vec::with_capacity(2 + RECORD_FLOOD_MAGIC.len() + 4 + record.len());
+    payload.push(peer_key[0]);
+    payload.push(own_key[0]);
+    payload.extend_from_slice(RECORD_FLOOD_MAGIC);
+    payload.extend_from_slice(nonce);
+    payload.extend_from_slice(record);
+    let mut out = Vec::with_capacity(6 + payload.len());
+    match scope {
+        None => out.push(ROUTE_FLOOD_HEADER),
+        Some(scope) => {
+            out.push(ROUTE_FLOOD_SCOPED_HEADER);
+            let code = transport_code(&scope.key, 0, &payload);
+            out.extend_from_slice(&code.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+        }
+    }
+    out.push(path_byte(hash_size, 0)?);
+    out.extend_from_slice(&payload);
+    if out.len() > PACKET_MAX {
+        return Err(CodecError::TooLong {
+            len: out.len(),
+            max: PACKET_MAX,
+        });
+    }
+    Ok(out)
+}
+
+/// A flooded session record addressed to this radio, and the path it arrived by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FloodedRecord<'a> {
+    /// The sealed record itself.
+    pub record: &'a [u8],
+    /// The path the flood took to arrive, in travel order.
+    pub path: AdvertPath,
+}
+
+/// Read a flooded session record addressed to `own_key`.
+///
+/// The destination hash is checked against our own key, and the magic keeps an unrelated `REQ`
+/// flood from being fed to the session. Who sent it is not carried: the record's own AEAD decides
+/// that, and a flood from a stranger fails to open for the price of one authentication check.
+#[must_use]
+pub fn parse_record_flood<'a>(packet: &'a [u8], own_key: &[u8; 32]) -> Option<FloodedRecord<'a>> {
+    let view = parse_packet(packet)?;
+    if !view.is_flood() || view.payload_type != 0 {
+        return None;
+    }
+    let payload = view.payload;
+    if payload.len() < 2 + RECORD_FLOOD_MAGIC.len() + 4 {
+        return None;
+    }
+    if payload[0] != own_key[0] {
+        return None;
+    }
+    if &payload[2..6] != RECORD_FLOOD_MAGIC {
+        return None;
+    }
+    Some(FloodedRecord {
+        record: &payload[10..],
+        path: view.path,
+    })
+}
+
 /// A route request that was addressed to this radio, and the route it arrived by.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteRequest {
