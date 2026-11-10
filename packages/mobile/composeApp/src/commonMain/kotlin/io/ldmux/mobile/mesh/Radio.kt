@@ -559,6 +559,8 @@ class MeshRadioConnection(
     private val creds: MeshCredentials,
     private val lib: SessionLib,
     private val selector: String,
+    /** The grid to state on the attach this connection makes for itself; see `MeshTermDriver`. */
+    grid: Pair<Int, Int>? = null,
 ) {
     private val origin = TimeSource.Monotonic.markNow()
     private val clock: () -> Long = { origin.elapsedNow().inWholeMilliseconds }
@@ -599,6 +601,7 @@ class MeshRadioConnection(
         },
         selector = selector,
         clock = clock,
+        initialGrid = grid,
     )
 
     /**

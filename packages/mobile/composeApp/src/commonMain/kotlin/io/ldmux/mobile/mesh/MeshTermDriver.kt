@@ -255,6 +255,14 @@ class MeshTermDriver(
     private val gateway: GatewayPort,
     private val begin: () -> HandshakePort,
     private val selector: String = "",
+    /**
+     * The grid this phone draws with, when it is known before the first attach.
+     *
+     * A resume attaches from inside `connect`, before any surface has measured anything, so
+     * without this the host drew the pane at the desk's size and repainted at the phone's — a
+     * dozen seconds of air on a full desk pane. The screen passes what it remembers.
+     */
+    initialGrid: Pair<Int, Int>? = null,
     private val clock: () -> Long,
     /**
      * A handshake not answered in this long is reported as a dead link.
@@ -966,7 +974,7 @@ class MeshTermDriver(
         if (session != null && terminalView == null) { fitHost(); pump(); publish() }
     }
 
-    private var wantedGrid: Pair<Int, Int>? = null
+    private var wantedGrid: Pair<Int, Int>? = initialGrid
     private var requestedFit: Triple<String, Int, Int>? = null
 
     /** When this radio's route hint last went out, so a retry does not repeat it. */

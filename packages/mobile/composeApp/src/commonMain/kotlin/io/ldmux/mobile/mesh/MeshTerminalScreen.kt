@@ -245,7 +245,10 @@ fun MeshTerminalScreen(
     val conn = remember(plan, attempt) {
         val link = meshRadioLink(plan.radioAddress, plan.creds.hostRadio) ?: UnsupportedRadioLink()
         link.setBudgetMode(if (config.meshOpenAirtime) RadioBudgetMode.Open else RadioBudgetMode.Metered)
-        MeshRadioConnection(link, plan.creds, plan.lib, resumeShell)
+        // **The resume attach states the grid too.** It happens inside `connect`, before any
+        // surface has measured anything here: without this the host painted the desk's pane and
+        // then the phone's, which is the cost this whole path exists to avoid.
+        MeshRadioConnection(link, plan.creds, plan.lib, resumeShell, rememberedGridOf(config))
     }
     // **A connection that ended is rebuilt, not left dead.** `run` returns when the transport
     // stopped carrying records - a radio that went quiet, a socket the host stopped answering on.
@@ -896,12 +899,7 @@ fun MeshTerminalScreen(
         scope.launch {
             // The measured grid, else the one this phone measured last time it ran: a cold start
             // has nothing of its own, and stating nothing costs a repaint at the desk's size.
-            val grid = lastGrid ?: config.meshLastGrid
-                .split(',')
-                .mapNotNull { it.toIntOrNull() }
-                .takeIf { it.size == 2 && it.all { n -> n > 0 } }
-                ?.let { it[0] to it[1] }
-            grid?.let { (c, r) -> conn.driver.setGrid(c, r) }
+            (lastGrid ?: rememberedGridOf(config))?.let { (c, r) -> conn.driver.setGrid(c, r) }
             conn.driver.open(first)
         }
     }
@@ -1527,6 +1525,20 @@ private fun MeshShellList(
  * been applied, and nothing before that. The driver's mirror is blank from a `Profile` until the next
  * full screen, and a blank screen is not a fact about the shell.
  */
+/**
+ * The grid this phone last measured, as `(cols, rows)`, from the config; null before the first one.
+ *
+ * **Every attach that happens before a surface has measured anything needs this**: the connection's
+ * own resume attach, and an attach from the launcher. Without it the host paints the pane at
+ * whatever size the desk left behind and then repaints at the phone's, which on a 255x82 desk pane
+ * is twenty-odd records and a dozen seconds of air for a picture nobody sees.
+ */
+internal fun rememberedGridOf(config: LdmuxConfig): Pair<Int, Int>? =
+    config.meshLastGrid.split(',')
+        .mapNotNull { it.trim().toIntOrNull() }
+        .takeIf { it.size == 2 && it.all { n -> n in 1..255 } }
+        ?.let { it[0] to it[1] }
+
 internal fun meshScreenToShow(view: MeshTermView): MeshScreen? =
     (view as? MeshTermView.Live)?.takeIf { it.painted }?.screen
 

@@ -4,6 +4,7 @@ import io.ldmux.mobile.LdmuxConfig
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -100,6 +101,32 @@ class MeshAnswerDeadlineTest {
         assertEquals(8_000L, handshakeRetryFor(null))
         assertEquals(28_000L, handshakeRetryFor(10))
         assertEquals(48_000L, handshakeRetryFor(20))
+    }
+}
+
+/**
+ * **Every attach that happens before a surface has measured anything states the remembered grid.**
+ *
+ * The connection's own resume attach runs inside `connect`, and a cold start's attach from the
+ * launcher runs before the terminal page exists. Stating nothing there costs a repaint at the desk's
+ * size — a 255x82 pane is twenty-odd records — before the phone's own arrives.
+ */
+class RememberedGridTest {
+    private fun config(grid: String) = LdmuxConfig(host = "", token = "", meshLastGrid = grid)
+
+    @Test
+    fun a_remembered_grid_is_read_back_as_two_numbers() {
+        assertEquals(46 to 17, rememberedGridOf(config("46,17")))
+        assertEquals(79 to 18, rememberedGridOf(config(" 79, 18 ")))
+    }
+
+    @Test
+    fun nothing_remembered_is_no_grid_at_all() {
+        assertNull(rememberedGridOf(config("")))
+        assertNull(rememberedGridOf(config("46")), "half a grid is not a grid")
+        assertNull(rememberedGridOf(config("46,x")))
+        assertNull(rememberedGridOf(config("0,17")), "a grid has at least one column")
+        assertNull(rememberedGridOf(config("46,300")), "and fits the wire's byte")
     }
 }
 
