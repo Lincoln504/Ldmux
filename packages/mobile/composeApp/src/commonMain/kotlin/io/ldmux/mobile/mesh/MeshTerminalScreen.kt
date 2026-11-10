@@ -21,6 +21,7 @@ import androidx.compose.material3.Text
 import io.ldmux.mobile.voice.VoiceState
 import io.ldmux.mobile.voice.VoiceBanner
 import io.ldmux.mobile.voice.Dictation
+import io.ldmux.mobile.appLog
 import io.ldmux.mobile.DisconnectRequests
 import io.ldmux.mobile.NewShellRow
 import io.ldmux.mobile.SidePanel
@@ -271,14 +272,15 @@ fun MeshTerminalScreen(
     var released by remember(conn) { mutableStateOf(false) }
     LaunchedEffect(conn) {
         conn.run()
-        // The link is down: do not hold a foreground service for it while the user reads the
-        // reason or leaves the app.
-        BackgroundSession.setActive(false, "")
-        // **A link that died while the app was off screen is rebuilt the moment the app is back**,
-        // not after a two-to-thirty-second wait meant for a failure the user watched happen. The
-        // wait itself is the platform's: this coroutine is suspended here while the process may be
-        // frozen, which is exactly the state a dead radio would otherwise be hidden in.
-        if (released || !AppLifecycle.foreground) {
+        // **The service belongs to the screen, not to the attempt.** Releasing it here stopped the
+        // process the loop below runs in — see the note on `wanted` above. The view decides.
+        //
+        // **A platform release is the one case that waits for the return**, and the wait itself is
+        // the platform's: this coroutine is suspended here while the process may be frozen, which is
+        // exactly the state a released link should be in. Everything else rebuilds where it is, on
+        // screen or off it: a phone in a pocket that walked out of range and back must be linked
+        // again before the screen comes on.
+        if (released) {
             if (!AppLifecycle.foreground) snapshotFlow { AppLifecycle.foreground }.first { it }
             attempt += 1
             return@LaunchedEffect
@@ -302,6 +304,16 @@ fun MeshTerminalScreen(
         // drawn uniformly below the ladder's cap ([rebuildCapMs]): a phone and a host that both
         // back off on 2, 4, 8, 16 meet again on 2, 4, 8, 16, which is the shape every account of a
         // reconnect storm prescribes against.
+        // **A give-up, so a dead link does not run a radio for ever.** Thirty rebuilds is seven
+        // minutes of retrying at the ladder's cap; past that the failure is the operator's to
+        // explain (wrong channel, radio left behind), and the app releases the service and waits
+        // for the screen to come back, which rebuilds immediately.
+        if (rebuilds >= 30) {
+            appLog("mesh rebuilds gave up after $rebuilds attempts")
+            BackgroundSession.setActive(false, "")
+            ended = true
+            return@LaunchedEffect
+        }
         val cap = rebuildCapMs(rebuilds)
         rebuilds += 1
         delay(Random.nextLong(1, cap + 1))
@@ -381,15 +393,29 @@ fun MeshTerminalScreen(
     // The mesh link is a foreground service while it is up, exactly like the tailnet
     // link. Without this Android freezes the process before the release grace and the
     // BLE link is not actually kept alive while the user looks at another app.
+    // **A failure is not the end of wanting the link.** This released the service the moment the
+    // view became `LinkDown`, and on this route that is the worst possible moment: the failure
+    // happens while the phone is in a pocket, the screen is off, and the process is frozen the
+    // instant the foreground service stops — so the rebuild loop never ran, the radio never
+    // re-asked for a route, and the next thing the operator saw was "handshaking" minutes later
+    // (measured 2026-11-10: no app log line at all between 00:21 and 00:55 while walking out to 28
+    // hops). The service is now held while a shell is **wanted**, which is what it is for, and
+    // released when there is nothing to hold — `Idle` (no shell) or a host that has closed the one
+    // that was open.
     LaunchedEffect(view, disconnected) {
-        val up = when (view) {
-            MeshTermView.Idle, is MeshTermView.LinkDown, is MeshTermView.HostClosed -> false
+        val wanted = when (view) {
+            MeshTermView.Idle, is MeshTermView.HostClosed -> false
             else -> !disconnected
+        }
+        val text = when (view) {
+            is MeshTermView.LinkDown, is MeshTermView.Handshaking ->
+                "reconnecting to desktop over radio"
+            else -> "linked to desktop over radio"
         }
         // The same wording as the tailnet surface: what is being kept, never that the app is
         // running. "Mesh session open" named the app's own state, which is the line the operator
         // objected to.
-        BackgroundSession.setActive(up, "linked to desktop over radio")
+        BackgroundSession.setActive(wanted, text)
     }
     DisposableEffect(conn) {
         onDispose { BackgroundSession.setActive(false, "") }

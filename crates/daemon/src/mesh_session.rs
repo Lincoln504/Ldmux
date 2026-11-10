@@ -207,7 +207,14 @@ impl SessionHost {
                     Err(e) => self.last_error = Some(format!("record dropped: {e:?}")),
                 }
             }
-            _ => self.last_error = Some("unknown record kind".to_owned()),
+            // **A raw custom packet that is not ours is not a fault.** `RAW_CUSTOM` is a shared
+            // channel: another tool on the mesh can send one, and a single flipped header bit
+            // produces the same shape. Neither says anything about this session, and recording it
+            // as `last_error` made the one diagnostic line the operator reads — `session replaced
+            // after N s (hops=H, reason)` — name a stranger's packet instead of the real cause
+            // (measured 2026-11-10: a fifteen-minute session at 28 hops replaced with
+            // "unknown record kind" as its reason).
+            _ => {}
         }
     }
 

@@ -1,6 +1,8 @@
 package io.ldmux.mobile.mesh
 
 import io.ldmux.mobile.appLog
+import io.ldmux.mobile.appLogDump
+import io.ldmux.mobile.AppLogBuffer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -347,6 +349,8 @@ class MeshTermDriver(
      * when a session is established or the link is given up.
      */
     private var handshakeBeganAt = 0L
+    /** Which re-ask of the current handshake this is, for the log line that says its path. */
+    private var handshakeNo = 0
 
     /**
      * Set when this connection cannot be revived from the inside.
@@ -363,6 +367,7 @@ class MeshTermDriver(
 
     /** How many times this connection has re-asked an unanswered handshake. */
     private var handshakeTries = 0
+    /** The re-ask number of the current handshake. Reset with [handshakeTries]. */
 
     /**
      * When the host last said anything. Silence is not failure on a shell that has nothing to
@@ -621,6 +626,15 @@ class MeshTermDriver(
         handshake = h
         handshakeSince = clock()
         if (handshakeBeganAt == 0L) handshakeBeganAt = handshakeSince
+        // **Which path the handshake is going down, said once per attempt.** A direct packet
+        // carries the route; with no path it is a broadcast that reaches one hop and stops. At
+        // range that difference is the whole failure — the host received the phone's route
+        // requests (floods, which cross anything) and not one handshake — and it is invisible from
+        // either end without this line. The failure log keeps it.
+        appLog(
+            "mesh handshake ${handshakeNo + 1}/$handshakeRetries on " +
+                (gateway.routeHops?.let { "$it hop(s)" } ?: "no path (broadcast, one hop)"),
+        )
         _view.value = MeshTermView.Handshaking
         // Message 1 is handshake traffic, not an ARQ record: it has no slot to give back, so it
         // travels with an unknown sequence.
@@ -661,6 +675,10 @@ class MeshTermDriver(
         // differently. Without this line the next question is always "why", and the answer was only
         // ever visible to somebody reading the state machine.
         appLog("mesh drop: $state${if (why.isEmpty()) "" else " · $why"}")
+        // **The one record that outlives this process.** A failure at range happens with the phone
+        // in a pocket, and Android may have taken the process before anyone can read a cable log;
+        // this buffer is protocol-only, app-private, and overwritten on the next drop.
+        appLogDump(AppLogBuffer.snapshot())
         // Drop what failed. A retry that kept the dead session would never run, and the native
         // session holds keys and a queue that only a fresh handshake should replace. Held messages
         // go too: an `Attach` or an `Input` built for a session that ended is not for the next one.
@@ -929,6 +947,7 @@ class MeshTermDriver(
                 failed(MeshLinkState.SessionFailed, "the handshake timed out")
             } else if (waited >= handshakeRetryFor(gateway.routeHops) shl handshakeTries) {
                 handshakeTries++
+                handshakeNo = handshakeTries
                 // **A handshake that was not answered is asked again, not waited out.** `msg1` is
                 // one record; on a radio that drops one in ten it can simply go missing, and until
                 // this nothing retried it - the driver sat on "securing the link" for the whole

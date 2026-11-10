@@ -17,10 +17,25 @@ import kotlin.time.TimeSource
  *
  * **The same call also records the line here**, because a support question ("the
  * shell list was empty") cannot be answered from a log that needs a cable and a
- * terminal. One buffer, no second logging convention, and nothing on disk: a log
- * that outlives the process is a privacy decision this app does not make.
+ * terminal. One buffer, no second logging convention.
+ *
+ * **Nothing is kept on disk in normal running** — a log that outlives the process is a
+ * privacy decision this app does not make. The one exception is a *link failure*: when the
+ * connection drops, the buffer is written once to an app-private file and overwritten on the
+ * next drop. A failure at range happens with the phone in a pocket, so the process may be gone
+ * by the time anyone can read a cable-attached log; the last failure is otherwise unknowable,
+ * which is exactly the question a field test asks. The buffer holds protocol and state lines,
+ * never terminal content or anything typed.
  */
 expect fun appLog(message: String)
+
+/**
+ * Write the diagnostics buffer where it survives this process, once, on a link failure.
+ *
+ * App-private (`filesDir`, `MODE_PRIVATE`), overwritten each time, and never exported: the
+ * answer to "why did it drop at range" without a cable, and nothing else.
+ */
+expect fun appLogDump(lines: List<String>)
 
 /**
  * The last lines this app said, newest last.
