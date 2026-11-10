@@ -190,6 +190,8 @@ class AndroidRadioLink(
     private var routeAsks: Int = 0
     /** Whether a record has arrived down the route in hand, which is the only proof it works. */
     private var routeProven: Boolean = false
+    /** The paths that have lost a session recently, newest last: encoded length and bytes. */
+    private val failedRoutes = ArrayDeque<Pair<Int, Long>>()
     /** When this radio last answered a request from the host, so one ask cannot become a storm. */
     private var lastAnsweredAt: Long = 0L
 
@@ -1017,6 +1019,15 @@ class AndroidRadioLink(
         // bound ended it. A candidate now displaces a route only when that route is unproven (no
         // record has arrived on it) or stale, and among unproven ones the shortest still wins.
         val stale = System.currentTimeMillis() - routeHeardAt > ROUTE_TRUST_MS
+        // **A route that just lost a session is not re-adopted on the next answer.** A path heard in
+        // one direction only — our transmission reaching the host while the host's does not reach us,
+        // which is what a 0-hop copy next to a 5-hop copy means — is otherwise adopted again straight
+        // after the failure that proved it dead, and the link loops. Remembered for ten minutes so a
+        // route that has genuinely recovered is usable again.
+        if (recentlyFailed(path)) {
+            appLog("mesh $source route ignored: it lost a session ${hops} hop(s)")
+            return
+        }
         if (routeProven && hops > held && !stale) {
             appLog("mesh $source route ignored: $hops hop(s), ${held} in hand")
             return
@@ -1041,6 +1052,11 @@ class AndroidRadioLink(
      * Measured 2026-11-09 at range: two handshakes accepted and every session dying for ten minutes.
      */
     override fun forgetRoute() {
+        advertPath?.let { path ->
+            // Remember what failed, so the next answer cannot hand back the same ghost.
+            failedRoutes.addLast((path.encoded and 0xFF) or (path.bytes.size shl 8) to System.currentTimeMillis())
+            while (failedRoutes.size > FAILED_ROUTE_MEMORY) failedRoutes.removeFirst()
+        }
         advertPath = null
         contactPath = null
         routeHeardAt = 0L
@@ -1070,6 +1086,16 @@ class AndroidRadioLink(
         lastAnsweredAt = now
         val result = runCatching { send(reply) }.getOrNull()
         appLog("mesh route answered: ${result?.outcome ?: "failed"}")
+    }
+
+    /** Whether this path lost a session within the memory window. */
+    private fun recentlyFailed(path: RadioRoute.Path): Boolean {
+        val now = System.currentTimeMillis()
+        while (failedRoutes.isNotEmpty() && now - failedRoutes.first().second > FAILED_ROUTE_HOLD_MS) {
+            failedRoutes.removeFirst()
+        }
+        val key = (path.encoded and 0xFF) or (path.bytes.size shl 8)
+        return failedRoutes.any { it.first == key }
     }
 
     /** How long to wait before asking for a route again: doubling, jittered, capped. */
@@ -1384,6 +1410,10 @@ class AndroidRadioLink(
 
         /** The least time between two answers to the host's requests. */
         const val REQUEST_ANSWER_FLOOR_MS = 5_000L
+
+        /** How many failed paths are remembered, and for how long one stays unusable. */
+        const val FAILED_ROUTE_MEMORY = 4
+        const val FAILED_ROUTE_HOLD_MS = 600_000L
         /** The least gap between two route requests: a flood every repeater in range repeats. */
         const val ROUTE_REQUEST_FLOOR_MS = 5_000L
         /** How long a route request's own `OK` may take. */
