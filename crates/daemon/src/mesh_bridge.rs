@@ -544,6 +544,18 @@ impl Attached {
     /// landed: that is the loop that spent about 20 s of air a minute on an attached shell nobody
     /// was typing in. The wanted flag makes the request cost one repaint instead of two, and the
     /// next tick with an empty pipe honours it, so a real resync still happens.
+    /// **Start the screen over, and owe exactly one frame even while frozen.**
+    ///
+    /// The reset is deferred when the pipe still holds records, which would otherwise leave the
+    /// rows a refusal had left owed (`retry`) to be replayed in front of the new full frame: two
+    /// frames, one of them for an epoch the differ has abandoned. The owed rows go first, always,
+    /// because a reset supersedes them.
+    fn owe_frame_after_reset(&mut self, pending: usize) {
+        self.retry.clear();
+        self.defer_resync(pending);
+        self.owe_frame = true;
+    }
+
     fn defer_resync(&mut self, pending: usize) {
         if pending == 0 {
             self.resync();
@@ -1855,13 +1867,13 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                     let held = self.shells.get(&shell).is_some_and(Attached::held);
                     if let Some(a) = self.shells.get_mut(&shell) {
                         a.geometry = Some((cols, rows));
-                        a.defer_resync(pending);
                         if held {
                             // **A frozen view still owes the frame that makes its grid true.** The
-                            // resync above would be swallowed by the hold, so the shell is marked
-                            // for exactly one frame and the hold resumes after it.
-                            a.owe_frame = true;
-                            a.resync();
+                            // reset would be swallowed by the hold, so the shell is marked for
+                            // exactly one frame and the hold resumes after it.
+                            a.owe_frame_after_reset(pending);
+                        } else {
+                            a.defer_resync(pending);
                         }
                     }
                     self.grids.insert(shell, (cols, rows));
@@ -1871,16 +1883,14 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                 let pending = self.link.pending();
                 let held = self.shells.get(&shell).is_some_and(Attached::held);
                 if let Some(a) = self.shells.get_mut(&shell) {
-                    a.defer_resync(pending);
                     if held {
                         // **"Show me the shell" is one frame, not a release.** A frozen view that
                         // asks for the screen gets exactly that and stays frozen: the hold is what
                         // keeps a printing shell off the air, and the operator asked to look once.
                         // This is what makes a press cost two records instead of three.
-                        a.owe_frame = true;
-                        if pending == 0 {
-                            a.resync();
-                        }
+                        a.owe_frame_after_reset(pending);
+                    } else {
+                        a.defer_resync(pending);
                     }
                 }
             }
@@ -2095,7 +2105,12 @@ impl Host for DaemonHost {
         // at or past the live screen never receives live rows, and whether the pane still holds
         // history above that point is exactly what the caller needs to know: `older` false means
         // "you are at the oldest row this shell kept", true means "ask again lower down".
-        let above = live_top > total.saturating_sub(available);
+        //
+        // The test is "does this pane have any history at all", because the request is already at
+        // the live screen: `live_top > total - available` reads as "more history than one screen",
+        // which is a different question and answers `false` for a pane that kept less than a
+        // screenful.
+        let above = available > 0;
         if from >= live_top {
             return Some((live_top, above, Vec::new()));
         }
@@ -4185,6 +4200,55 @@ mod tests {
             sent_records(&link) - refused,
             1,
             "one frame, not a replay and a frame: {msgs:?}"
+        );
+    }
+
+    /// **A reset asked for while the pipe is busy still supersedes the owed rows.**
+    ///
+    /// The reset is deferred until the queue empties, which used to leave `retry` — the rows a
+    /// refused send still owed, from the epoch the reset is about to abandon — to be replayed in
+    /// front of the new full frame: two frames, one of them unplaceable. A frozen view makes it
+    /// worse, because the replay would come out of a shell that is holding.
+    #[tokio::test]
+    async fn a_deferred_reset_drops_owed_rows_before_it_runs() {
+        let (mut b, host, link, clock) = attached_paced().await;
+        // A frame cut off part-way leaves rows owed, exactly as a full queue does.
+        link.0.lock().unwrap().refuse_after = Some(1);
+        clock.advance(2_000);
+        paced(&host, &["$ one", "two", "three"]);
+        b.tick().await;
+        link.0.lock().unwrap().refuse_after = None;
+        let refused = sent_records(&link);
+
+        // The link is now busy, and the phone freezes the view and asks to start over.
+        phone_says(&link, 1, &Message::Hold { on: true });
+        link.0.lock().unwrap().pending = 2;
+        phone_says(&link, 1, &Message::Resync);
+        b.tick().await;
+        assert_eq!(sent_records(&link), refused, "nothing goes while the pipe is busy");
+
+        // The pipe drains: one full frame, for the live view held behind it.
+        link.0.lock().unwrap().pending = 0;
+        phone_says(&link, 1, &Message::Hold { on: false });
+        clock.advance(2_000);
+        b.tick().await;
+        let mut d = Decoder::new();
+        let msgs: Vec<Message> = link.0.lock().unwrap().sent[refused..]
+            .iter()
+            .flat_map(|(_, bytes)| d.push(bytes).unwrap())
+            .filter_map(|m| m.ok())
+            .collect();
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, Message::Rows { full: true, .. })),
+            "the release draws a whole screen: {msgs:?}"
+        );
+        assert!(
+            msgs.iter()
+                .filter(|m| matches!(m, Message::Rows { .. }))
+                .count()
+                == 1,
+            "one row set, not a replay and a frame: {msgs:?}"
         );
     }
 

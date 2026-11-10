@@ -451,6 +451,18 @@ class MeshTermDriver(
      */
     private var attachAskedAt: Long? = null
     private var attachAsks: Int = 0
+    /** The pending ask was a `Takeover`, so its retry must be one too: an `Attach` would be refused. */
+    private var askWasTakeover = false
+
+    /**
+     * A shell the host was asked to start, and the deadline for its `Created`.
+     *
+     * A lost answer to `Create` left the phone on the list with nothing happening and no record
+     * spent to say why — the same "sits for ever" shape as an unanswered attach.
+     */
+    private var createdCwd: String? = null
+    private var createAskedAt: Long? = null
+    private var createAsks: Int = 0
 
     /**
      * Whether the run of pages now arriving answers a list this link asked for.
@@ -834,11 +846,38 @@ class MeshTermDriver(
         if (session != null
             && terminalView == null
             && mirror.profile == null
-            && attachAskedAt?.let { clock() - it >= ATTACH_RETRY_MS } == true
+            && attachAskedAt?.let { clock() - it >= ANSWER_RETRY_MS } == true
         ) {
             attachAskedAt = null
-            if (attachAsks < ATTACH_ASKS) {
-                queueAttach(attempted ?: "")
+            val id = attempted ?: ""
+            if (attachAsks < ANSWER_ASKS) {
+                if (askWasTakeover && id.isNotEmpty()) {
+                    // **The same ask, again.** A retry that sent `Attach` where a `Takeover` was
+                    // asked would be refused by the desk's claim, and the page would say the shell
+                    // is held by the very window the user had just displaced.
+                    attachAskedAt = clock()
+                    attachAsks += 1
+                    queue(TermMessage.Takeover(id))
+                    pump()
+                } else {
+                    queueAttach(id)
+                    pump()
+                }
+            }
+        }
+        // **A `Create` whose answer never came is asked for again.** One record a deadline, bounded:
+        // a host that cannot start a shell is a state the screen draws, and the operator's refresh
+        // is the cure.
+        if (session != null
+            && terminalView == null
+            && createAskedAt?.let { clock() - it >= ANSWER_RETRY_MS } == true
+        ) {
+            val cwd = createdCwd
+            createAskedAt = null
+            if (cwd != null && createAsks < ANSWER_ASKS) {
+                createAskedAt = clock()
+                createAsks += 1
+                queue(TermMessage.Create(MeshTerm.VERSION, cwd))
                 pump()
             }
         }
@@ -872,8 +911,9 @@ class MeshTermDriver(
         // **A list answer has a deadline too**, or the loop sleeps through it: the idle tick is
         // 30 s, which is longer than anyone will wait for a page of shells.
         val list = listAskedAt?.plus(LIST_ANSWER_MS)
-        val attach = attachAskedAt?.plus(ATTACH_RETRY_MS)
-        listOfNotNull(deadline, retry, list, attach).minOrNull()
+        val attach = attachAskedAt?.plus(ANSWER_RETRY_MS)
+        val create = createAskedAt?.plus(ANSWER_RETRY_MS)
+        listOfNotNull(deadline, retry, list, attach, create).minOrNull()
     }
 
     // ── what the user does ─────────────────────────────────────────────────────────────
@@ -1042,6 +1082,9 @@ class MeshTermDriver(
         listHoldsNothing = false
         attachedId = id
         mirror = RowMirror(); held.clear(); lastEpoch = null; painted = false; resyncing = false
+        attachAskedAt = clock()
+        attachAsks += 1
+        askWasTakeover = true
         queue(TermMessage.Takeover(id)); pump(); publish()
         true
     }
@@ -1128,6 +1171,9 @@ class MeshTermDriver(
         // silence. The list still works, so the row that offers this is what says why.
         if (hostVersion in 1 until MeshTerm.SHELL_CONTROL_VERSION) return@withLock false
         createdId = null
+        createdCwd = cwd
+        createAskedAt = clock()
+        createAsks += 1
         queue(TermMessage.Create(MeshTerm.VERSION, cwd)); pump(); publish()
         true
     }
@@ -1559,6 +1605,7 @@ class MeshTermDriver(
                 appLog("mesh profile ${m.cols}x${m.rows} v${m.version} shell ${m.shell}")
                 attachAskedAt = null
                 attachAsks = 0
+                askWasTakeover = false
                 hostVersion = m.version
                 unsupported = m.unsupported
                 // The host names the shell it attached (version 2), so the header's current marker
@@ -1650,6 +1697,9 @@ class MeshTermDriver(
             // request and the answer.
             is TermMessage.Created -> {
                 createdId = m.id
+                createdCwd = null
+                createAskedAt = null
+                createAsks = 0
                 // No `pick` condition: the answer to a create is this link's to act on whatever the
                 // list was showing. Backing out of a failed list leaves `pick` at `None`, and that
                 // silently swallowed the new shell's id — the create worked and nothing opened.
@@ -1834,6 +1884,7 @@ class MeshTermDriver(
     private fun queueAttach(selector: String) {
         attachAskedAt = clock()
         attachAsks += 1
+        askWasTakeover = false
         // A fresh attach is a fresh shell on the host, and it starts unheld: whatever this phone
         // told the previous one does not carry over. Nothing has been drawn for it either, so the
         // first hold waits for the first frame.
@@ -2085,14 +2136,16 @@ internal fun silenceFailureMs(hops: Int?): Long =
 private const val LIST_ANSWER_MS = 8_000L
 
 /**
- * How long an attach may go unanswered before it is asked for again.
+ * How long a control request may go unanswered before it is asked for again.
  *
- * A profile is one record back, so a few seconds is a lost answer and not a slow one.
+ * One deadline for the answers that are a single record: a `Profile` after an attach or a takeover,
+ * and a `Created` after a create. On a link where a record is 600 ms, six seconds is a lost answer
+ * and not a slow one. A list has [LIST_ANSWER_MS] instead, because its answer is paged.
  */
-private const val ATTACH_RETRY_MS = 6_000L
+private const val ANSWER_RETRY_MS = 6_000L
 
-/** How many times one attach is asked for before the screen's own refresh is the cure. */
-private const val ATTACH_ASKS = 3
+/** How many times an attach or a create is asked for before the screen's own refresh is the cure. */
+private const val ANSWER_ASKS = 3
 
 /** How many times a list is asked for before the screen's own refresh is the only cure. */
 private const val LIST_ASKS = 3

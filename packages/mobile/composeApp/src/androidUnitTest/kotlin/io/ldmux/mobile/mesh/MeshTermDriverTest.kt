@@ -246,6 +246,67 @@ class MeshTermDriverTest {
         assertEquals(null, d.nextWakeMs(), "an answered attach schedules nothing")
     }
 
+    /// **A `Takeover` whose profile never arrived is retried as a `Takeover`.**
+    ///
+    /// An `Attach` retry would be refused by the desk's claim, and the page would then say the shell
+    /// is held by the very window the user had just displaced.
+    @Test
+    fun `a takeover with no profile is retried as a takeover`() = runBlocking<Unit> {
+        val d = driver(); probed(d)
+        deliver(d, TermMessage.Sessions(true, listOf(ent("aa11"))))
+        sess.queued.clear()
+        assertTrue(d.takeover("aa11"))
+        assertEquals(1, sess.messages().count { it is TermMessage.Takeover })
+
+        now += 7_000
+        d.tick()
+        assertEquals(
+            2,
+            sess.messages().count { it is TermMessage.Takeover },
+            "the same ask, repeated: ${sess.messages()}"
+        )
+        assertTrue(
+            sess.messages().none { it is TermMessage.Attach },
+            "and never an Attach, which the claim would refuse: ${sess.messages()}"
+        )
+    }
+
+    /// **A `Create` whose answer never came is asked for again.**
+    ///
+    /// The list row that starts a shell says "starting · N s" while it waits; a lost answer left it
+    /// there for ever, with nothing spent to say why.
+    @Test
+    fun `a create with no answer is asked for again`() = runBlocking<Unit> {
+        val d = driver(); probed(d)
+        deliver(d, TermMessage.Profile(13, 46, 17, 0, "aa11"))
+        sess.queued.clear()
+        assertTrue(d.createShell("~/Documents"))
+        assertEquals(1, sess.messages().count { it is TermMessage.Create })
+
+        now += 7_000
+        d.tick()
+        assertEquals(
+            2,
+            sess.messages().count { it is TermMessage.Create },
+            "the create is asked for once more: ${sess.messages()}"
+        )
+        assertEquals(
+            TermMessage.Create(MeshTerm.VERSION, "~/Documents"),
+            sess.messages().last { it is TermMessage.Create }
+        )
+
+        // The answer arrives: nothing more is asked for.
+        deliver(d, TermMessage.Created("bb22"))
+        val after = sess.messages().count { it is TermMessage.Create }
+        now += 30_000
+        d.tick()
+        assertEquals(
+            after,
+            sess.messages().count { it is TermMessage.Create },
+            "an answered create is not repeated"
+        )
+    }
+
     private fun stream(vararg m: TermMessage): ByteArray = m.flatMap { it.encode().toList() }.toByteArray()
     private fun data(vararg m: TermMessage) = Received.Data(listOf(Delivered(0, stream(*m))))
 
