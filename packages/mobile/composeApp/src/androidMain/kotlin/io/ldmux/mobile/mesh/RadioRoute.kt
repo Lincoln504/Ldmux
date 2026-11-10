@@ -20,6 +20,9 @@ internal object RadioRoute {
     /** A path as the wire carries it: the encoded length byte, and the bytes it counts. */
     internal class Path(val encoded: Int, val bytes: ByteArray)
 
+    /** `PAYLOAD_TYPE_REQ`: the vehicle a stock companion radio can flood. */
+    const val PAYLOAD_REQ = 0x00
+
     /** The firmware's `MAX_PATH_SIZE`; a longer path cannot be carried at all. */
     const val MAX_PATH_BYTES = 64
 
@@ -148,6 +151,35 @@ internal object RadioRoute {
         // the record would feed four nonce bytes into the reversal and change the hop count.
         if (record.size < 5 + want) return null
         return reversed(encoded, record.copyOfRange(5, 5 + want))
+    }
+
+    /**
+     * The route a **flooded** reply heard in a receive-log (`0x88`) packet carries.
+     *
+     * **This is the answer that reaches a phone at distance, and it is why a route request is
+     * worth sending at all.** A reply sent directly depends on one chain of repeaters forwarding it:
+     * one lost hop and the phone learns nothing, waits, and asks again — measured 2026-11-09 on a
+     * single-repeater link at -11 dB SNR, where the requests went out every ten seconds and the
+     * handshake never finished. A flooded reply is forwarded by every repeater in range, and the
+     * community firmware's own rule for answering a flood is a flooded path return
+     * (`ReplyRoute::REPLY_ROUTE_PATH_RETURN`); the adverts that compete with it are dropped after
+     * `flood_max_advert` (8) hops while an unscoped `REQ` flood travels 64.
+     *
+     * The layout is the host's `build_route_reply_flood`, and it is pinned on both sides:
+     * `[0x01 flood][travel path byte][travel path][dest hash][src hash]["LDRR"][host key 32]
+     * [path byte][path][nonce]`. The travel path is ignored — the path that matters is the one the
+     * host carried inside, which is the route it uses towards us, so it is reversed into sending
+     * order here like any other.
+     */
+    fun heardRouteReply(raw: ByteArray, hostKey: ByteArray): Path? {
+        if (hostKey.size != 32) return null
+        val packet = parse(raw) ?: return null
+        if (!packet.isFlood || packet.payloadType != PAYLOAD_REQ) return null
+        val payload = packet.payload
+        if (payload.size < 2 + REPLY_MAGIC.size + 32) return null
+        for (i in REPLY_MAGIC.indices) if (payload[2 + i] != REPLY_MAGIC[i]) return null
+        for (i in 0 until 32) if (payload[6 + i] != hostKey[i]) return null
+        return routeReply(payload.copyOfRange(38, payload.size))
     }
 
     /**

@@ -35,3 +35,4 @@ One file per decision, oldest first. A record says what was decided, what it cos
 - `0032-a-route-is-asked-for-not-waited-for.md` — A route is asked for, not waited for: a flooded `REQ` and a direct reply, because a repeater drops an advert after eight hops.
 - `0033-a-flood-scope-is-followed-never-invented.md` — A flood scope is followed, never invented: the radio's own region, else one proven by an overheard scoped flood, else unscoped.
 - `0034-the-view-is-made-valid-while-frozen.md` — A hold bounds output, not validity: the attach states the grid, and a resize or a `show` owes exactly one frame.
+- `0035-a-request-is-answered-by-a-flood.md` — A route request is answered by a **flood**: an advert dies at eight hops, a `REQ` travels sixty-four, and without a path the phone cannot send a single record.

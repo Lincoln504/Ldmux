@@ -57,6 +57,16 @@ interface RadioLink {
      */
     suspend fun refreshRoute() {}
 
+    /**
+     * **A route that just failed a session must not be handed to the next one.**
+     *
+     * The link deliberately outlives a driver rebuild (ownership stays with one radio), so a path
+     * kept here survives the very failure that proves it dead. The next attempt would then send its
+     * handshake down the same chain, lose it the same way, and rebuild again — which is the loop a
+     * person breaks by pressing refresh. After this the next `refreshRoute` asks the mesh instead.
+     */
+    fun forgetRoute() {}
+
     /** Read the radio's firmware description (path-hash mode, limits). */
     suspend fun readDeviceInfo(): RadioDeviceInfo?
 
@@ -565,6 +575,7 @@ class RadioLinkException(val state: MeshLinkState, message: String) : Exception(
  */
 class MeshRadioGateway(private val link: RadioLink) : GatewayPort {
     override suspend fun refreshRoute() = link.refreshRoute()
+    override fun forgetRoute() = link.forgetRoute()
 
     override val state: StateFlow<MeshLinkState> = link.state
     override val status: StateFlow<MeshStatus?> = link.status

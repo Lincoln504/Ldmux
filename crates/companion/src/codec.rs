@@ -704,6 +704,87 @@ pub fn build_route_reply_with_nonce(
     Ok(out)
 }
 
+/// Build the **flooded** answer to a route request.
+///
+/// **This is the reply that works at range, and it is MeshCore's own rule for one.** A request
+/// arrives as an un-scoped flood, and the far side answers it with a *flooded* path return
+/// (`mesh::ReplyRoute::REPLY_ROUTE_PATH_RETURN` in the community firmware's `RoutingPolicy.h`),
+/// because the two vehicles a stock companion has are not equal: an advert is dropped by a repeater
+/// after `flood_max_advert` hops — **eight** by default — while a `REQ` flood travels `flood_max`
+/// (64) and an un-scoped one `flood_max_unscoped` (64). A direct reply depends on one chain of
+/// repeaters all forwarding it; a flooded one depends on the mesh.
+///
+/// The direct reply is kept as the answer to a *neighbour*, where it is the same one transmission.
+/// This one is the answer when the request had to cross repeaters to arrive at all.
+///
+/// **Layout**, so the phone can recognise it without a contact on either side (ldmux keeps none,
+/// ADR-0030) and without the firmware having to decrypt anything:
+///
+/// ```text
+/// [0x01 flood][path byte for the reply's own travel path][dest hash][src hash]
+/// ["LDRR"][responding radio's 32-byte key][the direct reply record: path byte, path, nonce]
+/// ```
+///
+/// The reply's own travel path starts empty and accumulates one hash per repeater, which is how a
+/// flooded packet shows where it came from; the phone does not read it — the path it needs is the
+/// one carried inside, which is the route the *host* uses towards it.
+pub fn build_route_reply_flood(
+    own_key: &[u8; 32],
+    peer_key: &[u8; 32],
+    hash_size: u8,
+    hops: u8,
+    path: &[u8],
+    nonce: &[u8; 4],
+) -> Result<Vec<u8>, CodecError> {
+    let inner = build_route_reply_with_nonce(hash_size, hops, path, nonce)?;
+    let mut payload = Vec::with_capacity(2 + ROUTE_REPLY_MAGIC.len() + 32 + inner.len());
+    // The firmware's own `REQ` envelope: the destination and sender hash bytes, then the body.
+    // A node with no contact for either hash simply never decrypts it; it still forwards it, which
+    // is the whole point.
+    payload.push(peer_key[0]);
+    payload.push(own_key[0]);
+    payload.extend_from_slice(ROUTE_REPLY_MAGIC);
+    payload.extend_from_slice(own_key);
+    payload.extend_from_slice(&inner);
+    let mut out = Vec::with_capacity(2 + payload.len());
+    out.push(ROUTE_FLOOD_HEADER);
+    // The travel path, empty at origin, at the width the carried path uses so a repeater appends
+    // hashes of the same size. The receiver ignores this path entirely.
+    out.push(path_byte(hash_size, 0)?);
+    out.extend_from_slice(&payload);
+    Ok(out)
+}
+
+/// Read a flooded route reply out of a received packet, when it is `own_key`'s.
+///
+/// **The mirror of [`build_route_reply_flood`], and the daemon's own check**: it answers requests, so
+/// it never reads one back, but the shape has to be pinned by a test on both sides or the two ends
+/// drift silently — the failure mode being a phone that never learns a route at any distance.
+#[must_use]
+pub fn parse_route_reply_flood(packet: &[u8], from_key: &[u8; 32]) -> Option<AdvertPath> {
+    if packet.first() != Some(&ROUTE_FLOOD_HEADER) {
+        return None;
+    }
+    let encoded = *packet.get(1)?;
+    let travel_hash = (encoded >> 6) + 1;
+    if travel_hash == 4 {
+        return None;
+    }
+    let travel = usize::from(encoded & 0x3F) * usize::from(travel_hash);
+    let payload = packet.get(2 + travel..)?;
+    // Destination and sender hash bytes, then the marker, then the responder's full key.
+    if payload.len() < 2 + ROUTE_REPLY_MAGIC.len() + 32 {
+        return None;
+    }
+    if payload.get(2..6)? != ROUTE_REPLY_MAGIC.as_slice() {
+        return None;
+    }
+    if payload.get(6..38)? != from_key {
+        return None;
+    }
+    parse_route_reply(payload.get(38..)?)
+}
+
 /// Read a route reply's path: the route to the peer that sent it, already in travel order.
 #[must_use]
 pub fn parse_route_reply(record: &[u8]) -> Option<AdvertPath> {
@@ -1386,6 +1467,54 @@ mod tests {
         // One and a half hashes is not a path.
         assert!(build_route_reply(2, 1, &[0x12]).is_err());
         assert!(parse_route_reply(&[0x4C, 0x44, 0x52, 0x52, 0x41, 0x00]).is_none());
+    }
+
+    /// **The answer a request from a distance needs is a flood**, and its shape is pinned on both
+    /// sides of the wire here: the phone reads exactly this layout out of its receive log, so a
+    /// change to one end that is not made to the other would leave a link that cannot discover a
+    /// route at any distance at all.
+    #[test]
+    fn a_flooded_route_reply_carries_the_path_and_names_its_sender() {
+        let host = [0xA1; 32];
+        let phone = [0xB2; 32];
+        let path = [0x11, 0x22, 0x33];
+        let packet = build_route_reply_flood(&host, &phone, 1, 3, &path, &[7, 8, 9, 10])
+            .expect("builds");
+        // A flood, so repeaters forward it: `flood_max` is 64 hops where an advert is dropped at 8.
+        assert_eq!(packet[0], ROUTE_FLOOD_HEADER);
+        let view = parse_packet(&packet).expect("parses");
+        assert!(view.is_flood());
+        assert_eq!(view.payload_type, 0, "REQ is the flood vehicle");
+        // The envelope is addressed to the phone, from the host, and names the host in full so the
+        // phone can tell its own host from any other node answering.
+        assert_eq!(view.payload[0], phone[0]);
+        assert_eq!(view.payload[1], host[0]);
+        assert_eq!(&view.payload[2..6], ROUTE_REPLY_MAGIC);
+        assert_eq!(&view.payload[6..38], &host);
+
+        let carried = parse_route_reply_flood(&packet, &host).expect("reads back");
+        assert_eq!(carried.hash_size, 1);
+        assert_eq!(carried.hops, 3);
+        assert_eq!(carried.bytes, path.to_vec());
+        // A reply from somebody else's radio is not our host's route.
+        assert!(parse_route_reply_flood(&packet, &phone).is_none());
+        // Neither is a packet that is not a flood, or one cut short.
+        let mut direct = packet.clone();
+        direct[0] = RAW_CUSTOM_DIRECT_HEADER;
+        assert!(parse_route_reply_flood(&direct, &host).is_none());
+        // **A lost nonce is not a lost route** — the tail is four bytes of it and the path is
+        // intact, so the reply still teaches the path. Cutting into the path is what fails.
+        let mut no_nonce = packet.clone();
+        no_nonce.truncate(no_nonce.len() - 4);
+        assert_eq!(
+            parse_route_reply_flood(&no_nonce, &host).map(|p| p.bytes),
+            Some(path.to_vec())
+        );
+        let mut short = packet.clone();
+        short.truncate(short.len() - 6);
+        assert!(parse_route_reply_flood(&short, &host).is_none());
+        // A ragged carried path is refused where it is built, not on the air.
+        assert!(build_route_reply_flood(&host, &phone, 2, 1, &[0x11], &[0; 4]).is_err());
     }
 
     /// The path width travels **in the packet**, because forwarding is width-agnostic and the two

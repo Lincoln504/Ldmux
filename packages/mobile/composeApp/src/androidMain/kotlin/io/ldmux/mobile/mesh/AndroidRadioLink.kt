@@ -186,6 +186,8 @@ class AndroidRadioLink(
     /** When the last route request went out, so a failing link cannot turn into a broadcaster. */
     @Volatile
     private var lastRequestAt: Long = 0L
+    /** Unanswered route requests since the last route learned, for the doubling interval. */
+    private var routeAsks: Int = 0
 
     /**
      * The **flood scope** this radio broadcasts under, as the radio itself reports it.
@@ -398,7 +400,12 @@ class AndroidRadioLink(
                     val raw = frame.log().raw()
                     val host = hostKey
                     if (host.size == 32) {
-                        RadioRoute.heardAdvert(raw, host)?.let { adoptRoute(it, "advert") }
+                        // **The flooded answer to our own request.** This is the one that arrives at
+                        // distance: the host answers a request that crossed repeaters with a flood,
+                        // because a direct reply is one packet along one chain and one lost hop is a
+                        // phone that never learns a route.
+                        RadioRoute.heardRouteReply(raw, host)?.let { adoptRoute(it, "flooded reply") }
+                            ?: RadioRoute.heardAdvert(raw, host)?.let { adoptRoute(it, "advert") }
                     }
                     // **Learn the mesh's scope from a packet it scoped.** A scoped flood proves the
                     // region is carried by the repeaters that forwarded it, and the region's name is
@@ -957,15 +964,58 @@ class AndroidRadioLink(
             appLog("mesh $source route ignored: older than the one in hand")
             return
         }
+        // **A flood arrives by every chain that carried it, and the shortest one is the route.**
+        // The same reply heard through one repeater and through four is four copies of one answer;
+        // taking the last would send every record the long way round, and the long way round is
+        // exactly what a link at range cannot afford. This is the same rule the host applies to its
+        // own candidates (`prefer_route`), and here it stops a late copy from widening a route that
+        // is already working.
+        val inHand = advertPath
+        val hops = path.encoded and 0x3F
+        val held = inHand?.encoded?.and(0x3F) ?: Int.MAX_VALUE
+        val stale = System.currentTimeMillis() - routeHeardAt > ROUTE_FRESH_MS
+        if (hops > held && !stale) {
+            appLog("mesh $source route ignored: $hops hop(s), ${held} in hand")
+            return
+        }
         advertPath = RadioPath(path.encoded, path.bytes)
         routeHeardAt = heardAt
+        // A route is an answer: the next time one is needed, ask at once rather than after backoff.
+        routeAsks = 0
         appLog(
             "mesh $source route: ${path.encoded and 0x3F} hop(s)" +
                 if (heardAt > 0L) " · ${(System.currentTimeMillis() - heardAt) / 1000}s old" else " · age unknown",
         )
     }
 
+    /**
+     * **A route that failed the session is not a route.** The driver rebuilds the connection after a
+     * dead session, and this link is reused across that rebuild, so a path kept here would be handed
+     * to the next attempt as if nothing had happened: the handshake would go out along the chain that
+     * just lost it, fail the same way, and rebuild again — a loop that only a refresh breaks.
+     * Measured 2026-11-09 at range: two handshakes accepted and every session dying for ten minutes.
+     */
+    override fun forgetRoute() {
+        advertPath = null
+        contactPath = null
+        routeHeardAt = 0L
+        // The next request goes out at once: the floor exists to stop a *failing* link broadcasting,
+        // and this is the moment the broadcast is worth the most.
+        lastRequestAt = 0L
+        appLog("mesh route dropped after a failed session")
+    }
+
     /** A route heard recently enough to try before asking again. */
+    /** How long to wait before asking for a route again: doubling, jittered, capped. */
+    private fun requestIntervalMs(): Long {
+        val step = 1L shl minOf(routeAsks, 3)
+        val base = ROUTE_REQUEST_FLOOR_MS * step
+        // ±25 %, from the clock rather than from `Random` so the byte stream of a test is stable.
+        val spread = (base / 4).coerceAtLeast(1L)
+        val jitter = (System.currentTimeMillis() % (2 * spread + 1)) - spread
+        return (base + jitter).coerceAtLeast(ROUTE_REQUEST_FLOOR_MS / 2)
+    }
+
     private fun routeIsFresh(now: Long): Boolean =
         advertPath != null && routeHeardAt > 0L && now - routeHeardAt <= ROUTE_FRESH_MS
 
@@ -986,10 +1036,17 @@ class AndroidRadioLink(
         val key = hostKey.takeIf { it.size == 32 } ?: return false
         val own = radioPublicKey ?: return false
         val now = System.currentTimeMillis()
-        if (now - lastRequestAt < ROUTE_REQUEST_FLOOR_MS) return false
+        // **A phone that cannot hear an answer must not keep asking at a fixed rate.** Every request
+        // is a flood, so a fixed ten seconds spends air on every repeater in range for as long as
+        // the phone is out of contact — and several phones doing it at once walk over each other's
+        // answers. Each unanswered request doubles the wait, up to forty seconds, and the jitter
+        // keeps two phones that started together from asking together. A route learned anywhere
+        // (`adoptRoute`) puts the first interval back.
+        if (now - lastRequestAt < requestIntervalMs()) return false
         if (!s.canSendRaw()) return false
         val packet = RadioRoute.routeRequest(currentPreset().pathHashSize, key, own, scopeKey) ?: return false
         lastRequestAt = now
+        routeAsks = (routeAsks + 1).coerceAtMost(8)
         val answer = CompletableDeferred<RadioSendResult>()
         val queued = runCatching {
             s.sendRawPacket(0, packet, RawSendCallback { ok, error ->
@@ -1099,8 +1156,14 @@ class AndroidRadioLink(
                 // used to key on "is a path present", which a phone that had connected once at home
                 // always answered yes to, and then refreshed only every five minutes — so a phone
                 // that moved sat on a dead path for the rest of the interval.
-                val wait = if (routeIsFresh(System.currentTimeMillis())) PATH_REFRESH_MS else PATH_RETRY_MS
-                delay(wait)
+                // **A link with no route is never idle, and the wait is the backoff's.** The tick
+                // used to be ten seconds whenever the route was stale, which overrode the doubling
+                // interval inside `ensureRoute` — the backoff could not be slower than the loop. A
+                // pathless link is also the one case the idle rule below must not silence: nothing
+                // is being sent *because* there is nowhere to send it, and going quiet there is a
+                // link that never recovers without a person pressing refresh.
+                val fresh = routeIsFresh(System.currentTimeMillis())
+                delay(if (fresh) PATH_REFRESH_MS else minOf(requestIntervalMs(), PATH_RETRY_MS))
                 if (closing) continue
                 // **A route is only worth asking for when something is about to use it.** The loop
                 // used to re-flood a request every ten seconds on a link whose route had merely
@@ -1109,8 +1172,9 @@ class AndroidRadioLink(
                 // and two records for a route no record needed. A send that finds no route asks for
                 // one itself (`refreshRoute`), so the only case this loop covers is an idle link,
                 // and on an idle link the answer is nothing.
-                val idle = System.currentTimeMillis() - lastSendAt > ROUTE_IDLE_MS
-                if (!idle && !routeIsFresh(System.currentTimeMillis())) ensureRoute(s)
+                val idle = System.currentTimeMillis() - lastSendAt > ROUTE_IDLE_MS &&
+                    routeIsFresh(System.currentTimeMillis())
+                if (!idle) ensureRoute(s)
                 if (!s.canSendRaw()) continue
                 // One command per tick: the companion has one answer window, and a second request
                 // inside it makes both answers ambiguous.

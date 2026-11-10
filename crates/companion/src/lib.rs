@@ -34,10 +34,11 @@ pub use codec::{
     APP_TARGET_VERSION, AdvertPath, DeviceInfo, FloodScope, KNOWN_SCOPE_TAGS, PacketView,
     RAW_CUSTOM_DIRECT_HEADER, ROUTE_FLOOD_HEADER, ROUTE_FLOOD_SCOPED_HEADER, ROUTE_REPLY_MAGIC,
     ROUTE_REQUEST_MAGIC, ROUTE_TRANSPORT_FLOOD, RouteRequest, SelfInfo, build_default_flood_scope,
-    build_raw_direct, build_route_reply, build_route_reply_with_nonce, build_route_request,
+    build_raw_direct, build_route_reply, build_route_reply_flood, build_route_reply_with_nonce,
+    build_route_request,
     build_route_request_in_scope, build_route_request_with_nonce, codes,
     commands, identify_scope, parse_advert_path, parse_default_flood_scope, parse_packet,
-    parse_route_reply, parse_route_request, transport_code,
+    parse_route_reply, parse_route_reply_flood, parse_route_request, transport_code,
 };
 pub use framing::{FrameReader, MAX_PAYLOAD, encode};
 pub use link::{ByteLink, MemoryLink, SerialLink};

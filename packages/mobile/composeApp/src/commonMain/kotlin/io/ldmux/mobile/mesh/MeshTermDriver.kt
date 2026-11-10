@@ -48,6 +48,14 @@ interface GatewayPort {
     suspend fun refreshRoute() {}
 
     /**
+     * Drop the route this link is holding, because a session just died on it.
+     *
+     * Defaulted: a test double has no route to forget. The driver calls it on every session failure,
+     * so the rebuild that follows asks the mesh for a route instead of reusing the one that failed.
+     */
+    fun forgetRoute() {}
+
+    /**
      * This radio's own public key, once the link is bound; null before that or when the link has no
      * radio to ask.
      *
@@ -647,6 +655,9 @@ class MeshTermDriver(
         handshakeBeganAt = 0L
         session?.close()
         session = null
+        // **The route is part of what failed.** A rebuilt connection reuses this link, and a path
+        // kept across a dead session sends the next handshake down the chain that just lost it.
+        gateway.forgetRoute()
         forgetMarkPage()
         terminalView = MeshTermView.LinkDown(state)
         // Every one of these is the transport's word, not the user's: a refused link, a handshake

@@ -238,7 +238,11 @@ fn route_hint(record: &[u8]) -> Option<[u8; 32]> {
 /// One rule serves both directions: a reply carries the sender's sending-order path and the reader
 /// reverses it. Getting that backwards would produce a route that is the mirror of the truth, which
 /// on a single-repeater path is indistinguishable from a dead link.
-fn send_route_reply<L: ByteLink>(companion: &mut Companion<L>, req: &RouteRequest) -> bool {
+fn send_route_reply<L: ByteLink>(
+    companion: &mut Companion<L>,
+    req: &RouteRequest,
+    own_key: &[u8; 32],
+) -> bool {
     let Some(send) = PeerPath::reversed(
         usize::from(req.path.hash_size),
         usize::from(req.path.hops),
@@ -248,16 +252,32 @@ fn send_route_reply<L: ByteLink>(companion: &mut Companion<L>, req: &RouteReques
     };
     // **The reply echoes the request's nonce**, so answering the same question twice produces two
     // different packets: an identical one would be dropped as a duplicate by the phone's radio
-    // (`Packet::calculatePacketHash`), and the phone would learn nothing.
-    let Ok(record) =
-        ldmux_companion::build_route_reply_with_nonce(send.hash_size, send.hops, &send.bytes, &req.nonce)
-    else {
+    // (`Packet::calculatePacketHash`), and the phone would learn nothing. A flooded reply that the
+    // phone heard a second time would otherwise be discarded as its own duplicate, and a *cannot
+    // arrive* is worse than a *arrives twice* on a mesh where the first copy is what a lost hop ate.
+    let Ok(packet) = ldmux_companion::build_route_reply_flood(
+        own_key,
+        &req.peer_key,
+        send.hash_size,
+        send.hops,
+        &send.bytes,
+        &req.nonce,
+    ) else {
         return false;
     };
+    // **Flooded, because a direct reply depends on one chain and the request did not.** The request
+    // crossed repeaters as an un-scoped `REQ` flood, which travels `flood_max_unscoped` (64) hops,
+    // and MeshCore's own rule for answering one is a flooded path return
+    // (`ReplyRoute::REPLY_ROUTE_PATH_RETURN`). A direct reply is one packet along one chain: if a
+    // single repeater on it drops the packet — measured 2026-11-09 on a 1-hop link at −11 dB SNR —
+    // the phone learns nothing, waits, and asks again. This costs one transmission per repeater in
+    // range, only while the phone has no route at all, and after the first answer every record is
+    // direct again.
+    //
     // **Two seconds, not ten.** This runs inside the push handler, before the record that arrived is
     // delivered upward, so a radio that stopped answering must not hold the loop for ten seconds.
     companion
-        .send_raw_within(send.hash_size, &send.bytes, &record, Duration::from_secs(2))
+        .send_packet_within(&packet, Duration::from_secs(2))
         .is_ok()
 }
 
@@ -1507,6 +1527,15 @@ fn serve_loop<L: ByteLink>(
                     // **A peer asking where we are.** The request is a flood, so its path is what it
                     // crossed to reach us; reversed, that is our route to the peer, which means
                     // neither end has to read the radio's advert cache to hold one.
+                    // **A request for a route is proof the route in hand is dead.** The phone asks
+                    // only when it cannot send, and it cannot send because nothing it sends arrives,
+                    // so the path this end holds is not carrying anything either. Without this the
+                    // shortest-path rule kept a dead one-hop route for the full two minutes of
+                    // `PEER_ROUTE_STALE` while the peer asked every few seconds, and every answer
+                    // went back down the chain that had just failed. Marking the route unheard makes
+                    // the candidate from this request win, which is the route the phone can actually
+                    // receive on.
+                    peer_path_heard = None;
                     let candidate = PeerPath::reversed(
                         usize::from(req.path.hash_size),
                         usize::from(req.path.hops),
@@ -1551,7 +1580,8 @@ fn serve_loop<L: ByteLink>(
                         && left(budget, sent) != Some(0)
                     {
                         last_reply = Some(Instant::now());
-                        let ok = send_route_reply(&mut companion, &req);
+                        let ok =
+                            send_route_reply(&mut companion, &req, &settings.preset.public_key);
                         route_log(&format!("reply sent ok={ok}"));
                         if ok {
                             sent = sent.saturating_add(1);
@@ -2206,9 +2236,11 @@ mod tests {
         worker.join().unwrap();
     }
 
-    /// **A route request is answered with the path this end uses, and both ends end up holding
-    /// one.** This is the mechanism that replaced "flood an advert and hope", so what it writes has
-    /// to be exact: a direct `RAW_CUSTOM` record on the reversed path, carrying that same path.
+    /// **A route request is answered by a flood carrying the path this end uses.** The request
+    /// crossed repeaters to arrive, so the answer has to as well: a direct reply depends on one chain
+    /// of repeaters and one lost hop is a phone that never learns a route. This is MeshCore's own
+    /// rule for answering a flood (`ReplyRoute::REPLY_ROUTE_PATH_RETURN`), and the order on the wire
+    /// has to be exact because the phone reads it out of its receive log.
     #[test]
     fn a_route_request_is_answered_along_the_path_it_arrived_by() {
         let peer = [0x42u8; 32];
@@ -2222,7 +2254,7 @@ mod tests {
         let mut link = MemoryLink::new();
         link.push_payload(&[0x00]); // the radio answers OK
         let mut companion = Companion::new(link);
-        assert!(send_route_reply(&mut companion, &req));
+        assert!(send_route_reply(&mut companion, &req, &own));
 
         // The frame the radio is handed: `[0x3C][u16 n][0x41][0][header][path byte][path][record]`.
         let written = companion.link_mut().written.clone();
@@ -2230,13 +2262,21 @@ mod tests {
         assert_eq!(body[0], ldmux_companion::commands::SEND_RAW_PACKET);
         assert_eq!(body[1], 0, "priority");
         let view = parse_packet(&body[2..]).expect("a whole packet");
-        assert_eq!(view.route, 2, "direct: the request told us the way");
-        assert_eq!(view.payload_type, 0x0F, "RAW_CUSTOM, the record type");
-        assert_eq!(view.path.hops, 2);
-        assert_eq!(view.path.bytes, vec![0x22, 0x11], "reversed into sending order");
-        let reply = parse_route_reply(view.payload).expect("a route reply");
+        assert_eq!(view.route, 1, "flood: the request crossed repeaters, so the answer does too");
+        assert_eq!(view.payload_type, 0, "REQ, the vehicle a stock companion can flood");
+        assert_eq!(view.path.hops, 0, "it starts here and each repeater appends its own hash");
+        // The envelope is addressed to the peer, names this radio in full, and carries the reply.
+        assert_eq!(view.payload[0], peer[0], "destination hash is the peer");
+        assert_eq!(view.payload[1], own[0], "sender hash is this radio");
+        assert_eq!(&view.payload[6..38], &own, "so the phone can tell its host from any other node");
+        let reply = parse_route_reply(&view.payload[38..]).expect("a route reply");
         assert_eq!(reply.hops, 2);
         assert_eq!(reply.bytes, vec![0x22, 0x11], "the path we used, for the peer to reverse");
+        // And the phone's own reader agrees with the builder, which is the contract that matters:
+        // one end writes this layout and the other parses it out of a logged packet.
+        let parsed = ldmux_companion::parse_route_reply_flood(&body[2..], &own).expect("reads back");
+        assert_eq!(parsed.bytes, vec![0x22, 0x11]);
+        assert_eq!((parsed.hash_size, parsed.hops), (1, 2));
     }
 
     /// **One rule for both directions.** The reply carries the sender's sending-order path and the

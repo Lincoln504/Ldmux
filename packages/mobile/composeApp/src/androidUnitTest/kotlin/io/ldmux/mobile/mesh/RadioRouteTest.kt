@@ -197,6 +197,76 @@ class RadioRouteTest {
     }
 
     /**
+     * **The answer that reaches a phone at distance is a flood.**
+     *
+     * A direct reply is one packet along one chain of repeaters: measured 2026-11-09 at range, the
+     * requests went out every ten seconds and the handshake never finished because the single reply
+     * kept being lost. The host now answers the way the community firmware answers a flood
+     * (`ReplyRoute::REPLY_ROUTE_PATH_RETURN`), and the layout below is the exact contract between
+     * `build_route_reply_flood` in `crates/companion` and this reader.
+     */
+    @Test
+    fun `a flooded reply in the receive log carries the route`() {
+        val host = ByteArray(32) { 0xA1.toByte() }
+        val path = byteArrayOf(0x22, 0x11)
+        val raw = floodReply(host, travelHops = 0, pathByte = 0x02, path = path)
+        val route = RadioRoute.heardRouteReply(raw, host)
+        assertNotNull(route)
+        assertEquals(2, route!!.encoded and 0x3F)
+        assertArrayEquals("reversed into sending order", byteArrayOf(0x11, 0x22), route.bytes)
+
+        // **The travel path is skipped, not read.** A flood accumulates one hash per repeater, so by
+        // the time it arrives the packet carries three; the route is the one carried inside.
+        val travelled = floodReply(host, travelHops = 3, pathByte = 0x02, path = path)
+        assertArrayEquals(byteArrayOf(0x11, 0x22), RadioRoute.heardRouteReply(travelled, host)!!.bytes)
+
+        // Another node's reply is not our host's route, and a direct packet is not a flood.
+        val other = ByteArray(32) { 0xB2.toByte() }
+        assertNull(RadioRoute.heardRouteReply(raw, other))
+        val direct = floodReply(host, travelHops = 0, pathByte = 0x02, path = path)
+        direct[0] = 0x3E
+        assertNull(RadioRoute.heardRouteReply(direct, host))
+        // **A lost nonce is not a lost route** — the tail is four bytes of it and the path is
+        // intact, so the reply still teaches the route. Cutting into the path is what fails, and a
+        // foreign marker is refused rather than half-read.
+        assertNotNull(RadioRoute.heardRouteReply(raw.copyOfRange(0, raw.size - 4), host))
+        assertNull(RadioRoute.heardRouteReply(raw.copyOfRange(0, raw.size - 8), host))
+        val foreign = floodReply(host, travelHops = 0, pathByte = 0x02, path = path)
+        foreign[6] = 'X'.code.toByte()
+        assertNull(RadioRoute.heardRouteReply(foreign, host))
+    }
+
+    /**
+     * The host's `build_route_reply_flood`:
+     * `[flood][travel path][dest][src]["LDRR"][host key]["LDRR"][path byte][path][nonce]`.
+     *
+     * The inner record is a whole direct reply, magic included — the same bytes the direct reply
+     * carried — so one parser serves both and the two cannot drift.
+     */
+    private fun floodReply(
+        host: ByteArray,
+        travelHops: Int,
+        pathByte: Int,
+        path: ByteArray,
+    ): ByteArray {
+        val travel = ByteArray(travelHops) { (0xC0 + it).toByte() }
+        val out = ArrayList<Byte>()
+        out.add(0x01)
+        out.add((travelHops and 0x3F).toByte())
+        travel.forEach { out.add(it) }
+        out.add(0x42) // destination hash: the phone
+        out.add(host[0]) // sender hash: the host
+        "LDRR".forEach { out.add(it.code.toByte()) }
+        host.forEach { out.add(it) }
+        // The inner record is a direct reply in full, so it carries its own magic.
+        "LDRR".forEach { out.add(it.code.toByte()) }
+        out.add(pathByte.toByte())
+        path.forEach { out.add(it) }
+        listOf(7, 8, 9, 10).forEach { out.add(it.toByte()) }
+        return out.toByteArray()
+    }
+
+    /**
      * **The advert as it arrived, not as the cache remembers it.** A `0x88` log line carries the
      * whole packet with its path, so the route is learned on the event instead of on the next
      * `GET_ADVERT_PATH` — which, with a route in hand, was five minutes apart.

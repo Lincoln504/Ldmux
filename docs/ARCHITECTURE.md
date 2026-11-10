@@ -658,15 +658,30 @@ be transmitted and then ignored by every receiver. Direct means the sender must 
    a 160-entry ring with no timeout (`Packet::calculatePacketHash`, `SimpleMeshTables`), at every
    repeater and every receiver, so a byte-identical second request never leaves the first repeater.
    The reply echoes that nonce for the same reason, and the route hint carries one too.
-2. **The peer answers with its own path, direct.** A request arrives with the hops it crossed, in
-   travel order (flooded packets *append* one hash per repeater, `Mesh::routeRecvPacket`), so the
-   receiver reverses the hop groups and replies with a `RAW_CUSTOM` record: `[LDRR][path byte][path]`,
-   carrying **the path it used towards the requester**. One rule serves both directions — the reply
-   names the sender's sending-order path and the reader reverses it — so after one round trip both
-   ends hold a route. Nothing here needs a contact, a telemetry permission or a firmware change.
-   The reply is consumed on both ends before the session can see it (`mesh_serial::route_reply`,
-   `AndroidRadioLink.onRawData`): it arrives before the session exists and would otherwise fail a
-   tag and be counted as noise.
+2. **The peer answers with its own path, as a flood** (ADR-0035). A request arrives with the hops it
+   crossed, in travel order (flooded packets *append* one hash per repeater,
+   `Mesh::routeRecvPacket`), so the receiver reverses the hop groups and answers with
+   `build_route_reply_flood`: a `REQ` flood carrying `[LDRR][host key 32][LDRR][path byte][path]
+   [nonce]` — **the path it used towards the requester**, and its own radio key so the phone can tell
+   its host from any other node. One rule serves both directions: the reply names the sender's
+   sending-order path and the reader reverses it.
+   **The answer is a flood because the answer is the only thing that has to arrive.** A direct reply
+   is one packet along one chain of repeaters: measured 2026-11-09 on a single-repeater link at
+   −11 dB SNR, the phone asked every ten seconds for ten minutes, every reply was sent, and none
+   arrived. A flooded reply is forwarded by every repeater in range, which is MeshCore's own rule for
+   answering a flood (`ReplyRoute::REPLY_ROUTE_PATH_RETURN`), and a `REQ` flood travels 64 hops where
+   an advert is dropped at 8. It costs one transmission per repeater in range, only while the phone
+   has no route at all, and it keeps the request's nonce so a second answer is not a duplicate the
+   radio discards. The phone reads it out of the same receive log an advert comes through
+   (`RadioRoute.heardRouteReply`), so nothing here needs a contact, a telemetry permission or a
+   firmware change.
+   **A route is invalidated by the evidence, on both ends.** The phone drops its route when a session
+   dies on it, so the rebuild after a failure asks rather than retrying the chain that just lost the
+   records. The host treats an incoming request as proof that the path it holds is dead, because the
+   peer asks only when nothing it sends is arriving — without which the shortest-path rule kept a
+   dead one-hop route for the full two minutes of `PEER_ROUTE_STALE` while the peer asked every few
+   seconds. Unanswered requests double their interval from five seconds to a forty-second cap, with
+   ±25 % jitter, and any route learned resets it.
 3. **A route heard on the air is adopted on the event.** Both ends receive
    `PUSH_CODE_LOG_RX_DATA` (0x88) for every packet their radio hears, path included, so an advert
    from the peer updates the route the moment it arrives. The radio's own advert-path cache is
