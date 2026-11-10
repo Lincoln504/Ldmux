@@ -1020,6 +1020,7 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
         }
         let ids: Vec<u8> = self.shells.keys().copied().collect();
         for shell in ids {
+
             // **Keep the pipe full, do not build a backlog.** This used to stop looking at the
             // screen while ANY record was unacked, which cost a whole round trip per update: the
             // echo you were waiting for could not even be *built* until the previous record's ack
@@ -1237,16 +1238,17 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                 ),
                 None => continue,
             };
-            // **The waiting messages lead the frame.** The profile comes before the rows it
-            // describes, which is the order the phone needs.
+            // **The frame leads, the waiting messages follow.** A fresh attach's frame carries its
+            // own profile, which must be read before a row; the marks are a table for the launcher
+            // and can ride behind it. (The other order put the marks in front of the profile.)
             if built.is_empty() && waiting.is_empty() {
                 if let Some(a) = self.shells.get_mut(&shell) {
                     a.changed_last_tick = false;
                 }
                 continue;
             }
-            let mut messages = waiting;
-            messages.extend(built);
+            let mut messages = built;
+            messages.extend(waiting);
             let messages = messages;
             if messages.is_empty() {
                 if let Some(a) = self.shells.get_mut(&shell) {
@@ -1553,20 +1555,17 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                         // phone still learns the grid before it reads a row.
                         let mut together = if version >= MARKS_VERSION {
                             let marks = self.host.marks().await;
-                            let mut t = vec![profile];
-                            t.extend(marks_pages(marks));
-                            t
+                            marks_pages(marks)
                         } else {
-                            vec![profile]
+                            Vec::new()
                         };
-                        // **A stated grid needs no early profile, so it rides the first frame.**
-                        // The profile went first only because the phone could not ask for its grid
-                        // until it knew the pane's — a deadlock. A phone that stated its grid has
-                        // already asked, and the pane is already that size, so the profile can
-                        // travel with the rows it describes: one record for both instead of two,
-                        // 0.6 s of air on every shell opened. The differ is reset for a new
-                        // attach, so the frame that follows is a full screen and the profile
-                        // leads it — the phone still reads the grid before a row.
+                        // **A stated grid needs nothing sent early at all.** Two things used to go
+                        // first: the profile, because a phone could not ask for its grid until it
+                        // knew the pane's (a deadlock), and the marks, which only ride an answer.
+                        // A phone that stated its grid has already asked, and **the differ emits
+                        // the profile itself with a fresh attach's first frame** — so writing one
+                        // here too sent it twice, resetting the phone's mirror a second time in the
+                        // same record. What is left is the marks.
                         if stated.is_some()
                             && let Some(a) = self.shells.get_mut(&shell)
                         {
@@ -1574,7 +1573,11 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                             pending.append(&mut a.pending_messages);
                             a.pending_messages = pending;
                         } else {
-                            self.reply(shell, &together);
+                            // The held first frame: the profile must arrive before the grace runs
+                            // out, because the phone's fit waits on it.
+                            let mut now_messages = vec![profile];
+                            now_messages.append(&mut together);
+                            self.reply(shell, &now_messages);
                         }
                     }
                     _ => {
@@ -5941,12 +5944,28 @@ mod tests {
             .filter_map(|m| m.ok())
             .collect();
         assert!(
-            matches!(msgs.first(), Some(Message::Profile { cols: 46, rows: 17, .. })),
-            "the profile leads: {msgs:?}"
+            matches!(
+                msgs.first(),
+                Some(Message::Profile {
+                    cols: 46,
+                    rows: 17,
+                    ..
+                })
+            ),
+            "the profile leads the frame it describes: {msgs:?}"
         );
         assert!(
             msgs.iter().any(|m| matches!(m, Message::Rows { .. })),
             "and the screen is in the same record: {msgs:?}"
+        );
+        // **One profile per attach.** A duplicate would blank the phone's mirror a second time and
+        // make it re-fit for nothing.
+        assert_eq!(
+            msgs.iter()
+                .filter(|m| matches!(m, Message::Profile { .. }))
+                .count(),
+            1,
+            "exactly one profile: {msgs:?}"
         );
     }
 
