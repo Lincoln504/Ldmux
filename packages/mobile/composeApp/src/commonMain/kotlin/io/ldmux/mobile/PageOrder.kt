@@ -35,8 +35,29 @@ fun pagesInOrder(order: List<String>, attachable: List<Session>): List<Session> 
  * `+ shell` and the launcher both come through here so a page can never be inserted
  * in the middle of the set the user is paging through.
  */
-fun addToOrder(order: List<String>, ids: List<String>): List<String> {
+fun addToOrder(
+    order: List<String>,
+    ids: List<String>,
+    max: Int = MAX_OPEN_PAGES,
+): List<String> {
     val out = order.toMutableList()
-    for (id in ids) if (id !in out) out.add(id)
+    for (id in ids) {
+        if (out.size >= max) break
+        if (id !in out) out.add(id)
+    }
     return out
 }
+
+/**
+ * How many shells the app keeps open at once.
+ *
+ * **A limit is a promise about state, not about the host.** Every open page holds a live stream, a
+ * claim and a fitted grid, and the daemon serves as many as are asked for — so the client is the
+ * only place a number belongs. Five is what a person can page between on a phone without losing
+ * which one is which, and it is the same number on both routes: on the tailnet a page is a stream,
+ * on the radio a page is a shell this phone has claimed.
+ *
+ * Reaching it is refused with a sentence rather than silently opening a sixth: a shell created and
+ * not paged to is a shell the user cannot reach, which is worse than a refusal they can read.
+ */
+const val MAX_OPEN_PAGES = 5

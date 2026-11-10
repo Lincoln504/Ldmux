@@ -325,6 +325,15 @@ class LdmuxClient(private var config: LdmuxConfig) {
     }
 
     /** The notice has been read (or timed out); nothing more to say. */
+    /**
+     * Say something this client refused on its own, through the same notice the daemon's refusals
+     * use — one surface for "that did not happen, and here is why", wherever the refusal came from.
+     */
+    fun refuseLocally(message: String) {
+        _serverError.value = ServerError(code = "client", message = message)
+        _errorTick.value += 1
+    }
+
     fun clearServerError() {
         _serverError.value = null
     }

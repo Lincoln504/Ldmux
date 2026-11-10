@@ -506,6 +506,9 @@ impl Arq {
         if self.queue.is_empty() {
             return false;
         }
+        // Kept so an overflow can put the queue back exactly as it was: re-splitting into a queue
+        // that no longer fits its bound must not silently drop bytes.
+        let original: Vec<(u8, Vec<u8>)> = self.queue.iter().cloned().collect();
         let mut merged: Vec<(u8, Vec<u8>)> = Vec::with_capacity(self.queue.len());
         for (shell, bytes) in self.queue.drain(..) {
             match merged.last_mut() {
@@ -517,14 +520,10 @@ impl Arq {
             .iter()
             .map(|(_, bytes)| bytes.len().div_ceil(chunk).max(1))
             .sum();
-        // A queue that would no longer fit its own bound is left as it was: the carrier refusing a
-        // record is a slower failure than a queue that silently dropped bytes.
+        // A queue that would no longer fit its own bound is put back exactly as it was: the carrier
+        // refusing a record is a slower failure than a queue that silently dropped bytes.
         if count > self.cfg.queue_max {
-            for (shell, bytes) in merged {
-                for c in bytes.chunks(self.cfg.max_payload.max(1)) {
-                    self.queue.push_back((shell, c.to_vec()));
-                }
-            }
+            self.queue.extend(original);
             return false;
         }
         for (shell, bytes) in merged {

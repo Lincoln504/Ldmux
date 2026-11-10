@@ -245,7 +245,11 @@ internal fun AppContent(
         // ...and go to it. Creating a shell and staying on the screen that created it
         // is a shell the user cannot reach; this used to work only because the
         // selection was cleared, which also silently closed every other shell.
-        gotoSessionId = ids.last()
+        //
+        // **Only a shell that is actually in the order.** The order is capped, so a create that
+        // lands while five pages are open adds nothing, and paging to a page that does not exist is
+        // a blank screen. The shell still exists on the host and the launcher lists it.
+        gotoSessionId = ids.lastOrNull { it in pageOrder }
         client.clearCreated()
     }
 
@@ -339,9 +343,16 @@ internal fun AppContent(
             if (sessions.isNotEmpty()) ShellInbox.clear()
             return@LaunchedEffect
         }
-        pageOrder = addToOrder(pageOrder, listOf(id))
-        gotoSessionId = id
-        showLauncher = false
+        // **A page for the shell a notification or a mark named** — refused, with a sentence, when
+        // the pager is full, rather than landing the user on a page that is not there.
+        if (id in pageOrder || pageOrder.size < MAX_OPEN_PAGES) {
+            pageOrder = addToOrder(pageOrder, listOf(id))
+            gotoSessionId = id
+            showLauncher = false
+        } else {
+            client.refuseLocally("$MAX_OPEN_PAGES shells are open · close one first")
+            return@LaunchedEffect
+        }
         client.clearMark(id)
         ShellInbox.clear()
     }
@@ -931,7 +942,13 @@ internal fun AppContent(
                 // what ◀ ▶ walk, so opening a second shell left one page and the
                 // arrows with nowhere to go. Creating a shell is not a reason to let
                 // go of the others.
-                if (client.create(path.ifBlank { null })) {
+                // **Five is the most the pager keeps, so the sixth is refused where the user can
+                // read why.** A create the daemon accepted and the pager then dropped is a shell
+                // nobody can reach: it exists on the host, its entry is missing here, and the only
+                // way back to it is the launcher's list.
+                if (pageOrder.size >= MAX_OPEN_PAGES) {
+                    client.refuseLocally("$MAX_OPEN_PAGES shells are open · close one first")
+                } else if (client.create(path.ifBlank { null })) {
                     pendingOpens = 1
                     showLauncher = false
                 }

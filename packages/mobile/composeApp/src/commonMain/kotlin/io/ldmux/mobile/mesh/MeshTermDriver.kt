@@ -861,6 +861,19 @@ class MeshTermDriver(
             // Measured from the last record either direction carried, not from the last one that
             // arrived: silence is only evidence of a dead peer when something has been sent into
             // it and not answered.
+            // **A record that will not come back is the first evidence the route died, and it is
+            // evidence worth acting on before the session ends.** Walking or driving out of one
+            // route into another, the phone keeps sending down a path that no longer carries
+            // anything: the ARQ retries for as long as its timer allows and then tears the session
+            // down, which costs a handshake to recover. Asking for a route here repairs it in place —
+            // the link adopts the answer and the next send uses it — because a route is per record
+            // and the session does not care which path carries it. Bounded by the same backoff as
+            // every other ask, and silent while nothing is outstanding.
+            if (terminalView == null && h.pending > 0 &&
+                clock() - maxOf(lastInboundAt, lastCarriedAt) > ROUTE_REPAIR_MS
+            ) {
+                gateway.refreshRoute()
+            }
             if (terminalView == null && h.pending > 0 &&
                 clock() - maxOf(lastInboundAt, lastCarriedAt) > silenceFailureMs(gateway.routeHops)
             ) {
@@ -2230,6 +2243,16 @@ internal fun silenceFailureMs(hops: Int?): Long =
     // long route dead between a record and its answer. 63 is the firmware's ceiling (a 64-byte path
     // at one byte a hop), and the cap is above one round trip at that length.
     (60_000L + (hops ?: 0).coerceIn(0, MAX_HOPS) * 3_600L).coerceAtMost(300_000L)
+
+/**
+ * How long a record may sit outstanding before this phone asks the mesh where the host is now.
+ *
+ * Not a timeout: nothing is given up on. The ARQ's own ladder decides when a record has failed, and
+ * that is minutes away on a long route. This is the cheaper question asked first, because a route
+ * change is how a terminal behaves while its owner moves, and a repair in place costs one flood
+ * where a rebuild costs a handshake.
+ */
+internal const val ROUTE_REPAIR_MS = 20_000L
 
 /**
  * The firmware's longest legal path: a 64-byte path field, so 63 one-byte hops.

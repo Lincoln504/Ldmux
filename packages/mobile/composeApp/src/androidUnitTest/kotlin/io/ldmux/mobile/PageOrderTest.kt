@@ -52,6 +52,12 @@ class PageOrderTest {
         assertEquals(listOf("a", "b"), addToOrder(listOf("a"), listOf("b")))
         assertEquals(listOf("a", "b"), addToOrder(listOf("a", "b"), listOf("b")))
         assertEquals(listOf("a", "b", "c"), addToOrder(listOf("a"), listOf("b", "c")))
+        // **Five is the ceiling, and a shell that would be the sixth is not added.** A page the
+        // pager dropped is a shell the user cannot reach; the open action refuses before asking the
+        // daemon, and this is the invariant underneath it.
+        val five = listOf("1", "2", "3", "4", "5")
+        assertEquals(five, addToOrder(five, listOf("6")))
+        assertEquals(listOf("1", "2"), addToOrder(listOf("1"), listOf("2", "3", "4"), max = 2))
         // Two pages on one pty is two claims on one shell; the order cannot say it.
         assertEquals(listOf("a"), pagesInOrder(listOf("a", "a"), listOf(shell("a"))).map { it.id })
     }
