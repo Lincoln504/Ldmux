@@ -851,7 +851,18 @@ fun MeshTerminalScreen(
         pageOrder = picked.map { it.id }
         showList = false
         val first = picked.first().id
-        scope.launch { conn.driver.open(first) }
+        // **Tell the driver the grid before it asks for the shell.** On the list there is no
+        // surface to measure one, so an attach from here carried none: the host drew the pane at
+        // whatever size the desk left behind, then the phone's own `Resize` made it draw again
+        // (two repaints, ~4 records of air on the black-link tuple). The last grid the surface
+        // measured is the same phone in the same orientation in the common case; when it is not,
+        // the surface's first layout pass corrects it with one `Resize`, exactly as before.
+        // **One coroutine, in order.** Two launches have no order between them, and the whole point
+        // is that the grid is known *before* the attach is queued.
+        scope.launch {
+            lastGrid?.let { (c, r) -> conn.driver.setGrid(c, r) }
+            conn.driver.open(first)
+        }
     }
     // **A refusal the user did not ask for is not a page.** A resumed shell (or the launch attach)
     // can be refused while nothing was opened, and drawing the takeover there put it on the first
