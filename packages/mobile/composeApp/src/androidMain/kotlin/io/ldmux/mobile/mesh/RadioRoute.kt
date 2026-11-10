@@ -322,6 +322,9 @@ internal object RadioRoute {
     /** The four bytes that mark a session record carried by a flood. Mirrors `RECORD_FLOOD_MAGIC`. */
     const val RECORD_FLOOD_MAGIC = "LDMR"
 
+    /** The largest packet the companion frame accepts, opcode and priority byte excluded. */
+    private const val MESHCORE_PACKET_MAX = 174
+
     /**
      * A sealed session record as a `REQ` flood.
      *
@@ -362,6 +365,11 @@ internal object RadioRoute {
         }
         out[1 + codes] = ((hashSize - 1) shl 6).toByte()
         payload.copyInto(out, 2 + codes)
+        // **The builder refuses what the radio would refuse.** The Rust builder returns `TooLong`
+        // here and a test pins it; without the mirror the send throws inside the library, is caught
+        // as "not queued", and the record silently takes the direct carrier instead — the failure
+        // reading as a dead link rather than as an oversized record.
+        if (out.size > MESHCORE_PACKET_MAX) return null
         return out
     }
 

@@ -296,6 +296,16 @@ class RadioRouteTest {
         )
     }
 
+    /// The builder refuses a record the radio would refuse, instead of letting the send fall back.
+    @Test
+    fun `a record flood that does not fit is refused`() {
+        val host = ByteArray(32) { 0x11 }
+        val own = ByteArray(32) { 0x22 }
+        assertNull(
+            RadioRoute.recordFlood(1, host, own, null, byteArrayOf(0, 0, 0, 0), ByteArray(200)),
+        )
+    }
+
     /// A flood addressed to this radio is a record; the same flood is not ours to open at the sender.
     @Test
     fun `a record flood reads back only for its address`() {

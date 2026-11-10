@@ -31,6 +31,17 @@ internal object MeshRecordLimits {
      */
     const val RECEIVED_MAX = 171
 
+    /**
+     * The largest record a **flood** carrier can hold.
+     *
+     * A flooded record travels inside a `REQ` flood whose wrapper is 12 bytes — header, path byte,
+     * destination and source hashes, the marker and a fresh nonce — and the companion's packet
+     * budget is 174. A record built to [RECEIVED_MAX] (171) therefore does not fit, and the send
+     * would silently fall back to the direct carrier exactly when the flood was the only way
+     * through. Mirrors the host's `LDMUX_FLOOD_RECORD_MAX`.
+     */
+    const val FLOOD_MAX = 162
+
     /** Records the session may keep outstanding: the radio's credit window. */
     const val CREDIT_WINDOW = 8
 }

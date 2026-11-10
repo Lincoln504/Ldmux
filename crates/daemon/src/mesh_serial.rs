@@ -436,6 +436,15 @@ fn route_nonce() -> [u8; 4] {
     nanos.to_le_bytes()
 }
 
+/// The largest record a **flood** carrier can hold: the packet budget less its 12-byte wrapper
+/// (header, path byte, two hashes, magic, nonce). A record above this must go direct, so the limit
+/// published while no route is fresh is this one, not the pathless direct maximum.
+fn flood_record_limit() -> u8 {
+    u8::try_from(LDMUX_FLOOD_RECORD_MAX.min(RECEIVED_RECORD_MAX)).unwrap_or(1).max(1)
+}
+
+const LDMUX_FLOOD_RECORD_MAX: usize = 162;
+
 fn record_limit(path: Option<&PeerPath>) -> u8 {
     let used = path.map_or(0, |p| p.bytes.len());
     let max = RECORD_MAX
@@ -1195,6 +1204,13 @@ fn serve_loop<L: ByteLink>(
     }
     // The record size for the path in hand (none yet: a bare record is the largest).
     let mut published_limit = record_limit(peer_path.as_ref());
+    let mut published_hops = peer_path.as_ref().map_or(1, |p| p.hops);
+    // **The mesh measures itself.** The furthest any flood has been heard to travel is the honest
+    // estimate for a record that will ride one, where "one hop" is what made a flooded record's retry
+    // fire while it was still crossing the city.
+    let mut max_flood_hops: u8 = 1;
+    // The last flooded-record route line, so a flood-only link does not write one per record.
+    let mut last_flood_route_log: Option<Instant> = None;
     if events
         .blocking_send(Ok(Event::Limit {
             record_max: published_limit,
@@ -1246,7 +1262,16 @@ fn serve_loop<L: ByteLink>(
                 // goes as a flood, which every repeater in range forwards and only the edge case
                 // needs. Any record that arrives at all resets the count, because then the cheap
                 // carrier is working.
-                let flood_when_pathless = peer_path.is_none() && pathless_directs > 0;
+                // **A path that has stopped carrying is as good as none.** Escalating only when
+                // there is *no* path left the host answering down a stale chain for ever: measured
+                // 2026-11-10, a 0-hop path learned at home, the phone four minutes away, every reply
+                // sent direct to nobody. Staleness is the same evidence as absence — nothing has come
+                // back on it — so both count, and the counter below only increments while the direct
+                // carrier is going unanswered.
+                let path_stale = peer_path_heard.is_none_or(|t| {
+                    t.elapsed() >= route_stale(peer_path.as_ref().map_or(1, |p| usize::from(p.hops)))
+                });
+                let flood_when_pathless = (peer_path.is_none() || path_stale) && pathless_directs > 0;
                 // **Two seconds, not ten.** The firmware acknowledges `SEND_RAW_PACKET` *before* it
                 // transmits (`MyMesh.cpp:2003-2016`), so a 10-second wait bought nothing on a busy
                 // channel and meant one stalled radio held the command queue — and the route
@@ -1280,7 +1305,7 @@ fn serve_loop<L: ByteLink>(
                 };
                 let outcome = match attempt {
                     Ok(kind) => {
-                        if kind == SendOutcome::SentDirect && peer_path.is_none() {
+                        if kind == SendOutcome::SentDirect && (peer_path.is_none() || path_stale) {
                             pathless_directs = pathless_directs.saturating_add(1);
                         }
                         sent = sent.saturating_add(1);
@@ -1638,15 +1663,32 @@ fn serve_loop<L: ByteLink>(
             }
         }
 
-        let limit_now = record_limit(peer_path.as_ref());
-        if limit_now != published_limit {
+        // **What the next record will actually ride decides its size and its patience.** A record
+        // that will go by flood has 12 bytes of wrapper and crosses every repeater, so it is both
+        // smaller and slower than a direct one: publishing the direct numbers made the session build
+        // a record the flood builder refuses (163-171 bytes) and time its retry at one hop.
+        let path_fresh = peer_path.as_ref().is_some_and(|p| {
+            peer_path_heard.is_some_and(|t| t.elapsed() < route_stale(usize::from(p.hops)))
+        });
+        let limit_now = if path_fresh {
+            record_limit(peer_path.as_ref())
+        } else {
+            flood_record_limit()
+        };
+        let hops_now = if path_fresh {
+            peer_path.as_ref().map_or(1, |p| p.hops)
+        } else {
+            max_flood_hops.max(1)
+        };
+        if limit_now != published_limit || hops_now != published_hops {
             // The route changed and took record bytes with it. The session is told, so a screen
             // update is split to fit instead of being refused by the packet builder.
             published_limit = limit_now;
+            published_hops = hops_now;
             if events
                 .blocking_send(Ok(Event::Limit {
                     record_max: limit_now,
-                    hops: peer_path.as_ref().map_or(0, |p| p.hops),
+                    hops: hops_now,
                 }))
                 .is_err()
             {
@@ -1791,6 +1833,8 @@ fn serve_loop<L: ByteLink>(
                         peer_path_proven = false;
                         peer_path_adopted_at = Some(Instant::now());
                     }
+                    // A request is a flood: its travel distance is this mesh's reach right now.
+                    max_flood_hops = max_flood_hops.max(req.path.hops).max(1);
                     // **A flood is not an identity.** The request carries only the requester's
                     // radio key and the destination is matched by one hash byte, so any node on the
                     // mesh can send one addressed to us; taking its key as *the* peer displaced the
@@ -1929,7 +1973,14 @@ fn serve_loop<L: ByteLink>(
                         false,
                         &candidate,
                     ) {
-                        route_log(&format!("route from a flooded record hops={}", candidate.hops));
+                        // **Once a minute, not once a record.** A link running entirely on the
+                        // flood carrier sends every record this way, and one journal line each is a
+                        // log nobody can read; the fact that the route is being learned this way is
+                        // what matters, and it does not change per record.
+                        route_log_rare(
+                            &mut last_flood_route_log,
+                            &format!("route from a flooded record hops={}", candidate.hops),
+                        );
                         peer_path = Some(candidate);
                         peer_path_heard = Some(Instant::now());
                         // **A flooded record is proof of that chain in this direction.** The record

@@ -215,6 +215,23 @@ class AndroidRadioLink(
     /** When this radio last announced itself, so a linkless spell does not flood the mesh with them. */
     @Volatile
     private var lastAdvertAt: Long = 0L
+
+    /** When a record last rode the flood carrier, so a burst of keystrokes cannot become a broadcast. */
+    @Volatile
+    private var lastFloodAt: Long = 0L
+
+    /**
+     * The least time between two records sent by flood.
+     *
+     * A flood is forwarded by every repeater in range, so the pace is a flood's own round trip at
+     * this mesh's measured reach: long enough that typing cannot turn a terminal into a broadcast,
+     * short enough that a link at the edge still retries within a useful time.
+     */
+    private fun floodIntervalMs(): Long {
+        val preset = currentPreset()
+        val reach = maxFloodHops.coerceIn(1, 63)
+        return (2.0 * reach * RadioAirtime.timeOnAirMs(preset, 172)).toLong().coerceIn(5_000L, 90_000L)
+    }
     /** Unanswered route requests since the last route learned, for the doubling interval. */
     private var routeAsks: Int = 0
     /** Whether a record has arrived down the route in hand, which is the only proof it works. */
@@ -343,6 +360,12 @@ class AndroidRadioLink(
      */
     private val carrierPayloadMax: Int
         get() {
+            // **The carrier decides the budget, not the path in hand.** A record with no fresh route
+            // rides a flood, whose wrapper costs the same 12 bytes whatever the path — and a record
+            // built to the pathless direct maximum (171) does not fit it, so the send would silently
+            // fall back to the direct carrier exactly when the fallback was the point. Publishing the
+            // smaller ceiling makes the session split the screen update instead.
+            if (!routeIsFresh(System.currentTimeMillis())) return MeshRecordLimits.FLOOD_MAX
             val path = hostPath ?: RadioPath(0, ByteArray(0))
             // 176-byte companion frame, minus the opcode and priority byte, minus the packet
             // header and its path-length byte, minus the path itself.
@@ -856,8 +879,16 @@ class AndroidRadioLink(
         // (measured 2026-11-10: four minutes of requests that reached nobody), so the record goes as
         // a `REQ` flood instead, which every repeater forwards. The record is sealed, so a repeater
         // forwarding it reads none of it.
-        val fresh = routeIsFresh(System.currentTimeMillis())
-        if (!fresh) {
+        // **A flood is a city-wide transmission, so it is paced like one.** This used to fire on
+        // `!routeIsFresh`, which is true after two minutes on a link that is merely *idle* — so a
+        // person typing into a working shell would have sent one flood per keystroke, each forwarded
+        // by every repeater in range. The gate is now a flood's own round trip at this mesh's measured
+        // reach, so at most one record rides the expensive carrier per round trip and the session's
+        // retransmission carries the rest.
+        val floodNow = System.currentTimeMillis()
+        val fresh = routeIsFresh(floodNow)
+        if (!fresh && floodNow - lastFloodAt >= floodIntervalMs()) {
+            lastFloodAt = floodNow
             val own = radioPublicKey
             val key = hostKey.takeIf { it.size == 32 }
             if (own != null && key != null) {
