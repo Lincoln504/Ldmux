@@ -53,6 +53,15 @@ interface GatewayPort {
     val meshReach: Int get() = 1
 
     /**
+     * Whether the ldmux session is established, so the link knows what the flood carrier is for.
+     *
+     * A path that has merely gone quiet is not a dead path — the peer may have nothing to say — and
+     * only the session's own retransmission budget can tell the two apart. That fact lives in the
+     * driver, so the driver states it rather than letting the carrier guess from silence.
+     */
+    fun sessionUp(established: Boolean) {}
+
+    /**
      * Why the link is down, in the link's own words, or null when it has not said.
      *
      * A state is a category and there are five ways to be unable to reach a radio - Bluetooth off,
@@ -720,6 +729,7 @@ class MeshTermDriver(
         handshake = null
         session?.close()
         session = null
+        gateway.sessionUp(false)
         recoverAt = clock()
     }
 

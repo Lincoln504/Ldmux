@@ -236,6 +236,14 @@ class AndroidRadioLink(
     @Volatile
     private var lastInboundAt = 0L
 
+    /** Whether the *ldmux* session is established; told by the driver, which owns that fact. */
+    @Volatile
+    private var sessionUp = false
+
+    override fun sessionUp(established: Boolean) {
+        sessionUp = established
+    }
+
     /** When a record was last sent as a direct packet, so its silence can be judged. */
     @Volatile
     private var lastDirectAt = 0L
@@ -979,7 +987,13 @@ class AndroidRadioLink(
         // single zero-hop packet, which is exactly right for a neighbour; flooding before trying it
         // would put every first call on the whole city. `directSilent` already requires a completed
         // direct attempt, so this is "the cheap carrier did not answer" and nothing else.
-        val floodWanted = directSilent && floodTokens > 0
+        // **Only while there is no session.** Carrier silence is not evidence of failure when the
+        // peer simply has nothing to say: a keystroke that produces no output looks exactly like a
+        // dead path, and measured 2026-11-10 a healthy link sent a 43-byte record as a flood for that
+        // reason. What actually proves a path dead is the session's own retransmission budget running
+        // out, and the driver ends the session when that happens — after which a handshake with no
+        // session is exactly the case this carrier exists for.
+        val floodWanted = !sessionUp && directSilent && floodTokens > 0
         if (floodWanted && s.canSendRaw()) {
             lastFloodAt = floodNow
             floodTokens--

@@ -99,6 +99,15 @@ interface RadioLink {
     fun meshReach(): Int = 1
 
     /**
+     * Whether the ldmux session is established, so the link knows when the flood carrier is for.
+     *
+     * A path that has merely gone quiet is not a dead path — the peer may have nothing to say — and
+     * only the session's own retransmission budget can tell the two apart. That fact lives in the
+     * driver, so the driver states it.
+     */
+    fun sessionUp(established: Boolean) {}
+
+    /**
      * This radio's own public key, once the companion handshake has run.
      *
      * Null before that: the key comes from `SELF_INFO`, which is the first answer the radio gives.
@@ -597,6 +606,7 @@ class MeshRadioGateway(private val link: RadioLink) : GatewayPort {
     override val routeHops: Int? get() = link.routeHops
     override val routeFresh: Boolean get() = link.routeFresh()
     override val meshReach: Int get() = link.meshReach()
+    override fun sessionUp(established: Boolean) = link.sessionUp(established)
     override val radioPublicKey: ByteArray? get() = link.radioPublicKey
 
     override suspend fun send(record: ByteArray): MeshSendResult =
