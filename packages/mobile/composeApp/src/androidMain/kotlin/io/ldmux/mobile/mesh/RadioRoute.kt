@@ -154,6 +154,90 @@ internal object RadioRoute {
     }
 
     /**
+     * A route request heard on the air, when it is addressed to this radio.
+     *
+     * **The host asks this radio for a route too, and it has to, or a restarted daemon can never
+     * answer.** The host learns where the phone is from a flood — its advert or its own request —
+     * and a *direct* packet's path is consumed by the repeaters that carry it, so a session record
+     * arriving from the phone teaches it nothing. After a daemon restart the host holds no path, and
+     * the phone holds a fresh one and therefore never asks: the phone sends `msg1`, the host cannot
+     * address `msg2`, and nothing moves until the phone's own handshake ladder gives up and drops
+     * the route. Answering the host's request closes that in one round trip.
+     *
+     * Returns the requester's radio key and the nonce to echo, or null when the packet is not a
+     * request addressed to us.
+     */
+    fun heardRouteRequest(raw: ByteArray, ownKey: ByteArray, scope: String?): Request? {
+        if (ownKey.size != 32) return null
+        val packet = parse(raw) ?: return null
+        if (!packet.isFlood || packet.payloadType != PAYLOAD_REQ) return null
+        val payload = packet.payload
+        if (payload.size < 2 + REQUEST_MAGIC.size + 32 + 4) return null
+        if (payload[0] != ownKey[0]) return null
+        for (i in REQUEST_MAGIC.indices) if (payload[2 + i] != REQUEST_MAGIC[i]) return null
+        val host = payload.copyOfRange(6, 38)
+        val nonce = payload.copyOfRange(38, 42)
+        // **The answer goes back the way the question came.** A dense mesh denies unscoped floods,
+        // so an unscoped answer to a scoped request is dropped before it crosses the region. Only a
+        // scope this end can name is usable: this radio's own, or a public region whose key
+        // reproduces the request's code.
+        val scopeName = when {
+            packet.transportCode0 == null -> null
+            scope != null && transportCode(scopeKey(scope), packet.payloadType, payload) == packet.transportCode0 -> scope
+            else -> heardScope(raw, KNOWN_SCOPE_TAGS)
+        }
+        return Request(host, nonce, scopeName)
+    }
+
+    /**
+     * A request heard on the air: who asked, the nonce to echo, and the scope to answer under.
+     *
+     * [scope] is null for an unscoped request and for one whose region this end cannot name — the
+     * answer then goes unscoped, which is what the request will have been able to cross.
+     */
+    internal class Request(val hostKey: ByteArray, val nonce: ByteArray, val scope: String?)
+
+    /**
+     * The answer to a heard request: a flooded reply carrying **this radio's** path to the host.
+     *
+     * The layout is the host's `build_route_reply_flood` with the roles swapped, so the host reads it
+     * with `parse_route_reply_flood(packet, phone_key)` and reverses the carried path into its own.
+     */
+    fun replyFlood(ownKey: ByteArray, request: Request, path: Path): ByteArray? {
+        if (ownKey.size != 32) return null
+        if (path.bytes.size != (path.encoded and 0x3F) * (((path.encoded ushr 6) and 0x03) + 1)) return null
+        // The body first, because a scoped packet's transport code is an HMAC over exactly these
+        // bytes (`HMAC(key, payloadType || payload)`, cut to two little-endian bytes).
+        val body = ArrayList<Byte>(2 + 4 + 32 + 4 + 1 + path.bytes.size + 4)
+        body.add(request.hostKey[0]) // destination hash: the host
+        body.add(ownKey[0]) // sender hash: this radio
+        REPLY_MAGIC.forEach { body.add(it) }
+        ownKey.forEach { body.add(it) }
+        REPLY_MAGIC.forEach { body.add(it) }
+        body.add(path.encoded.toByte())
+        path.bytes.forEach { body.add(it) }
+        request.nonce.forEach { body.add(it) }
+        val payload = body.toByteArray()
+        val out = ArrayList<Byte>(8 + payload.size)
+        val scope = request.scope
+        if (scope == null) {
+            out.add(0x01) // ROUTE_TYPE_FLOOD
+            // The reply's own travel path, empty at origin, at the width the carried path uses.
+            out.add((path.encoded and 0xC0).toByte())
+        } else {
+            out.add(0x00) // ROUTE_TYPE_TRANSPORT_FLOOD: four code bytes before the path
+            val code = transportCode(scopeKey(scope), PAYLOAD_REQ, payload)
+            out.add((code and 0xFF).toByte())
+            out.add(((code ushr 8) and 0xFF).toByte())
+            out.add(0)
+            out.add(0) // the second slot is reserved, as the firmware leaves it
+            out.add((path.encoded and 0xC0).toByte())
+        }
+        payload.forEach { out.add(it) }
+        return out.toByteArray()
+    }
+
+    /**
      * The route a **flooded** reply heard in a receive-log (`0x88`) packet carries.
      *
      * **This is the answer that reaches a phone at distance, and it is why a route request is

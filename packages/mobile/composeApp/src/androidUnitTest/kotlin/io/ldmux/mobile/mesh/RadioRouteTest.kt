@@ -237,6 +237,62 @@ class RadioRouteTest {
     }
 
     /**
+     * **The phone answers the host's request, and the two readers agree.** The host cannot learn
+     * where the phone is from a session record (a direct packet's path is consumed in transit), so
+     * after a daemon restart it asks; this radio answers with its own path and the host reverses it
+     * exactly as this one reverses a reply.
+     */
+    @Test
+    fun `a request from the host is answered with this radio's path`() {
+        val host = ByteArray(32) { 0xA1.toByte() }
+        val phone = ByteArray(32) { 0xB2.toByte() }
+        val path = byteArrayOf(0x11, 0x22)
+        // The host asks *us*: the destination hash is this radio's, the sender hash is the host's.
+        val request = RadioRoute.routeRequest(1, phone, host)
+        assertNotNull(request)
+        val heard = RadioRoute.heardRouteRequest(request!!, phone, null)
+        assertNotNull("a request addressed to us is ours", heard)
+        val reply = RadioRoute.replyFlood(phone, heard!!, RadioRoute.Path(0x02, path))
+        assertNotNull(reply)
+        // Read it back the way the *host* would, with the phone's key as the sender.
+        val route = RadioRoute.heardRouteReply(reply!!, phone)
+        assertNotNull(route)
+        assertArrayEquals("the host reverses into its own", byteArrayOf(0x22, 0x11), route!!.bytes)
+        // The same request read by another radio is not that radio's.
+        assertNull(RadioRoute.heardRouteRequest(request, ByteArray(32) { 0x01 }, null))
+        // And a request we send to the host is not ours to answer.
+        assertNull(RadioRoute.heardRouteRequest(RadioRoute.routeRequest(1, host, phone)!!, phone, null))
+    }
+
+    /**
+     * **The answer goes back under the question's scope.** A mesh that denies unscoped floods drops
+     * an unscoped answer before it crosses the region, so a scoped request must be answered scoped,
+     * with the code recomputed over the answer's own bytes.
+     */
+    @Test
+    fun `a scoped request is answered under the same scope`() {
+        val host = ByteArray(32) { 0xA1.toByte() }
+        val phone = ByteArray(32) { 0xB2.toByte() }
+        val scoped = RadioRoute.routeRequest(1, phone, host, RadioRoute.scopeKey("us-co"))
+        assertNotNull(scoped)
+        val heard = RadioRoute.heardRouteRequest(scoped!!, phone, "us-co")
+        assertNotNull(heard)
+        assertEquals("us-co", heard!!.scope)
+        val reply = RadioRoute.replyFlood(phone, heard, RadioRoute.Path(0x02, byteArrayOf(0x11, 0x22)))
+        assertNotNull(reply)
+        assertEquals("ROUTE_TYPE_TRANSPORT_FLOOD", 0x00, reply!![0].toInt() and 0x03)
+        // The four code bytes precede the travel path byte.
+        val code = (reply[1].toInt() and 0xFF) or ((reply[2].toInt() and 0xFF) shl 8)
+        val payload = reply.copyOfRange(6, reply.size)
+        assertEquals(RadioRoute.transportCode(RadioRoute.scopeKey("us-co"), 0, payload), code)
+        // And it still reads back as a route.
+        assertArrayEquals(
+            byteArrayOf(0x22, 0x11),
+            RadioRoute.heardRouteReply(reply, phone)!!.bytes,
+        )
+    }
+
+    /**
      * The host's `build_route_reply_flood`:
      * `[flood][travel path][dest][src]["LDRR"][host key]["LDRR"][path byte][path][nonce]`.
      *

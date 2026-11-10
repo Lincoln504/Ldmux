@@ -1057,6 +1057,12 @@ fn serve_loop<L: ByteLink>(
     let mut last_reply: Option<Instant> = None;
     // When the peer's route was last asked for, so a quiet link does not ask on every tick.
     let mut last_route_ask: Option<Instant> = None;
+    // The last record heard from the peer, and the last one this end handed to the radio. They are
+    // the only evidence the carrier has that a session is trying to cross: without a route it can
+    // neither send nor be understood, so a pathless host asks the peer while one of them is recent
+    // and stays quiet when nothing has moved for a couple of minutes.
+    let mut last_peer_record: Option<Instant> = None;
+    let mut last_outbound: Option<Instant> = None;
     // When the last advert went out; `None` means none yet, so the first idle moment sends one.
     let mut last_advert: Option<Instant> = None;
     let advert_every = advert_interval();
@@ -1115,6 +1121,11 @@ fn serve_loop<L: ByteLink>(
 
         match commands.recv_timeout(COMMAND_WAIT) {
             Ok(Command::Record { seq, record }) => {
+                // Something is trying to cross: the asker above uses this, and the last record
+                // heard from the peer, to decide whether a pathless host should ask at all. Without
+                // it a host with no phone in range floods on a timer for ever; with it, nothing
+                // moved for two minutes means nothing wants to.
+                last_outbound = Some(Instant::now());
                 // **The reply follows the path the request arrived by.** Without it a phone behind
                 // a repeater is unreachable: a direct packet with no path travels only as far as
                 // this radio's own antenna.
@@ -1282,18 +1293,42 @@ fn serve_loop<L: ByteLink>(
                     // peer for a route: the reply is one direct record and it crosses whatever
                     // distance the mesh actually carries, which an advert does not (a repeater
                     // drops an advert after 8 hops by default).
-                    // **The host does not ask for a route, because nothing can answer it.**
+                    // **The host asks too, because a restarted daemon otherwise cannot answer.**
                     //
-                    // A route request is a flooded `REQ` payload, and the only end that parses one
-                    // is the daemon's own reader: the phone's `RadioRoute` builds requests and
-                    // parses *replies*, and a `REQ` never reaches it as a raw record. So a request
-                    // sent from here was a dead letter — one flood plus a neighbourhood's forwarding
-                    // every ten seconds with no route, answered by nobody, for as long as the daemon
-                    // ran without a phone in range.
+                    // A direct packet's path is consumed by the repeaters that carry it, so the
+                    // session records arriving from the phone teach this end nothing about where it
+                    // is. After a restart the host holds no route, and a phone holding a fresh one
+                    // never asks: the phone sends `msg1`, this end cannot address `msg2`, and
+                    // nothing moves until the phone's handshake ladder gives up and drops the route
+                    // — three unanswered handshakes, a minute of air, for a path the phone already
+                    // knew. The phone now answers a request with a flooded reply (it has the same
+                    // reader this end has), so asking is one round trip instead.
                     //
-                    // The route comes from the phone's own request (this end answers it directly, and
-                    // the request's path is the way back), and freshness now comes from a record
-                    // actually arriving. A host with no route and no traffic to send needs neither.
+                    // **Only while something is trying to cross**, because a host with no phone in
+                    // range and nothing to send would otherwise flood on a timer for ever.
+                    if peer_path.is_none()
+                        && (last_peer_record.is_some_and(|t| t.elapsed() < Duration::from_secs(120))
+                            || last_outbound.is_some_and(|t| t.elapsed() < Duration::from_secs(120)))
+                        && left(budget, sent) != Some(0)
+                        && let Some(key) = peer_radio
+                        && let Ok(packet) = ldmux_companion::build_route_request_in_scope(
+                            settings.preset.hash_size,
+                            &key,
+                            &settings.preset.public_key,
+                            scope.as_ref(),
+                        )
+                    {
+                        let ok = companion
+                            .send_packet_within(&packet, Duration::from_secs(2))
+                            .is_ok();
+                        route_log(&format!("asked the peer for a route ok={ok}"));
+                        if ok {
+                            sent = sent.saturating_add(1);
+                            if let Some(path) = settings.window_record.as_deref() {
+                                save_window(path, window_start_unix, sent);
+                            }
+                        }
+                    }
                 }
                 // The countdown, refreshed while the link is idle. Not a transmission: it is a
                 // message to this process only, and it is what lets the session see the hour roll
@@ -1715,6 +1750,7 @@ fn serve_loop<L: ByteLink>(
                         if peer_path.is_some() {
                             peer_path_heard = Some(Instant::now());
                         }
+                        last_peer_record = Some(Instant::now());
                         if events
                             .blocking_send(Ok(Event::Recv(incoming.record)))
                             .is_err()

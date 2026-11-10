@@ -188,6 +188,8 @@ class AndroidRadioLink(
     private var lastRequestAt: Long = 0L
     /** Unanswered route requests since the last route learned, for the doubling interval. */
     private var routeAsks: Int = 0
+    /** When this radio last answered a request from the host, so one ask cannot become a storm. */
+    private var lastAnsweredAt: Long = 0L
 
     /**
      * The **flood scope** this radio broadcasts under, as the radio itself reports it.
@@ -205,6 +207,10 @@ class AndroidRadioLink(
 
     @Volatile
     private var adoptedScope: ByteArray? = null
+    /** The name behind [adoptedScope], so a flood can be answered under the scope it arrived on. */
+    private var adoptedScopeName: String? = null
+    /** The radio's own region name, from `CMD_GET_DEFAULT_FLOOD_SCOPE`; null when it has none. */
+    private var radioScopeName: String? = null
 
     /** When an overheard scoped flood was last tested against the known region names. */
     @Volatile
@@ -406,6 +412,13 @@ class AndroidRadioLink(
                         // phone that never learns a route.
                         RadioRoute.heardRouteReply(raw, host)?.let { adoptRoute(it, "flooded reply") }
                             ?: RadioRoute.heardAdvert(raw, host)?.let { adoptRoute(it, "advert") }
+                        // **A request from the host is answered, because the host cannot learn where
+                        // we are any other way.** A direct packet's path is consumed in transit, so
+                        // the session records we send teach it nothing: after a daemon restart it
+                        // holds no route to us, and a phone that holds a fresh one never asks. This
+                        // is the one round trip that ends that standoff.
+                        // Off the listener's thread: the answer is a send, which suspends.
+                        pathScope?.launch { answerRequest(raw) }
                     }
                     // **Learn the mesh's scope from a packet it scoped.** A scoped flood proves the
                     // region is carried by the repeaters that forwarded it, and the region's name is
@@ -419,6 +432,7 @@ class AndroidRadioLink(
                         scopeCheckAt = now
                         RadioRoute.heardScope(raw, RadioRoute.KNOWN_SCOPE_TAGS)?.let { name ->
                             adoptedScope = RadioRoute.scopeKey(name)
+                            adoptedScopeName = name
                             appLog("mesh scope $name learned from the mesh")
                         }
                     }
@@ -449,6 +463,7 @@ class AndroidRadioLink(
                 }
                 is DefaultFloodScopeFrame -> {
                     radioScope = frame.scopeKey()
+                    radioScopeName = frame.scopeName()
                     appLog("mesh radio scope: ${frame.scopeName() ?: "none (unscoped floods)"}")
                     scopeDone?.complete(Unit)
                 }
@@ -1018,6 +1033,26 @@ class AndroidRadioLink(
     }
 
     /** A route heard recently enough to try before asking again. */
+    /**
+     * Answer a route request from the host with our own path, if we have one.
+     *
+     * Rate-limited like the host's own answers, and silent when this radio has no route to give: a
+     * reply that carries nothing is a record of air that teaches the host the same nothing.
+     */
+    private suspend fun answerRequest(raw: ByteArray) {
+        val own = radioPublicKey ?: return
+        val now = System.currentTimeMillis()
+        if (now - lastAnsweredAt < REQUEST_ANSWER_FLOOR_MS) return
+        val scope = radioScopeName ?: adoptedScopeName
+        val request = RadioRoute.heardRouteRequest(raw, own, scope) ?: return
+        val path = advertPath ?: contactPath ?: return
+        val reply = RadioRoute.replyFlood(own, request, RadioRoute.Path(path.encoded, path.bytes))
+            ?: return
+        lastAnsweredAt = now
+        val result = runCatching { send(reply) }.getOrNull()
+        appLog("mesh route answered: ${result?.outcome ?: "failed"}")
+    }
+
     /** How long to wait before asking for a route again: doubling, jittered, capped. */
     private fun requestIntervalMs(): Long {
         val step = 1L shl minOf(routeAsks, 3)
@@ -1327,6 +1362,9 @@ class AndroidRadioLink(
          * settled on.
          */
         const val ROUTE_TRUST_MS = 60_000L
+
+        /** The least time between two answers to the host's requests. */
+        const val REQUEST_ANSWER_FLOOR_MS = 5_000L
         /** The least gap between two route requests: a flood every repeater in range repeats. */
         const val ROUTE_REQUEST_FLOOR_MS = 5_000L
         /** How long a route request's own `OK` may take. */

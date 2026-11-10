@@ -732,6 +732,16 @@ be transmitted and then ignored by every receiver. Direct means the sender must 
    name a region, and a match is proof that the repeaters in the path carry it. A radio with no scope
    and no proof stays unscoped. Nothing is a setting, and `ldmux mesh status` prints the one line
    that says which of those happened.
+   **The precedence is fixed and it follows the operator, never ldmux**: an explicit pin
+   (`LDMUX_MESH_SCOPE`, or `off` for a deliberately unscoped link) beats the radio's own answer,
+   which beats a learned tag, which beats unscoped. A learned tag is adopted only when the radio has
+   none and only after **two** scoped floods from different payloads agree, and it is written to the
+   radio only once something has answered under it — a region name is a community's decision, and the
+   only part ldmux may contribute is the observation that this mesh is already using it.
+   **Both directions of discovery use the scope in force.** A request goes out under this end's
+   scope, and the answer goes back under **the request's** — `ReplyScope::REPLY_SCOPE_REQUEST`, since
+   the asking end may have scoped a region this end cannot name. A phone answers the host's request
+   the same way, so the two ends cannot disagree about what a round trip looks like.
 
 Consequences worth knowing:
 
