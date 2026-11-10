@@ -1659,6 +1659,27 @@ fn serve_loop<L: ByteLink>(
                     }
                 } else if let Some(view) = frame_packet(&frame)
                     && view.is_flood()
+                    && view.payload_type == 0x00
+                    // **The peer's answer to our own request, as a flood.** A direct reply depends on
+                    // one chain of repeaters and this end's request may have crossed several, so the
+                    // phone answers the way this end answers: flooded. Without this branch the answer
+                    // was on the air and unread, which is the standoff it exists to end.
+                    && let Some(key) = peer_radio
+                    && let Some(packet) = frame.get(3..)
+                    && let Some(candidate) = ldmux_companion::parse_route_reply_flood(packet, &key)
+                    && let Some(reply) = PeerPath::reversed(
+                        usize::from(candidate.hash_size),
+                        usize::from(candidate.hops),
+                        &candidate.bytes,
+                    )
+                {
+                    // A request is proof the old route is dead, and this is its answer: the path the
+                    // peer can be reached on now.
+                    route_log(&format!("reply from a flood hops={}", reply.hops));
+                    peer_path = Some(reply);
+                    peer_path_heard = Some(Instant::now());
+                } else if let Some(view) = frame_packet(&frame)
+                    && view.is_flood()
                     && view.payload_type == 0x04
                     && peer_radio.is_some_and(|k| view.payload.starts_with(&k))
                 {
@@ -1699,16 +1720,12 @@ fn serve_loop<L: ByteLink>(
                             &hex_key(&key)[..8],
                             peer_path.is_some()
                         ));
-                        // **A hint is already a working route, and nothing can answer a request.**
-                        // It arrives as a direct record, which means the peer reaches this radio;
-                        // an empty path is therefore the *correct* way to answer a direct neighbour,
-                        // and the advert cache is re-read below for a path when the peer is not one.
+                        // **A hint is already a working route.** It arrives as a direct record,
+                        // which means the peer reaches this radio; an empty path is therefore the
+                        // *correct* way to answer a direct neighbour, and the advert cache is re-read
+                        // below for a path when the peer is not one. Nothing is asked here: the asker
+                        // runs on its own timer, only while there is no route and traffic has moved.
                         //
-                        // A flooded request from here would be a dead letter: only the daemon parses
-                        // a request, and the phone builds requests and parses *replies*. Measured on
-                        // a direct-neighbour link this was one flood per hint, floored at ten
-                        // seconds, for as long as the peer kept trying to start a session.
-
                         // Remember who the peer is, so a restarted daemon can address it.
                         if settings.peer_key != Some(key) {
                             settings.peer_key = Some(key);

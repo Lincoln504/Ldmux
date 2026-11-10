@@ -76,6 +76,21 @@ Three rules keep the extra air contained:
   too, so it covers the neighbour case at the same cost, and two reply paths would be two things to
   keep correct.
 
+## Either end may ask, and both answer
+
+A direct packet's path is consumed by the repeaters that carry it, so a session record arriving from
+the phone teaches the host nothing about where the phone is. That is correct and unavoidable, and it
+has a consequence the first version missed: **after a daemon restart the host holds no route while the
+phone holds a fresh one**, and a phone holding a fresh route never asks. The phone would send `msg1`
+into a host that could not address `msg2`, and nothing moved until the phone's handshake ladder gave
+up and dropped its route — three unanswered handshakes and a minute of air, for a path the phone
+already knew. The first version's own code called a request from the host "a dead letter".
+
+So the mechanism is symmetric: **each end reads a request out of its receive log and answers it with a
+flooded reply**, and the host asks while it has no route and traffic has moved either way within two
+minutes. An idle pathless host stays quiet, because a host with no phone in range must not flood on a
+timer.
+
 ## The answer goes back under the request's scope
 
 A dense mesh configures its repeaters to deny unscoped floods (`region denyf *`), and some cap them

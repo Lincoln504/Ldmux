@@ -681,6 +681,12 @@ be transmitted and then ignored by every receiver. Direct means the sender must 
    over the reply's own payload, so it is computed rather than copied. The order is this radio's own
    scope when the request's code matches it, then a public region whose key reproduces the code,
    then unscoped.
+   **Either end can ask, and both answer.** A direct packet's path is consumed by the repeaters that
+   carry it, so the session records arriving from the phone teach the host nothing about where it is:
+   after a daemon restart the host holds no route while the phone holds a fresh one and therefore
+   never asks. Both ends read a request out of their receive log and answer it with a flooded reply,
+   and the host asks while it has no route and traffic has moved either way within two minutes — one
+   round trip instead of three unanswered handshakes and a dropped route.
    **A route is invalidated by the evidence, on both ends.** The phone drops its route when a session
    dies on it, so the rebuild after a failure asks rather than retrying the chain that just lost the
    records. The host treats an incoming request as proof that the path it holds is dead, because the
