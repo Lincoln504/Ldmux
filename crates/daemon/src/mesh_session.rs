@@ -103,6 +103,8 @@ pub struct SessionHost {
     record_limit: usize,
     /// Repeaters on the route to the phone, from the carrier's last `Limit`. See [`Self::set_hops`].
     hops: u8,
+    /// When the live session was installed, so a replacement can say how long it lasted.
+    session_since: Option<std::time::Instant>,
     pub inbound: VecDeque<(u8, Vec<u8>)>,
     /// Records dropped because the queue was full. Counted so the loss is visible.
     pub dropped_inbound: u64,
@@ -130,6 +132,7 @@ impl SessionHost {
             next_index: 1,
             record_limit,
             hops: 1,
+            session_since: None,
             inbound: VecDeque::new(),
             dropped_inbound: 0,
             refused: 0,
@@ -268,6 +271,20 @@ impl SessionHost {
             self.airtime_ms,
         ) {
             Ok(session) => {
+                // **A replaced session says how long it lived.** The phone re-handshakes for two very
+                // different reasons — it lost a record or it decided the link was dead — and the
+                // difference is the age of the session it abandoned plus how far away it was.
+                // Without this line the journal only shows a rising handshake count, which is what
+                // an investigation at range had to work from on 2026-11-09.
+                if self.session.is_some() {
+                    let lived = self.session_since.map_or(0, |t| t.elapsed().as_secs());
+                    eprintln!(
+                        "ldmuxd: session replaced after {lived}s (hops={}, {})",
+                        self.hops,
+                        self.last_error.as_deref().unwrap_or("no error recorded")
+                    );
+                }
+                self.session_since = Some(std::time::Instant::now());
                 self.pairing = updated;
                 self.session = Some(session);
                 self.outbox.clear();

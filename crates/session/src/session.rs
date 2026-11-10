@@ -141,8 +141,20 @@ impl Session {
             return;
         }
         self.record_limit = record_limit;
-        self.arq
-            .set_config(Config::for_payload(app - arq::HEADER).with_airtime(self.airtime_ms));
+        // **The path survives a resize.** The first draft rebuilt the config from the payload alone,
+        // which silently reset the retransmission timer to the direct-neighbour value (six airtimes,
+        // 3.6 s at the public tuple) while the route was twenty hops long: every record was
+        // retransmitted while its first copy was still crossing the mesh.
+        self.arq.set_config(
+            Config::for_payload(app - arq::HEADER)
+                .with_airtime(self.airtime_ms)
+                .with_path(self.airtime_ms, self.hops),
+        );
+        // **What is still queued is re-split at the new size.** Otherwise a shrink left chunks that
+        // can never fit, which the carrier refused on every attempt — the loop that ended in a
+        // reconnect, and the reconnect is what the operator saw as the link dropping at range.
+        let chunk = self.arq.config().max_payload;
+        self.arq.resize_pending(chunk);
     }
 
     /// The record limit this session was sized to.

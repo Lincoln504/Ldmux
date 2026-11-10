@@ -713,28 +713,35 @@ class MeshTermDriver(
     }
 
     /**
-     * Re-handshake when the route has grown, because a record's size is a property of the path.
+     * Re-size the session to what the link can carry **now** — one path, two callers.
      *
-     * **The sealed record size is fixed at the handshake**, and a raw send carries the path inside
-     * the same frame, so walking out of direct range onto a repeater chain shrinks what the link can
-     * carry while the session keeps sealing at the old size. The packet builder then refuses every
-     * record (`TooLong`), each one is reported as a refusal, and the session retries the same
-     * oversized record until the silence bound ends it — a rebuild that would have happened at once
-     * had the size been re-read. A session that grew is left alone: a smaller record still fits.
+     * **The tick** (`force = false`) only ever shrinks, waits for an empty queue, and respects the
+     * floor: nothing is wrong, the route simply got longer, and a resize costs no air.
+     *
+     * **A refusal** (`force = true`) is the record that was just refused asking for it. It cannot
+     * wait for an empty queue, because the queued record *is* the one that does not fit. If the limit
+     * has not moved and a record was still refused, the session holds something sealed at a size the
+     * radio will not take and re-splitting cannot reach it, so one rekey is the cure, floored so a
+     * burst of refusals cannot become a handshake storm.
+     *
+     * **A handshake is only for keys.** The size is a property of the route, so the tick path resizes
+     * in place — a handshake at range is a dozen records of air, msg1 out, msg2 back, msg3 out, every
+     * one of them forwarded by every repeater, to change one number the radio already told us.
      */
-    private fun resizeIfRouteGrew(health: SessionHealth) {
+    private fun resizeToLink(force: Boolean, pending: Int = 0) {
+        if (session == null) return
         val now = gateway.uplinkRecordMax
-        if (!needsResize(sessionLimit, now)) return
-        if (health.pending > 0) return
-        if (clock() - lastResizeAt < RESIZE_FLOOR_MS) return
-        lastResizeAt = clock()
+        if (now <= 0) return
+        if (!needsResize(sessionLimit, now)) {
+            if (!force || clock() - lastResizeAt < RESIZE_FLOOR_MS) return
+            lastResizeAt = clock()
+            rekey()
+            return
+        }
+        if (!force && (pending > 0 || clock() - lastResizeAt < RESIZE_FLOOR_MS)) return
         sessionLimit = now
-        // **Re-size, do not re-handshake.** The size is a property of the route, not of the keys, and
-        // a handshake at range is a dozen records of air — msg1 out, msg2 back, msg3 out, each one
-        // forwarded by every repeater — to change one number the radio already told us. The session
-        // is resized in place, and the host does exactly the same thing from its carrier's own limit.
-        val s = session
-        if (s != null) s.setRecordLimit(now) else rekey()
+        lastResizeAt = clock()
+        session?.setRecordLimit(now)
     }
 
     /**
@@ -842,7 +849,7 @@ class MeshTermDriver(
             // A session that has spent its nonce budget starts a new one. Nothing is wrong with
             // the link, so this is not [failed]: the screen stays up and only the keys change.
             if (h.needsRekey && terminalView == null) rekey()
-            if (terminalView == null) resizeIfRouteGrew(h)
+            if (terminalView == null) resizeToLink(force = false, pending = h.pending)
             if (terminalView == null) followRoute(h)
             if (h.failed && terminalView == null) failed(MeshLinkState.SessionFailed, "the ARQ gave up a record")
             // **A record the host never answers is a dead link, and the screen must say so.** With
@@ -2056,7 +2063,13 @@ class MeshTermDriver(
             // tells the user the path is unusable; this is a record that did not fit, which the
             // carrier's own limit should make impossible — so it is reported as a refusal, which
             // retries, rather than as a link that needs a shorter route.
-            MeshSendOutcome.ErrTooLong -> failed(MeshLinkState.Refused)
+            // **A record that no longer fits is a size problem, not a dead link.** This used to end
+            // the connection, and at range that is exactly wrong: a path that grows shrinks each
+            // record by a byte a hop, so one record sealed before the resize tore down a working
+            // link — measured 2026-11-09 at twenty-nine hops as eight handshakes and a link that
+            // kept dropping. The session is re-sized to what the link carries now, its queued tail
+            // re-split, and the connection stays; the refused attempt is given back just below.
+            MeshSendOutcome.ErrTooLong -> resizeToLink(force = true)
             // Busy, a local timeout or an unknown answer: the record was not acknowledged by the
             // host, so the session's own bounded retransmission covers it.
             else -> {}

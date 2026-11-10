@@ -491,6 +491,53 @@ impl Arq {
         Ok(())
     }
 
+    /// **Re-split what is still queued, after the record size shrank.**
+    ///
+    /// A repeater's hops come out of the same radio frame as the record, so a route that grows
+    /// shrinks each record by one byte a hop. Chunks are split when they are queued, so a queue
+    /// split at 172 bytes keeps chunks that no longer fit — the carrier refuses them, gives the
+    /// attempt back, and they are refused again: a loop that used to end in a reconnect. Merging
+    /// adjacent chunks of the *same shell* is lossless, so the tail can be re-split at the new size
+    /// with nothing lost. Records already in flight cannot be re-split; the caller handles those.
+    ///
+    /// Returns whether the queue changed.
+    pub fn resize_pending(&mut self, chunk: usize) -> bool {
+        let chunk = chunk.max(1);
+        if self.queue.is_empty() {
+            return false;
+        }
+        let mut merged: Vec<(u8, Vec<u8>)> = Vec::with_capacity(self.queue.len());
+        for (shell, bytes) in self.queue.drain(..) {
+            match merged.last_mut() {
+                Some((s, acc)) if *s == shell => acc.extend_from_slice(&bytes),
+                _ => merged.push((shell, bytes)),
+            }
+        }
+        let count: usize = merged
+            .iter()
+            .map(|(_, bytes)| bytes.len().div_ceil(chunk).max(1))
+            .sum();
+        // A queue that would no longer fit its own bound is left as it was: the carrier refusing a
+        // record is a slower failure than a queue that silently dropped bytes.
+        if count > self.cfg.queue_max {
+            for (shell, bytes) in merged {
+                for c in bytes.chunks(self.cfg.max_payload.max(1)) {
+                    self.queue.push_back((shell, c.to_vec()));
+                }
+            }
+            return false;
+        }
+        for (shell, bytes) in merged {
+            if bytes.is_empty() {
+                self.queue.push_back((shell, Vec::new()));
+            }
+            for c in bytes.chunks(chunk) {
+                self.queue.push_back((shell, c.to_vec()));
+            }
+        }
+        true
+    }
+
     /// End the session. The close record is emitted once, after everything queued has been
     /// sent and acknowledged, budget permitting.
     pub fn close(&mut self) {
@@ -899,5 +946,37 @@ impl Arq {
             payload: Vec::new(),
             retransmit: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod resize_tests {
+    use super::*;
+
+    /// **A shrink re-splits what is queued, and loses nothing.** A route that grows takes one byte a
+    /// hop out of every record, so a queue split at 148 bytes holds chunks the radio then refuses;
+    /// merging adjacent chunks of one shell is lossless, so the tail can be re-split at the new size.
+    #[test]
+    fn a_smaller_record_resplits_the_queue_without_losing_bytes() {
+        let mut arq = Arq::new(Config::for_payload(148));
+        let body: Vec<u8> = (0..300u32).map(|i| (i % 251) as u8).collect();
+        arq.send(3, &body).expect("queues");
+        let before = arq.pending();
+        assert!(arq.resize_pending(90));
+        assert!(arq.pending() > before, "smaller chunks means more of them");
+        let mut rejoined = Vec::new();
+        for (shell, bytes) in arq.queue.iter() {
+            assert_eq!(*shell, 3);
+            assert!(bytes.len() <= 90);
+            rejoined.extend_from_slice(bytes);
+        }
+        assert_eq!(rejoined, body, "byte for byte, in order");
+        // Two shells are never merged into one chunk.
+        let mut arq = Arq::new(Config::for_payload(148));
+        arq.send(1, &[7u8; 10]).unwrap();
+        arq.send(2, &[8u8; 10]).unwrap();
+        assert!(arq.resize_pending(60));
+        let shells: Vec<u8> = arq.queue.iter().map(|(s, _)| *s).collect();
+        assert_eq!(shells, vec![1, 2]);
     }
 }
