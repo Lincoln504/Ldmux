@@ -1003,7 +1003,10 @@ class AndroidRadioLink(
                     if (queued) {
                         val result = withTimeoutOrNull(SEND_TIMEOUT_MS) { answer.await() }
                         recordAirtime(packet.size + 3)
-                        appLog("mesh record by flood (no route): ${result ?: RadioSendResult.Failed}")
+                        appLog(
+                            "mesh record by flood: ${result ?: RadioSendResult.Failed} · " +
+                                "${packet.size} B · dest ${packet.getOrNull(2)?.toInt()?.and(0xFF)}",
+                        )
                         return result ?: RadioSendResult.Failed
                     }
                 }

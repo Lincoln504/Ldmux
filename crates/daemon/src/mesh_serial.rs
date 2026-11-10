@@ -1231,6 +1231,7 @@ fn serve_loop<L: ByteLink>(
     let mut max_flood_hops: u8 = 1;
     // The last flooded-record route line, so a flood-only link does not write one per record.
     let mut last_flood_route_log: Option<Instant> = None;
+    let mut last_flood_record_log: Option<Instant> = None;
     if events
         .blocking_send(Ok(Event::Limit {
             record_max: published_limit,
@@ -2011,6 +2012,16 @@ fn serve_loop<L: ByteLink>(
                     // that statement, and without it the host refuses the repair it just asked for
                     // and floods again for the same reason, for ever.
                     let arrived_by_flood = true;
+                    // **Said once per minute, and always the first time**, so a flood that arrives
+                    // but teaches nothing is visible rather than silent.
+                    route_log_rare(
+                        &mut last_flood_record_log,
+                        &format!(
+                            "flooded record {} B from a {} hop chain",
+                            record.len(),
+                            path.hops
+                        ),
+                    );
                     if let Some(candidate) = PeerPath::reversed(
                         usize::from(path.hash_size),
                         usize::from(path.hops),
@@ -3063,6 +3074,37 @@ mod tests {
         assert!(statuses >= 2, "the countdown refreshes on its own");
         drop(_command_tx);
         let _ = worker.join();
+    }
+
+    /// **The frame a phone's flooded record arrives in is read as a record, end to end.**
+    ///
+    /// This is the path that had never run on air: the phone builds the packet, the radio logs it as
+    /// `[0x88][snr][rssi][packet]`, and the host must recognise it before the route-request,
+    /// reply, advert and advert-path branches get a chance to swallow it.
+    #[test]
+    fn a_flooded_record_from_the_phone_is_read_as_a_record() {
+        let host_key = [0x11u8; 32];
+        let phone_key = [0x22u8; 32];
+        let record = [7u8, 8, 9, 10];
+        let packet = ldmux_companion::build_record_flood_in_scope(
+            1,
+            &host_key,
+            &phone_key,
+            None,
+            &[1, 2, 3, 4],
+            &record,
+        )
+        .expect("builds");
+        // The receive log the radio pushes: `[0x88][snr x4][rssi][packet]`.
+        let mut frame = vec![ldmux_companion::codes::LOG_RX_DATA, 0x10, 0xA0u8];
+        frame.extend_from_slice(&packet);
+        assert!(incoming_record(&frame).is_none(), "not a direct record");
+        assert!(frame_route_request(&frame, &host_key).is_none(), "not a request");
+        let (got, path) = incoming_flooded_record(&frame, &host_key).expect("a flooded record");
+        assert_eq!(got, record);
+        assert_eq!(path.hops, 0);
+        // And the same flood is not ours to open when it is addressed to another radio.
+        assert!(incoming_flooded_record(&frame, &phone_key).is_none());
     }
 
     #[test]
