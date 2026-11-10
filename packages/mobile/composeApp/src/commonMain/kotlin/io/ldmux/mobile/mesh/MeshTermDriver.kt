@@ -391,8 +391,15 @@ class MeshTermDriver(
     private var lastCarriedAt = 0L
     private var session: SessionPort? = null
     /** When a dead session is tried again, and how long to wait after the next failure. */
+    /**
+     * Set when a dead session should be rebuilt on the very next tick.
+     *
+     * **The pause belongs to the screen's ladder, not here.** This pair used to hold a doubling
+     * delay that nothing ever consumed: `recoverAt` was always stamped with "now", so the "fast
+     * retry earned back after success" it described never happened, and the constant beside it was
+     * written twice and read never. One flag, and the owner of the backoff does the backing off.
+     */
     private var recoverAt = 0L
-    private var recoverDelayMs = FIRST_RECOVERY_MS
 
     /** The record size this session was sealed at, and when the last resize re-handshake ran. */
     private var sessionLimit = 0
@@ -660,7 +667,6 @@ class MeshTermDriver(
         session?.close()
         session = null
         recoverAt = clock()
-        recoverDelayMs = FIRST_RECOVERY_MS
     }
 
     /**
@@ -822,8 +828,7 @@ class MeshTermDriver(
             handshakeTries = 0
             // A session is up: the next handshake (after a drop) starts its own clock.
             handshakeBeganAt = 0L
-            // A session that worked earns the fast retry back for the next failure.
-            recoverDelayMs = FIRST_RECOVERY_MS
+            // Nothing is pending: the next failure starts its own recovery.
             recoverAt = 0
             _view.value = MeshTermView.ProfileMissing
             // Nothing named: attach with an empty selector first. The host takes the one shell if
@@ -849,7 +854,6 @@ class MeshTermDriver(
                 lastInboundAt = clock()
                 lastCarriedAt = clock()
                 resyncMadeProgress()
-                recoverDelayMs = FIRST_RECOVERY_MS
                 for (c in r.chunks) if (c.shell == SHELL) feedStream(c.bytes)
             }
         }
@@ -2389,8 +2393,6 @@ private const val ANSWER_ASKS = 3
 /** How many times a list is asked for before the screen's own refresh is the only cure. */
 private const val LIST_ASKS = 3
 
-private const val FIRST_RECOVERY_MS = 2_000L
-private const val MAX_RECOVERY_MS = 30_000L
 
 /** Longer than the gateway's own bound on the radio's answer, short enough that `tick` runs again. */
 private const val SEND_RESULT_TIMEOUT_MS = 10_000L

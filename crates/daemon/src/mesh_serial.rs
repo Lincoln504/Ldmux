@@ -356,26 +356,32 @@ fn frame_route_request(frame: &[u8], own_key: &[u8; 32]) -> Option<RouteRequest>
 fn prefer_route(
     current: Option<&PeerPath>,
     heard: Option<Instant>,
+    proven: bool,
     dead: bool,
     candidate: &PeerPath,
 ) -> bool {
     let Some(current) = current else {
         return true;
     };
-    // **A strictly shorter chain wins, because it carried a packet and is cheaper.** This is the
-    // rule that makes a burst of copies converge on its best copy.
-    if candidate.hops < current.hops {
+    let stale =
+        heard.is_none_or(|t| t.elapsed() >= route_stale(usize::from(current.hops)));
+    // **A dead or stale route yields to anything**, and `dead` is set once per request burst rather
+    // than by clearing the timestamp: clearing that before every candidate made each copy of one
+    // request replace the path, so the *last* — and longest — copy won. Measured 2026-11-10: one
+    // request logged at 1, 2, 4, 17, 19, 20, 26, 27, 28 hops, and the host kept the 28-repeater
+    // chain: twenty-eight transmissions per record and a 101-second first retransmission.
+    if dead || stale {
         return true;
     }
-    // **Otherwise only a route known dead yields — and it yields to anything.** `dead` is set once
-    // per request burst rather than by clearing the timestamp: clearing it before every candidate
-    // made every copy of one request replace the path, so the *last* (longest) copy won. Measured
-    // 2026-11-10: one request logged at 1, 2, 4, 17, 19, 20, 26, 27, 28 hops, and the host settled
-    // on the 28-repeater chain — twenty-eight transmissions per record and a 101-second timer.
-    if dead {
-        return true;
+    // **A route that is carrying records is not displaced by a guess.** Being shorter is not
+    // evidence of working: a flood copy's length says how few repeaters relayed it *to us*, which is
+    // the opposite direction from the one this end sends in, and a one-hop copy beside a five-hop
+    // truth is exactly how a working link was replaced by a ghost.
+    if proven {
+        return false;
     }
-    heard.is_none_or(|t| t.elapsed() >= route_stale(usize::from(current.hops)))
+    // Among candidates that have carried nothing, the shortest wins.
+    candidate.hops < current.hops
 }
 
 /// The largest record this link can carry **now**, given the path it is using.
@@ -405,6 +411,7 @@ fn refresh_peer_route<L: ByteLink>(
     peer_radio: Option<&[u8; 32]>,
     peer_path: &mut Option<PeerPath>,
     peer_path_heard: &mut Option<Instant>,
+    peer_path_proven: &mut bool,
 ) -> bool {
     let Some(key) = peer_radio else {
         return false;
@@ -426,13 +433,15 @@ fn refresh_peer_route<L: ByteLink>(
                 usize::from(path.hash_size),
                 usize::from(path.hops),
                 &path.bytes,
-            ) && prefer_route(peer_path.as_ref(), *peer_path_heard, false, &candidate)
+            ) && prefer_route(peer_path.as_ref(), *peer_path_heard, *peer_path_proven, false, &candidate)
             {
                 // **A zero-hop answer is a route, and the shortest one.** The phone coming back
                 // into earshot advertises with no path, and keeping the last repeater chain would
                 // send every reply into a link that no longer reaches it.
                 *peer_path = Some(candidate);
                 *peer_path_heard = heard;
+                // A cache answer is a candidate, not proof: only traffic makes a route proven.
+                *peer_path_proven = false;
             }
             if *peer_path != before {
                 route_log(&format!("cache answer hops={} age={age}s", path.hops));
@@ -1051,6 +1060,11 @@ fn serve_loop<L: ByteLink>(
     // path. A cache entry may be hours old — `received_at` says so once the radio's clock is set —
     // and a route that merely exists is not a route that works.
     let mut peer_path_heard: Option<Instant> = None;
+    // **Whether the route in hand has carried a record.** A path that has is not replaced by a
+    // shorter guess: a flood copy's length says how few repeaters relayed it *towards us*, not that
+    // this end can reach the peer, and a one-hop copy beside a five-hop truth is how a working link
+    // was swapped for a ghost. Cleared whenever the path changes and by a session failure.
+    let mut peer_path_proven = false;
     // Which radio the peer is: from the state record, a route hint or a route request. Without it
     // there is no prefix to look a route up by, and nothing to address a route request to.
     let mut peer_radio: Option<[u8; 32]> = settings.peer_key;
@@ -1322,7 +1336,7 @@ fn serve_loop<L: ByteLink>(
                 // silence would never let the route be re-read.
                 if peer_radio.is_some() && due {
                     last_route_ask = Some(Instant::now());
-                    refresh_peer_route(&mut companion, peer_radio.as_ref(), &mut peer_path, &mut peer_path_heard);
+                    refresh_peer_route(&mut companion, peer_radio.as_ref(), &mut peer_path, &mut peer_path_heard, &mut peer_path_proven);
                     // **The cache is a shortcut, not the mechanism.** When it has nothing, ask the
                     // peer for a route: the reply is one direct record and it crosses whatever
                     // distance the mesh actually carries, which an advert does not (a repeater
@@ -1613,8 +1627,13 @@ fn serve_loop<L: ByteLink>(
                 // radio given it, because an advert is firmware-built and uses the radio's own
                 // default scope — a daemon that only scoped its raw packets would keep advertising
                 // unscoped on the one mesh that needs the scope.
+                // **One decode per frame.** Each `incoming_record` builds a fresh copy of the
+                // record, and this ran it twice for every frame the radio pushed — twice the copying
+                // of every raw-custom packet on a busy mesh.
+                let incoming = incoming_record(&frame);
                 let answered = frame_route_request(&frame, &settings.preset.public_key).is_some()
-                    || incoming_record(&frame)
+                    || incoming
+                        .as_ref()
                         .and_then(|i| route_reply(&i.record))
                         .is_some();
                 if scope_unproven && answered {
@@ -1650,10 +1669,16 @@ fn serve_loop<L: ByteLink>(
                         &req.path.bytes,
                     );
                     if let Some(candidate) = candidate
-                        && prefer_route(peer_path.as_ref(), peer_path_heard, true, &candidate)
+                        && prefer_route(peer_path.as_ref(), peer_path_heard, peer_path_proven, true, &candidate)
                     {
+                        route_log(&format!(
+                            "request from {} hops={} (adopted)",
+                            &hex_key(&req.peer_key)[..8],
+                            candidate.hops
+                        ));
                         peer_path = Some(candidate);
                         peer_path_heard = Some(Instant::now());
+                        peer_path_proven = false;
                     }
                     // **A flood is not an identity.** The request carries only the requester's
                     // radio key and the destination is matched by one hash byte, so any node on the
@@ -1673,11 +1698,11 @@ fn serve_loop<L: ByteLink>(
                         );
                     }
                     peer_radio = pinned.or(Some(req.peer_key));
-                    route_log(&format!(
-                        "request from {} hops={}",
-                        &hex_key(&req.peer_key)[..8],
-                        req.path.hops
-                    ));
+                    // **One line per burst, naming the copy that was adopted.** One request is
+                    // re-flooded by every repeater in range and arrives as a dozen copies (measured
+                    // 2026-11-10: 1, 2, 4, 17, 19, 20, 26, 27, 28 hops), so logging every copy
+                    // buried the only line that matters — which one the host chose to answer down.
+                    // Logged after adoption below.
                     if adopt && settings.peer_key != Some(req.peer_key) {
                         settings.peer_key = Some(req.peer_key);
                         if let Some(record) = settings.peer_record.as_deref() {
@@ -1739,7 +1764,7 @@ fn serve_loop<L: ByteLink>(
                         usize::from(view.path.hash_size),
                         usize::from(view.path.hops),
                         &view.path.bytes,
-                    ) && prefer_route(peer_path.as_ref(), peer_path_heard, false, &candidate)
+                    ) && prefer_route(peer_path.as_ref(), peer_path_heard, peer_path_proven, false, &candidate)
                     {
                         route_log(&format!("route from an advert hops={}", view.path.hops));
                         peer_path = Some(candidate);
@@ -1752,12 +1777,12 @@ fn serve_loop<L: ByteLink>(
                         usize::from(path.hash_size),
                         usize::from(path.hops),
                         &path.bytes,
-                    ) && prefer_route(peer_path.as_ref(), peer_path_heard, false, &candidate)
+                    ) && prefer_route(peer_path.as_ref(), peer_path_heard, peer_path_proven, false, &candidate)
                     {
                         peer_path = Some(candidate);
                         peer_path_heard = Some(Instant::now());
                     }
-                } else if let Some(incoming) = incoming_record(&frame) {
+                } else if let Some(incoming) = incoming {
                     // The peer announcing which radio it is, so the route above can be looked up.
                     if let Some(key) = route_hint(&incoming.record) {
                         peer_radio = Some(key);
@@ -1779,7 +1804,7 @@ fn serve_loop<L: ByteLink>(
                                 save_peer(record, &key);
                             }
                         }
-                        if refresh_peer_route(&mut companion, peer_radio.as_ref(), &mut peer_path, &mut peer_path_heard) {
+                        if refresh_peer_route(&mut companion, peer_radio.as_ref(), &mut peer_path, &mut peer_path_heard, &mut peer_path_proven) {
                             last_route_ask = Some(Instant::now());
                         }
                     } else if let Some(reply) = route_reply(&incoming.record) {
@@ -1788,9 +1813,10 @@ fn serve_loop<L: ByteLink>(
                         // one round trip, and the session's own records can follow.
                         let hops = reply.hops;
                         route_log(&format!("reply received hops={hops}"));
-                        if prefer_route(peer_path.as_ref(), peer_path_heard, false, &reply) {
+                        if prefer_route(peer_path.as_ref(), peer_path_heard, peer_path_proven, false, &reply) {
                             peer_path = Some(reply);
                             peer_path_heard = Some(Instant::now());
+                            peer_path_proven = false;
                         }
                     } else {
                         // **Learn the route again whenever the peer talks.** A link that is up can
@@ -1803,7 +1829,7 @@ fn serve_loop<L: ByteLink>(
                             && last_route_ask.is_none_or(|t| t.elapsed() >= ROUTE_REASK_FLOOR)
                         {
                             last_route_ask = Some(Instant::now());
-                            refresh_peer_route(&mut companion, peer_radio.as_ref(), &mut peer_path, &mut peer_path_heard);
+                            refresh_peer_route(&mut companion, peer_radio.as_ref(), &mut peer_path, &mut peer_path_heard, &mut peer_path_proven);
                         }
                         // **A record that arrived on the path is the proof the path works.** Nothing
                         // stamped this before, so `route_stale` aged out on a link that was busy in
@@ -1969,9 +1995,10 @@ struct Incoming {
 
 fn incoming_record(frame: &[u8]) -> Option<Incoming> {
     let view = frame_packet(frame)?;
-    // Route DIRECT only: a flooded `RAW_CUSTOM` is dropped by every receiver before the application
-    // sees it, so a flood-routed one cannot be a record.
-    if view.route != 2 || view.payload_type != 0x0F {
+    // **Direct only: plain or transport-scoped.** A flooded `RAW_CUSTOM` is dropped by every
+    // receiver before the application sees it, so a flood-routed one cannot be a record; a
+    // `ROUTE_TYPE_TRANSPORT_DIRECT` one is a direct packet a bridge scoped, and it is a record.
+    if !matches!(view.route, 2 | 3) || view.payload_type != 0x0F {
         return None;
     }
     Some(Incoming {
@@ -2190,8 +2217,9 @@ mod tests {
         let mut companion = Companion::new(link);
         let mut path: Option<PeerPath> = None;
         let mut heard: Option<Instant> = None;
+        let mut proven = false;
         assert!(
-            refresh_peer_route(&mut companion, Some(&peer), &mut path, &mut heard),
+            refresh_peer_route(&mut companion, Some(&peer), &mut path, &mut heard, &mut proven),
             "an answer arrived"
         );
         let learned = path.clone().expect("two hops is a route");
@@ -2201,7 +2229,7 @@ mod tests {
         // The same phone, back in earshot: its advert arrives with no hops.
         companion.link_mut().push_payload(&advert_path_frame(0x00, &[]));
         assert!(
-            refresh_peer_route(&mut companion, Some(&peer), &mut path, &mut heard),
+            refresh_peer_route(&mut companion, Some(&peer), &mut path, &mut heard, &mut proven),
             "an answer arrived"
         );
         let adjacent = path.clone().expect("no hops is an answer: the peer is adjacent");
@@ -2662,29 +2690,36 @@ mod tests {
         };
         let now = Instant::now();
         // Nothing in hand: anything is accepted.
-        assert!(prefer_route(None, None, false, &path(4)));
+        assert!(prefer_route(None, None, false, false, &path(4)));
         // A shorter path displaces a longer one. **An equal one does not disturb a working route**:
         // two chains of the same length are the same price, and the incumbent has carried packets.
-        assert!(prefer_route(Some(&path(4)), Some(now), false, &path(0)));
-        assert!(!prefer_route(Some(&path(4)), Some(now), false, &path(4)));
+        assert!(prefer_route(Some(&path(4)), Some(now), false, false, &path(0)));
+        assert!(!prefer_route(Some(&path(4)), Some(now), false, false, &path(4)));
         // A longer one does not, while the route in hand is fresh.
-        assert!(!prefer_route(Some(&path(0)), Some(now), false, &path(4)));
+        assert!(!prefer_route(Some(&path(0)), Some(now), false, false, &path(4)));
         // **A route known dead yields to anything**, which is what a route request proves.
-        assert!(prefer_route(Some(&path(0)), Some(now), true, &path(4)));
+        assert!(prefer_route(Some(&path(0)), Some(now), false, true, &path(4)));
         // Stale is no route at all: a longer path is accepted once the window has passed.
         let stale = now - PEER_ROUTE_STALE - std::time::Duration::from_secs(1);
-        assert!(prefer_route(Some(&path(0)), Some(stale), false, &path(4)));
+        assert!(prefer_route(Some(&path(0)), Some(stale), false, false, &path(4)));
         // A route whose age was never recorded is treated as stale, not as fresh.
-        assert!(prefer_route(Some(&path(0)), None, false, &path(4)));
+        assert!(prefer_route(Some(&path(0)), None, false, false, &path(4)));
         // **A burst converges on its shortest copy.** Copies arrive in ascending hop order, so the
         // first is adopted and every later, longer one is refused: the last copy must not win.
         let mut held = path(1);
         for hops in [2, 4, 17, 19, 20, 26, 27, 28] {
-            if prefer_route(Some(&held), Some(now), false, &path(hops)) {
+            if prefer_route(Some(&held), Some(now), false, false, &path(hops)) {
                 held = path(hops);
             }
         }
         assert_eq!(1, held.hops, "one request's flood settled on its longest copy");
+        // **A route carrying records is not displaced by a shorter guess.** The same one-hop copy
+        // that a burst should converge on is *not* allowed to unseat a path that has delivered
+        // traffic: length says how few repeaters relayed the flood towards us, which is the
+        // opposite direction from the one this end sends in.
+        assert!(!prefer_route(Some(&path(5)), Some(now), true, false, &path(1)));
+        // A dead route still yields to it, proof or not.
+        assert!(prefer_route(Some(&path(5)), Some(now), true, true, &path(1)));
     }
 
     /// **The countdown is republished while nothing is sent.** The session gates every send on it,

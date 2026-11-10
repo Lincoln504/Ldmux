@@ -53,6 +53,8 @@ pub enum RecordError {
     TooLong,
     /// The 32-bit counter is used up. A new handshake is the only way on.
     CounterExhausted,
+    /// The transport could not seal the plaintext: a key or nonce state fault, not a sizing one.
+    SealFailed,
 }
 
 /// A sliding replay window over a 32-bit counter, 64 records wide (ADR-0020: judgement call,
@@ -140,9 +142,12 @@ pub fn seal(
     plain.push(shell);
     plain.extend_from_slice(app);
     let mut ct = vec![0u8; plain.len() + TAG];
+    // **A crypto fault is not a sizing fault.** Reporting both as `TooLong` made a broken key or a
+    // spent nonce indistinguishable from "the route grew a hop" in every log, in `mesh status`, and
+    // in the ABI's `LDMUX_ERR_TOO_LONG`.
     let n = transport
         .write_message(u64::from(counter), &plain, &mut ct)
-        .map_err(|_| RecordError::TooLong)?;
+        .map_err(|_| RecordError::SealFailed)?;
     ct.truncate(n);
     let mut out = Vec::with_capacity(CLEAR_HEADER + ct.len());
     out.push(KIND_TRANSPORT);

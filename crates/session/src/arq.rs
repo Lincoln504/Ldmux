@@ -531,7 +531,10 @@ impl Arq {
         let mut merged: Vec<(u8, Vec<u8>)> = Vec::with_capacity(self.queue.len());
         for (shell, bytes) in self.queue.drain(..) {
             match merged.last_mut() {
-                Some((s, acc)) if *s == shell => acc.extend_from_slice(&bytes),
+                // **An empty message is a message.** Folding it into a neighbour of its shell made
+                // it vanish, which matters because a zero-length delivery can be meaningful to the
+                // caller and this function is documented as lossless.
+                Some((s, acc)) if *s == shell && !bytes.is_empty() => acc.extend_from_slice(&bytes),
                 _ => merged.push((shell, bytes)),
             }
         }
@@ -763,7 +766,13 @@ impl Arq {
                 s.sent_at + self.rto(s.attempts)
             }
         });
-        let ack = self.ack_owed_since.map(|t| t + self.cfg.ack_delay_ms);
+        // **An urgent ack is due now, and the caller's timer has to agree with `poll`.** A gap's
+        // ack goes out at once (`ack_urgent`), but this always added the full delay, so the loop
+        // then slept up to a second and a bit past the moment it had decided to answer — the two
+        // halves of one decision disagreeing about when it happens.
+        let ack = self
+            .ack_owed_since
+            .map(|t| if self.ack_urgent { t } else { t + self.cfg.ack_delay_ms });
         // `heartbeat_ms == 0` means never, which `poll` already honours. Without the guard here
         // the deadline resolved to `last_sent_at`, an instant in the past, so the caller's wait
         // was zero after the first record and the session loop spun at full CPU forever.

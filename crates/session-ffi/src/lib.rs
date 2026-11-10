@@ -102,6 +102,9 @@ fn rec_err(e: RecordError) -> i32 {
         RecordError::BadTag => LDMUX_ERR_BAD_TAG,
         RecordError::TooLong => LDMUX_ERR_TOO_LONG,
         RecordError::CounterExhausted => LDMUX_ERR_COUNTER_EXHAUSTED,
+        // A seal failure is the transport's own fault (key or nonce state), so it reports as a
+        // crypto error rather than as the sizing error it used to share.
+        RecordError::SealFailed => LDMUX_ERR_CRYPTO,
     }
 }
 

@@ -374,13 +374,12 @@ class AndroidRadioLink(
         override fun onRawData(frame: RawDataFrame) {
             _status.value = _status.value.copy(rssiDbm = frame.rssi())
             val payload = frame.payload()
-            // **A route reply is not a session record.** It arrives before the session exists and
-            // carries the host's path; handed to the session it would fail its tag and be counted
-            // as noise, which is exactly how a working discovery would read as an attack.
-            RadioRoute.routeReply(payload)?.let {
-                adoptRoute(it, "reply")
-                return
-            }
+            // **A route reply is not a session record, but this end no longer sends one directly.**
+            // The host answers a request with a *flood* (`build_route_reply_flood`, ADR-0035) whose
+            // inner record is read off the receive log below; a direct `LDRR` reply was the older
+            // shape and its branch here adopted the host's belief about the direction towards us,
+            // which is precisely the guess that made a range handshake fail. Removed so the only
+            // route this end learns from a reply is the one the reply itself travelled.
             // **A record that arrived on the path is proof the path works.** Nothing stamped this
             // before, so `routeIsFresh` aged out on a link that was carrying traffic in both
             // directions, and the path-refresh loop then re-flooded a route request every ten
