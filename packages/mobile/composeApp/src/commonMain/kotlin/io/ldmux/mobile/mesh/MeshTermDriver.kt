@@ -982,6 +982,18 @@ class MeshTermDriver(
                     // that may have been dropped, which is what the doubling is for.
                     handshakeTries = 0
                     handshakeSince = clock()
+                    // **Every third rung still sends the handshake.** The link can be asymmetric:
+                    // the host may hear a direct packet from this phone while the phone's flood is
+                    // lost, or a relay may forward one payload type and not another. Asking for a
+                    // route is the better bet, not the only one, and the neighbour case must never be
+                    // traded away for it.
+                    if (blindAsks % 3 == 0) {
+                        handshake?.abandon()
+                        handshake = null
+                        terminalView = null
+                        connect()
+                        return@withLock
+                    }
                     // The handshake object stays: the screen says "securing the link", which is
                     // true, and nothing re-sends msg1 down a path that does not exist. If a route
                     // arrives, the next rung takes the normal branch and starts a fresh handshake

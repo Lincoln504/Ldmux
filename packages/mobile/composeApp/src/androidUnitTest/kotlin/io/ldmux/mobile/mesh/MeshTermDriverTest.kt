@@ -228,7 +228,12 @@ class MeshTermDriverTest {
             now += handshakeRetryFor(null)
             d.tick()
         }
-        assertEquals(records, gw.sent.size, "and the budget never re-sent a handshake either")
+        // **But not for ever.** An asymmetric link can hear a direct packet while losing the flood,
+        // so a blind handshake is still tried on every third rung rather than abandoned.
+        assertTrue(
+            gw.sent.size > records,
+            "a blind handshake is still attempted, just not on every rung",
+        )
         assertTrue(
             io.ldmux.mobile.AppLogBuffer.snapshot().any { it.contains("no route") },
             "the verdict says no route, not 'three unanswered handshakes': " +
