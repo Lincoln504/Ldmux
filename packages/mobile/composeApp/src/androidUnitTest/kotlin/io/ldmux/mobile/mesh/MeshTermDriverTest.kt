@@ -27,6 +27,14 @@ class MeshTermDriverTest {
         override val status = MutableStateFlow<MeshStatus?>(MeshStatus(0, null, 0, 58))
         override val received = MutableSharedFlow<ByteArray>(extraBufferCapacity = 8)
         override var uplinkRecordMax = 172
+        /**
+         * A neighbour by default, so the ladder tests exercise the ladder.
+         *
+         * `null` is the blind case — no route to the host — and the driver spends its rungs asking
+         * the mesh for one instead of re-sending a direct packet no repeater will carry. Zero is a
+         * neighbour, which is the timing every ladder test was written against.
+         */
+        override var routeHops: Int? = 0
         val sent = ArrayList<ByteArray>()
         var routeRefreshes = 0
         var outcome = MeshSendOutcome.SentDirect
@@ -185,6 +193,46 @@ class MeshTermDriverTest {
         assertTrue(
             (d.nextWakeMs() ?: Long.MAX_VALUE) <= budget,
             "the loop must not sleep past the handshake's budget",
+        )
+    }
+
+    /// **With no route, the rungs ask the mesh instead of re-sending a handshake.**
+    ///
+    /// A session record is a direct packet and a direct packet crosses no repeater, so a handshake
+    /// with no route can only reach the operator's immediate neighbours — at range it is air spent on
+    /// something that cannot arrive. A route request is a flood and does cross. Measured intent,
+    /// 2026-11-10: the phone climbed the whole ladder at range and the host logged no handshake at
+    /// all, because none of them could get there.
+    @Test
+    fun with_no_route_the_rungs_ask_the_mesh_instead_of_re_asking_a_handshake(): Unit = runBlocking {
+        val d = driver()
+        gw.routeHops = null
+        d.start()
+        assertIs<MeshTermView.Handshaking>(d.view.value)
+        val records = gw.sent.size
+        val asks = gw.routeRefreshes
+        now += handshakeRetryFor(null)
+        d.tick()
+        assertEquals(records, gw.sent.size, "no handshake was re-sent down a path that does not exist")
+        assertTrue(gw.routeRefreshes > asks, "and a route request went out instead")
+        assertIs<MeshTermView.Handshaking>(d.view.value, "the screen still says it is working on it")
+        // The verdict names the real thing when the budget runs out. The view does not rest on it —
+        // a failure schedules its own recovery, which is deliberate — so this asserts the sentence
+        // the app logs, which is the same one the failure dump carries off the phone.
+        // Driven rung by rung, because the budget is measured from the moment the handshake began
+        // and the test's clock is not that moment.
+        var rungs = 0
+        while (io.ldmux.mobile.AppLogBuffer.snapshot().none { it.contains("no route") } &&
+            rungs++ < 40
+        ) {
+            now += handshakeRetryFor(null)
+            d.tick()
+        }
+        assertEquals(records, gw.sent.size, "and the budget never re-sent a handshake either")
+        assertTrue(
+            io.ldmux.mobile.AppLogBuffer.snapshot().any { it.contains("no route") },
+            "the verdict says no route, not 'three unanswered handshakes': " +
+                io.ldmux.mobile.AppLogBuffer.snapshot().takeLast(3).toString(),
         )
     }
 

@@ -367,6 +367,15 @@ class MeshTermDriver(
 
     /** How many times this connection has re-asked an unanswered handshake. */
     private var handshakeTries = 0
+    /**
+     * Rungs spent asking for a route instead of re-sending a handshake nothing could carry.
+     *
+     * A session record is a direct packet and a direct packet crosses no repeater, so a handshake
+     * with no route is air spent on a packet whose audience is the operator's immediate neighbours.
+     * A route request is a flood and does cross, so while the route is unknown this is what the
+     * ladder spends its rungs on. Reset whenever a route is adopted or a session comes up.
+     */
+    private var blindAsks = 0
     /** The re-ask number of the current handshake. Reset with [handshakeTries]. */
 
     /**
@@ -830,6 +839,9 @@ class MeshTermDriver(
             handshakeBeganAt = 0L
             // Nothing is pending: the next failure starts its own recovery.
             recoverAt = 0
+            // A session exists, so the route the handshake went down works: the next blind spell
+            // starts its count from zero.
+            blindAsks = 0
             _view.value = MeshTermView.ProfileMissing
             // Nothing named: attach with an empty selector first. The host takes the one shell if
             // there is exactly one (the common case, and no extra record on a link that allows
@@ -945,8 +957,38 @@ class MeshTermDriver(
             // and the re-asks inside it are scheduled from their own start by the ladder below.
             if (clock() - handshakeBeganAt > (handshakeWaitOverride ?: handshakeWaitMs(gateway.routeHops))) {
                 handshake?.abandon(); handshake = null
-                failed(MeshLinkState.SessionFailed, "three unanswered handshakes")
+                // **The verdict says which thing failed.** Re-sending a handshake with no route is
+                // re-sending a direct packet, so "three unanswered handshakes" would name the ladder
+                // when the truth is that the mesh never gave this phone a route to any repeater.
+                failed(
+                    MeshLinkState.SessionFailed,
+                    if (blindAsks > 0) {
+                        "no route: nothing answered $blindAsks request(s) across the mesh"
+                    } else {
+                        "three unanswered handshakes"
+                    },
+                )
             } else if (waited >= handshakeRetryFor(gateway.routeHops) shl handshakeTries) {
+                // **Blind is a different problem with a different cure.** A session record is a
+                // direct packet, and a direct packet crosses no repeater, so with no route every
+                // rung of this ladder spends air on something that cannot arrive. A route *request*
+                // is a flood and can cross, so while the route is unknown the ladder asks for the
+                // route instead — at the same rung, and with the flood's own round trip as the
+                // interval rather than a doubling ladder meant for one lost record.
+                if (gateway.routeHops == null) {
+                    blindAsks++
+                    // **The first rung's interval, not the ladder's.** What is being retried is a
+                    // flood that has to cross and come back — one round trip — not a single record
+                    // that may have been dropped, which is what the doubling is for.
+                    handshakeTries = 0
+                    handshakeSince = clock()
+                    // The handshake object stays: the screen says "securing the link", which is
+                    // true, and nothing re-sends msg1 down a path that does not exist. If a route
+                    // arrives, the next rung takes the normal branch and starts a fresh handshake
+                    // on it; if none does, the budget ends this with the honest verdict below.
+                    runCatching { gateway.refreshRoute() }
+                    return@withLock
+                }
                 handshakeTries++
                 handshakeNo = handshakeTries
                 // **A handshake that was not answered is asked again, not waited out.** `msg1` is
