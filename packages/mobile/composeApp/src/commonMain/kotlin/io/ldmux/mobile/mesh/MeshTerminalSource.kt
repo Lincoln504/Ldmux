@@ -238,7 +238,12 @@ class MeshTerminalSource(
             // draw. Releasing lets the host send the difference, which is usually nothing — and
             // that is the correct answer when the screen is already current.
             if (hold.on && last != null) {
+                // **"Show me the shell" is one record out and the difference back.** The host keeps
+                // holding and draws once, so this is `Resync` alone — no release, no re-hold, and no
+                // state on this side that can disagree with the host's. It used to be three records
+                // a press: `Hold{off}`, the frame, `Hold{on}`.
                 hold.sync(pending = false, nowMs = now())
+                onWantScreen?.invoke()
                 return false
             }
             // Nothing to send, nothing held and nothing to release: a wait left over from an
@@ -794,6 +799,15 @@ class MeshTerminalSource(
     /** Wired by the screen to the driver: ask the host for [rows] lines from absolute line [from]. */
     var onWantHistory: ((Int, Int) -> Unit)? = null
 
+    /**
+     * Ask the host to draw the shell once, without releasing the freeze.
+     *
+     * Set by the screen to [`MeshTermDriver.showOnce`]. Batch mode's `show` press is this request and
+     * nothing else: the host answers with the difference from the screen this client holds and goes
+     * on holding, so a look costs two records instead of a release, a frame and a re-hold.
+     */
+    var onWantScreen: (() -> Unit)? = null
+
     /** A history request is in flight, so an up key pressed again does not queue another. */
     private var awaitingHistory = false
 
@@ -905,6 +919,13 @@ class MeshTerminalSource(
 
     /** [tapCell] against a given frame, so the rule is testable without a native engine. */
     internal fun tapOn(f: TerminalFrame.Frame, col: Int, row: Int): Boolean {
+        // **A frozen view has no cursor to walk from.** The picture is the one the operator last
+        // asked for, so the cursor drawn on it is not where the shell's cursor is now: walking from
+        // it moves the real cursor to a place the operator misread. Batch mode also cannot show the
+        // result of the walk until a `show`, so the keys pile up invisibly and land all at once —
+        // measured 2026-11-09 as a screenful of `^[[D` in a shell whose loop reads no input, after a
+        // few taps were flushed by a `show` press.
+        if (hold.on && !hold.awaiting) return false
         return when (val action = planTap(col, row, f, mouseRefused = true)) {
             is TapAction.Keys -> {
                 var all = true

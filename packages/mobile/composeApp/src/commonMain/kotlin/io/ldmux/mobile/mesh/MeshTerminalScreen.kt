@@ -418,10 +418,12 @@ fun MeshTerminalScreen(
         // absolute line above the oldest row it holds, so a page joins what it has.
         conn.driver.onHistoryPage = { page -> source.prependHistory(page) }
         source.onWantHistory = { from, rows -> scope.launch { conn.driver.wantHistory(from, rows) } }
+        source.onWantScreen = { scope.launch { conn.driver.showOnce() } }
         onDispose {
             conn.onIdle = null
             conn.driver.onHistoryPage = null
             source.onWantHistory = null
+            source.onWantScreen = null
         }
     }
     // **A shell that was just opened shows itself, without a timer.** This used to be a 1.5 s
@@ -546,8 +548,12 @@ fun MeshTerminalScreen(
     // hour's allowance spent on a picture in a drawer. Released whenever the view is following an
     // answer (a sync, or `show`), and only after the first screen: before that there is nothing to
     // hold and the first paint has to arrive.
-    LaunchedEffect(source.publicChannel, source.awaitingSync, source.hasScreen) {
-        conn.driver.setHold(source.publicChannel && !source.awaitingSync && source.hasScreen)
+    //
+    // **A `show` press does not release it.** A look is a `Resync`, which the host answers with one
+    // frame and then keeps holding; releasing and re-holding cost three records for the same look.
+    // A press that *sent* text does release, because that answer arrives over several seconds.
+    LaunchedEffect(source.publicChannel, source.awaitingAnswer, source.hasScreen) {
+        conn.driver.setHold(source.publicChannel && !source.awaitingAnswer && source.hasScreen)
     }
 
     // A sync whose answer never comes must not leave the screen frozen with no word about it: the

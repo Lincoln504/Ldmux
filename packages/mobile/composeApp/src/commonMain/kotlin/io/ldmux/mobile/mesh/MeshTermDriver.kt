@@ -1144,6 +1144,24 @@ class MeshTermDriver(
      * `setHold(true)` is a real message. A host that predates the tag skips it and behaves exactly
      * as before, which is why nothing here waits for an acknowledgement.
      */
+    /**
+     * Draw the shell once, without releasing the freeze.
+     *
+     * **The batch-mode `show` press.** The host answers a `Resync` from a frozen view with exactly
+     * one frame — the difference from the screen this phone holds — and keeps holding, so this is
+     * one record out and one or two back. Releasing the hold instead cost three records a press and
+     * needed two extra messages to get back to frozen.
+     */
+    suspend fun showOnce() = lock.withLock {
+        if (session == null || terminalView != null) return@withLock
+        if (attachedId == null && pick != Pick.Attached) return@withLock
+        resyncing = true
+        resyncAskedAt = clock()
+        queue(TermMessage.Resync)
+        pump()
+        publish()
+    }
+
     suspend fun setHold(on: Boolean) = lock.withLock {
         holdWanted = on
         if (session == null || terminalView != null) return@withLock

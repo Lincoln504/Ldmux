@@ -225,6 +225,40 @@ class MeshTerminalSourceTest {
         assertTrue(s.pullHeld(), "the newest screen was kept, waiting for a show")
     }
 
+    /// **`show` asks the host for one frame instead of releasing the freeze.**
+    ///
+    /// Three records a press was the old shape: `Hold{off}`, the frame, `Hold{on}`. A frozen view
+    /// that asks for the screen gets exactly that and stays frozen — one record out, the difference
+    /// back — so the press costs two.
+    @Test
+    fun `a show asks for one frame and keeps the freeze`() {
+        val (s, _, b) = source()
+        s.setPublicChannel(true)
+        s.show(screenOf(1, "$ one", "$ "), "aa11")
+        var asked = 0
+        s.onWantScreen = { asked++ }
+        assertFalse(s.sync(), "nothing to send, so the press sends nothing typed")
+        assertEquals(1, asked, "the press asks the host to draw the shell once")
+        assertTrue(s.awaitingSync, "and the view follows the one screen that answers it")
+        assertFalse(s.awaitingAnswer, "no answer is owed, because nothing was sent")
+        assertTrue(b.isEmpty, "no keystroke was queued by the press")
+    }
+
+    /// **A frozen view does not walk its cursor**, because the cursor it draws is not where the
+    /// shell's is, and the keys would queue invisibly until a `show` flushed them all at once.
+    @Test
+    fun `a tap queues no keys while the view is frozen`() {
+        val (s, _, b) = source()
+        s.setPublicChannel(true)
+        s.show(screenOf(1, "$ one", "$ "), "aa11")
+        assertTrue(b.isEmpty)
+
+        // The cursor is at the end of the second row; a tap on the far right of it would walk right.
+        val drew = s.tapCell(20, 1)
+        assertFalse(drew, "a frozen view takes no cursor walk")
+        assertTrue(b.isEmpty, "and nothing is queued for the next show")
+    }
+
     /// **A lost request expires, so the up key never goes dead.**
     ///
     /// One request in flight at a time, or a fast press would queue a record per press. But a

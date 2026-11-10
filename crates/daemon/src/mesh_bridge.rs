@@ -361,15 +361,18 @@ struct Attached {
     /// every control message still arrive — and the release sends the difference from the screen the
     /// phone holds, so nothing is repainted.
     held_since: Option<Instant>,
-    /// **A grid change owes the phone one frame, even while frozen.**
+    /// **One frame is owed while frozen, and it is the only thing a hold does not stop.**
     ///
-    /// Batch mode's hold stops a stream of output the operator is not reading. A rotation or a
-    /// keyboard is not output: it is the view being made valid again, and without a frame the phone
-    /// keeps drawing the rows of the old grid into a new viewport — which reads as the terminal
-    /// having stopped updating until the shell is left and re-entered (reported 2026-11-09, and
-    /// reproduced on the device: rotate while held, one `Resize` record out, no screen back).
-    /// Set by an accepted `Resize`, cleared when that frame is built; the hold resumes after it.
-    resize_frame: bool,
+    /// Two things ask for it, and both are the view being made *valid* rather than fed:
+    /// - a grid change (a rotation or a keyboard), where the phone would otherwise keep drawing the
+    ///   old grid's rows into a new viewport — measured on the device as the terminal appearing to
+    ///   stop updating until the shell was left and re-entered;
+    /// - a `Resync` from a frozen view, which is what the `show` press sends: the operator asked to
+    ///   see the shell once, and the host answers with the difference and goes on holding it. That
+    ///   is one record instead of a release and a re-hold (three records a press).
+    ///
+    /// Set when the frame is asked for, cleared when it is built; the hold is untouched throughout.
+    owe_frame: bool,
     /// When this shell's screen was last read while the phone had it held.
     ///
     /// **A frozen view is not worth a keeper round trip twenty times a second.** While held nothing
@@ -1008,7 +1011,7 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                 // **A grid change is read at once.** The once-a-second gate is for a picture nobody
                 // draws; a shell that owes a frame after a resize owes a *current* one, and reading
                 // late draws the pane as it was before the pty changed size.
-                let due = a.resize_frame
+                let due = a.owe_frame
                     || a.held_read_at
                         .is_none_or(|t| now.saturating_duration_since(t) >= HELD_SCREEN_MS);
                 if !due {
@@ -1095,7 +1098,7 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
             let owes_frame = self
                 .shells
                 .get(&shell)
-                .is_some_and(|a| a.held() && a.resize_frame);
+                .is_some_and(|a| a.held() && a.owe_frame);
             if owes_frame {
                 // The frame must go at once: the pty has already changed size, so a paced delay is
                 // a wait on nothing. The differ was reset, so what follows is a whole screen.
@@ -1215,7 +1218,7 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
             }
             if let Some(a) = self.shells.get_mut(&shell) {
                 a.retry.clear();
-                a.resize_frame = false;
+                a.owe_frame = false;
                 a.last_push = Some(now);
                 // **An echo does not open a burst.** The keystroke is sent at once, which is right,
                 // and then the answer it produces is the *next* change: marking this push as a
@@ -1422,7 +1425,7 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                                     .is_none()
                                     .then(|| Instant::now() + ATTACH_GRACE),
                                 resync_wanted: false,
-                                resize_frame: false,
+                                owe_frame: false,
                                 held_since: None,
                                 released_by_sync: false,
                                 defer_until: None,
@@ -1818,7 +1821,7 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                             // **A frozen view still owes the frame that makes its grid true.** The
                             // resync above would be swallowed by the hold, so the shell is marked
                             // for exactly one frame and the hold resumes after it.
-                            a.resize_frame = true;
+                            a.owe_frame = true;
                             a.resync();
                         }
                     }
@@ -1827,8 +1830,19 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
             }
             Message::Resync => {
                 let pending = self.link.pending();
+                let held = self.shells.get(&shell).is_some_and(Attached::held);
                 if let Some(a) = self.shells.get_mut(&shell) {
                     a.defer_resync(pending);
+                    if held {
+                        // **"Show me the shell" is one frame, not a release.** A frozen view that
+                        // asks for the screen gets exactly that and stays frozen: the hold is what
+                        // keeps a printing shell off the air, and the operator asked to look once.
+                        // This is what makes a press cost two records instead of three.
+                        a.owe_frame = true;
+                        if pending == 0 {
+                            a.resync();
+                        }
+                    }
                 }
             }
             // **The phone's view is frozen, so nothing is built for it.** A version-12 host ignores
@@ -4899,6 +4913,38 @@ mod tests {
     /// Batch mode freezes the picture until the operator presses sync, and the host had no way to
     /// know: a shell printing a build log cost a record a second for screens the phone kept and
     /// dropped. The release must not repaint — the differ still records what the phone holds.
+    /// **"Show me the shell" is one frame, and the shell stays frozen.**
+    ///
+    /// A press with nothing typed used to release the hold, wait for a screen and then re-hold: three
+    /// records for one look, and a state machine on the phone that could disagree with the host's.
+    /// A `Resync` from a frozen view now means "draw the current screen once": the host resets the
+    /// differ, builds exactly one frame and goes on holding, so a press costs two records.
+    #[tokio::test]
+    async fn a_resync_from_a_frozen_view_draws_one_frame_and_stays_frozen() {
+        let (mut b, host, link, clock) = attached_paced().await;
+        phone_says(&link, 1, &Message::Hold { on: true });
+        b.tick().await;
+        let base = sent_records(&link);
+        clock.advance(2_000);
+        paced(&host, &["$ ls", "one"]);
+        b.tick().await;
+        assert_eq!(sent_records(&link), base, "frozen: nothing is built");
+
+        phone_says(&link, 1, &Message::Resync);
+        b.tick().await;
+        assert!(sent_records(&link) > base, "the press draws one frame");
+
+        // And the hold is still on: further output builds nothing until the next press.
+        let base = sent_records(&link);
+        clock.advance(2_000);
+        paced(&host, &["$ ls", "two"]);
+        b.tick().await;
+        clock.advance(2_000);
+        paced(&host, &["$ ls", "three"]);
+        b.tick().await;
+        assert_eq!(sent_records(&link), base, "still frozen after the one frame");
+    }
+
     /// **A rotation or a keyboard owes one frame, even frozen.**
     ///
     /// The hold exists to stop output the operator is not reading; a grid change is not output, it
