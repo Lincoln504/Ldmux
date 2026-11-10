@@ -567,6 +567,69 @@ suite (574 cases) green.
 | 17.115 | A multi-line paste on the radio route ran its first line as a command and the rest went to whatever that line started: the phone turned every newline into a carriage return, because it assumed no pane accepts bracketed paste | FIXED — the phone sends the paste's text with its newlines and the host encodes it for the pane it can see (`paste_bytes`): wrapped in `CSI 200 ~` / `CSI 201 ~` where the pane asked for bracketed paste, carriage returns where it did not, ESC stripped inside the wrap so a clipboard cannot close the paste early, CRLF folded first. Proven end to end over a real keeper and bash (`tests/mesh_paste.rs`): the pasted commands do not run, and the same text with carriage returns does |
 | 17.114 | The host published no path-hash width, so an operator comparing the host's tuple with the phone's `path N B` row compared three quarters of it | FIXED — `pathHashSize` in the snapshot and on the `ldmux mesh status` preset line |
 
+## 18. State and risks at `838f101` (2026-11-09)
+
+One page that says what is deployed, what was actually exercised on the air, what was not, and every
+risk that remains. Written to be read cold, by someone who was not in the session.
+
+### Deployed
+
+| | |
+|---|---|
+| Desktop daemon | `838f101`, `ldmuxd 838f101 (protocol 1)`, `ldmux.service` and `ldmux-keeper.service` active |
+| Phone app | built from the same tree, `arm64-v8a` + `x86_64`, JNI symbol set checked (`setRecordLimit`, `setHops` present in `libldmux_session.so`) |
+| Radio route | 910.525 MHz, 62.5 kHz, SF7, CR5, path **1 B**, 22 dBm, host radio key `5cc244aa…`, phone key `45b9f1cb…` (pinned) |
+| Channel | the public USA/Canada tuple, so **batch mode is forced** (typing is held until `sync`) |
+| Region scope | none configured on either radio; floods are unscoped, which most meshes forward |
+
+### Verified on the air
+
+- **Flooded discovery works**: a request is answered and the phone holds a route **0.5 s** later, at
+  zero hops (2026-11-09, `mesh flooded reply route: 0 hop(s)`).
+- **Discovery reaches far**: the host received requests at **29 hops** and answered them
+  (`journalctl --user -u ldmux`, 23:15), which is what the 64-hop `REQ` ceiling exists for.
+- **A session establishes** with one accepted handshake, and a shell attaches and paints at the
+  phone's own grid (`mesh profile 46x17` → `mesh commit full=true` 0.9 s later).
+- **The frozen view is free**: 0 records over 12 s with the shell printing.
+- **One answer, two paths**: at home with both radios in one room, a single answer arrived at 0 hops
+  and 5 hops, which is how a one-way link is measured rather than theorised.
+
+### Not verified — the next range test covers these
+
+1. **A full session over more than one repeater since the `TooLong` fix.** The defect measured at
+   range was exactly this (row 6.158) and the fix is reasoned and unit-tested, not yet proven on the
+   air. **This is the first thing to watch.**
+2. **The host asking and the phone answering** (row 6.156) — the recovery after a daemon restart.
+3. **Scoped discovery on a region-scoped mesh** (row 6.154). A *private* region name cannot be
+   identified by either end, so an answer to a request under one goes out unscoped.
+4. **Route repair while moving** (row 6.163) and the failed-route memory (row 6.160).
+5. **Five open pages** (row 6.162): unit-tested, not exercised on screen.
+
+### Risks that remain
+
+| # | Risk | Evidence and mitigation |
+|---|---|---|
+| R1 | **A direct path has no per-hop recovery.** One lost hop costs an end-to-end retransmission at `6 airtimes × hops`, and five of those end the session. The community firmware's per-hop resend (`max.resend 2`) measured 71 → 95 % delivery on the same topology | `crates/session/src/arq.rs` (RTO), `docs/AIRTIME.md`. A repeater-side resend would need firmware, so the mitigation is the route repair (6.163) and fast re-discovery |
+| R2 | **Discovery is a flood, and a flood costs one transmission per repeater in range** | Bounded: only while pathless, backoff 5 → 40 s with jitter, and the host asks only when traffic has moved in two minutes. `build_route_reply_flood` |
+| R3 | **Repeater policy can silently cap discovery.** `flood.max` is 64 by default, but Canada's guide sets **16**, some meshes set `flood.max.unscoped 3`, and an advert is dropped at **8** | `RoutingPolicy.h`, `examples/simple_repeater/MyMesh.cpp:970-972`. Nothing can be done from the ends; the host log shows the hop count a request arrived by, which is the diagnostic |
+| R4 | **Path widths can differ between ends** (host 1 B, a phone's radio 2 B). Legal, and interoperable only through repeaters on firmware ≥ 1.14 — older ones drop multi-byte packets unheard | `docs/ARCHITECTURE.md` §11; `PublicPreset.appliedPathHashSize` is what ldmux writes |
+| R5 | **A site's private region scope cannot be named**, so a request under it is answered unscoped and may be dropped by `region denyf *` | `reply_scope` in `crates/daemon/src/mesh_serial.rs` |
+| R6 | **Links are asymmetric.** A path heard one way is not a path that works; the phone once held a 0-hop ghost beside a 5-hop truth | `routeProven` + `failedRoutes` (10 min, four paths). Rows 6.159/6.160 |
+| R7 | **Airtime is the scarce resource**: 602.6 ms per 172-byte record at 62.5 kHz. Metered bands get 36 s/h (1 %); this band has no limit, so the meter is a measurement and the discipline is ours | `docs/AIRTIME.md`, `ldmux mesh status` `airtime` line |
+| R8 | **The session lives in the app process.** A foreground service and a partial wake lock hold it while the view is Live; the service is released the moment the view goes Idle or LinkDown, and a frozen process cannot recover alone | `MeshTerminalScreen.kt:386`, `BackgroundSession.android.kt` |
+| R9 | **The phone's log is in-memory only** (a deliberate privacy decision) and logcat rolls over in about ten minutes of traffic. A failure at range is therefore diagnosed from the **host journal**, which is why it now says `session replaced after Ns (hops=H, reason)` | `AppLog.kt`, `crates/daemon/src/mesh_session.rs` |
+| R10 | **Five open shells is the ceiling** on the pager, refused with a sentence | `MAX_OPEN_PAGES`, `PageOrder.addToOrder` |
+| R11 | **One live shell at a time on the radio**, by construction: a screen is records | `docs/ARCHITECTURE.md` §11 |
+| R12 | **A rekey is still possible** when a shrink cannot reach a chunk already in flight; bounded to once per 30 s | `resizeToLink(force = true)`, `RESIZE_FLOOR_MS` |
+| R13 | **A stuck companion radio holds the command queue**; a raw send waits at most 2 s and a refused attempt is given back rather than counted | `send_raw_within`, `refuseSeq` |
+| R14 | **Nothing has been through a store review**, and the package id changed at 0.1 so an upgrade does not migrate | Rows 2.4, Appendix A |
+
+### By design, not a fault
+
+A scope is never invented (ADR-0033); ldmux keeps no contacts (ADR-0030); session records are never
+flooded, because a raw custom packet is delivered only on a direct route (ADR-0035); five pages, one
+radio shell, and no log on disk.
+
 ## How to use this
 
 Every row that is not FIXED, OK or EXPLAINED is either *by design* or in Appendix C, so the to-do
