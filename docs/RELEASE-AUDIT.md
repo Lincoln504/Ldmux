@@ -253,6 +253,9 @@ implements are in `docs/adr/`.
 | 6.169 | **The foreground service stopped the moment the link dropped, so the phone could not recover while walking.** The service is what keeps Android from freezing the process; releasing it on `LinkDown` froze the rebuild loop at exactly the state a range test is in — phone in a pocket, screen off, out of range — and the app logged nothing at all for thirty-four minutes (measured 2026-11-10: no `ldmux : mesh` line between 00:21 and 00:55 while the host was asked for routes from 28 hops). The rebuild now runs off screen and the service is held while a shell is wanted, released on `Idle`/`HostClosed` or after thirty failed rebuilds |
 | 6.170 | **The failure that killed a handshake was unknowable after the fact.** All the evidence lived in an in-memory buffer that dies with the process, and at range the process is exactly what Android takes — so a field failure produced no record at all, from the phone's side, ever | FIXED — on a drop the buffer is written once to app-private `files/mesh-last-failure.log` (protocol lines only, overwritten each time, never terminal content), readable with `adb shell run-as io.ldmux.mobile cat files/mesh-last-failure.log`. A handshake now logs which path it is going down: `mesh handshake 2/3 on 28 hop(s)` or `no path (broadcast, one hop)` |
 | 6.171 | **A stranger's raw-custom packet was reported as this session's fault.** `RAW_CUSTOM` is a shared channel; another tool's packet, or one flipped header bit, set `last_error = "unknown record kind"` and became the reason printed for a dead session — measured as `session replaced after 909s (hops=28, unknown record kind)` on a session that had carried traffic for fifteen minutes | FIXED — an unrecognised kind is ignored, because it says nothing about this session |
+| 6.172 | **A flat handshake timeout pre-empted the very ladder it allowed.** `handshakeTimeoutMs` was 60 s while the first re-ask on a route is `8 s + 2 s a hop` (64 s at 28 hops), so from 26 hops up the phone abandoned the handshake **before its first re-ask**: one attempt, no fresh ephemeral key, then a new route search, for ever — measured 2026-11-10 as handshake/fail/handshake/fail with not one handshake reaching the host | FIXED — the budget is the ladder's own sum, `handshakeRetryFor(hops) shl HANDSHAKE_RETRIES` (8 s at a neighbour, 512 s at 28 hops), measured from the first ask, with each attempt getting its own window including the last. Pinned by `a handshake is given the whole ladder it schedules` and the re-ask test |
+| 6.173 | **A hardcoded rebuild count stood in for time.** The give-up was "thirty rebuilds", a number that says how the ladder is tuned rather than how long the link has been down | FIXED — `LINK_GIVE_UP_MS`, ten minutes by policy (the one figure no measurement can derive: a radio cannot know whether its owner turned round), named as policy in the code |
+| 6.174 | **The host's route trust window was a neighbour's minute.** `PEER_ROUTE_STALE` 60 s, against a 34 s round trip at 28 hops, so a working long route could be judged dead by its own first exchange | FIXED — `route_stale(hops)` = `max(60 s, 2 × hops × airtime)`, the same 2-airtime-a-hop forward delay the rest of the figures use |
 | 6.12 | The vendored client's setters **dropped a frame silently**: `setRadioParams`, `setTxPower` and `setPathHashMode` returned without a word when the session was not `READY` (and `sendTracked` drops at its queue ceiling), so a write that was never sent looked like a radio refusing a value — the read-back then carried the blame | FIXED — all three report whether they were queued, and `applyPreset` names the field it could not send (`radio did not accept the change (path width) · try again`) instead of inferring a refusal |
 | 6.22 | The 1 % window was **per daemon process**: `sent` started at zero on every start, so each restart handed out a fresh 36 s, and an afternoon of restarts reached `airtime 61.4 s` against a 36 s allowance on a band where the duty cycle is a condition of use | FIXED — the hour's start and its spend are written to `<state>/mesh-airtime` and resumed when still inside the same hour (`mesh_serial::load_window`/`save_window`, tested). The firmware reports no airtime at all, so this record is the only thing that can carry the window across a restart; `docs/AIRTIME.md` now states that the hour is rolling from the daemon's first send and that there is no official reset time |
 | 6.21 | A spent hour still spent: the 1 % allowance was fully used (`records 0 left`, `airtime 57.6 s`) while **adverts kept going out**, and `mesh status` attributed both figures to the radio when they are ldmux's own arithmetic | FIXED — adverts (periodic and hint-triggered) are refused once the allowance is spent, and the two lines now say whose number they are: records sent × one record's air here, and the allowance minus that. Recorded in `docs/AIRTIME.md` what fills an hour at 62.5 kHz: one 40-character live command is ≈36 s by itself, a reconnect is a handshake each way, and adverts are the only part that can be refused |
@@ -630,6 +633,38 @@ risk that remains. Written to be read cold, by someone who was not in the sessio
 | R12 | **A rekey is still possible** when a shrink cannot reach a chunk already in flight; bounded to once per 30 s | `resizeToLink(force = true)`, `RESIZE_FLOOR_MS` |
 | R13 | **A stuck companion radio holds the command queue**; a raw send waits at most 2 s and a refused attempt is given back rather than counted | `send_raw_within`, `refuseSeq` |
 | R14 | **Nothing has been through a store review**, and the package id changed at 0.1 so an upgrade does not migrate | Rows 2.4, Appendix A |
+
+### Every timing figure, and what it is derived from
+
+A number that has to be right on a one-hop link and on a 28-hop one cannot be a constant. Each figure
+below is either **derived** (a formula over airtime, hops or the radio's own report) or **policy**
+(a decision no measurement can make), and nothing in the radio path is an unexplained literal.
+
+| Figure | Value | Basis |
+|---|---|---|
+| One record's airtime | 603 ms | **Measured** at 62.5 kHz / SF7 / CR5 (172 B record) |
+| `rto_initial` | 6 airtimes per hop | **Derived** — MeshCore's own direct-send budget (`DIRECT_SEND_PERHOP_FACTOR`); 101 s at 28 hops |
+| `rto_max` | 40 airtimes | **Derived** — one record's worth of wait before the ladder's cap |
+| `ack_delay_ms` | 2 airtimes, floor 150 ms | **Derived** — long enough for an ack to ride the next data record, short enough never to be the delay (`6.164`) |
+| fast retransmit floor | 1 airtime | **Derived** — a record cannot have arrived before its own transmission finished |
+| `max_attempts` | 5 | **Policy** — MeshCore's own figure for a direct send |
+| `window` | 8 records | **Policy** — the L2 credit |
+| `handshakeRetryFor` | 8 s + 2 s a hop | **Derived** — one round trip: the firmware's forward delay is up to 2 airtimes a hop |
+| `handshakeWaitMs` | `retry << 3` | **Derived** — the ladder's own sum, including the last re-ask's window (`6.172`) |
+| `handshakeVerdictMs` | 30 s + 2 s a hop | **Derived** — the point at which "handshaking" becomes "no answer came" |
+| `answerDeadlineMs` (attach, create, list, resync, history) | base + 2 s a hop | **Derived** — the same forward-delay figure |
+| `routeRepairMs` | 2 × 6 airtimes a hop, floor 20 s | **Derived** — twice the first copy's budget (`6.163`) |
+| `silenceFailureMs` | 60 s + 3.6 s a hop, cap 300 s | **Derived** — the ARQ's own first timeout, plus the route |
+| `route_stale` (host) | max(60 s, 2 × hops × airtime) | **Derived** — a route is dead when a round trip over it is late (`6.174`) |
+| `PEER_ROUTE_RETRY` | 15 s | **Policy** — how often a pathless host asks |
+| `ROUTE_REPLY_FLOOR` | 5 s | **Policy** — the floor that stops a radio becoming a repeater of itself |
+| `ps` carrier silence | max(75 s, 3 × rto) | **Derived** — three attempts is the ARQ's own verdict |
+| `LINK_GIVE_UP_MS` | 10 min | **Policy**, and named as such — a radio cannot know whether its owner turned round (`6.173`) |
+| `REBUILD` ladder | 2 s doubling, 300 s cap | **Policy** — full jitter, so two ends never meet in lockstep |
+| `SEND_RESULT_TIMEOUT_MS`, `REQUEST_ANSWER_MS`, `RAW_WINDOW_WAIT_MS` | 10 s / 2 s / 1.5 s | **Local** — the companion's own answer window over serial, never the air |
+| `PATH_RETRY_MS`, `PATH_REFRESH_MS`, `IDLE_TICK_MS`, `STATS_WATCH` | 10 s / 60 s / 30 s / 20 s | **Local** — serial reads, no airtime |
+| `ROUTE_TRUST_MS` / `ROUTE_FRESH_MS` / `FAILED_ROUTE_HOLD_MS` | 60 s / 120 s / 120 s | **Policy** — the community's path-gating window, and how long a bad path is remembered |
+| `MAX_HOPS` | 63 | **Firmware** — a 64-byte path field, one byte a hop |
 
 ### By design, not a fault
 

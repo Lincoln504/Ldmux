@@ -88,8 +88,8 @@ class MeshTermDriverTest {
     private val sess = FakeSession()
     private var hs = FakeHandshake(sess)
     private var now = 1_000L
-    private fun driver(handshakeTimeoutMs: Long = 300_000, sendTimeoutMs: Long = 10_000) =
-        MeshTermDriver(gw, { hs }, selector = "", clock = { now }, handshakeTimeoutMs = handshakeTimeoutMs, sendTimeoutMs = sendTimeoutMs)
+    private fun driver(handshakeWaitMs: Long = 300_000, sendTimeoutMs: Long = 10_000) =
+        MeshTermDriver(gw, { hs }, selector = "", clock = { now }, handshakeWaitOverride = handshakeWaitMs, sendTimeoutMs = sendTimeoutMs)
 
     /**
      * **A handshake nobody answers becomes a sentence, not a climbing counter.**
@@ -1031,7 +1031,7 @@ class MeshTermDriverTest {
         // 8 s then 16 s then 32 s, three asks: a lost msg1 costs seconds, not the whole timeout, and
         // a host that is really gone ends the connection so the screen can build a new one. The
         // doubling matters - a fixed 6 s re-key raced its own answer on the real link.
-        val d = driver(handshakeTimeoutMs = 120_000); d.start()
+        val d = driver(handshakeWaitMs = 120_000); d.start()
         val first = gw.sent.size
         now += 8_500; d.tick()
         assertEquals(first + 1, gw.sent.size, "the second ask at eight seconds")
@@ -1039,7 +1039,10 @@ class MeshTermDriverTest {
         assertEquals(first + 2, gw.sent.size, "the third at sixteen after that")
         now += 32_500; d.tick()
         assertEquals(first + 3, gw.sent.size, "the fourth at thirty-two after that")
-        d.tick()
+        // **The last re-ask gets its own window before the link is called dead.** It used to be
+        // declared failed on the tick after it was sent, so the fourth attempt was never answered
+        // by anything. The total is now the ladder's own sum: 8 + 16 + 32 + 64.
+        now += 64_500; d.tick()
         assertEquals(MeshTermView.LinkDown(MeshLinkState.SessionFailed), d.view.value)
         assertTrue(hs.abandoned)
     }

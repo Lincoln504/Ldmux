@@ -145,6 +145,27 @@ class MeshSilenceBoundTest {
      * floor for a neighbour and a flood every twenty seconds on a twenty-hop route, where one
      * working round trip is 72 s.
      */
+    /**
+     * **The handshake's total wait must exceed the last re-ask it schedules.** A flat sixty seconds
+     * did the opposite on any route of 26 hops or more: the timeout fired before the first re-ask,
+     * so the mesh was given one attempt and a fresh ephemeral key was never sent.
+     */
+    @Test
+    fun a_handshake_is_given_the_whole_ladder_it_schedules() {
+        for (hops in listOf(1, 5, 14, 26, 28, 63)) {
+            val retry = handshakeRetryFor(hops)
+            // Each re-ask waits twice the one before, so four asks are 1, 2, 4 and 8 x the retry.
+            assertEquals(
+                retry shl HANDSHAKE_RETRIES,
+                handshakeWaitMs(hops),
+                "at $hops hops the wait must be the ladder's own sum",
+            )
+            assertTrue(handshakeWaitMs(hops) > retry * 7, "the last re-ask gets its window")
+        }
+        // And it scales with the route rather than being a fixed minute.
+        assertTrue(handshakeWaitMs(28) > handshakeWaitMs(1) * 5)
+    }
+
     @Test
     fun a_route_repair_waits_for_a_round_trip_that_scales() {
         assertEquals(20_000L, routeRepairMs(1), "a neighbour gets the floor")

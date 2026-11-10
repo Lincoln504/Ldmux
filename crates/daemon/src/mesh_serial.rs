@@ -148,6 +148,19 @@ const ROUTE_REASK_FLOOR: Duration = Duration::from_secs(2);
 /// an equal-or-shorter candidate always wins anyway.
 const PEER_ROUTE_STALE: Duration = Duration::from_secs(60);
 
+/// The same window for a route of `hops` repeaters.
+///
+/// **A minute is a neighbour's figure.** The window exists so a route that has stopped carrying is
+/// replaced by a fresher candidate, and "stopped carrying" has to be measured against how long one
+/// round trip over that route takes: 2 airtimes a hop (the firmware's own forward delay), so a
+/// 28-hop route needs 34 s before anything is late, and a flat minute would call it dead while its
+/// first exchange was still crossing. The base is the community's own path-gating window
+/// (`max(60 s, 2 × hops × airtime)`, with 603 ms an airtime at the public tuple).
+fn route_stale(hops: usize) -> Duration {
+    let round_trip = Duration::from_millis(2 * 603 * hops.max(1) as u64);
+    PEER_ROUTE_STALE.max(round_trip)
+}
+
 /// The least time between two **route replies** to the same peer.
 ///
 /// A request is ~40 bytes and a reply ~40 bytes plus the path, so answering every request is cheap;
@@ -342,7 +355,7 @@ fn prefer_route(current: Option<&PeerPath>, heard: Option<Instant>, candidate: &
     let Some(current) = current else {
         return true;
     };
-    if heard.is_none_or(|t| t.elapsed() >= PEER_ROUTE_STALE) {
+    if heard.is_none_or(|t| t.elapsed() >= route_stale(usize::from(current.hops))) {
         return true;
     }
     candidate.hops <= current.hops

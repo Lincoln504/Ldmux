@@ -195,6 +195,17 @@ internal fun rebuildCapMs(rebuilds: Int): Long =
     (2_000L shl rebuilds.coerceIn(0, 7)).coerceAtMost(300_000L)
 
 /**
+ * How long a link with a shell **wanted** keeps retrying before the app gives the radio back.
+ *
+ * **Policy, and said as policy**, because it is the one figure here that no measurement can derive:
+ * a radio cannot know whether its owner walked round the corner or left it on the desk. Ten minutes
+ * is a walk that turned round and came back, at a cost of a dozen handshakes; past that the failure
+ * is the operator's to explain (wrong channel, radio out of range for good), the service is released
+ * and the battery stops paying, and the return to the screen rebuilds immediately anyway.
+ */
+internal const val LINK_GIVE_UP_MS = 10 * 60_000L
+
+/**
  * The mesh route's terminal. It is the **same chrome as the tailnet terminal**: the shared
  * [PortraitBar] (shell header with its arrows, menu, Esc/Tab/Home/End/PgUp/PgDn, the sticky
  * Ctrl/Alt/Shift latch, C/c, paste, Enter, the arrow pad, the keyboard toggle) drives a
@@ -258,6 +269,8 @@ fun MeshTerminalScreen(
     // is that reload, on the same backoff: two seconds doubling to thirty, and back to two as soon
     // as the link is live.
     var rebuilds by remember(plan) { mutableStateOf(0) }
+    // When the link first failed in this run of failures, for the give-up in [LINK_GIVE_UP_MS].
+    var downSince by remember(conn) { mutableStateOf<kotlin.time.TimeSource.Monotonic.ValueTimeMark?>(null) }
     // **Which screen this connection is showing.** Declared here rather than beside the list
     // because the rebuild below has to be able to land on it: a handshake is a new session, and
     // the screen it lands on is the list, not the shell the old session was in.
@@ -304,12 +317,14 @@ fun MeshTerminalScreen(
         // drawn uniformly below the ladder's cap ([rebuildCapMs]): a phone and a host that both
         // back off on 2, 4, 8, 16 meet again on 2, 4, 8, 16, which is the shape every account of a
         // reconnect storm prescribes against.
-        // **A give-up, so a dead link does not run a radio for ever.** Thirty rebuilds is seven
-        // minutes of retrying at the ladder's cap; past that the failure is the operator's to
-        // explain (wrong channel, radio left behind), and the app releases the service and waits
-        // for the screen to come back, which rebuilds immediately.
-        if (rebuilds >= 30) {
-            appLog("mesh rebuilds gave up after $rebuilds attempts")
+        // **A give-up, so a dead link does not run a radio for ever.** Measured in **time**, not in
+        // attempts: how long this has been down says what it is — a walk that turned round, or a
+        // radio left on the desk — where a count of retries says only how the ladder happens to be
+        // tuned. See [LINK_GIVE_UP_MS] for the one figure and why it is that one.
+        val since = downSince ?: kotlin.time.TimeSource.Monotonic.markNow().also { downSince = it }
+        val downMs = since.elapsedNow().inWholeMilliseconds
+        if (downMs >= LINK_GIVE_UP_MS) {
+            appLog("mesh rebuilds gave up after ${downMs / 1000} s down")
             BackgroundSession.setActive(false, "")
             ended = true
             return@LaunchedEffect
@@ -441,7 +456,10 @@ fun MeshTerminalScreen(
             is MeshTermView.NoShells,
             is MeshTermView.ProfileMissing,
             is MeshTermView.HeldBy,
-            -> rebuilds = 0
+            -> {
+                rebuilds = 0
+                downSince = null
+            }
             else -> {}
         }
     }

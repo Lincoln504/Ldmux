@@ -283,13 +283,13 @@ class MeshTermDriver(
     initialGrid: Pair<Int, Int>? = null,
     private val clock: () -> Long,
     /**
-     * A handshake not answered in this long is reported as a dead link.
+     * How long the whole handshake is given, overriding [handshakeWaitMs].
      *
-     * A handshake is three small records, so a minute is already generous - the old five made a
-     * lost `msg1` look like a dead host for most of a coffee break. The retry below is what makes
-     * a short timeout safe: the wait is retried every `handshakeRetryFor(hops)`, not once.
+     * **Derived by default, because a flat figure cannot be right on both a neighbour and a
+     * twenty-eight-hop route.** It exists only so a test can assert the ladder with a short budget:
+     * the real value is the ladder's own sum, including the answer to the last re-ask.
      */
-    private val handshakeTimeoutMs: Long = 60_000,
+    private val handshakeWaitOverride: Long? = null,
     /**
      * The first interval before an unanswered handshake is asked again, with fresh keys each time.
      *
@@ -311,7 +311,7 @@ class MeshTermDriver(
      */
     private val handshakeVerdictMs: Long = 30_000,
     /** How many re-asks before the transport itself is judged dead and the connection rebuilt. */
-    private val handshakeRetries: Int = 3,
+    private val handshakeRetries: Int = HANDSHAKE_RETRIES,
     /** How long the gateway may take to say what the radio did with one record. */
     private val sendTimeoutMs: Long = SEND_RESULT_TIMEOUT_MS,
 ) {
@@ -937,14 +937,11 @@ class MeshTermDriver(
             pump()
         } else if (handshake != null) {
             val waited = clock() - handshakeSince
-            if (waited > handshakeTimeoutMs) {
+            // Measured from the **first** ask, not the latest: this is the whole handshake's budget,
+            // and the re-asks inside it are scheduled from their own start by the ladder below.
+            if (clock() - handshakeBeganAt > (handshakeWaitOverride ?: handshakeWaitMs(gateway.routeHops))) {
                 handshake?.abandon(); handshake = null
                 failed(MeshLinkState.SessionFailed, "three unanswered handshakes")
-            } else if (handshakeTries >= handshakeRetries) {
-                // Three unanswered handshakes, each given twice as long as the last, is not a lost
-                // record. The transport is the suspect now, and only a new connection can test that.
-                handshake?.abandon(); handshake = null
-                failed(MeshLinkState.SessionFailed, "the handshake timed out")
             } else if (waited >= handshakeRetryFor(gateway.routeHops) shl handshakeTries) {
                 handshakeTries++
                 handshakeNo = handshakeTries
@@ -2331,8 +2328,28 @@ internal const val MAX_HOPS = 63
 internal fun handshakeRetryFor(hops: Int?): Long =
     answerDeadlineMs(HANDSHAKE_FIRST_RETRY_MS, hops)
 
+/** Handshakes asked before the link is called dead and rebuilt. */
+internal const val HANDSHAKE_RETRIES = 3
+
 /** The flat first re-ask; [handshakeRetryFor] adds the route. */
 private const val HANDSHAKE_FIRST_RETRY_MS = 8_000L
+
+/**
+ * How long a handshake is given **in total**, over a route of `hops` repeaters.
+ *
+ * **The ladder's own sum, so no flat figure can pre-empt the retries it exists to allow.** Each
+ * attempt waits twice as long as the one before ([handshakeTries]), and the whole handshake is
+ * abandoned after [handshakeRetries] waits plus one more for the answer to the last re-ask. At a
+ * neighbour that is 8 + 16 + 32 s and a slack second; at 28 hops each wait is 64 s, because 8 s plus
+ * 2 s a hop is one round trip over that route.
+ *
+ * This replaced a flat sixty seconds, which at 26 hops or more fired **before the first re-ask** —
+ * the phone handshook once, gave up, and went looking for a new route while the mesh had not yet
+ * had the round trip it needs (measured 2026-11-10: handshake, fail, handshake, fail, and not one
+ * handshake reaching the host).
+ */
+internal fun handshakeWaitMs(hops: Int?): Long =
+    handshakeRetryFor(hops) shl HANDSHAKE_RETRIES
 
 /**
  * How long a request may go unanswered over a route of `hops` repeaters.
