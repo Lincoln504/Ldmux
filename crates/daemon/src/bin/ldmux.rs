@@ -296,11 +296,19 @@ fn print_mesh_status(v: &serde_json::Value) {
     if let (Some(hops), Some(airtime)) = (
         hops,
         v.get("airtimeMs").and_then(serde_json::Value::as_f64),
-    ) && hops > 0
-        && airtime > 0.0
+    ) && airtime > 0.0
     {
-        let exchange = 2.0 * hops as f64 * airtime / 1000.0;
-        println!("cost     one exchange ~ {exchange:.0} s (a record out and its ack back)");
+        // A direct link crosses one hop in each direction, so its exchange is two records: the
+        // arithmetic is the same and the answer for a neighbour is 1.2 s at the public tuple.
+        let exchange = 2.0 * hops.max(1) as f64 * airtime / 1000.0;
+        // A neighbour's exchange is 1.2 s and a twenty-eight-hop one is 34 s: one decimal is worth
+        // keeping below ten seconds and noise above it.
+        let shown = if exchange < 10.0 {
+            format!("{exchange:.1}")
+        } else {
+            format!("{exchange:.0}")
+        };
+        println!("cost     one exchange ~ {shown} s (a record out and its ack back)");
     }
     // **Not a limit this host enforces.** The radio's firmware runs the transmitter's duty cycle,
     // and what it reports is its own count: printing it as a budget read like a gate the daemon
