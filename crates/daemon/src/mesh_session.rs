@@ -91,6 +91,8 @@ impl SessionSnapshot {
 
 /// What the gateway's side of one L2 connection knows about the session.
 pub struct SessionHost {
+    /// Records this end refused to open, so the journal can tell "not sending" from "discarding".
+    inbound_dropped: u32,
     responder: Responder,
     pairing: PairingEntry,
     persist: Persister,
@@ -135,6 +137,7 @@ impl SessionHost {
             session_since: None,
             inbound: VecDeque::new(),
             dropped_inbound: 0,
+            inbound_dropped: 0,
             refused: 0,
             handshakes: 0,
             last_error: None,
@@ -204,7 +207,22 @@ impl SessionHost {
                     Err(ldmux_session::SessionError::Record(
                         RecordError::Duplicate | RecordError::TooOld,
                     )) => {}
-                    Err(e) => self.last_error = Some(format!("record dropped: {e:?}")),
+                    Err(e) => {
+                        self.last_error = Some(format!("record dropped: {e:?}"));
+                        // **Said in the journal, not only in a status field.** A dropped record is
+                        // the difference between "the phone is not sending" and "the phone's records
+                        // are arriving and we are discarding them" — the two readings that a whole
+                        // range investigation on 2026-11-10 could not separate, because the only
+                        // trace was a field overwritten by the next event. Powers of two, so a bad
+                        // key that drops a hundred records writes seven lines and not a hundred.
+                        self.inbound_dropped = self.inbound_dropped.saturating_add(1);
+                        if self.inbound_dropped.is_power_of_two() {
+                            eprintln!(
+                                "ldmuxd: mesh record dropped ({n} so far): {e:?}",
+                                n = self.inbound_dropped
+                            );
+                        }
+                    }
                 }
             }
             // **A raw custom packet that is not ours is not a fault.** `RAW_CUSTOM` is a shared

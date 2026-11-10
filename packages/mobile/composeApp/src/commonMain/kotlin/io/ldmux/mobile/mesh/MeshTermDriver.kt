@@ -860,7 +860,16 @@ class MeshTermDriver(
         val s = session ?: return@withLock
         when (val r = s.receive(clock(), record)) {
             Received.Quiet -> {}
-            is Received.Rejected -> rejectedRecords++
+            is Received.Rejected -> {
+                rejectedRecords++
+                // **A record the session threw away is the difference between "the host is not
+                // answering" and "the host is answering and we are dropping it".** Nothing recorded
+                // this, so a whole range investigation on 2026-11-10 could not tell those apart: the
+                // host's journal said it accepted the handshake and sent a reply, and this end's log
+                // said only that nothing arrived. The code is the ABI's own (`LDMUX_ERR_*`), named
+                // rather than numbered so a reader does not have to go looking.
+                appLog("mesh record rejected: ${rejectReason(r.code)} (count $rejectedRecords)")
+            }
             Received.PeerClosed -> { terminalView = MeshTermView.HostClosed(null) }
             is Received.Data -> {
                 lastInboundAt = clock()
@@ -2396,6 +2405,24 @@ internal const val MAX_HOPS = 63
  * seconds in the first place — and a round trip over ten repeaters is twenty-odd seconds. A mesh is
  * mostly repeaters, so the flat figure is the floor and each hop adds its forward delay.
  */
+/**
+ * The ABI's record error, said in words.
+ *
+ * A discarded record is a fact about the *link*, not about the user, so the sentence is for the log
+ * and the diagnostics list rather than the notice line. Named errors matter here: "wrong index"
+ * means this end and the host disagree about which session they are in (a rekey problem), while "bad
+ * tag" means the packet was addressed elsewhere or corrupted, and the two are cured differently.
+ */
+internal fun rejectReason(code: Int): String = when (code) {
+    SessionLib.ERR_WRONG_INDEX -> "wrong session index"
+    SessionLib.ERR_DUPLICATE -> "duplicate"
+    SessionLib.ERR_TOO_OLD -> "older than the replay window"
+    SessionLib.ERR_BAD_TAG -> "tag did not verify"
+    SessionLib.ERR_TOO_LONG -> "longer than this route's record"
+    SessionLib.ERR_MALFORMED -> "malformed"
+    else -> "code $code"
+}
+
 internal fun handshakeRetryFor(hops: Int?): Long =
     answerDeadlineMs(HANDSHAKE_FIRST_RETRY_MS, hops)
 
