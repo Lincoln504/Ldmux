@@ -158,6 +158,46 @@ class MeshTermDriverTest {
         assertIs<MeshTermView.Handshaking>(d.view.value, "and the screen still says so")
     }
 
+    /// **A list answer that never arrives is asked for again, and only a few times.**
+    ///
+    /// `launcher()` marks the request in flight and `listShells()` refuses to ask twice ("a list
+    /// already in flight is not asked for again"), so a lost answer left the screen on "asking host
+    /// for shells" until the operator pressed refresh — measured 2026-11-09 at 75 s on a link that
+    /// was up. The retry is one record a deadline, bounded: a host that is not answering is a state
+    /// the screen already draws, and the operator's refresh is the cure.
+    @Test
+    fun `a list with no answer is asked for again and then left to the operator`() = runBlocking<Unit> {
+        val d = driver(); live(d)
+        assertTrue(d.launcher(), "the launcher asks for the list")
+        assertEquals(now + 8_000, d.nextWakeMs(), "the loop must wake for the deadline")
+        val asked = gw.sent.size
+
+        // Nothing arrives: one record a deadline, not one a tick.
+        now += 5_000
+        d.tick()
+        assertEquals(asked, gw.sent.size, "under the deadline nothing is repeated")
+        now += 5_000
+        d.tick()
+        assertEquals(asked + 1, gw.sent.size, "past it the list is asked for once more")
+
+        // The answer arrives: the deadline is over and nothing more is spent on it.
+        deliver(d, TermMessage.Sessions(true, listOf(ent("aa11"))))
+        val answered = gw.sent.size
+        now += 40_000
+        d.tick()
+        assertEquals(answered, gw.sent.size, "an answered list is not asked for again")
+
+        // A host that never answers is asked a bounded number of times, and the count ends.
+        assertTrue(d.launcher(), "the list is asked for again from the launcher")
+        val start = gw.sent.size
+        repeat(8) {
+            now += 9_000
+            d.tick()
+        }
+        val repeatAsks = gw.sent.size - start
+        assertTrue(repeatAsks in 1..3, "two more asks at most, not one per deadline: $repeatAsks")
+    }
+
     private fun stream(vararg m: TermMessage): ByteArray = m.flatMap { it.encode().toList() }.toByteArray()
     private fun data(vararg m: TermMessage) = Received.Data(listOf(Delivered(0, stream(*m))))
 

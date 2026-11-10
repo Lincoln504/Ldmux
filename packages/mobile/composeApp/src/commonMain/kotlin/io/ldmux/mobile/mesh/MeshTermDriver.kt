@@ -427,6 +427,20 @@ class MeshTermDriver(
     private var listingForHeader = false
 
     /**
+     * When the list was last asked for, and how many times.
+     *
+     * **An answer that never arrives must not leave the phone asking for ever.** `launcher()` and
+     * `listShells()` both mark the request as in flight, and `listShells()` then refuses to ask
+     * again ("a list already in flight is not asked for again", which is right: the screen asks once
+     * per frame otherwise). The gap: nothing re-asks if the answer is lost, so the screen sat on
+     * "asking host for shells" until the operator pressed refresh — measured 2026-11-09 at 75 s on a
+     * link that was up, after a daemon restart. The retry is bounded, because a host that is not
+     * answering is a state the screen already draws.
+     */
+    private var listAskedAt: Long? = null
+    private var listAsks: Int = 0
+
+    /**
      * Whether the run of pages now arriving answers a list this link asked for.
      *
      * **Decided once, on the run's first page.** The old code kept two buffers and chose between
@@ -802,6 +816,26 @@ class MeshTermDriver(
             terminalView = null
             connect()
         }
+        // **A list answer that never came is asked for again.** One record, at most
+        // [LIST_ASKS] times: a host that is up answers in a handful of records, so a second ask is
+        // only ever the cure for a lost one.
+        if (session != null && listAskedAt?.let { clock() - it >= LIST_ANSWER_MS } == true) {
+            listAskedAt = null
+            if (listAsks < LIST_ASKS && (listingForHeader || pick == Pick.Listing)) {
+                listingForHeader = true
+                listAskedAt = clock()
+                listAsks += 1
+                queue(TermMessage.ListRequest)
+                // **Queued is not sent.** Without the pump the ask waits for whatever else next
+                // drives the link, which on a frozen page is nothing: the tick is the only thing
+                // running, and a record that sits in the queue is a record that never left.
+                pump()
+            } else {
+                // Out of asks: let the screen ask again on its own path rather than pretending a
+                // request is still in flight.
+                listingForHeader = false
+            }
+        }
         publish()
     }
 
@@ -809,11 +843,10 @@ class MeshTermDriver(
     suspend fun nextWakeMs(): Long? = lock.withLock {
         val deadline = session?.nextDeadlineMs()
         val retry = recoverAt.takeIf { it > 0 }
-        when {
-            deadline == null -> retry
-            retry == null -> deadline
-            else -> minOf(deadline, retry)
-        }
+        // **A list answer has a deadline too**, or the loop sleeps through it: the idle tick is
+        // 30 s, which is longer than anyone will wait for a page of shells.
+        val list = listAskedAt?.plus(LIST_ANSWER_MS)
+        listOfNotNull(deadline, retry, list).minOrNull()
     }
 
     // ── what the user does ─────────────────────────────────────────────────────────────
@@ -1020,6 +1053,8 @@ class MeshTermDriver(
         // completed a fresh buffer. A completed run empties it; a request only says what to do
         // with the next one.
         listingForHeader = true
+        listAskedAt = clock()
+        listAsks += 1
         queue(TermMessage.ListRequest)
         pump(); publish()
         true
@@ -1032,6 +1067,8 @@ class MeshTermDriver(
         // without this guard that is a record per frame on a link that allows ≈58 an hour.
         if (listingForHeader) return@withLock
         listingForHeader = true
+        listAskedAt = clock()
+        listAsks += 1
         queue(TermMessage.ListRequest); pump(); publish()
     }
 
@@ -1673,7 +1710,12 @@ class MeshTermDriver(
         // **One buffer, one decision.** A page belongs to the run that started with the first page
         // after an empty buffer; whether that run was asked for is read once, there, because the UI
         // state that answers it (`pick`, `listingForHeader`) is allowed to change mid-reply.
-        if (pages.isEmpty()) pagesAsked = listingForHeader || pick == Pick.Listing
+        if (pages.isEmpty()) {
+            // An answer of any kind ends the deadline: a pushed list is as good as an asked-for one.
+            listAskedAt = null
+            listAsks = 0
+            pagesAsked = listingForHeader || pick == Pick.Listing
+        }
         pages.addAll(m.entries)
         if (!m.last) return
         val all = pages.distinctBy { it.id }.take(MeshTerm.MAX_SESSIONS)
@@ -1997,6 +2039,16 @@ internal fun silenceFailureMs(hops: Int?): Long =
  * that is truly off is not hammered on airtime, and capped so a host that comes back is picked up
  * within half a minute rather than the next time the user reopens the screen.
  */
+/**
+ * How long a list request may go unanswered before it is asked for again.
+ *
+ * A list is a handful of records each way, so a few seconds is a lost answer and not a slow one.
+ */
+private const val LIST_ANSWER_MS = 8_000L
+
+/** How many times a list is asked for before the screen's own refresh is the only cure. */
+private const val LIST_ASKS = 3
+
 private const val FIRST_RECOVERY_MS = 2_000L
 private const val MAX_RECOVERY_MS = 30_000L
 
