@@ -325,11 +325,22 @@ fn send_route_reply<L: ByteLink>(
     // range, only while the phone has no route at all, and after the first answer every record is
     // direct again.
     //
-    // **Two seconds, not ten.** This runs inside the push handler, before the record that arrived is
-    // delivered upward, so a radio that stopped answering must not hold the loop for ten seconds.
-    companion
-        .send_packet_within(&packet, Duration::from_secs(2))
-        .is_ok()
+    // **Retried, because a busy radio is not a refusal.** This runs inside the push handler, before
+    // the record that arrived is delivered upward, so it must not hold the loop for long — but
+    // dropping the answer to a route request leaves the phone asking again, which costs more air than
+    // waiting out the radio's own deferral. `RESP_CODE_DISABLED` and a timeout are both "ask again":
+    // measured 2026-11-10 at range, three consecutive route replies reported `ok=false` and were
+    // lost, each of them an answer the phone never saw.
+    match send_retrying(|d| companion.send_packet_within(&packet, d)) {
+        Ok(()) => true,
+        Err(e) => {
+            // A failure is rare and always the answer to a question somebody is waiting on, so it is
+            // logged unconditionally and with the reason: "not sent" alone sent this investigation
+            // looking at the air when the radio had simply been busy.
+            route_log(&format!("route reply not sent: {e}"));
+            false
+        }
+    }
 }
 
 /// The route a peer's `LDRR` reply names: the path it uses towards us, reversed into ours.
@@ -450,6 +461,50 @@ const LDMUX_FLOOD_RECORD_MAX: usize = 162;
 /// Six airtimes per hop is MeshCore's own direct-send factor (`DIRECT_SEND_PERHOP_FACTOR`), the same
 /// arithmetic the session uses for its first retransmission — so this fires exactly when the record
 /// it is judging would have been retried, and not before.
+/// How long to wait for the radio to accept a send.
+///
+/// **Longer than the firmware's own deferral.** MeshCore defers a transmission behind a busy channel
+/// and forces it after a 4-second CAD timeout, so any deadline shorter than that expires on a
+/// crowded channel while the packet is still queued — the send is reported failed and never
+/// transmitted. One airtime is added for the acknowledge itself, and the floor keeps the old
+/// two-second promise as the minimum rather than the maximum.
+/// Send a packet, retrying the failures that mean "again".
+///
+/// **`RESP_CODE_DISABLED` is the radio asking to be asked again**, not a refusal: it is mid-retune or
+/// its store is busy (`MyMesh.cpp:86`, which the companion crate already maps to
+/// [`SessionError::Disabled`]). A timeout is the same class from this side — the firmware deferred the
+/// transmission behind a busy channel and its own 4-second CAD ceiling. Both were reported as a
+/// failed send and the packet was dropped, which at range looked like a handshake reply that never
+/// existed. Only a real refusal (`Rejected`), a framing fault or a malformed reply ends the attempt.
+fn send_retrying<F>(mut attempt: F) -> Result<(), SessionError>
+where
+    F: FnMut(Duration) -> Result<(), SessionError>,
+{
+    let mut last = None;
+    for round in 0..SEND_ROUNDS {
+        // The radio's own deferral is the pace of the first retry; doubling after that.
+        let deadline = raw_send_deadline(900.0) + Duration::from_millis(300 * (1 << round));
+        match attempt(deadline) {
+            Ok(()) => return Ok(()),
+            Err(SessionError::Disabled | SessionError::Timeout { .. }) => {
+                last = Some(());
+                std::thread::sleep(Duration::from_millis(200 * (1 << round)));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    let _ = last;
+    Err(SessionError::Disabled)
+}
+
+/// How many times a send is attempted when the radio says "not now".
+const SEND_ROUNDS: u32 = 3;
+
+fn raw_send_deadline(airtime_ms: f64) -> Duration {
+    let ms = 4_000.0 + airtime_ms.max(1.0);
+    Duration::from_millis(ms as u64).max(Duration::from_secs(2))
+}
+
 fn direct_round_trip(hops: usize, airtime_ms: f64) -> Duration {
     let per = airtime_ms.max(1.0);
     let ms = 6.0 * per * hops.max(1) as f64;
@@ -1339,12 +1394,16 @@ fn serve_loop<L: ByteLink>(
                 } else {
                     None
                 };
+                // **The firmware may hold a send for four seconds before it transmits.** Its
+                // dispatcher defers behind a busy channel and forces the transmission after a
+                // 4-second CAD timeout, so a two-second deadline expires on a crowded channel and
+                // the reply is dropped without ever reaching the air. Measured 2026-11-10 at range:
+                // three consecutive `reply sent ok=false`, each one a handshake answer the phone
+                // never saw, so it re-handshook until it gave up.
                 let attempt: Result<SendOutcome, SessionError> = match flooded {
-                    Some(packet) => companion
-                        .send_packet_within(&packet, std::time::Duration::from_secs(2))
+                    Some(packet) => send_retrying(|d| companion.send_packet_within(&packet, d))
                         .map(|()| SendOutcome::SentFlood),
-                    None => companion
-                        .send_raw_within(hash_size, path, &record, std::time::Duration::from_secs(2))
+                    None => send_retrying(|d| companion.send_raw_within(hash_size, path, &record, d))
                         .map(|()| SendOutcome::SentDirect),
                 };
                 let outcome = match attempt {
