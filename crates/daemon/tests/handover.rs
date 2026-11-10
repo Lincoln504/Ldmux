@@ -108,7 +108,10 @@ async fn handover_size_and_close_does_not_detach() {
     let _keeper_guard = KeeperGuard(keeper);
     wait_socket(&keeper_sock).await;
 
-    let port: u16 = 51000 + (rand::random::<u16>() % 4000);
+    // **Port 0: the kernel picks one nobody else can have.** Picking a number and hoping
+    // collided in a loaded gate, and a bind failure is logged rather than fatal, so the
+    // symptom was a connection refused in a test about something else entirely.
+    let port: u16 = 0;
     let token = "handover-token";
     let d = LdmuxDaemon::new(dir.clone(), keeper_bin()).with_remote(
         "127.0.0.1".to_string(),
@@ -120,6 +123,8 @@ async fn handover_size_and_close_does_not_detach() {
         let mut d = arc.lock().await;
         d.start(&arc).await.unwrap();
     }
+    // The port the kernel gave the endpoint, which is what a client connects to.
+    let port = arc.lock().await.remote_port().expect("the tailnet endpoint is bound");
     let cwd = dir.to_string_lossy().into_owned();
     let id = arc
         .lock()

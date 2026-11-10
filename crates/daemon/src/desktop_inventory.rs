@@ -99,8 +99,7 @@ pub fn walk_i3_tree(root: &serde_json::Value) -> (Vec<DesktopWorkspace>, Vec<Des
                 window_count: 0,
             });
         }
-        if node.window.is_some_and(|w| w != 0) {
-            let w = node.window.unwrap();
+        if let Some(w) = node.window.filter(|w| *w != 0) {
             windows.push(DesktopWindow {
                 id: format!("0x{:x}", w),
                 app_class: class_of(node),

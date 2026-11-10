@@ -520,6 +520,16 @@ impl LdmuxDaemon {
         self
     }
 
+    /// The port the tailnet endpoint is listening on, once it is bound.
+    ///
+    /// **A configured port of 0 means "any free one"**, and this is how a test learns which —
+    /// picking a number and hoping is a collision waiting for a loaded gate (three test binaries
+    /// still did, and one lost the bind in a parallel run: `bind` failures are logged rather than
+    /// fatal, so the symptom was a connection refused in a test that had nothing to do with ports).
+    pub fn remote_port(&self) -> Option<u16> {
+        self.remote.as_ref().map(crate::remote::RemoteServer::port)
+    }
+
     /// Shorten the live-window grace period. A test hook: the rule it guards is
     /// real, and five seconds per assert is not.
     pub fn with_live_window_grace_ms(mut self, ms: u64) -> Self {

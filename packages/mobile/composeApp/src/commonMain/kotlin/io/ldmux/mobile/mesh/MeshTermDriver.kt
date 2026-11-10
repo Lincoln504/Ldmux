@@ -1054,6 +1054,10 @@ class MeshTermDriver(
         // with the next one.
         listingForHeader = true
         listAskedAt = clock()
+        // **A deliberate ask re-arms the retry.** The bound exists so a host that is not answering
+        // is not asked for ever on its own; the operator asking again is new information, and after
+        // three failed asks the deadline would otherwise never fire again on this connection.
+        if (listAsks >= LIST_ASKS) listAsks = 0
         listAsks += 1
         queue(TermMessage.ListRequest)
         pump(); publish()
@@ -1068,6 +1072,7 @@ class MeshTermDriver(
         if (listingForHeader) return@withLock
         listingForHeader = true
         listAskedAt = clock()
+        if (listAsks >= LIST_ASKS) listAsks = 0
         listAsks += 1
         queue(TermMessage.ListRequest); pump(); publish()
     }

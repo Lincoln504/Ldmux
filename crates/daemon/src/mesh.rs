@@ -857,6 +857,7 @@ async fn session<C: Carrier>(
     // every pass, which is not a budget at all.
     let mut hour_left: Option<u8> = None;
 
+
     loop {
         if runtime.reset_pin.swap(false, Ordering::SeqCst)
             && let Some(h) = host.as_mut()
@@ -1004,13 +1005,21 @@ async fn session<C: Carrier>(
                         // zero nothing was polled and nothing transmitted (measured 2026-11-06:
                         // `held back 3959 times`, a phone waiting on a healthy session).
                         //
-                        // Taking a *higher* report is how an hour rollover comes back, and it is the
-                        // only thing that can reopen a spent budget.
                         if let Some(left) = status.ops_left_this_hour {
-                            hour_left = Some(match hour_left {
-                                Some(current) if left <= current => current,
-                                _ => left,
-                            });
+                            // **The carrier is the accountant, and its figure replaces ours.** It
+                            // counts what it actually transmitted — retransmissions and acks
+                            // included — and that is the 1 % the band allows. The loop's own
+                            // decrement below is a *reservation* for records handed over since this
+                            // report; replacing the count with the report is what stops the two
+                            // being charged twice, which is the stall of 2026-11-06 in reverse.
+                            //
+                            // Keeping the larger of the two (which is what this did) meant
+                            // retransmissions were never charged at all: a link retransmitting a
+                            // third of its records spent a third more of the hour's airtime than it
+                            // believed. A report can be a few records behind the reservation for a
+                            // moment; that is bounded by the L2 window and self-corrects on the
+                            // next report.
+                            hour_left = Some(left);
                         }
                         set(snapshot, |s| {
                             s.radio_state = Some(status.radio_state);
