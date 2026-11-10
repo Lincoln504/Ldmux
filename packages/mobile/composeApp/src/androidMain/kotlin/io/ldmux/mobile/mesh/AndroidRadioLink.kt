@@ -361,6 +361,17 @@ class AndroidRadioLink(
         override fun onReady(selfInfo: SelfInfo) {
             if (closing) return
             _selfInfo.value = selfInfo.toRadioSelfInfo()
+            // **The operating point goes in the record, and a mismatch is said out loud.** Nothing
+            // on this path ever checked that the radio is on the channel the link needs: the preset
+            // is written only from the settings panel, and a radio left on another channel — by an
+            // earlier setting, or by another app that shares it — then fails exactly like a link out
+            // of range. Two apps on one radio makes that a live possibility rather than a theory.
+            val info = selfInfo.toRadioSelfInfo()
+            appLog(
+                "mesh radio preset ${info.frequencyMhz} MHz ${info.bandwidthKhz} kHz " +
+                    "SF${info.spreadingFactor} CR${info.codingRate} tx ${info.txPowerDbm} dBm " +
+                    "(max ${info.maxTxPowerDbm})",
+            )
             radioPublicKey = selfInfo.publicKey()
             refreshStatus()
             _status.value = _status.value.copy(radioState = MeshStatus.RADIO_CONNECTED)
