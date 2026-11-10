@@ -380,6 +380,19 @@ impl SessionHost {
             .is_some_and(|s| s.arq_mut().on_refused(seq, now_ms))
     }
 
+    /// How long this session waits before retransmitting a record, in ms.
+    ///
+    /// **A route's first retry is its round trip.** The ARQ scales it at six airtimes per hop, so a
+    /// caller that wants to say "the carriage has gone silent" has to ask the session rather than
+    /// use a constant: on ten repeaters one round trip is thirty-six seconds, and a flat
+    /// seventy-five would end the connection between the first retry and its answer.
+    #[must_use]
+    pub fn first_rto_ms(&self) -> u64 {
+        self.session
+            .as_ref()
+            .map_or(0, |s| s.arq().config().rto_initial_ms)
+    }
+
     #[must_use]
     pub fn next_deadline(&self) -> Option<u64> {
         self.session.as_ref().and_then(|s| s.arq().next_deadline())

@@ -1100,7 +1100,14 @@ async fn session<C: Carrier>(
         // **Silence with something outstanding is the end of this connection.** Nothing else
         // concludes anything from it: see [`CARRIER_SILENCE`]. Returning here is what lets
         // `supervise` build a new one, which is the only cure for a dead carriage.
-        if h.snapshot().pending > 0 && last_carrier.elapsed() >= CARRIER_SILENCE {
+        // **The backstop scales with the route.** A flat seventy-five seconds is two round trips on
+        // a direct link and less than one on ten repeaters: the first retry there is thirty-six
+        // seconds and its answer is due twenty later, so the constant would end a healthy connection
+        // between them. Three first retries is the rule.
+        let silence = CARRIER_SILENCE.max(std::time::Duration::from_millis(
+            h.first_rto_ms().saturating_mul(3),
+        ));
+        if h.snapshot().pending > 0 && last_carrier.elapsed() >= silence {
             return Err(MeshError::Timeout("the carriage stopped answering"));
         }
 

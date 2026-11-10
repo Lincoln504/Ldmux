@@ -90,6 +90,17 @@ class MeshAnswerDeadlineTest {
         assertEquals(4_000L, resyncFirstRetryMs(0))
         assertEquals(24_000L, resyncFirstRetryMs(10))
     }
+
+    /// **The handshake retry must outlast one round trip, and a round trip is per hop.** The eight
+    /// seconds that fixed a destroyed answer on a link next door is a fifth of one round trip over
+    /// ten repeaters: the re-ask would abandon `msg2` while it was still travelling.
+    @Test
+    fun the_handshake_reask_covers_the_route() {
+        assertEquals(8_000L, handshakeRetryFor(0))
+        assertEquals(8_000L, handshakeRetryFor(null))
+        assertEquals(28_000L, handshakeRetryFor(10))
+        assertEquals(48_000L, handshakeRetryFor(20))
+    }
 }
 
 class MeshSilenceBoundTest {

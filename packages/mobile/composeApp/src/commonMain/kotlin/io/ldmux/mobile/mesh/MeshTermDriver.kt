@@ -261,7 +261,7 @@ class MeshTermDriver(
      *
      * A handshake is three small records, so a minute is already generous - the old five made a
      * lost `msg1` look like a dead host for most of a coffee break. The retry below is what makes
-     * a short timeout safe: the wait is retried every [handshakeRetryMs], not once.
+     * a short timeout safe: the wait is retried every `handshakeRetryFor(hops)`, not once.
      */
     private val handshakeTimeoutMs: Long = 60_000,
     /**
@@ -275,12 +275,13 @@ class MeshTermDriver(
      * the counter resetting every six seconds. Doubling from here (CoAP's ladder, RFC 6298's
      * backoff) gives 8 s, 16 s, 32 s.
      */
-    private val handshakeRetryMs: Long = 8_000,
     /**
      * How long an unanswered handshake is drawn as `handshaking` before the app says no answer came.
      *
-     * Two re-asks (8 s and 16 s) plus a full round trip on a narrow channel fit inside this; the
-     * ladder itself keeps going, so this changes the sentence and not the retrying.
+     * Two re-asks plus a full round trip on a narrow channel fit inside this on a link next door;
+     * [answerDeadlineMs] adds the route, because a handshake over ten repeaters is not answered in
+     * thirty seconds and saying so would be a sentence about the wrong thing. The ladder itself
+     * keeps going, so this changes the sentence and not the retrying.
      */
     private val handshakeVerdictMs: Long = 30_000,
     /** How many re-asks before the transport itself is judged dead and the connection rebuilt. */
@@ -819,7 +820,7 @@ class MeshTermDriver(
                 // record. The transport is the suspect now, and only a new connection can test that.
                 handshake?.abandon(); handshake = null
                 failed(MeshLinkState.SessionFailed)
-            } else if (waited >= handshakeRetryMs shl handshakeTries) {
+            } else if (waited >= handshakeRetryFor(gateway.routeHops) shl handshakeTries) {
                 handshakeTries++
                 // **A handshake that was not answered is asked again, not waited out.** `msg1` is
                 // one record; on a radio that drops one in ten it can simply go missing, and until
@@ -1602,6 +1603,17 @@ class MeshTermDriver(
     }
 
     private fun handle(m: TermMessage) {
+        // **A refusal is an answer, so nothing is owed.** The request deadlines exist for a record
+        // that was lost; a `Closed` means the host spoke, and leaving them set re-sent the attach
+        // at its deadline and had the host refuse the same thing three times — three records spent
+        // to be told what the first refusal already said.
+        if (m is TermMessage.Closed) {
+            attachAskedAt = null
+            attachAsks = 0
+            createAskedAt = null
+            createAsks = 0
+            if (m.reason != MeshTerm.Closed.HELD) createdCwd = null
+        }
         when (m) {
             is TermMessage.Profile -> {
                 if (pick == Pick.Probing) pick = Pick.Attached
@@ -2007,8 +2019,13 @@ class MeshTermDriver(
         _view.value = when {
             session == null && handshake == null -> MeshTermView.Idle
             handshake != null ->
-                if (clock() - handshakeBeganAt > handshakeVerdictMs) MeshTermView.NoAnswer
-                else MeshTermView.Handshaking
+                if (clock() - handshakeBeganAt >
+                    answerDeadlineMs(handshakeVerdictMs, gateway.routeHops)
+                ) {
+                    MeshTermView.NoAnswer
+                } else {
+                    MeshTermView.Handshaking
+                }
             mirror.profile == null -> when (pick) {
                 Pick.Listing -> MeshTermView.Listing
                 Pick.Choosing -> MeshTermView.Choose(choices)
@@ -2135,6 +2152,20 @@ internal fun silenceFailureMs(hops: Int?): Long =
  * that is truly off is not hammered on airtime, and capped so a host that comes back is picked up
  * within half a minute rather than the next time the user reopens the screen.
  */
+/**
+ * The first handshake re-ask over a route of `hops` repeaters.
+ *
+ * **The handshake retry suffers the same defect as every other flat deadline.** It must exceed one
+ * round trip or the re-ask destroys the answer it is waiting for — the failure that put it at eight
+ * seconds in the first place — and a round trip over ten repeaters is twenty-odd seconds. A mesh is
+ * mostly repeaters, so the flat figure is the floor and each hop adds its forward delay.
+ */
+internal fun handshakeRetryFor(hops: Int?): Long =
+    answerDeadlineMs(HANDSHAKE_FIRST_RETRY_MS, hops)
+
+/** The flat first re-ask; [handshakeRetryFor] adds the route. */
+private const val HANDSHAKE_FIRST_RETRY_MS = 8_000L
+
 /**
  * How long a request may go unanswered over a route of `hops` repeaters.
  *
