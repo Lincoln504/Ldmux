@@ -322,9 +322,21 @@ fn print_mesh_status(v: &serde_json::Value) {
     let rssi = v.get("radioRssi").and_then(serde_json::Value::as_i64);
     let snr = v.get("snrDb").and_then(serde_json::Value::as_f64);
     let noise = v.get("noiseFloorDbm").and_then(serde_json::Value::as_i64);
+    // **Whose packet the reading is, said on the line.** The radio answers "the last packet I
+    // heard", which on a busy mesh is whatever a neighbour's repeater said most recently; the
+    // peer's own record is the link the session uses, and a field test needs to know which is which.
+    let heard = if v
+        .get("signalFromPeer")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        "last record from the phone"
+    } else {
+        "last packet heard"
+    };
     match (rssi, snr, noise) {
         (Some(rssi), Some(snr), Some(noise)) => println!(
-            "signal   {rssi} dBm, SNR {snr:.2} dB over a {noise} dBm noise floor (last packet heard), battery {charge}"
+            "signal   {rssi} dBm, SNR {snr:.2} dB over a {noise} dBm noise floor ({heard}), battery {charge}"
         ),
         (None, Some(snr), Some(noise)) => println!(
             "signal   nothing heard yet (SNR {snr:.2} dB, noise floor {noise} dBm), battery {charge}"

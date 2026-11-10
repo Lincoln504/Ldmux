@@ -303,6 +303,8 @@ pub struct MeshSnapshot {
     pub snr_quarter_db: Option<i8>,
     pub noise_floor_dbm: Option<i16>,
     pub radio_rssi: Option<i8>,
+    /// Whether `radio_rssi` is the peer's last record rather than whatever the radio heard last.
+    pub signal_from_peer: bool,
     pub radio_tx_secs: Option<u32>,
     pub radio_rx_secs: Option<u32>,
     pub radio_state: Option<RadioState>,
@@ -340,6 +342,7 @@ impl MeshSnapshot {
             peer_hops: None,
             snr_quarter_db: None,
             noise_floor_dbm: None,
+            signal_from_peer: false,
             radio_rssi: None,
             radio_tx_secs: None,
             radio_rx_secs: None,
@@ -365,6 +368,7 @@ impl MeshSnapshot {
             "snrDb": self.snr_quarter_db.map(|q| f32::from(q) / 4.0),
             "noiseFloorDbm": self.noise_floor_dbm,
             "radioRssi": self.radio_rssi,
+            "signalFromPeer": self.signal_from_peer,
             "radioTxSecs": self.radio_tx_secs,
             "radioRxSecs": self.radio_rx_secs,
             "radioState": self.radio_state.map(|s| s.code()),
@@ -967,6 +971,7 @@ async fn session<C: Carrier>(
                             s.snr_quarter_db = Some(reading.snr_quarter_db);
                             s.noise_floor_dbm = Some(reading.noise_floor_dbm);
                             s.radio_rssi = reading.rssi_dbm;
+                            s.signal_from_peer = reading.from_peer;
                             s.radio_tx_secs = Some(reading.tx_air_secs);
                             s.radio_rx_secs = Some(reading.rx_air_secs);
                         });

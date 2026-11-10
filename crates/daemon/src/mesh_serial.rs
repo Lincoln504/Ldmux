@@ -1062,6 +1062,10 @@ fn serve_loop<L: ByteLink>(
     // neither send nor be understood, so a pathless host asks the peer while one of them is recent
     // and stays quiet when nothing has moved for a couple of minutes.
     let mut last_peer_record: Option<Instant> = None;
+    // The RSSI and SNR the radio measured for the last record **from the peer**, from the receive
+    // log frame that carried it (`[0x88][snr×4][rssi][packet]`). The radio's own `GET_STATS` answers
+    // "the last packet I heard", which on a busy mesh is whatever a neighbour said most recently.
+    let mut peer_signal: Option<(i8, i8)> = None;
     let mut last_outbound: Option<Instant> = None;
     // When the last advert went out; `None` means none yet, so the first idle moment sends one.
     let mut last_advert: Option<Instant> = None;
@@ -1419,14 +1423,24 @@ fn serve_loop<L: ByteLink>(
                 if !companion.has_pending() && last_stats.is_none_or(|t| t.elapsed() >= STATS_WATCH) {
                     last_stats = Some(Instant::now());
                     if let Ok(stats) = companion.radio_stats() {
-                        let rssi = stats.has_signal().then_some(stats.last_rssi);
+                        // **The peer's record wins over "whatever was heard last".** Both are true
+                        // facts about the air; only one of them is the link the session is using.
+                        let (rssi, snr, from_peer) = match peer_signal {
+                            Some((snr, rssi)) => (Some(rssi), snr, true),
+                            None => (
+                                stats.has_signal().then_some(stats.last_rssi),
+                                stats.last_snr_quarter_db,
+                                false,
+                            ),
+                        };
                         if events
                             .blocking_send(Ok(Event::Signal(Signal {
                                 noise_floor_dbm: stats.noise_floor_dbm,
                                 rssi_dbm: rssi,
-                                snr_quarter_db: stats.last_snr_quarter_db,
+                                snr_quarter_db: snr,
                                 tx_air_secs: stats.tx_air_secs,
                                 rx_air_secs: stats.rx_air_secs,
+                                from_peer,
                             })))
                             .is_err()
                         {
@@ -1768,6 +1782,10 @@ fn serve_loop<L: ByteLink>(
                             peer_path_heard = Some(Instant::now());
                         }
                         last_peer_record = Some(Instant::now());
+                        // The frame's own reading: SNR in quarters of a dB, then RSSI in dBm.
+                        if let (Some(&snr), Some(&rssi)) = (frame.get(1), frame.get(2)) {
+                            peer_signal = Some((snr as i8, rssi as i8));
+                        }
                         if events
                             .blocking_send(Ok(Event::Recv(incoming.record)))
                             .is_err()

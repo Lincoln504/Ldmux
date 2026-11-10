@@ -74,6 +74,14 @@ pub struct Signal {
     /// The radio's own transmit and receive airtime since boot, in seconds.
     pub tx_air_secs: u32,
     pub rx_air_secs: u32,
+    /// Whether the reading is the **peer's** last record rather than whatever was heard last.
+    ///
+    /// The radio's own `GET_STATS` answers "the last packet I heard", which on a busy mesh is
+    /// whatever a neighbour's repeater said most recently: at home that reads 30 dB stronger than
+    /// the phone, and at range it can read a distant packet while the phone is unreachable. A field
+    /// test needs the link that matters, so a receive-log frame carrying a record from the peer
+    /// overrides the radio's answer, and this says which of the two the numbers are.
+    pub from_peer: bool,
 }
 
 /// What a carrier promised at connect time.
