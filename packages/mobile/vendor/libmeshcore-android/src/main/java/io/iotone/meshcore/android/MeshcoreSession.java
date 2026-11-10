@@ -1019,11 +1019,19 @@ public final class MeshcoreSession {
         if (frame instanceof MsgSentFrame) {
             MsgSent sent = ((MsgSentFrame) frame).sent();
             suggestedSendTimeoutMs = (int) Math.min(Integer.MAX_VALUE, sent.estTimeoutMs());
-            RawSendCallback pending = pendingRaw.getAndSet(null);
-            if (pending != null) {
-                pending.onResult(true, -1);
+            // **The same bookkeeping the `OK` path does, because this is the same event.** Returning
+            // early here left `pendingTracked` where it was, so a tracked command answered with
+            // `RESP_CODE_SENT` never completed, `isIdle()` stayed false for ever, and every later
+            // raw send was refused — measured 2026-11-10 on firmware 1.17.1, which answers a raw
+            // send with this frame: the first flood was accepted and nothing after it could be sent.
+            contactDumpInFlight = false;
+            RawSendCallback pendingSent = pendingRaw.getAndSet(null);
+            if (pendingSent != null) {
+                pendingSent.onResult(true, -1);
+                pumpTracked();
+            } else {
+                trackedAnswered();
             }
-            return;
         }
         if (frame instanceof OkFrame || frame instanceof ErrorFrame) {
             contactDumpInFlight = false;

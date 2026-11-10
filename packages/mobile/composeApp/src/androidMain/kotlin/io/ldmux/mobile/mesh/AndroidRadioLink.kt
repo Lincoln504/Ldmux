@@ -216,9 +216,35 @@ class AndroidRadioLink(
     @Volatile
     private var lastAdvertAt: Long = 0L
 
-    /** When a record last rode the flood carrier, so a burst of keystrokes cannot become a broadcast. */
+    /** When a record last rode the flood carrier, for the log and the status line. */
     @Volatile
     private var lastFloodAt: Long = 0L
+
+    /**
+     * Direct sends made since the route stopped being fresh, so the flood carrier is the second
+     * attempt rather than the first. Reset by any record that arrives, which proves the cheap
+     * carrier is working.
+     */
+    @Volatile
+    private var directsSinceStale = 0
+
+    /** Floods available to spend now; refilled at [floodIntervalMs], capped at [FLOOD_BURST]. */
+    private var floodTokens = FLOOD_BURST
+    /** When the bucket was last refilled, so a refill is charged by elapsed time rather than a timer. */
+    private var floodRefilledAt = 0L
+
+    private fun refillFloodBudget(now: Long) {
+        if (floodRefilledAt == 0L) {
+            floodRefilledAt = now
+            return
+        }
+        val gap = floodIntervalMs().coerceAtLeast(1L)
+        val gained = (now - floodRefilledAt) / gap
+        if (gained > 0) {
+            floodRefilledAt += gained * gap
+            floodTokens = (floodTokens + gained.toInt()).coerceAtMost(FLOOD_BURST)
+        }
+    }
 
     /**
      * The least time between two records sent by flood.
@@ -460,6 +486,9 @@ class AndroidRadioLink(
                 // Something the host sent arrived down this path: it works in the direction that
                 // matters, and no shorter candidate may displace it on hops alone.
                 routeProven = true
+                // A record arrived on the direct carrier, so the cheap path works: the next send
+                // starts at the direct attempt again instead of escalating.
+                directsSinceStale = 0
             }
             if (!inbox.trySend(payload).isSuccess) {
                 appLog("mesh radio inbox full, dropping one raw record")
@@ -887,8 +916,21 @@ class AndroidRadioLink(
         // retransmission carries the rest.
         val floodNow = System.currentTimeMillis()
         val fresh = routeIsFresh(floodNow)
-        if (!fresh && floodNow - lastFloodAt >= floodIntervalMs()) {
+        // **The cheap carrier is tried first, always.** A stale route is not a broken one: an idle
+        // link two minutes old still delivers a zero-hop packet, and flooding it would put every
+        // keystroke on every repeater in range. So the flood is the *second* attempt — after a direct
+        // send has gone unanswered since the route went stale — and never while the one raw window is
+        // busy with a route request.
+        // **A budget, not a gap.** One flood per round trip keeps a terminal from becoming a
+        // broadcast, but it also starves a batch: a 2 KB screen update is thirteen records, and at
+        // one per fifteen seconds that is minutes for a repaint. A small token bucket gives a burst
+        // (a batch gets four records away at once) and then refills at the paced rate, so a stream
+        // of keystrokes still cannot flood the mesh and a burst still completes.
+        refillFloodBudget(floodNow)
+        val floodWanted = !fresh && directsSinceStale >= 1 && floodTokens > 0
+        if (floodWanted && s.canSendRaw()) {
             lastFloodAt = floodNow
+            floodTokens--
             val own = radioPublicKey
             val key = hostKey.takeIf { it.size == 32 }
             if (own != null && key != null) {
@@ -917,6 +959,8 @@ class AndroidRadioLink(
         }
         // One immutable path read for this send, including the packet build.
         val path = hostPath ?: RadioPath(0, ByteArray(0))
+        // Counted before the send: this is the direct attempt that the next one may escalate past.
+        if (!fresh) directsSinceStale++
         val answer = CompletableDeferred<RadioSendResult>()
         val callback = RawSendCallback { ok, errorCode ->
             answer.complete(if (ok) RadioSendResult.Accepted else errorFor(errorCode))
@@ -1491,6 +1535,10 @@ class AndroidRadioLink(
         if (!s.canSendRaw() || !s.isIdle()) return
         lastAdvertAt = now
         runCatching { s.sendSelfAdvert(true) }
+        // **The advert's own answer holds the one raw window.** Leaving it outstanding made the
+        // route request behind it fail with "the radio refused", which then read as a link that
+        // cannot send at all — measured 2026-11-10, seconds after the first flood.
+        withTimeoutOrNull(ADVERT_WAIT_MS) { while (!s.isIdle()) delay(20) }
         appLog("mesh advert sent (flood): no route, so the far end is told where this radio is")
     }
 
@@ -1505,7 +1553,13 @@ class AndroidRadioLink(
         // keeps two phones that started together from asking together. A route learned anywhere
         // (`adoptRoute`) puts the first interval back.
         if (now - lastRequestAt < requestIntervalMs()) return false
-        if (!s.canSendRaw()) return false
+        // **Wait for the window rather than give up on it.** One command at a time is the radio's
+        // rule, and a send that was a few milliseconds behind an advert used to return "failed" —
+        // which the ladder reads as the record not reaching the air, when it never tried.
+        if (!s.canSendRaw()) {
+            withTimeoutOrNull(RAW_WINDOW_WAIT_MS) { while (!s.canSendRaw() && !closing) delay(10) }
+            if (!s.canSendRaw()) return false
+        }
         // Every other attempt is an advert rather than a question: a question needs its answer to
         // come back, an advert does not, and at the margin the answer is the half that gets lost.
         if (routeAsks % 2 == 1) maybeAdvertise(s, now)
@@ -1858,6 +1912,15 @@ class AndroidRadioLink(
 
         /** How long to wait for the radio to accept the connect-time advert before carrying on. */
         const val ADVERT_WAIT_MS = 3_000L
+
+    /**
+     * How many records may ride the flood carrier back to back.
+     *
+     * A batch (a screen repaint, a pasted file) is several records and the link is only useful if
+     * they can leave together; beyond a handful the mesh is being used as a broadcast channel, so the
+     * bucket refills at [floodIntervalMs] and no more.
+     */
+    const val FLOOD_BURST = 4
 
         /**
          * The least time between two adverts sent because there is no route.

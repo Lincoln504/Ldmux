@@ -1018,7 +1018,10 @@ fn prepare(
     let bound = Bound {
         // No route yet, so no path bytes are spent: the receiver's cap is the whole answer until
         // `Event::Limit` revises it as soon as a route is learned.
-        uplink_record_max: record_limit(None),
+        // **The first record has no route, so it rides a flood, and the flood holds less.** Publishing
+        // the pathless direct maximum here made the status line promise 171 bytes while the session
+        // was capped at 162, and a record built to the promise would not fit its carrier.
+        uplink_record_max: flood_record_limit(),
         radio_state: RadioState::Connected,
         // No gateway is in the path: this process owns the radio, and the firmware is the meter.
         budget: Budget::RadioGoverned,
@@ -1203,7 +1206,7 @@ fn serve_loop<L: ByteLink>(
         return;
     }
     // The record size for the path in hand (none yet: a bare record is the largest).
-    let mut published_limit = record_limit(peer_path.as_ref());
+    let mut published_limit = flood_record_limit();
     let mut published_hops = peer_path.as_ref().map_or(1, |p| p.hops);
     // **The mesh measures itself.** The furthest any flood has been heard to travel is the honest
     // estimate for a record that will ride one, where "one hop" is what made a flooded record's retry
@@ -3066,11 +3069,16 @@ mod tests {
             Some(Ok(Event::Scope(scope))) => assert!(scope.is_none(), "unscoped by default"),
             other => panic!("expected the opening scope, got {other:?}"),
         }
-        // ...the largest record this path allows (no path yet, so the receiver's cap), and only
-        // then the answer to the record.
+        // ...the largest record the carrier will actually take, and only then the answer to the
+        // record. **With no path the first record rides a flood**, whose 12-byte wrapper leaves 162
+        // — not the pathless direct maximum of 171, which does not fit the carrier it will use.
         match event_rx.blocking_recv() {
             Some(Ok(Event::Limit { record_max: limit, .. })) => {
-                assert_eq!(limit, RECEIVED_RECORD_MAX as u8, "a bare record, capped by the receiver")
+                assert_eq!(
+                    limit,
+                    flood_record_limit(),
+                    "a bare record, sized for the carrier it will ride"
+                )
             }
             other => panic!("expected the record limit, got {other:?}"),
         }
