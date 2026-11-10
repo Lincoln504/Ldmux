@@ -3104,6 +3104,49 @@ mod tests {
         );
     }
 
+    /// **Nothing a peer sends can panic the decoder.** The phone's radio is the untrusted end: a
+    /// garbled record, a truncated frame or a hostile body reaches this parser before any other
+    /// check, and a panic here is a crashed app or a crashed daemon on a link that cannot be
+    /// re-established without a handshake. The generator is a fixed LCG, so a failure is
+    /// reproducible from the printed bytes.
+    #[test]
+    fn random_and_truncated_bytes_never_panic_the_decoder() {
+        let mut seed: u64 = 0x2026_1109_1d3f_0001;
+        let mut next = || {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            (seed >> 33) as u8
+        };
+        // Random bytes, and every truncation of every valid message.
+        for _ in 0..4_000 {
+            let n = usize::from(next() % 40);
+            let bytes: Vec<u8> = (0..n).map(|_| next()).collect();
+            let mut d = Decoder::new();
+            let _ = d.push(&bytes);
+        }
+        for m in sample_messages() {
+            let bytes = m.encode().expect("encodes");
+            for cut in 0..bytes.len() {
+                let mut d = Decoder::new();
+                // **A truncated record is "not yet", never an error.** The stream decoder is fed
+                // whatever the link delivered, and a message split across two records is the
+                // normal case (a frame is 600 bytes and a record carries 143): an error here
+                // would throw away the half in hand and the rest would never decode.
+                assert!(
+                    d.push(&bytes[..cut]).is_ok(),
+                    "{cut} of {} bytes of {m:?} must wait for more, not fail",
+                    bytes.len()
+                );
+            }
+            // And one byte changed anywhere in the stream.
+            for i in 0..bytes.len() {
+                let mut bad = bytes.clone();
+                bad[i] ^= 0xFF;
+                let mut d = Decoder::new();
+                let _ = d.push(&bad);
+            }
+        }
+    }
+
     #[test]
     fn plain_row_strips_escapes_and_trailing_space() {
         assert_eq!(
@@ -3411,9 +3454,9 @@ mod tests {
         }
     }
 
-    fn fixture_value() -> serde_json::Value {
-        use serde_json::json;
-        let messages = vec![
+    /// One of every message, for the fixture and for the decoder fuzz.
+    fn sample_messages() -> Vec<Message> {
+        vec![
             Message::Attach {
                 version: 1,
                 selector: "ab12".into(),
@@ -3615,7 +3658,12 @@ mod tests {
                         shell: String::new(),
         }],
             },
-        ];
+        ]
+    }
+
+    fn fixture_value() -> serde_json::Value {
+        use serde_json::json;
+        let messages = sample_messages();
         let many: Vec<SessionSummary> = (0..7)
             .map(|i| SessionSummary {
                 id: format!("{i:02x}{}", "f".repeat(30)),

@@ -202,6 +202,41 @@ class MeshTermCodecTest {
         }
     }
 
+    /// **A truncated record is "not yet", never an error, and a hostile one never throws.**
+    ///
+    /// The stream decoder is fed whatever the link delivered, and a message split across two
+    /// records is the normal case (a frame is 600 bytes and a record carries 143). Rust pins the
+    /// same property (`random_and_truncated_bytes_never_panic_the_decoder`); this is the phone's
+    /// half of it, because a throw here is a crashed screen on a link that cannot be re-established
+    /// without a handshake.
+    @Test
+    fun aTruncatedRecordWaitsAndAHostileOneNeverThrows() {
+        for (c in fixture["messages"]!!.jsonArray) {
+            val bytes = unhex(c.jsonObject["hex"]!!.jsonPrimitive.content)
+            for (cut in 0 until bytes.size) {
+                // Any prefix: no exception, and nothing decoded from a partial message.
+                TermDecoder().push(bytes.copyOfRange(0, cut))
+            }
+        }
+        // Bytes that are not a message at all: a designed stream error is fine (the driver fails
+        // the link on it, which is the right answer to a stream it cannot trust), a crash is not.
+        var seed = 0x1109_1d3fL
+        repeat(600) {
+            seed = (seed * 6_364_136_223_846_793_005L + 1)
+            val n = ((seed ushr 33) % 40).toInt()
+            var x = seed
+            val junk = ByteArray(n) {
+                x = (x * 6_364_136_223_846_793_005L + 1)
+                (x ushr 33).toByte()
+            }
+            try {
+                TermDecoder().push(junk)
+            } catch (_: TermStreamException) {
+                // A malformed length is "this stream is unusable", which the driver handles.
+            }
+        }
+    }
+
     @Test
     fun theHostsSessionPagesDecodeAndTheLastOneIsTheOnlyLastOne() {
         val pages = fixture["sessionPages"]!!.jsonObject["pages"]!!.jsonArray
