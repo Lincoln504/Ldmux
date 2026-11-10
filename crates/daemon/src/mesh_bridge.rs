@@ -523,6 +523,11 @@ impl Attached {
     /// exact messages it failed to deliver and re-offers them (see `retry`).
     fn resync(&mut self) {
         self.differ.reset();
+        // **A starting-over screen supersedes anything a refusal left unsent.** Those messages name
+        // rows of the epoch the differ has just abandoned, so re-offering them would spend a record
+        // on a frame the phone cannot place and then send the full one anyway: two records where the
+        // reset asked for one.
+        self.retry.clear();
         // A resize is the answer the grace was waiting for, so it ends the hold too.
         self.hold = None;
         self.last_push = None;
@@ -4136,6 +4141,47 @@ mod tests {
         // not a page.
         assert!(lines[0].starts_with('0'), "the first row of the page");
         assert!(lines[5].starts_with('5'), "and the last, five rows later");
+    }
+
+    /// **A starting-over screen supersedes what a refusal left unsent.**
+    ///
+    /// The unsent messages name rows of the epoch the differ has just abandoned, so re-offering them
+    /// would spend a record on a frame the phone cannot place and then send the full screen anyway:
+    /// two records where the reset asked for one.
+    #[tokio::test]
+    async fn a_resync_drops_what_a_refusal_left_unsent() {
+        let (mut b, host, link, clock) = attached_paced().await;
+        // A link that refuses after the first record: the frame that follows is cut off part-way,
+        // which is the state `retry` exists for.
+        link.0.lock().unwrap().refuse_after = Some(1);
+        clock.advance(2_000);
+        paced(&host, &["$ one", "two", "three"]);
+        b.tick().await;
+        let refused = sent_records(&link);
+
+        // The link takes records again, and the phone asks to start the screen over.
+        link.0.lock().unwrap().refuse_after = None;
+        phone_says(&link, 1, &Message::Resync);
+        clock.advance(2_000);
+        b.tick().await;
+
+        let mut d = Decoder::new();
+        let msgs: Vec<Message> = link.0.lock().unwrap().sent[refused..]
+            .iter()
+            .flat_map(|(_, bytes)| d.push(bytes).unwrap())
+            .filter_map(|m| m.ok())
+            .collect();
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, Message::Rows { full: true, .. })),
+            "the reset draws a whole screen: {msgs:?}"
+        );
+        // One record, framed: the full screen. A re-offer of the abandoned rows would be a second.
+        assert_eq!(
+            sent_records(&link) - refused,
+            1,
+            "one frame, not a replay and a frame: {msgs:?}"
+        );
     }
 
     /// **A list answered with nothing attached is framed too.**
