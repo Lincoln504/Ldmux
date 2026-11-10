@@ -391,7 +391,24 @@ fun MeshTerminalScreen(
     // count, so the wait line can say which of the two it is.
     val radioStatus by conn.radio.status.collectAsState()
     val spent = radioStatus?.opsLeftThisHour == 0
-    LaunchedEffect(view) { if (view is MeshTermView.Live) rebuilds = 0 }
+    // **A connection that came up resets the ladder, whatever page it landed on.** This reset keyed
+    // on `Live` alone, which is the state of a *shell*: a rebuild that succeeded and showed the
+    // launcher (`Listing`), the picker or an empty host left the count where it was, so the next
+    // drop waited longer for a link that had just worked. Five drops later the ladder is at five
+    // minutes, which reads as "the app needs a refresh" — the exact complaint the ladder exists to
+    // remove. Every state below implies a session, so every one of them earns the reset.
+    LaunchedEffect(view) {
+        when (view) {
+            is MeshTermView.Live,
+            is MeshTermView.Listing,
+            is MeshTermView.Choose,
+            is MeshTermView.NoShells,
+            is MeshTermView.ProfileMissing,
+            is MeshTermView.HeldBy,
+            -> rebuilds = 0
+            else -> {}
+        }
+    }
     val shells by conn.driver.shells.collectAsState()
     // The marks the host replayed with this attach: drawn beside the rows, gone once the shell is
     // opened. An empty map is "nothing to say", which is what a host below version 9 always means.

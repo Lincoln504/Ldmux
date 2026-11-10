@@ -799,7 +799,7 @@ class MeshTermDriver(
                 // seconds over a radio, and asking inside that window is what made the screen slower
                 // the longer it was waited for.
                 if (resyncing && clock() - resyncAskedAt >= resyncRetryMs) {
-                    resyncRetryMs = (resyncRetryMs * 2).coerceAtMost(60_000L)
+                    resyncRetryMs = (resyncRetryMs * 2).coerceAtMost(maxOf(60_000L, resyncFloorMs))
                 }
                 requestResync()
             }
@@ -846,7 +846,7 @@ class MeshTermDriver(
         if (session != null
             && terminalView == null
             && mirror.profile == null
-            && attachAskedAt?.let { clock() - it >= ANSWER_RETRY_MS } == true
+            && attachAskedAt?.let { clock() - it >= answerDeadlineMs(ANSWER_RETRY_MS, gateway.routeHops) } == true
         ) {
             attachAskedAt = null
             val id = attempted ?: ""
@@ -870,7 +870,7 @@ class MeshTermDriver(
         // is the cure.
         if (session != null
             && terminalView == null
-            && createAskedAt?.let { clock() - it >= ANSWER_RETRY_MS } == true
+            && createAskedAt?.let { clock() - it >= answerDeadlineMs(ANSWER_RETRY_MS, gateway.routeHops) } == true
         ) {
             val cwd = createdCwd
             createAskedAt = null
@@ -884,7 +884,7 @@ class MeshTermDriver(
         // **A list answer that never came is asked for again.** One record, at most
         // [LIST_ASKS] times: a host that is up answers in a handful of records, so a second ask is
         // only ever the cure for a lost one.
-        if (session != null && listAskedAt?.let { clock() - it >= LIST_ANSWER_MS } == true) {
+        if (session != null && listAskedAt?.let { clock() - it >= answerDeadlineMs(LIST_ANSWER_MS, gateway.routeHops) } == true) {
             listAskedAt = null
             if (listAsks < LIST_ASKS && (listingForHeader || pick == Pick.Listing)) {
                 listingForHeader = true
@@ -910,9 +910,10 @@ class MeshTermDriver(
         val retry = recoverAt.takeIf { it > 0 }
         // **A list answer has a deadline too**, or the loop sleeps through it: the idle tick is
         // 30 s, which is longer than anyone will wait for a page of shells.
-        val list = listAskedAt?.plus(LIST_ANSWER_MS)
-        val attach = attachAskedAt?.plus(ANSWER_RETRY_MS)
-        val create = createAskedAt?.plus(ANSWER_RETRY_MS)
+        val hops = gateway.routeHops
+        val list = listAskedAt?.plus(answerDeadlineMs(LIST_ANSWER_MS, hops))
+        val attach = attachAskedAt?.plus(answerDeadlineMs(ANSWER_RETRY_MS, hops))
+        val create = createAskedAt?.plus(answerDeadlineMs(ANSWER_RETRY_MS, hops))
         listOfNotNull(deadline, retry, list, attach, create).minOrNull()
     }
 
@@ -1537,6 +1538,8 @@ class MeshTermDriver(
      * backs off 4, 8, 16, 32, then 60 seconds.
      */
     private var resyncRetryMs = RESYNC_FIRST_RETRY_MS
+    /** The floor the ladder climbs from, for this route. See [answerDeadlineMs]. */
+    private val resyncFloorMs: Long get() = resyncFirstRetryMs(gateway.routeHops)
     private var resyncAskedAt = Long.MIN_VALUE
 
     /**
@@ -1579,7 +1582,7 @@ class MeshTermDriver(
      */
     private fun resyncMadeProgress() {
         resyncAskedAt = clock()
-        resyncRetryMs = RESYNC_FIRST_RETRY_MS
+        resyncRetryMs = resyncFloorMs
     }
 
     private fun sessionPending(): Int = runCatching { session?.health(clock())?.pending ?: 0 }.getOrDefault(0)
@@ -1633,7 +1636,7 @@ class MeshTermDriver(
                     // for up to the backoff's sixty seconds with a cursor placed from a grid it did
                     // not have.
                     if (m is TermMessage.Commit) {
-                        resyncRetryMs = RESYNC_FIRST_RETRY_MS
+                        resyncRetryMs = resyncFloorMs
                         resyncAskedAt = 0L
                     }
                 }
@@ -2094,6 +2097,10 @@ private const val RESIZE_FLOOR_MS = 30_000L
 /** The first wait before a resync is asked again; each ask doubles it, to a minute. */
 private const val RESYNC_FIRST_RETRY_MS = 4_000L
 
+/// The first resync retry over a route: the same per-hop floor as any other answer.
+internal fun resyncFirstRetryMs(hops: Int?): Long =
+    answerDeadlineMs(RESYNC_FIRST_RETRY_MS, hops)
+
 /** The least gap between two "the host named a gap" asks, so a burst cannot become a storm. */
 private const val GAP_ASK_FLOOR_MS = 1_500L
 
@@ -2129,9 +2136,23 @@ internal fun silenceFailureMs(hops: Int?): Long =
  * within half a minute rather than the next time the user reopens the screen.
  */
 /**
+ * How long a request may go unanswered over a route of `hops` repeaters.
+ *
+ * **A deadline measured in seconds is a deadline for a link next to the computer.** MeshCore's
+ * direct-send forward delay is up to two airtimes per hop and a record is a third of a second at the
+ * public tuple, so one round trip over ten repeaters is twenty-odd seconds before anything is late.
+ * A flat six seconds re-asked the attach, the create and the list *while their answers were still on
+ * the air*, which spends exactly the records the deadline exists to save. The floor is the flat
+ * figure for a neighbour and two seconds per hop beyond it.
+ */
+internal fun answerDeadlineMs(baseMs: Long, hops: Int?): Long =
+    baseMs + (hops ?: 0).coerceIn(0, 40) * 2_000L
+
+/**
  * How long a list request may go unanswered before it is asked for again.
  *
- * A list is a handful of records each way, so a few seconds is a lost answer and not a slow one.
+ * A list is a handful of records each way, so a few seconds is a lost answer and not a slow one — on
+ * a link next door. See [answerDeadlineMs] for the route.
  */
 private const val LIST_ANSWER_MS = 8_000L
 

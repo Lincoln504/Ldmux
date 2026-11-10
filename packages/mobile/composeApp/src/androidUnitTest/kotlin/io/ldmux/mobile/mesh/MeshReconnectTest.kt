@@ -62,6 +62,36 @@ class MeshReconnectTest {
  * each way at about 0.6 s apiece, so the old constant declared a working long-range session dead
  * and rebuilt it - a handshake is a dozen records - while the answer was still on the air.
  */
+/**
+ * **A deadline for a link next door is not a deadline for a mesh.** MeshCore's forward delay is up
+ * to two airtimes per hop, so an answer over ten repeaters is twenty-odd seconds before anything is
+ * late; a flat six-second attach or list deadline re-asked while the answer was still on the air and
+ * spent the records it exists to save.
+ */
+class MeshAnswerDeadlineTest {
+    @Test
+    fun a_neighbour_keeps_the_flat_deadline() {
+        // `routeHops` counts *repeaters*: 0 is a direct neighbour.
+        assertEquals(6_000L, answerDeadlineMs(6_000L, 0))
+        assertEquals(6_000L, answerDeadlineMs(6_000L, null), "no route yet is a neighbour")
+        assertEquals(8_000L, answerDeadlineMs(6_000L, 1), "one repeater adds its forward delay")
+    }
+
+    @Test
+    fun every_hop_buys_two_seconds_of_forward_delay() {
+        assertEquals(26_000L, answerDeadlineMs(6_000L, 10))
+        assertEquals(46_000L, answerDeadlineMs(6_000L, 20))
+        // A nonsense hop count cannot make the page wait for ever.
+        assertEquals(86_000L, answerDeadlineMs(6_000L, 1_000))
+    }
+
+    @Test
+    fun the_resync_floor_scales_the_same_way() {
+        assertEquals(4_000L, resyncFirstRetryMs(0))
+        assertEquals(24_000L, resyncFirstRetryMs(10))
+    }
+}
+
 class MeshSilenceBoundTest {
     @Test
     fun a_direct_link_still_has_room_for_a_full_repaint() {
