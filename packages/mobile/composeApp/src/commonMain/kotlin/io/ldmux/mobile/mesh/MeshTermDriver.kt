@@ -53,7 +53,7 @@ interface GatewayPort {
      * Defaulted: a test double has no route to forget. The driver calls it on every session failure,
      * so the rebuild that follows asks the mesh for a route instead of reusing the one that failed.
      */
-    fun forgetRoute() {}
+    fun forgetRoute(blame: Boolean = true) {}
 
     /**
      * This radio's own public key, once the link is bound; null before that or when the link has no
@@ -673,9 +673,13 @@ class MeshTermDriver(
         handshakeBeganAt = 0L
         session?.close()
         session = null
-        // **The route is part of what failed.** A rebuilt connection reuses this link, and a path
-        // kept across a dead session sends the next handshake down the chain that just lost it.
-        gateway.forgetRoute()
+        // **The route is part of what failed — when records were what failed.** A rebuilt connection
+        // reuses this link, and a path kept across a dead session sends the next handshake down the
+        // chain that just lost it. But a session also ends for reasons that say nothing about the
+        // route: a host restart, a rekey, a record the radio refused. Blaming the path for those
+        // banned the direct one for ten minutes and forced a six-hop detour in the same room.
+        val lostRecords = why.contains("ARQ") || why.contains("stopped carrying")
+        gateway.forgetRoute(blame = lostRecords)
         forgetMarkPage()
         terminalView = MeshTermView.LinkDown(state)
         // Every one of these is the transport's word, not the user's: a refused link, a handshake
@@ -764,6 +768,17 @@ class MeshTermDriver(
 
     /** Repeaters on the route right now, for a caller that has to size a wait over the air. */
     fun hopsNow(): Int? = gateway.routeHops
+
+    /**
+     * How long since a record last arrived from the host, in the driver's own clock.
+     *
+     * Null when nothing ever has. **The bar's job is to say what this mode is doing**, and on a link
+     * where an answer legitimately takes a minute the difference between "waiting" and "nothing has
+     * come back for a minute" is the whole diagnosis. Read without the lock: a millisecond-stale
+     * number on a status line is not worth blocking a frame for.
+     */
+    fun answeredAgoMs(): Long? =
+        if (lastInboundAt == 0L) null else (clock() - lastInboundAt).coerceAtLeast(0L)
 
     /** One record from the gateway's `RECV`. */
     suspend fun onRecord(record: ByteArray) = lock.withLock {

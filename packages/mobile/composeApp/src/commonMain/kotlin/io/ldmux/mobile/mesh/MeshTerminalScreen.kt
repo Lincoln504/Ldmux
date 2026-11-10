@@ -1020,6 +1020,7 @@ fun MeshTerminalScreen(
     val barRow: (@Composable (Modifier) -> Unit)? = if (config.meshHoldsInput) {
         { m ->
             PublicChannelBar(
+                evidence = { linkEvidenceText(conn.driver.hopsNow(), conn.driver.answeredAgoMs()) },
                 summary = handle.heldSummary,
                 awaiting = source.awaitingAnswer,
                 reported = source.answerOverdue,
@@ -1243,7 +1244,25 @@ fun MeshTerminalScreen(
                         // one state that is waiting for the host, so it is the one that counts.
                         if (toShow == null && drawn == null && view is MeshTermView.Live) {
                             Box(Modifier.align(Alignment.TopStart).background(Bg).padding(horizontal = 6.dp, vertical = 2.dp)) {
-                                WaitingLine("waiting for shell screen", attemptNo)
+                                WaitingLine(
+                                    "waiting for shell screen",
+                                    attemptNo,
+                                    // **The bar owns the link evidence in batch mode.** One fact,
+                                    // one place: with the batch row on screen it already says what
+                                    // the link has answered, and repeating it here is the same
+                                    // sentence twice on one page. In live mode there is no bar, so
+                                    // this line is the only place the evidence can be said.
+                                    evidence = if (config.meshHoldsInput) {
+                                        null
+                                    } else {
+                                        {
+                                            linkEvidenceText(
+                                                conn.driver.hopsNow(),
+                                                conn.driver.answeredAgoMs(),
+                                            )
+                                        }
+                                    },
+                                )
                             }
                         }
                         // The same three controls as the tailnet route, over the same surface.
@@ -1584,17 +1603,28 @@ internal fun meshRowSubtitle(e: SessionEntry): String =
  * and the retry itself is the proof that something is happening.
  */
 @Composable
-private fun WaitingLine(text: String, key: Any?) {
+private fun WaitingLine(text: String, key: Any?, evidence: (() -> String)? = null) {
     // The seconds are the age of **this attempt**, so the key changes whenever the driver starts a
     // new one. The first version keyed on the view's class name, which never changed while the
     // driver retried underneath it: it counted to 290 on a link that was being re-asked every six
     // seconds, which reads as a hang. Reset per attempt, it says what it looks like it says.
     var secs by remember(key) { mutableStateOf(0L) }
+    // **The counter is the attempt, and the evidence is the link.** A number that climbs on a
+    // screen with nothing on it says only that time passes; beside it, "nothing back yet" or
+    // "answered 4 s ago · 6 hops" says whether the wait is the mesh taking its time or a link that
+    // has stopped carrying anything — the difference between waiting and being broken.
+    var said by remember(key) { mutableStateOf(evidence?.invoke()) }
     LaunchedEffect(key) {
         while (true) {
-            delay(1000)
+            delay(1_000)
             secs += 1
+            said = evidence?.invoke() ?: said
         }
     }
-    Text("$text · ${secs} s", color = Dim, fontSize = 12.sp, fontFamily = MonoFont)
+    Text(
+        if (said.isNullOrEmpty()) "$text · ${secs} s" else "$text · ${secs} s · $said",
+        color = Dim,
+        fontSize = 12.sp,
+        fontFamily = MonoFont,
+    )
 }

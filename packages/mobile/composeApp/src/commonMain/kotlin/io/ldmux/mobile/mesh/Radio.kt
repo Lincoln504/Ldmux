@@ -65,7 +65,7 @@ interface RadioLink {
      * handshake down the same chain, lose it the same way, and rebuild again — which is the loop a
      * person breaks by pressing refresh. After this the next `refreshRoute` asks the mesh instead.
      */
-    fun forgetRoute() {}
+    fun forgetRoute(blame: Boolean = true) {}
 
     /** Read the radio's firmware description (path-hash mode, limits). */
     suspend fun readDeviceInfo(): RadioDeviceInfo?
@@ -575,7 +575,7 @@ class RadioLinkException(val state: MeshLinkState, message: String) : Exception(
  */
 class MeshRadioGateway(private val link: RadioLink) : GatewayPort {
     override suspend fun refreshRoute() = link.refreshRoute()
-    override fun forgetRoute() = link.forgetRoute()
+    override fun forgetRoute(blame: Boolean) = link.forgetRoute(blame)
 
     override val state: StateFlow<MeshLinkState> = link.state
     override val status: StateFlow<MeshStatus?> = link.status

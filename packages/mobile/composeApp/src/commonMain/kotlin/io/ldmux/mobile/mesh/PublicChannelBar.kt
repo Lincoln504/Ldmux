@@ -12,10 +12,16 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.Role
+import kotlinx.coroutines.delay
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
@@ -55,6 +61,26 @@ import io.ldmux.mobile.MonoFont
  * is asynchronous: sending queues records and the answer arrives as the host's next screen. A
  * second "receive" button would duplicate the wait.
  */
+/** The two numbers the status line is made of: how far, and how long since anything came back. */
+internal data class LinkEvidence(val hops: Int?, val answeredAgoMs: Long?)
+
+/**
+ * **What the link has actually said, in one sentence.**
+ *
+ * One place, because the bar, its tooltip and the "waiting for shell screen" line all say it: two
+ * vocabularies for the same fact is how a screen ends up contradicting its own tooltip. "direct" is
+ * said rather than "0 hops" because zero repeaters is the good case, not an absence.
+ */
+internal fun linkEvidenceText(hops: Int?, answeredAgoMs: Long?): String {
+    val where = hops?.let { if (it <= 0) "direct" else "$it hop${if (it == 1) "" else "s"}" }
+    val back = when {
+        answeredAgoMs == null -> "nothing back yet"
+        answeredAgoMs < 2_000L -> "answered just now"
+        else -> "answered ${answeredAgoMs / 1000} s ago"
+    }
+    return if (where == null) back else "$where · $back"
+}
+
 @Composable
 internal fun PublicChannelBar(
     summary: String,
@@ -68,6 +94,27 @@ internal fun PublicChannelBar(
     modifier: Modifier = Modifier,
     /** A newer screen is being kept unread: `show` would draw it. */
     held: Boolean = false,
+    /**
+     * What the link has actually said, for the line that says what this mode is doing.
+     *
+     * **"waiting for answer" is a claim about the caller; "nothing back for 12 s" is a fact about
+     * the air.** At range the difference is the whole diagnosis: an answer that is coming takes
+     * `2 × hops × airtime`, and a person watching a still screen cannot tell that from a link that
+     * has stopped carrying anything. The two numbers are cheap — the hop count the link already
+     * holds, and how long since a record last arrived — and they turn the status from a spinner into
+     * a reading.
+     */
+    hops: Int? = null,
+    /** Milliseconds since a record last arrived from the host; null when nothing ever has. */
+    answeredAgoMs: Long? = null,
+    /**
+     * The same evidence, read afresh on this bar's own ticker.
+     *
+     * A lambda rather than the two numbers, because the numbers change every second: reading them
+     * here recomposes this row alone, where passing them from the page would recompose the terminal
+     * above it — a full redraw of a 46x17 surface to advance one digit.
+     */
+    evidence: (() -> String)? = null,
 ) {
     // **A row of the terminal's chrome, not a card floating over the shell.** Portrait puts it
     // where the key pad begins — the space above the keyboard — and landscape puts it at the
@@ -84,10 +131,27 @@ internal fun PublicChannelBar(
     // **No count of screens.** The bar used to say "view 3 behind": a number nobody can act on,
     // counting screens the host had already sent and this phone had decided not to draw. What the
     // operator needs from this line is what the button will do next, which is the four states below.
+    // **The air's own words, and they move.** "waiting for answer" is a claim about the caller;
+    // "nothing back for 12 s" is a fact about the link, and at range the difference between an
+    // answer that is coming (`2 × hops × airtime`) and a link that has stopped carrying anything is
+    // the whole diagnosis. Re-read once a second only while this bar is talking about a send.
+    var ticked by remember { mutableStateOf(LinkEvidence(hops, answeredAgoMs)) }
+    val reading: () -> String = evidence ?: { linkEvidenceText(hops, answeredAgoMs) }
+    LaunchedEffect(awaiting, reported, evidence) {
+        if (!awaiting && !reported) return@LaunchedEffect
+        while (true) {
+            ticked = LinkEvidence(hops, answeredAgoMs)
+            delay(1_000)
+        }
+    }
+    // The lambda wins when given one: it reads the live link, not the values from composition.
+    val said = if (evidence != null) reading() else linkEvidenceText(ticked.hops, ticked.answeredAgoMs)
     val status = when {
         flushing -> "sending…"
-        reported -> "no answer yet · link busy or down"
-        awaiting -> "waiting for answer"
+        // **A deadline with the evidence beside it.** "link busy or down" was two guesses; this says
+        // how long nothing has come back, which is the only fact the phone has.
+        reported -> "no answer · $said"
+        awaiting -> "sent · $said"
         // **"Nothing typed", not "nothing held".** The line sits beside a button that says `show`,
         // and the mode may still be holding a screen the host sent: what is empty here is the
         // typed buffer, which is the only thing this summary counts.
@@ -136,6 +200,7 @@ internal fun PublicChannelBar(
                 .semantics {
                     contentDescription = when {
                         flushing -> "sending: waiting for shell screen"
+                        awaiting || reported -> "sync: $said"
                         summary.isEmpty() && held -> "show: draw the output waiting"
                         summary.isEmpty() -> "sync: show newest screen"
                         else -> "sync: send $summary, show screen"

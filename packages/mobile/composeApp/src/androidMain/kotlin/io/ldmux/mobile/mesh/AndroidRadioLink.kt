@@ -1053,8 +1053,13 @@ class AndroidRadioLink(
      * just lost it, fail the same way, and rebuild again — a loop that only a refresh breaks.
      * Measured 2026-11-09 at range: two handshakes accepted and every session dying for ten minutes.
      */
-    override fun forgetRoute() {
-        advertPath?.let { path ->
+    override fun forgetRoute(blame: Boolean) {
+        // **Only a path that lost records is blamed for it.** A session also ends for reasons that
+        // say nothing about the route — a host restart, a rekey, a record the radio refused — and
+        // banning the direct path for those forced a six-hop detour in the same room: measured
+        // 2026-11-10 as `flooded reply route ignored: it lost a session 0 hop(s)` three times while
+        // the radios were a metre apart.
+        advertPath?.takeIf { blame }?.let { path ->
             // Remember what failed, so the next answer cannot hand back the same ghost.
             failedRoutes.addLast(
                 ((path.encoded and 0xFF) or (path.bytes.contentHashCode() shl 8)) to
@@ -1439,7 +1444,7 @@ class AndroidRadioLink(
 
         /** How many failed paths are remembered, and for how long one stays unusable. */
         const val FAILED_ROUTE_MEMORY = 4
-        const val FAILED_ROUTE_HOLD_MS = 600_000L
+        const val FAILED_ROUTE_HOLD_MS = 120_000L
         /** The least gap between two route requests: a flood every repeater in range repeats. */
         const val ROUTE_REQUEST_FLOOR_MS = 5_000L
         /** How long a route request's own `OK` may take. */
