@@ -1403,7 +1403,7 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                         // of a repaint at the old geometry followed by another at the right one
                         // (measured 2026-11-09: seventeen records to open a shell). Without a
                         // stated grid, the remembered one is still the best hint there is.
-                        let stated = (grid.0 > 0 && grid.1 > 0).then_some(grid);
+                        let stated = stated_grid(grid.0, grid.1);
                         let remembered = stated.or_else(|| self.grids.get(&shell).copied());
                         if let Some((cols, rows)) = remembered {
                             let _ = self.host.resize(one, cols, rows).await;
@@ -1832,6 +1832,16 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                     self.stats.resizes_unchanged += 1;
                     return;
                 }
+                // **A grid the wire allows but no screen has is refused, not fitted.** See
+                // `stated_grid`: 255x255 is a measurement bug, and honouring it spends twelve
+                // seconds of air on a full frame nobody can read.
+                let (cols, rows) = match stated_grid(cols, rows) {
+                    Some(g) => g,
+                    None => {
+                        self.stats.resizes_unchanged += 1;
+                        return;
+                    }
+                };
                 // Only a resize the pane accepted starts the screen over: a refused one leaves
                 // the grid as it was and the phone keeps what it has.
                 let accepted = self.host.resize(&session, cols, rows).await.is_ok();
@@ -2273,6 +2283,23 @@ impl Host for DaemonHost {
             .await
             .map(|_| ())
     }
+}
+
+/// **The largest grid this link will fit a pane to.**
+///
+/// A phone's grid comes off its own surface measurement, and the wire carries it as two bytes: a
+/// bug in that measurement (or in the keyboard inset arithmetic) can produce 255x255, and a pane
+/// that size is 65 000 cells — twenty-odd records of a full frame, about twelve seconds of air, for
+/// a screen nobody could read. The bound is far above any real device (a 13-inch tablet at a small
+/// font is about 150x50) and far below what the wire allows, so it only ever catches a mistake.
+pub const MAX_GRID_COLS: u8 = 200;
+pub const MAX_GRID_ROWS: u8 = 120;
+
+/// A stated grid, if it is one worth fitting: both dimensions present and inside the bound.
+#[must_use]
+pub fn stated_grid(cols: u8, rows: u8) -> Option<(u8, u8)> {
+    ((1..=MAX_GRID_COLS).contains(&cols) && (1..=MAX_GRID_ROWS).contains(&rows))
+        .then_some((cols, rows))
 }
 
 /// Slice a history page out of a keeper snapshot, in the keeper's own line numbering.
@@ -3993,6 +4020,22 @@ mod tests {
             assert_eq!(*l, i + 1 == pages.len(), "only the final page ends the answer");
         }
         (lines, last, older)
+    }
+
+    /// **A grid nobody could draw is not fitted.**
+    ///
+    /// The wire carries two bytes per dimension, so a measurement bug can state 255x255: a pane of
+    /// 65 000 cells is twenty-odd records of a full frame, about twelve seconds of air, for a screen
+    /// that cannot be read. The bound is far above any real device and only ever catches a mistake.
+    #[test]
+    fn a_grid_beyond_any_screen_is_refused() {
+        assert_eq!(stated_grid(46, 17), Some((46, 17)), "a phone");
+        assert_eq!(stated_grid(150, 50), Some((150, 50)), "a tablet at a small font");
+        assert_eq!(stated_grid(0, 0), None, "a version-12 phone states nothing");
+        assert_eq!(stated_grid(0, 17), None, "half a grid is not a grid");
+        assert_eq!(stated_grid(255, 255), None, "the largest the wire can carry");
+        assert_eq!(stated_grid(201, 17), None, "one column past the bound");
+        assert_eq!(stated_grid(46, 121), None, "one row past the bound");
     }
 
     #[tokio::test]
