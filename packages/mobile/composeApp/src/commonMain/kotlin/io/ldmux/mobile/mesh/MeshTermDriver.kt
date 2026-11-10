@@ -552,7 +552,7 @@ class MeshTermDriver(
         _attempt.value += 1
         val g = gateway.state.value
         if (g != MeshLinkState.Bound) {
-            failed(g); publish(); return
+            failed(g, "the radio is not bound"); publish(); return
         }
         // **Every attempt asks where the host is, not just the first.** A retry is the moment the
         // route matters most: the previous attempt's records went somewhere and nothing came back,
@@ -561,7 +561,7 @@ class MeshTermDriver(
         // about to spend on a path that may no longer exist.
         runCatching { gateway.refreshRoute() }
         val h = try { begin() } catch (e: MeshSessionException) {
-            failed(e.state); publish(); return
+            failed(e.state, "the handshake could not start: ${e.message ?: e.state}"); publish(); return
         }
         // **Tell the host which radio this is, before the first session record.** A direct packet's
         // path is consumed by the repeaters that carry it, so the host cannot learn a return route
@@ -628,7 +628,13 @@ class MeshTermDriver(
      * pairing is not, because waiting cannot cure a token or a key and the screen already offers
      * the cure that can.
      */
-    private fun failed(state: MeshLinkState) {
+    private fun failed(state: MeshLinkState, why: String = "") {
+        // **Say why, once, in the log the app already keeps.** "Link dropped" is the only sentence
+        // the operator sees, and the four things that produce it — a dead radio, a refused pairing,
+        // a handshake nobody answered and a session the host stopped acknowledging — are cured
+        // differently. Without this line the next question is always "why", and the answer was only
+        // ever visible to somebody reading the state machine.
+        appLog("mesh drop: $state${if (why.isEmpty()) "" else " · $why"}")
         // Drop what failed. A retry that kept the dead session would never run, and the native
         // session holds keys and a queue that only a fresh handshake should replace. Held messages
         // go too: an `Attach` or an `Input` built for a session that ended is not for the next one.
@@ -706,7 +712,8 @@ class MeshTermDriver(
             val s = try {
                 h.finish(record, gateway.uplinkRecordMax, clock())
             } catch (e: MeshSessionException) {
-                failed(e.state); publish(); return@withLock
+                failed(e.state, "the handshake could not finish: ${e.message ?: e.state}")
+                publish(); return@withLock
             }
             session = s
             sessionLimit = gateway.uplinkRecordMax
@@ -783,7 +790,7 @@ class MeshTermDriver(
             // the link, so this is not [failed]: the screen stays up and only the keys change.
             if (h.needsRekey && terminalView == null) rekey()
             if (terminalView == null) resizeIfRouteGrew(h)
-            if (h.failed && terminalView == null) failed(MeshLinkState.SessionFailed)
+            if (h.failed && terminalView == null) failed(MeshLinkState.SessionFailed, "the ARQ gave up a record")
             // **A record the host never answers is a dead link, and the screen must say so.** With
             // nothing outstanding an idle shell is silent by design, so silence alone proves
             // nothing; with something outstanding, twenty seconds of nothing back is longer than
@@ -796,7 +803,7 @@ class MeshTermDriver(
             if (terminalView == null && h.pending > 0 &&
                 clock() - maxOf(lastInboundAt, lastCarriedAt) > silenceFailureMs(gateway.routeHops)
             ) {
-                failed(MeshLinkState.SessionFailed)
+                failed(MeshLinkState.SessionFailed, "the link stopped carrying while a record was owed")
             }
             if (h.peerClosed && terminalView == null) terminalView = MeshTermView.HostClosed(null)
             // **A live shell whose screen never arrived re-asks here.** The mirror is empty, so the
@@ -822,12 +829,12 @@ class MeshTermDriver(
             val waited = clock() - handshakeSince
             if (waited > handshakeTimeoutMs) {
                 handshake?.abandon(); handshake = null
-                failed(MeshLinkState.SessionFailed)
+                failed(MeshLinkState.SessionFailed, "three unanswered handshakes")
             } else if (handshakeTries >= handshakeRetries) {
                 // Three unanswered handshakes, each given twice as long as the last, is not a lost
                 // record. The transport is the suspect now, and only a new connection can test that.
                 handshake?.abandon(); handshake = null
-                failed(MeshLinkState.SessionFailed)
+                failed(MeshLinkState.SessionFailed, "the handshake timed out")
             } else if (waited >= handshakeRetryFor(gateway.routeHops) shl handshakeTries) {
                 handshakeTries++
                 // **A handshake that was not answered is asked again, not waited out.** `msg1` is
@@ -1601,7 +1608,7 @@ class MeshTermDriver(
             decoder.push(bytes)
         } catch (e: TermStreamException) {
             // The stream is unusable: say so and stop rather than painting from garbage.
-            failed(MeshLinkState.SessionFailed)
+            failed(MeshLinkState.SessionFailed, "the stream could not be decoded")
             return
         }
         for (item in items) when (item) {
@@ -1951,7 +1958,7 @@ class MeshTermDriver(
             // because `run` never returned, and the only cure was the refresh button. Measured on
             // the device 2026-11-04: "the host did not answer" until refresh, then working in two
             // seconds. `failed` is the one place that says "this connection is over".
-            failed(e.state); return
+            failed(e.state, "the session refused to poll: ${e.message ?: e.state}"); return
         }
         for (r in records) {
             if (!transmit(r)) break
@@ -1972,7 +1979,8 @@ class MeshTermDriver(
         } catch (e: RadioLinkException) {
             // Same rule as `pump`: the radio refusing to carry a record is the transport's word,
             // and a transport that has stopped carrying records cannot be revived from inside it.
-            failed(e.state); return false
+            failed(e.state, "the radio refused to carry a record: ${e.message ?: e.state}")
+            return false
         } catch (e: TimeoutCancellationException) {
             return false
         }
@@ -1988,6 +1996,7 @@ class MeshTermDriver(
             MeshSendOutcome.ErrNotFound -> failed(
                 if (gateway.state.value == MeshLinkState.NoPath) MeshLinkState.NoPath
                 else MeshLinkState.Refused,
+                "the radio refused the record: ${result.outcome}",
             )
             // **A record the radio would not take for its size is not "move closer".** `NoPath`
             // tells the user the path is unusable; this is a record that did not fit, which the
