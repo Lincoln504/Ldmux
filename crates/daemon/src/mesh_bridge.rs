@@ -2301,6 +2301,10 @@ pub const MAX_GRID_COLS: u8 = 200;
 pub const MAX_GRID_ROWS: u8 = 120;
 
 /// A stated grid, if it is one worth fitting: both dimensions present and inside the bound.
+///
+/// **Not the same bound as the keeper's.** `clamp_pane_size` allows 2000 columns and 255 rows,
+/// because a desk window on a large monitor is a real pane; this is the tighter limit a radio client
+/// is held to, and it exists for the airtime of the frame, not for the protocol.
 #[must_use]
 pub fn stated_grid(cols: u8, rows: u8) -> Option<(u8, u8)> {
     ((1..=MAX_GRID_COLS).contains(&cols) && (1..=MAX_GRID_ROWS).contains(&rows))
