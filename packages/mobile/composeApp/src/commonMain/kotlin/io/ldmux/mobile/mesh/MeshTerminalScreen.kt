@@ -433,7 +433,9 @@ fun MeshTerminalScreen(
     // addressee.
     val batcher = remember(conn) { MeshInputBatcher() }
     val handle = remember(conn) { MeshTerminalHandle(batcher, clock) }
-    val source = remember(conn) { MeshTerminalSource(handle, now = clock) }
+    val source = remember(conn) {
+        MeshTerminalSource(handle, now = clock, hops = { conn.driver.hopsNow() })
+    }
     // **The wait ends when the host says the answer ended.** One `Commit` with the idle flag is
     // the exact end of a burst; the four-second quiet timer in the hold stays as the fallback for a
     // host that does not send it.

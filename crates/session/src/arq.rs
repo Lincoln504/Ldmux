@@ -194,10 +194,19 @@ impl Config {
         // **A pure ack must not cost its own record when a little patience avoids it.** An owed ack
         // used to wait a fixed 150 ms for outgoing data and then go as a record of its own, which at
         // 0.6 s per record is 0.6 s of air for a 5-byte body — one record in every exchange where the
-        // host has nothing to send. Waiting a third of the retransmission timer still fires it long
-        // before anything is retransmitted (`rto_initial` is ≥ 6 airtimes), so the window never
-        // stalls on it, and in the common case the next frame's data carries the ack instead.
-        self.ack_delay_ms = self.ack_delay_ms.max(self.rto_initial_ms / 3).min(self.rto_max_ms / 2);
+        // host has nothing to send. Waiting a little still fires it long before anything is
+        // retransmitted, so the window never stalls on it, and in the common case the next frame's
+        // data carries the ack instead.
+        //
+        // **Two airtimes, not a third of the timer.** `rto_initial` is six airtimes *per hop*, so a
+        // third of it was 24 s on a twenty-hop route: a host with nothing to say held every
+        // acknowledgement for twenty-four seconds and the sender's window advanced one record per
+        // window of it. Patience that scales with the route is not patience, it is latency — and the
+        // case the delay exists for, an ack riding the next data record, is decided by whether data
+        // is going out in the next couple of records, not by how far the route is.
+        // The airtime this call was given, not the field: that is assigned a few lines below.
+        let ack = (airtime * 2.0).round().max(1.0) as u64;
+        self.ack_delay_ms = ack.max(self.ack_delay_ms).min(self.rto_max_ms / 2);
         self.airtime_ms = airtime.round() as u64;
         let cap = (airtime * 40.0).round() as u64;
         self.rto_max_ms = self.rto_max_ms.max(cap).min(600_000);
@@ -945,6 +954,26 @@ impl Arq {
             payload: Vec::new(),
             retransmit: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod ack_timing_tests {
+    use super::*;
+
+    /// **Patience that scales with the route is latency.** The owed-ack delay is decided by whether
+    /// data is going out in the next couple of records, not by how far the route is: a third of the
+    /// retransmission timer was 24 s on a twenty-hop path.
+    #[test]
+    fn an_ack_never_waits_more_than_a_couple_of_records() {
+        let near = Config::for_payload(137).with_path(Some(603.0), 1);
+        assert_eq!(near.ack_delay_ms, 1_206, "two airtimes at the public tuple");
+        let far = Config::for_payload(137).with_path(Some(603.0), 20);
+        assert_eq!(far.ack_delay_ms, 1_206, "and the same twenty hops out");
+        assert!(far.rto_initial_ms > 60_000, "while the retransmission timer scales");
+        // An unknown airtime keeps the interactive default rather than inventing one.
+        let unknown = Config::for_payload(137).with_path(None, 20);
+        assert_eq!(unknown.ack_delay_ms, 150);
     }
 }
 

@@ -762,6 +762,9 @@ class MeshTermDriver(
         session?.setHops(hops)
     }
 
+    /** Repeaters on the route right now, for a caller that has to size a wait over the air. */
+    fun hopsNow(): Int? = gateway.routeHops
+
     /** One record from the gateway's `RECV`. */
     suspend fun onRecord(record: ByteArray) = lock.withLock {
         if (terminalView is MeshTermView.HostClosed) return@withLock
@@ -870,7 +873,7 @@ class MeshTermDriver(
             // and the session does not care which path carries it. Bounded by the same backoff as
             // every other ask, and silent while nothing is outstanding.
             if (terminalView == null && h.pending > 0 &&
-                clock() - maxOf(lastInboundAt, lastCarriedAt) > ROUTE_REPAIR_MS
+                clock() - lastInboundAt > routeRepairMs(gateway.routeHops)
             ) {
                 gateway.refreshRoute()
             }
@@ -2245,14 +2248,25 @@ internal fun silenceFailureMs(hops: Int?): Long =
     (60_000L + (hops ?: 0).coerceIn(0, MAX_HOPS) * 3_600L).coerceAtMost(300_000L)
 
 /**
- * How long a record may sit outstanding before this phone asks the mesh where the host is now.
+ * How long a record may sit **unanswered** before this phone asks the mesh where the host is now.
  *
  * Not a timeout: nothing is given up on. The ARQ's own ladder decides when a record has failed, and
  * that is minutes away on a long route. This is the cheaper question asked first, because a route
  * change is how a terminal behaves while its owner moves, and a repair in place costs one flood
  * where a rebuild costs a handshake.
+ *
+ * **It scales with the route, because a fixed twenty seconds is a round trip that has not finished.**
+ * One airtime is 603 ms at the public tuple and a record's first copy covers `6 × hops` of them, so
+ * on a twenty-hop path a perfectly good round trip takes 72 s: a flat threshold would flood a
+ * request every twenty seconds on a link that was working. The figure is twice that budget, floored
+ * at twenty seconds so a neighbour does not wait for a route that is obviously there.
+ *
+ * **Measured from the last record that arrived, not the last one sent.** Retransmissions would
+ * otherwise reset the clock on every attempt — a link that keeps retrying would never ask, which is
+ * the opposite of the case this exists for.
  */
-internal const val ROUTE_REPAIR_MS = 20_000L
+internal fun routeRepairMs(hops: Int?): Long =
+    (2 * 3_600L * (hops ?: 0).coerceIn(1, MAX_HOPS)).coerceAtLeast(20_000L)
 
 /**
  * The firmware's longest legal path: a 64-byte path field, so 63 one-byte hops.

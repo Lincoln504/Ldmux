@@ -58,6 +58,15 @@ class MeshTerminalSource(
      * batch mode into live mode by accident.
      */
     private val now: () -> Long,
+    /**
+     * Repeaters on the route to the host, asked afresh each time a wait is sized.
+     *
+     * **A wait for something that crosses the mesh is a function of how far it crosses.** The
+     * history page is one record each way, so on a twenty-hop route the answer takes a minute and a
+     * flat ten-second wait declared it lost — the up key then asked again while the first page was
+     * still travelling. Defaulted because a source with no link (a test) has no route to ask about.
+     */
+    private val hops: () -> Int? = { null },
 ) : TerminalSource, TerminalHandle by input {
 
     /**
@@ -784,7 +793,7 @@ class MeshTerminalSource(
         // **A lost request expires; it does not block the key for ever.** The radio's own
         // retransmission is bounded (six airtimes per hop), so a page that has not arrived by
         // [HISTORY_WAIT_MS] is treated as lost and the next press asks again.
-        if (awaitingHistory && now() - historyAsked < HISTORY_WAIT_MS) return
+        if (awaitingHistory && now() - historyAsked < answerDeadlineMs(HISTORY_WAIT_MS, hops())) return
         awaitingHistory = true
         historyAsked = now()
         scrollNotice = "fetching history"
@@ -824,7 +833,10 @@ class MeshTerminalSource(
      * a full page and an empty one are both "last" of their answer.
      */
     private companion object {
-        /** How long a history request may be in flight before the up key may ask again. */
+        /**
+         * How long a history request may be in flight before the up key may ask again, before the
+         * route's own answer deadline is added to it.
+         */
         const val HISTORY_WAIT_MS = 10_000L
     }
 

@@ -140,6 +140,22 @@ class MeshSilenceBoundTest {
         assertEquals(60_000L, silenceFailureMs(null), "no route yet is treated as direct")
     }
 
+    /**
+     * **A repair must outlast the round trip it is repairing.** A flat twenty seconds is a fine
+     * floor for a neighbour and a flood every twenty seconds on a twenty-hop route, where one
+     * working round trip is 72 s.
+     */
+    @Test
+    fun a_route_repair_waits_for_a_round_trip_that_scales() {
+        assertEquals(20_000L, routeRepairMs(1), "a neighbour gets the floor")
+        assertEquals(20_000L, routeRepairMs(null))
+        assertEquals(36_000L, routeRepairMs(5))
+        assertEquals(72_000L, routeRepairMs(10))
+        assertEquals(144_000L, routeRepairMs(20))
+        // The firmware's ceiling clamps it, as every route-dependent figure is clamped.
+        assertEquals(2 * 3_600L * 63, routeRepairMs(1_000))
+    }
+
     @Test
     fun every_hop_buys_room_for_its_round_trip() {
         // **3.6 s a hop is the session's own first retransmission** (six airtimes at the public

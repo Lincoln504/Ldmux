@@ -54,8 +54,12 @@ fun addToOrder(
  * **A limit is a promise about state, not about the host.** Every open page holds a live stream, a
  * claim and a fitted grid, and the daemon serves as many as are asked for — so the client is the
  * only place a number belongs. Five is what a person can page between on a phone without losing
- * which one is which, and it is the same number on both routes: on the tailnet a page is a stream,
- * on the radio a page is a shell this phone has claimed.
+ * which one is which.
+ *
+ * **It is the pager's limit, and the pager is the tailnet's.** The radio route shows one shell at a
+ * time by construction — a screen is records, and two live screens would be two streams of them — so
+ * switching shells there is an attach and costs one record, with no page to hold. The number lives
+ * here because a page set is the one place an app keeps several shells open at once.
  *
  * Reaching it is refused with a sentence rather than silently opening a sixth: a shell created and
  * not paged to is a shell the user cannot reach, which is worse than a refusal they can read.

@@ -630,7 +630,7 @@ class AndroidRadioLink(
             // usually answered this already.
             if (!routeIsFresh(System.currentTimeMillis())) {
                 ensureRoute(s)
-                withTimeoutOrNull(ROUTE_REPLY_WAIT_MS) {
+                withTimeoutOrNull(replyWaitMs()) {
                     while (!routeIsFresh(System.currentTimeMillis()) && !closing) delay(20)
                 }
                 appLog("mesh connect: route ${if (routeIsFresh(System.currentTimeMillis())) "fresh" else "unknown"}")
@@ -913,7 +913,7 @@ class AndroidRadioLink(
         // reads below can only answer with an advert that already crossed the mesh.
         if (!routeIsFresh(System.currentTimeMillis())) {
             ensureRoute(s)
-            withTimeoutOrNull(ROUTE_REPLY_WAIT_MS) {
+            withTimeoutOrNull(replyWaitMs()) {
                 while (!routeIsFresh(System.currentTimeMillis()) && !closing) delay(20)
             }
         }
@@ -1054,7 +1054,10 @@ class AndroidRadioLink(
     override fun forgetRoute() {
         advertPath?.let { path ->
             // Remember what failed, so the next answer cannot hand back the same ghost.
-            failedRoutes.addLast((path.encoded and 0xFF) or (path.bytes.size shl 8) to System.currentTimeMillis())
+            failedRoutes.addLast(
+                ((path.encoded and 0xFF) or (path.bytes.contentHashCode() shl 8)) to
+                    System.currentTimeMillis(),
+            )
             while (failedRoutes.size > FAILED_ROUTE_MEMORY) failedRoutes.removeFirst()
         }
         advertPath = null
@@ -1066,6 +1069,10 @@ class AndroidRadioLink(
         lastRequestAt = 0L
         appLog("mesh route dropped after a failed session")
     }
+
+    /** The wait for a route answer, sized by the route already in hand. */
+    private fun replyWaitMs(): Long =
+        ROUTE_REPLY_WAIT_MS + ROUTE_REPLY_PER_HOP_MS * ((advertPath ?: contactPath)?.hops() ?: 0)
 
     /** A route heard recently enough to try before asking again. */
     /**
@@ -1094,7 +1101,9 @@ class AndroidRadioLink(
         while (failedRoutes.isNotEmpty() && now - failedRoutes.first().second > FAILED_ROUTE_HOLD_MS) {
             failedRoutes.removeFirst()
         }
-        val key = (path.encoded and 0xFF) or (path.bytes.size shl 8)
+        // The bytes, not their length: two five-hop paths with different repeaters share a length
+        // and must not share a grave.
+        val key = (path.encoded and 0xFF) or (path.bytes.contentHashCode() shl 8)
         return failedRoutes.any { it.first == key }
     }
 
@@ -1425,7 +1434,16 @@ class AndroidRadioLink(
         /** How long a route request's own `OK` may take. */
         const val REQUEST_ANSWER_MS = 2_000L
         /** How long to wait for the host's reply before connecting without it. */
+        /**
+         * How long to wait for an answer to our own route request, before the free cache reads.
+         *
+         * **A reply is one record each way, so the route decides.** Four seconds covers a neighbour;
+         * on a route the request itself already needs `2 × hops × airtime` to arrive and come back,
+         * so a flat four would move on while the answer was still travelling and the handshake's
+         * first attempt would go out with no path at all.
+         */
         const val ROUTE_REPLY_WAIT_MS = 4_000L
+        const val ROUTE_REPLY_PER_HOP_MS = 2_000L
         /** How long a send waits for a config write's answer window to clear. */
         const val RAW_WINDOW_WAIT_MS = 1_500L
         /**
