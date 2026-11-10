@@ -1430,15 +1430,19 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                         // stated grid, the remembered one is still the best hint there is.
                         let stated = stated_grid(grid.0, grid.1);
                         let remembered = stated.or_else(|| self.grids.get(&shell).copied());
+                        // **The size to put back is read before anything fits the pane.**
+                        // Reading it after the fit recorded the phone's own grid as the thing to
+                        // restore, so the *second* attach onwards left the shell at the phone's
+                        // width for the desk — the same symptom the read was moved here to fix,
+                        // one attach later. It also carries the pane's own paste mode, which the
+                        // first keystroke can beat: a paste that arrived before the next tick
+                        // would execute every line.
+                        let original = self.host.screen(one).await.ok();
+                        let bracketed_paste = original.as_ref().is_some_and(|s| s.bracketed_paste);
+                        let original = original.map(|s| (s.cols, s.rows));
                         if let Some((cols, rows)) = remembered {
                             let _ = self.host.resize(one, cols, rows).await;
                         }
-                        let original = self.host.screen(one).await.ok();
-                        // The pane's own paste mode rides the same read: the first keystroke can
-                        // beat the next tick, and a paste that arrived before it would execute
-                        // every line.
-                        let bracketed_paste = original.as_ref().is_some_and(|s| s.bracketed_paste);
-                        let original = original.map(|s| (s.cols, s.rows));
                         self.shells.insert(
                             shell,
                             Attached {
@@ -5797,6 +5801,64 @@ mod tests {
     /// shell, which reads as the reader's own shell being broken (reported 2026-11-05 after a phone
     /// attached to `meshmore-sns` and detached). The bridge records the size the host had before the
     /// first fit and restores it on detach.
+    /// **The grid to put back is the pane's, not the one this phone asked for last time.**
+    ///
+    /// The restore read the screen *after* fitting the pane to the remembered grid, so from the
+    /// second attach onwards it recorded the phone's own size as the thing to put back: the desk
+    /// window was left at 46 columns for ever, which is the symptom the read was moved earlier to
+    /// fix — one attach later. The first attach was fine, which is why the old test passed.
+    #[tokio::test]
+    async fn a_second_attach_still_restores_the_panes_own_grid() {
+        let (mut b, host, link) = setup();
+        let pane = {
+            let s = host.0.lock().unwrap();
+            let screen = s.screens.get("abcd-1").cloned().expect("the fixture screen");
+            (screen.cols, screen.rows)
+        };
+        assert_ne!(pane, (46, 17), "the fixture pane must differ from the phone's grid");
+
+        // First attach states the phone's grid, and it leaves.
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+                cols: 46,
+                rows: 17,
+            },
+        );
+        b.tick().await;
+        phone_says(&link, 1, &Message::Detach);
+        b.tick().await;
+
+        // The pane is back where it was; the phone returns with the same grid and leaves again.
+        {
+            let s = host.0.lock().unwrap();
+            let screen = s.screens.get("abcd-1").cloned().expect("the fixture screen");
+            assert_eq!((screen.cols, screen.rows), pane, "the first detach put it back");
+        }
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+                cols: 46,
+                rows: 17,
+            },
+        );
+        b.tick().await;
+        phone_says(&link, 1, &Message::Detach);
+        b.tick().await;
+        let resized = host.0.lock().unwrap().resized.clone();
+        assert_eq!(
+            resized.last(),
+            Some(&("abcd-1".to_string(), pane.0, pane.1)),
+            "the second detach puts the pane back too: {resized:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_detach_restores_the_grid_the_phone_displaced() {
         let (mut b, host, link) = setup();
