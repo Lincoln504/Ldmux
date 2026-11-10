@@ -1289,6 +1289,59 @@ fn text(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
+mod record_flood_tests {
+    use super::*;
+
+    /// **The same bytes on both ends, pinned.** This wrapper is built twice — here and in Kotlin
+    /// (`RadioRoute.recordFlood`) — and a one-byte disagreement means a record that is sent and never
+    /// opened, which reads as a dead link. The Kotlin test asserts the same vector.
+    #[test]
+    fn a_record_flood_is_the_same_bytes_as_the_phones() {
+        let host = [0x11u8; 32];
+        let own = [0x22u8; 32];
+        let nonce = [0x01, 0x02, 0x03, 0x04];
+        let record = [0xAA, 0xBB, 0xCC];
+        let packet = build_record_flood_in_scope(1, &host, &own, None, &nonce, &record).unwrap();
+        assert_eq!(
+            packet,
+            vec![
+                0x01, // ROUTE_FLOOD | REQ
+                0x00, // path byte: zero hops, one-byte hashes
+                0x11, // dest hash = host key byte 0
+                0x22, // source hash = own key byte 0
+                b'L', b'D', b'M', b'R', // magic
+                0x01, 0x02, 0x03, 0x04, // nonce, outside the sealed record
+                0xAA, 0xBB, 0xCC, // the record, untouched
+            ]
+        );
+    }
+
+    #[test]
+    fn a_record_flood_reads_back_and_only_for_its_address() {
+        let host = [0x11u8; 32];
+        let own = [0x22u8; 32];
+        let nonce = [9, 8, 7, 6];
+        let record = [1u8, 2, 3, 4, 5];
+        let packet = build_record_flood_in_scope(1, &host, &own, None, &nonce, &record).unwrap();
+        // Addressed to `host`, sent by `own`: the recipient is the one that opens it.
+        let flooded = parse_record_flood(&packet, &host).expect("addressed to the recipient");
+        assert_eq!(flooded.record, record);
+        assert_eq!(flooded.path.hops, 0);
+        // The sender's own key does not match the destination hash, so it is not the sender's to
+        // open. That check is what keeps another node's flood out of this session entirely.
+        assert!(parse_record_flood(&packet, &own).is_none());
+    }
+
+    #[test]
+    fn a_record_flood_that_does_not_fit_is_refused() {
+        let host = [0x11u8; 32];
+        let own = [0x22u8; 32];
+        let big = vec![0u8; 200];
+        assert!(build_record_flood_in_scope(1, &host, &own, None, &[0; 4], &big).is_err());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

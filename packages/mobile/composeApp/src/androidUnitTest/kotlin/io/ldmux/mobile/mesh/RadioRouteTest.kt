@@ -267,6 +267,46 @@ class RadioRouteTest {
         assertNotNull(routeRefusal(heldHops = null, candidateHops = 1, proven = false, stale = true, rememberedFailed = true))
     }
 
+    /// **The same bytes as the host, pinned.** This wrapper is built twice — here and in Rust
+    /// (`build_record_flood_in_scope`) — and a one-byte disagreement produces a record that is sent
+    /// and never opened, which reads as a dead link. The Rust test asserts this identical vector.
+    @Test
+    fun `a record flood is the same bytes as the hosts`() {
+        val host = ByteArray(32) { 0x11 }
+        val own = ByteArray(32) { 0x22 }
+        val packet = RadioRoute.recordFlood(
+            hashSize = 1,
+            hostKey = host,
+            ownKey = own,
+            scope = null,
+            nonce = byteArrayOf(0x01, 0x02, 0x03, 0x04),
+            record = byteArrayOf(0xAA.toByte(), 0xBB.toByte(), 0xCC.toByte()),
+        )!!
+        assertEquals(
+            listOf<Byte>(
+                0x01, // ROUTE_FLOOD | REQ
+                0x00, // path byte: zero hops, one-byte hashes
+                0x11, // dest hash = the recipient's key byte 0
+                0x22, // source hash = this radio's key byte 0
+                'L'.code.toByte(), 'D'.code.toByte(), 'M'.code.toByte(), 'R'.code.toByte(),
+                0x01, 0x02, 0x03, 0x04, // nonce, outside the sealed record
+                0xAA.toByte(), 0xBB.toByte(), 0xCC.toByte(), // the record, untouched
+            ),
+            packet.toList(),
+        )
+    }
+
+    /// A flood addressed to this radio is a record; the same flood is not ours to open at the sender.
+    @Test
+    fun `a record flood reads back only for its address`() {
+        val host = ByteArray(32) { 0x11 }
+        val own = ByteArray(32) { 0x22 }
+        val record = byteArrayOf(1, 2, 3, 4, 5)
+        val packet = RadioRoute.recordFlood(1, host, own, null, byteArrayOf(9, 8, 7, 6), record)!!
+        assertArrayEquals(record, RadioRoute.heardRecordFlood(packet, host))
+        assertNull(RadioRoute.heardRecordFlood(packet, own))
+    }
+
     @Test
     fun `a flooded reply in the receive log carries the route`() {
         val host = ByteArray(32) { 0xA1.toByte() }
