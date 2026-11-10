@@ -361,6 +361,13 @@ struct Attached {
     /// every control message still arrive — and the release sends the difference from the screen the
     /// phone holds, so nothing is repainted.
     held_since: Option<Instant>,
+    /// **Messages that wait for the first frame of an attach.**
+    ///
+    /// The profile and the marks table are a few dozen bytes; sending them alone is a record of
+    /// their own before the screen's, 0.6 s of air on this link. A phone that stated its grid has
+    /// nothing to wait for, so they ride the first frame instead — the same record, the profile
+    /// first.
+    pending_messages: Vec<Message>,
     /// **One frame is owed while frozen, and it is the only thing a hold does not stop.**
     ///
     /// Two things ask for it, and both are the view being made *valid* rather than fed:
@@ -1056,10 +1063,15 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
             {
                 a.resync();
             }
+            // A frame that has messages waiting to lead it keeps one message of room for them.
+            let waiting = self
+                .shells
+                .get(&shell)
+                .map_or(0, |a| a.pending_messages.len());
             let room = if pending == 0 {
-                FRAME_MESSAGES
+                FRAME_MESSAGES.saturating_sub(waiting)
             } else {
-                PENDING_LIMIT.saturating_sub(pending)
+                PENDING_LIMIT.saturating_sub(pending).saturating_sub(waiting)
             };
             if room == 0 {
                 self.stalled = true;
@@ -1218,10 +1230,24 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
             // that actually went out, so a frame too big for the window is spread over ticks
             // instead of being queued whole: one full repaint used to sit in front of a
             // keystroke as eight records, which the device showed as a freeze.
-            let messages = match self.shells.get_mut(&shell) {
-                Some(a) => a.differ.update_within(&screen, room),
+            let (waiting, built) = match self.shells.get_mut(&shell) {
+                Some(a) => (
+                    std::mem::take(&mut a.pending_messages),
+                    a.differ.update_within(&screen, room),
+                ),
                 None => continue,
             };
+            // **The waiting messages lead the frame.** The profile comes before the rows it
+            // describes, which is the order the phone needs.
+            if built.is_empty() && waiting.is_empty() {
+                if let Some(a) = self.shells.get_mut(&shell) {
+                    a.changed_last_tick = false;
+                }
+                continue;
+            }
+            let mut messages = waiting;
+            messages.extend(built);
+            let messages = messages;
             if messages.is_empty() {
                 if let Some(a) = self.shells.get_mut(&shell) {
                     a.changed_last_tick = false;
@@ -1475,6 +1501,7 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                                 // phone's size, so the first frame is the one it will keep.
                                 hold: (remembered.is_none() && stated.is_none())
                                     .then(|| Instant::now() + ATTACH_GRACE),
+                                pending_messages: Vec::new(),
                                 resync_wanted: false,
                                 owe_frame: false,
                                 held_since: None,
@@ -1524,13 +1551,30 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                         // and two separate replies were two records: 0.6 s of air on this link for a
                         // page that is usually empty. The profile stays first in the record, so the
                         // phone still learns the grid before it reads a row.
-                        if version >= MARKS_VERSION {
+                        let mut together = if version >= MARKS_VERSION {
                             let marks = self.host.marks().await;
-                            let mut together = vec![profile];
-                            together.extend(marks_pages(marks));
-                            self.reply(shell, &together);
+                            let mut t = vec![profile];
+                            t.extend(marks_pages(marks));
+                            t
                         } else {
-                            self.reply(shell, &[profile]);
+                            vec![profile]
+                        };
+                        // **A stated grid needs no early profile, so it rides the first frame.**
+                        // The profile went first only because the phone could not ask for its grid
+                        // until it knew the pane's — a deadlock. A phone that stated its grid has
+                        // already asked, and the pane is already that size, so the profile can
+                        // travel with the rows it describes: one record for both instead of two,
+                        // 0.6 s of air on every shell opened. The differ is reset for a new
+                        // attach, so the frame that follows is a full screen and the profile
+                        // leads it — the phone still reads the grid before a row.
+                        if stated.is_some()
+                            && let Some(a) = self.shells.get_mut(&shell)
+                        {
+                            let mut pending = std::mem::take(&mut together);
+                            pending.append(&mut a.pending_messages);
+                            a.pending_messages = pending;
+                        } else {
+                            self.reply(shell, &together);
                         }
                     }
                     _ => {
@@ -5850,6 +5894,59 @@ mod tests {
             resized.last(),
             Some(&("abcd-1".to_string(), pane.0, pane.1)),
             "and the detach puts the pane back where it was: {resized:?}"
+        );
+    }
+
+    /// **A stated grid lets the profile ride the first frame.**
+    ///
+    /// The profile went out alone only because the phone could not ask for its grid until it knew
+    /// the pane's. A phone that states its grid has already asked, so the profile and the marks
+    /// travel with the rows they describe: one record for the attach's whole answer instead of two,
+    /// which is 0.6 s of air on every shell opened. The profile still leads the record, because the
+    /// phone reads the grid before a row.
+    #[tokio::test]
+    async fn a_stated_grid_lets_the_profile_ride_the_first_frame() {
+        let (mut b, link) = {
+            let (b, _host, link) = setup();
+            (b, link)
+        };
+        let clock = FakeClock::new();
+        b.clock = clock.reader();
+        b.tick().await;
+        let base = sent_records(&link);
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: VERSION,
+                selector: String::new(),
+                cols: 46,
+                rows: 17,
+            },
+        );
+        clock.advance(500);
+        b.tick().await;
+        let sent = link.0.lock().unwrap().sent[base..].to_vec();
+        assert!(!sent.is_empty(), "the attach is answered");
+        assert_eq!(
+            sent.len(),
+            1,
+            "profile, marks and the first screen share one record: {}",
+            sent.len()
+        );
+        let mut d = Decoder::new();
+        let msgs: Vec<Message> = sent
+            .iter()
+            .flat_map(|(_, bytes)| d.push(bytes).unwrap())
+            .filter_map(|m| m.ok())
+            .collect();
+        assert!(
+            matches!(msgs.first(), Some(Message::Profile { cols: 46, rows: 17, .. })),
+            "the profile leads: {msgs:?}"
+        );
+        assert!(
+            msgs.iter().any(|m| matches!(m, Message::Rows { .. })),
+            "and the screen is in the same record: {msgs:?}"
         );
     }
 
