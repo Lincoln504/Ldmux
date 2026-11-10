@@ -1235,7 +1235,13 @@ fun MeshTerminalScreen(
                         }
                         // A wait is not a black screen: with nothing drawn yet this says what is awaited, with
                         // the seconds it has taken. (A resize keeps the old screen up, so it needs no line.)
-                        if (toShow == null && drawn == null) {
+                        //
+                        // **Only while a screen is actually coming.** This was drawn for every state
+                        // with nothing painted, so a shell the desk holds showed "in use on desktop ·
+                        // take it back" *and* "waiting for shell screen · 70 s" at once: the counter
+                        // promised a screen that only the user's own press can bring. `Live` is the
+                        // one state that is waiting for the host, so it is the one that counts.
+                        if (toShow == null && drawn == null && view is MeshTermView.Live) {
                             Box(Modifier.align(Alignment.TopStart).background(Bg).padding(horizontal = 6.dp, vertical = 2.dp)) {
                                 WaitingLine("waiting for shell screen", attemptNo)
                             }

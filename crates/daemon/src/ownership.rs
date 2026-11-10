@@ -58,6 +58,18 @@ impl Claim {
     /// Whether the holder is using the shell now, rather than having left it open.
     #[must_use]
     pub fn engaged(&self, now: i64) -> bool {
+        // **A phone's claim is a screen somebody is looking at; a desk window's is a window left
+        // open.** The idle rule exists because nine desk windows hold nine shells for ever, and
+        // because a desk window that has not typed in ninety seconds is not somebody's. A phone is
+        // the opposite: it releases the claim when the operator leaves the page or the app
+        // (`releaseShell`, and the daemon's own `release_device` on a dropped connection), so its
+        // claim cannot outlive their attention — and it cannot be refreshed by typing either,
+        // because in batch mode the typing has not been *sent* yet. Treating it as idle let a desk
+        // window take a shell from under a command being composed on the phone, which the operator
+        // then discovered by having their next keystroke refused with "take it back".
+        if self.device.kind == "phone" || self.device.kind == "mesh" {
+            return true;
+        }
         now.saturating_sub(self.active_at) <= ENGAGED_MS
     }
 }
@@ -377,6 +389,44 @@ mod tests {
         match o.claim("s1", phone(), false, Some(1_000 + ENGAGED_MS + 60_001)) {
             ClaimResult::Acquired { .. } => {}
             _ => panic!("an idle claim must not refuse"),
+        }
+    }
+
+    /// **A phone reads as in use however long it has been quiet, and a desk window does not.**
+    ///
+    /// The claim is the lock, and the idle rule exists for the case that produced it: nine desk
+    /// windows left open held nine shells for ever, so a phone opening any of them was refused over
+    /// a window nobody had touched. A phone is the mirror image — it gives the claim back when the
+    /// operator leaves the page or the app — and it cannot prove use by typing either, because in
+    /// batch mode the typing is held until the operator presses sync. A phone composing a command
+    /// for a minute therefore looked idle, and a desk window could take the shell from under it: the
+    /// operator found out by having the next keystroke refused.
+    #[test]
+    fn a_phone_holder_is_in_use_even_when_it_has_not_typed() {
+        let mut o = Ownership::new();
+        o.claim("s1", phone(), false, Some(1_000));
+        // Long past the desk window's idle bound.
+        let later = 1_000 + ENGAGED_MS * 10;
+        match o.claim("s1", desktop(), false, Some(later)) {
+            ClaimResult::HeldBy { device } => assert_eq!(device.id, "pixel-8"),
+            _ => panic!("a phone that is showing the shell is using it"),
+        }
+        // The mesh link is a phone too, and holds the same way.
+        let mut o = Ownership::new();
+        let mut mesh = phone();
+        mesh.id = "mesh".into();
+        mesh.kind = "mesh".into();
+        o.claim("s2", mesh, false, Some(1_000));
+        match o.claim("s2", desktop(), false, Some(later)) {
+            ClaimResult::HeldBy { .. } => {}
+            _ => panic!("the mesh link's claim is a phone's"),
+        }
+        // The desk's own claim keeps the idle rule: a window nobody has typed into is displaced.
+        let mut o = Ownership::new();
+        o.claim("s3", desktop(), false, Some(1_000));
+        match o.claim("s3", phone(), false, Some(later)) {
+            ClaimResult::Acquired { .. } => {}
+            _ => panic!("an idle desk window is displaced"),
         }
     }
 

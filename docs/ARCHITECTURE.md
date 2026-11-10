@@ -231,6 +231,13 @@ ADR-0010 is the decision. The practice:
   on a window's behalf must not outlive the window. A phone over the radio has no
   connection in that table, so the bridge tells the daemon which sessions the mesh
   link is watching and those claims are kept.
+- **A holder that has not typed is not a holder — except a phone.** Nine desk windows left open
+  held nine shells for ever, so a desk window quiet for ninety seconds is displaced without being
+  asked, and a phone opening one of them is answered instead of refused. A phone is the mirror
+  image: it gives the claim back when the operator leaves the page or the app, so its claim cannot
+  outlive their attention, and it cannot prove use by typing either — in batch mode the typing is
+  held until sync. A phone's claim therefore counts as in use however long it has been quiet, and a
+  desk window over it gets `press r`, which is the same consent it always needed.
 - When the holder lets go, the daemon broadcasts the session list and a displaced
   desk window takes the shell back by itself, including its own pane size.
 - **Limits, stated rather than implied.** A mesh claim is kept while the link watches the
