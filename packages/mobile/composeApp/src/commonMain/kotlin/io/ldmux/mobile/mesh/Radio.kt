@@ -87,6 +87,15 @@ interface RadioLink {
     val routeHops: Int? get() = null
 
     /**
+     * Whether the route in hand was confirmed inside the freshness window.
+     *
+     * Defaulted to true so an implementation that has no route bookkeeping is not forced to answer:
+     * the driver reads this only to tell "no route" from "a route that stopped carrying", and both
+     * of those need a flood rather than another handshake.
+     */
+    fun routeFresh(): Boolean = true
+
+    /**
      * This radio's own public key, once the companion handshake has run.
      *
      * Null before that: the key comes from `SELF_INFO`, which is the first answer the radio gives.
@@ -583,6 +592,7 @@ class MeshRadioGateway(private val link: RadioLink) : GatewayPort {
     override val received: Flow<ByteArray> = link.received
     override val uplinkRecordMax: Int get() = link.uplinkRecordMax
     override val routeHops: Int? get() = link.routeHops
+    override val routeFresh: Boolean get() = link.routeFresh()
     override val radioPublicKey: ByteArray? get() = link.radioPublicKey
 
     override suspend fun send(record: ByteArray): MeshSendResult =

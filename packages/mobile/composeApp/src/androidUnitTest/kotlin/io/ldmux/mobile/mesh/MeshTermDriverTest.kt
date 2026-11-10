@@ -35,6 +35,8 @@ class MeshTermDriverTest {
          * neighbour, which is the timing every ladder test was written against.
          */
         override var routeHops: Int? = 0
+        /** A route in hand that nothing has confirmed lately is as good as none, for the ladder. */
+        override var routeFresh: Boolean = true
         val sent = ArrayList<ByteArray>()
         var routeRefreshes = 0
         var outcome = MeshSendOutcome.SentDirect
@@ -239,6 +241,25 @@ class MeshTermDriverTest {
             "the verdict says no route, not 'three unanswered handshakes': " +
                 io.ldmux.mobile.AppLogBuffer.snapshot().takeLast(3).toString(),
         )
+    }
+
+    /// **A route nothing has confirmed lately is treated as no route by the ladder.**
+    ///
+    /// Measured 2026-11-10: three minutes of 8/16/32 s rungs handshaking down a stale 0-hop route,
+    /// the host hearing none of them, while the phone asked for a route only every half minute. A
+    /// stale route is still non-null, so the "ask the mesh instead" rule never engaged.
+    @Test
+    fun a_stale_route_makes_the_rungs_ask_the_mesh_too(): Unit = runBlocking {
+        val d = driver()
+        gw.routeHops = 3
+        gw.routeFresh = false
+        d.start()
+        val records = gw.sent.size
+        val asks = gw.routeRefreshes
+        now += handshakeRetryFor(3)
+        d.tick()
+        assertEquals(records, gw.sent.size, "no handshake down a route nothing has confirmed")
+        assertTrue(gw.routeRefreshes > asks, "a route request went out, and a request is a flood")
     }
 
     /// **A list answer that never arrives is asked for again, and only a few times.**

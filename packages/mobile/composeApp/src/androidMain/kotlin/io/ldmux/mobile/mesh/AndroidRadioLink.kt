@@ -1212,6 +1212,14 @@ class AndroidRadioLink(
         hostPath != null && routeHeardAt > 0L && now - routeHeardAt <= ROUTE_FRESH_MS
 
     /**
+     * Whether the route in hand was confirmed inside the freshness window.
+     *
+     * Public because the driver needs it to tell "there is no route" from "the route we have has
+     * stopped carrying" — the second also needs a flood, and `routeHops` cannot say which is which.
+     */
+    fun routeFresh(now: Long = System.currentTimeMillis()): Boolean = routeIsFresh(now)
+
+    /**
      * Ask the host for a route, right now, over a flood.
      *
      * **This is the on-demand half of discovery, and it is what makes the link work at distance.**

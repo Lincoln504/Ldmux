@@ -1463,7 +1463,15 @@ fun MeshTerminalScreen(
                         else -> null
                     }
                     if (waiting != null) {
-                        WaitingLine(waiting, attemptNo)
+                        // **The count that does not reset.** The seconds are the age of one attempt,
+                        // so with the ladder firing every eight, sixteen and thirty-two seconds the
+                        // operator sees a number that never passes twenty and concludes nothing is
+                        // happening (measured 2026-11-10, and said back: "I never once saw it count
+                        // above nineteen"). Beside it goes the effort that does not reset and the
+                        // one fact that matters at range: whether the mesh has answered a route
+                        // request at all. Six requests and no answer is a different world from six
+                        // requests and an answer.
+                        WaitingLine(waiting, attemptNo) { conn.driver.linkEffort() }
                         if (spent) {
                             // The cure is time, not a retry: say the one thing that helps.
                             MeshBodyBlock(

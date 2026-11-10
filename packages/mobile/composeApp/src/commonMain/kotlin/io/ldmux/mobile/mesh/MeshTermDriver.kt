@@ -29,6 +29,19 @@ interface GatewayPort {
     val routeHops: Int? get() = null
 
     /**
+     * Whether that route has been confirmed recently, or null when there is none.
+     *
+     * **A route nobody has confirmed is not a route for a handshake.** The driver treats "no route"
+     * as a different problem from "a route that stopped carrying", and the cure for the first is to
+     * ask the mesh — a flood, which crosses repeaters — instead of re-sending a direct packet. Until
+     * this existed the rule keyed only on `routeHops == null`, so a path heard minutes ago stayed
+     * "known" and every rung was spent handshaking down a chain that had delivered nothing: measured
+     * 2026-11-10, three minutes of 8/16/32 s rungs on a stale 0-hop route while the host heard none
+     * of them and the phone asked for a route only every half minute.
+     */
+    val routeFresh: Boolean get() = true
+
+    /**
      * Why the link is down, in the link's own words, or null when it has not said.
      *
      * A state is a category and there are five ways to be unable to reach a radio - Bluetooth off,
@@ -376,6 +389,13 @@ class MeshTermDriver(
      * ladder spends its rungs on. Reset whenever a route is adopted or a session comes up.
      */
     private var blindAsks = 0
+    /** Rungs spent on the link the operator is waiting for, which the screen never resets. */
+    private var attemptsThisLink = 0
+    /** Whether any route answer arrived since the operator last asked for a shell. */
+    private var routeAnsweredThisLink = false
+
+    /** The effort line the waiting screen shows: rungs and whether the mesh answered. */
+    fun linkEffort(): String = linkEffortLine(attemptsThisLink, blindAsks, routeAnsweredThisLink)
     /** The re-ask number of the current handshake. Reset with [handshakeTries]. */
 
     /**
@@ -580,6 +600,12 @@ class MeshTermDriver(
         // A new connection gets a full set of handshake re-asks. `connect` itself is also the
         // retry path inside one connection, which is why it does not reset this.
         handshakeTries = 0
+        // **The operator asked, so the effort starts now.** The waiting screen shows these counts
+        // alongside a seconds counter that resets per attempt; they exist so the number that
+        // matters — how many tries, and has the mesh ever answered — never resets under the reader.
+        attemptsThisLink = 0
+        routeAnsweredThisLink = false
+        blindAsks = 0
         connect()
     }
 
@@ -589,6 +615,11 @@ class MeshTermDriver(
      */
     private suspend fun connect() {
         _attempt.value += 1
+        // **The effort the screen shows starts at the operator's request, not at each rung.** A new
+        // connection here is either the first try or the ladder's next rung, and the two cannot be
+        // told apart from inside — so the counts are cleared where the operator asks (see `attach`),
+        // and a rung adds to them.
+        if (attemptsThisLink == 0) routeAnsweredThisLink = false
         val g = gateway.state.value
         if (g != MeshLinkState.Bound) {
             failed(g, "the radio is not bound"); publish(); return
@@ -599,6 +630,9 @@ class MeshTermDriver(
         // serial read plus, at most, one flooded request — no more than the record the retry is
         // about to spend on a path that may no longer exist.
         runCatching { gateway.refreshRoute() }
+        // A route in hand when a handshake starts is an answer the mesh gave us, whether it came
+        // from the flood we just asked for or from the advert cache.
+        if (gateway.routeHops != null) routeAnsweredThisLink = true
         val h = try { begin() } catch (e: MeshSessionException) {
             failed(e.state, "the handshake could not start: ${e.message ?: e.state}"); publish(); return
         }
@@ -840,8 +874,9 @@ class MeshTermDriver(
             // Nothing is pending: the next failure starts its own recovery.
             recoverAt = 0
             // A session exists, so the route the handshake went down works: the next blind spell
-            // starts its count from zero.
+            // starts its count from zero. It is also the strongest possible answer about the mesh.
             blindAsks = 0
+            routeAnsweredThisLink = true
             _view.value = MeshTermView.ProfileMissing
             // Nothing named: attach with an empty selector first. The host takes the one shell if
             // there is exactly one (the common case, and no extra record on a link that allows
@@ -984,8 +1019,9 @@ class MeshTermDriver(
                 // is a flood and can cross, so while the route is unknown the ladder asks for the
                 // route instead — at the same rung, and with the flood's own round trip as the
                 // interval rather than a doubling ladder meant for one lost record.
-                if (gateway.routeHops == null) {
+                if (gateway.routeHops == null || !gateway.routeFresh) {
                     blindAsks++
+                    attemptsThisLink++
                     // **The first rung's interval, not the ladder's.** What is being retried is a
                     // flood that has to cross and come back — one round trip — not a single record
                     // that may have been dropped, which is what the doubling is for.
@@ -1012,6 +1048,7 @@ class MeshTermDriver(
                 }
                 handshakeTries++
                 handshakeNo = handshakeTries
+                attemptsThisLink++
                 // **A handshake that was not answered is asked again, not waited out.** `msg1` is
                 // one record; on a radio that drops one in ten it can simply go missing, and until
                 // this nothing retried it - the driver sat on "securing the link" for the whole
@@ -2405,6 +2442,26 @@ internal const val MAX_HOPS = 63
  * seconds in the first place — and a round trip over ten repeaters is twenty-odd seconds. A mesh is
  * mostly repeaters, so the flat figure is the floor and each hop adds its forward delay.
  */
+/**
+ * How hard this end has tried, and what came back — the line beside the waiting counter.
+ *
+ * The counter on that screen is the age of one attempt, which is the right number for "how long has
+ * this try been going" and the wrong one for "have I been abandoned", because the ladder fires every
+ * eight, sixteen and thirty-two seconds and starts a new attempt each time. Measured 2026-11-10: a
+ * range test where the number never passed twenty and the operator read it as a hang. So: rungs that
+ * do not reset, and whether the mesh has ever answered a route request.
+ */
+internal fun linkEffortLine(rungs: Int, routeRequests: Int, answered: Boolean): String = buildString {
+    append(rungs)
+    append(if (rungs == 1) " try" else " tries")
+    if (routeRequests > 0) {
+        append(" · ")
+        append(routeRequests)
+        append(if (routeRequests == 1) " route request" else " route requests")
+        append(if (answered) ", answered" else ", no answer from the mesh")
+    }
+}
+
 /**
  * The ABI's record error, said in words.
  *
