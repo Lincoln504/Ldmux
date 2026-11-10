@@ -572,8 +572,16 @@ impl Attached {
     fn hold(&mut self, on: bool, now: Instant) {
         if on {
             self.held_since.get_or_insert(now);
+            // **A hold that is starting owes nothing.** A frame owed before it (a `Resync` or a
+            // `Resize` racing the release) would otherwise be built the instant the hold lands,
+            // spending a record on a request the operator has already moved past.
+            self.owe_frame = false;
             return;
         }
+        // The release draws the difference itself, so nothing is owed after it either. Left set,
+        // `owe_frame` would fire one unrequested frame at the *next* hold, which reads as a
+        // freeze that leaks a record per cycle.
+        self.owe_frame = false;
         self.held_since = None;
         self.held_read_at = None;
         self.defer_until = None;
@@ -4249,6 +4257,44 @@ mod tests {
                 .count()
                 == 1,
             "one row set, not a replay and a frame: {msgs:?}"
+        );
+    }
+
+    /// **A frame owed before a hold does not fire when the hold lands.**
+    ///
+    /// The race: a `Resync` is owed while frozen, its reply refused, and the operator releases and
+    /// freezes again. Left set, `owe_frame` makes the *next* hold build the screen — one record the
+    /// freeze exists to withhold. Nothing is lost by clearing it, because a release draws the
+    /// difference itself.
+    #[tokio::test]
+    async fn a_frame_owed_before_a_hold_does_not_fire_after_it() {
+        let (mut b, host, link, clock) = attached_paced().await;
+        clock.advance(2_000);
+        paced(&host, &["$ one", "two"]);
+        b.tick().await;
+
+        // Frozen, and a show press whose answer the link refuses: the frame stays owed.
+        phone_says(&link, 1, &Message::Hold { on: true });
+        b.tick().await;
+        link.0.lock().unwrap().refuse = true;
+        phone_says(&link, 1, &Message::Resync);
+        b.tick().await;
+        link.0.lock().unwrap().refuse = false;
+
+        // The release delivers the owed frame, and only then does the shell print.
+        phone_says(&link, 1, &Message::Hold { on: false });
+        b.tick().await;
+        clock.advance(2_000);
+        paced(&host, &["$ one", "two", "three"]);
+
+        // Freezing again now must withhold that change, not spend a record on it.
+        phone_says(&link, 1, &Message::Hold { on: true });
+        let base = sent_records(&link);
+        b.tick().await;
+        assert_eq!(
+            sent_records(&link),
+            base,
+            "the hold withholds the change, owed frame or not"
         );
     }
 

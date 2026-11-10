@@ -427,10 +427,11 @@ by the host radio, by the app before it retunes, and by every budget below.
   computes the hour's allowance from the tuple and the frequency, publishes it as
   `recordsLeftThisHour`, and the session loop charges it per new record (`poll_budget`,
   `crates/daemon/src/mesh.rs`). The wire carries the count in one byte, so the published figure caps
-  at 255 even when the policy allows more (at 500 kHz/SF7 ten percent is ≈4770 records); the spend
-  itself is counted exactly. The ARQ's limit is per poll, so a count that was not decremented would
-  have allowed that many records every pass. Acks and retransmissions are not charged: they are what
-  keeps the link alive. `ldmux mesh status` shows the countdown and the tuple it came from.
+  at 255 even when the allowance is larger (at 500 kHz/SF7 a 1 % hour is ≈477 records, so the cap is
+  a real bound there and the spend is still counted exactly); outside a duty-cycled band there is no
+  allowance and the count is a measurement. Acks and retransmissions are not charged to it: the
+  carrier's own meter counts them, and its report is the countdown (row 6.134). `ldmux mesh status`
+  shows the countdown and the tuple it came from.
 
 ## 10. Platforms
 

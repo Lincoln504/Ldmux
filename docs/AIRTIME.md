@@ -106,8 +106,9 @@ direction.** Both of the following are now true, and they were not before:
 - **A whole command is 12.8 % of live mode's air batched** — the answer is identical work in both
   modes, so the difference is everything the typing did not have to repeat.
 - **An agent turn is 86.8 % less air batched.** A 1 % duty cycle (36 s an hour) buys **0.35** typed
-  turns or **2.64** batched ones at this tuple; the 10 % allowance outside the European sub-band
-  buys 3.5 typed or 26 batched. Batch mode is still the only way an agent turn fits a 1 % hour.
+  turns or **2.64** batched ones at this tuple. Outside a duty-cycled band there is no cap to fit
+  into — the meter is a measurement and nothing is refused — but the same turn costs the same air,
+  so batch mode is what makes it a sensible amount on a shared channel either way.
 
 At the bench tuple (500 kHz, SF7, CR5) every record is eight times cheaper in air, so the same turn
 is ≈16 s typed and 2.0 s batched. The ratio between the modes belongs to the modes; the absolute

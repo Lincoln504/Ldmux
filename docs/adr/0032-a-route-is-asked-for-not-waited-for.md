@@ -115,6 +115,9 @@ Two more changes come with it, because they were the rest of the delay:
   condition of use; ten percent everywhere else, where there is no rule to comply with and the
   firmware itself would allow fifty. At one percent a single typed command line at 62.5 kHz was the
   whole hour, which made the meter, not the radio, the thing that stopped the session.
+  *(Corrected 2026-11-09: the "ten percent everywhere else" was itself a policy cap and was removed
+  — the allowance is now the law or nothing, `docs/RELEASE-AUDIT.md` row 6.52. The paragraph above
+  stands as the decision of its date.)*
 - **One thing is not covered.** A scope-configured mesh (repeaters with a default flood scope and
   `denyf *`) drops unscoped floods, so both the advert and the request die at the first scoped
   repeater. ldmux publishes no scope. A scoped mesh needs `LDMUX_MESH_*`-level scope support, which

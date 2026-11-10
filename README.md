@@ -28,8 +28,9 @@ tailnet, or a pair of LoRa radios when there is no internet at all.
   displaced silently.
 - **LoRa stays affordable.** Batch mode sends forty keystrokes as one transmission on `sync`, so a
   command costs a fraction of the air typing it live would, and an hourly allowance is enforced on
-  both ends — a tenth of the band's legal duty cycle inside the European sub-band, ten percent
-  elsewhere ([`docs/AIRTIME.md`](docs/AIRTIME.md)).
+  both ends wherever the law sets one: 1 % by law in the European `868.0-868.6` sub-band, a tenth of
+  the 10 % `869.4-869.65` allows, 0.1 % in the alarm band, and no cap at all where the band has no
+  duty cycle ([`docs/AIRTIME.md`](docs/AIRTIME.md)).
 - **A shell can say it is done.** `ldmux buzz` marks a shell in the app's list — finished a turn, or
   waiting for the operator — and the mark is cleared by opening it. A notification is optional and off
   by default, and only the tailnet route can reach a phone that is away;
