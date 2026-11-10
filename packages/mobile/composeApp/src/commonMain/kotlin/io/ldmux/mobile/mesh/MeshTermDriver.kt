@@ -2158,7 +2158,14 @@ internal fun needsResize(sessionLimit: Int, linkLimit: Int): Boolean =
  * hanging for more than two minutes.
  */
 internal fun silenceFailureMs(hops: Int?): Long =
-    (60_000L + (hops ?: 0).coerceIn(0, 40) * 1_500L).coerceAtMost(120_000L)
+    // **The per-hop figure is the session's own first retransmission, not a guess at one.** The ARQ
+    // waits six airtimes per hop, which is 3.6 s at the public tuple, so anything smaller declares a
+    // long route dead between a record and its answer. 63 is the firmware's ceiling (a 64-byte path
+    // at one byte a hop), and the cap is above one round trip at that length.
+    (60_000L + (hops ?: 0).coerceIn(0, MAX_HOPS) * 3_600L).coerceAtMost(300_000L)
+
+/** The firmware's longest legal path in one-byte hops: 64 path bytes. */
+internal const val MAX_HOPS = 63
 
 /**
  * A failed session is retried, not mourned.
@@ -2194,7 +2201,9 @@ private const val HANDSHAKE_FIRST_RETRY_MS = 8_000L
  * figure for a neighbour and two seconds per hop beyond it.
  */
 internal fun answerDeadlineMs(baseMs: Long, hops: Int?): Long =
-    baseMs + (hops ?: 0).coerceIn(0, 40) * 2_000L
+    // Two airtimes of forward delay per repeater, at the public tuple: enough for an answer that
+    // travels out and back over the longest path the firmware allows.
+    baseMs + (hops ?: 0).coerceIn(0, MAX_HOPS) * 2_000L
 
 /**
  * How long a list request may go unanswered before it is asked for again.

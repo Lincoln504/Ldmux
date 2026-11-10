@@ -879,10 +879,19 @@ fn the_first_timeout_covers_each_hop_of_the_route() {
     let far = Config::for_payload(137).with_path(Some(603.0), 10);
     assert_eq!(far.rto_initial_ms, 36_180, "the whole route, not one hop of it");
 
-    // The cap still holds: a route long enough to exceed a minute is not worth waiting for, and the
-    // non-advancing-ack pull covers the case where the estimate is too long.
+    // **The cap is above any real route's round trip.** A minute was sixteen hops at the public
+    // tuple, so a record on a fifty-hop path was still in the air when the timer fired and the
+    // retransmission doubled the traffic on a route that was working. The figure now tracks the
+    // path: six airtimes a hop, bounded only where the firmware's own path limit ends.
+    let far_fifty = Config::for_payload(137).with_path(Some(603.0), 50);
+    assert_eq!(far_fifty.rto_initial_ms, 180_900, "fifty hops at the public tuple");
     let absurd = Config::for_payload(137).with_path(Some(3_660.0), 20);
-    assert_eq!(absurd.rto_initial_ms, 60_000);
+    assert_eq!(absurd.rto_initial_ms, 439_200, "twenty hops at six seconds each");
+    // A hop count past the firmware's 64-byte path is a misread, not a route: it is clamped to
+    // the 63 one-byte hops a 64-byte path can carry, and ten minutes bounds even the slowest
+    // preset at that length (63 × 6 × 3.66 s is 23 minutes, so the cap is what answers).
+    let nonsense = Config::for_payload(137).with_path(Some(3_660.0), 200);
+    assert_eq!(nonsense.rto_initial_ms, 600_000);
 
     // A route of one (or zero, meaning "unknown") is the direct case, unchanged.
     assert_eq!(Config::for_payload(137).with_path(Some(603.0), 0).rto_initial_ms, 3_618);

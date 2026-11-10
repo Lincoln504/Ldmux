@@ -174,7 +174,10 @@ impl Config {
         let Some(airtime) = airtime_ms.filter(|a| *a > 0.0) else {
             return self;
         };
-        let hops = f64::from(hops.max(1));
+        // **The firmware's own ceiling, not a guess.** A path is at most 64 bytes, so at one byte a
+        // hop there can be 63 repeaters; a number above that is a misread, and letting it through
+        // would set a retransmission timer of hours.
+        let hops = f64::from(hops.clamp(1, 63));
         // **Six airtimes: a record, its ack, and two forward delays per hop.** The burst is no longer
         // a reason to stretch this, because a slot's timer starts at its own air slot (see `poll`):
         // the eighth record of a window is timed from two seconds later, not from the hand-over.
@@ -182,7 +185,12 @@ impl Config {
         // took to come back — measured 2026-11-09, a first paint waited eleven seconds for one lost
         // record on a noisy link — and a loss is the common case this timer exists for.
         let scaled = (airtime * 6.0 * hops).round() as u64;
-        self.rto_initial_ms = self.rto_initial_ms.max(scaled).min(60_000);
+        // **The cap has to be above the route's own round trip, or the timer is the bug.** Sixty
+        // seconds is sixteen hops at the public tuple; a record on a fifty-hop path is still in the
+        // air when a sixty-second timer fires, so the retransmission doubles the traffic on a route
+        // that was working. Six airtimes per hop is MeshCore's own direct-send budget and the figure
+        // that belongs here; ten minutes bounds a nonsense hop count rather than a real route.
+        self.rto_initial_ms = self.rto_initial_ms.max(scaled).min(600_000);
         // **A pure ack must not cost its own record when a little patience avoids it.** An owed ack
         // used to wait a fixed 150 ms for outgoing data and then go as a record of its own, which at
         // 0.6 s per record is 0.6 s of air for a 5-byte body — one record in every exchange where the

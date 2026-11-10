@@ -82,8 +82,8 @@ class MeshAnswerDeadlineTest {
     fun every_hop_buys_two_seconds_of_forward_delay() {
         assertEquals(26_000L, answerDeadlineMs(6_000L, 10))
         assertEquals(46_000L, answerDeadlineMs(6_000L, 20))
-        // A nonsense hop count cannot make the page wait for ever.
-        assertEquals(86_000L, answerDeadlineMs(6_000L, 1_000))
+        // A nonsense hop count is clamped to the firmware's own longest path.
+        assertEquals(6_000L + 63 * 2_000L, answerDeadlineMs(6_000L, 1_000))
     }
 
     @Test
@@ -142,11 +142,13 @@ class MeshSilenceBoundTest {
 
     @Test
     fun every_hop_buys_room_for_its_round_trip() {
-        assertEquals(75_000L, silenceFailureMs(10))
-        assertEquals(90_000L, silenceFailureMs(20))
-        // The ceiling keeps a genuinely dead link from hanging for more than two minutes.
-        assertEquals(120_000L, silenceFailureMs(64))
-        assertEquals(120_000L, silenceFailureMs(1_000), "a nonsense hop count cannot hang the page")
+        // **3.6 s a hop is the session's own first retransmission** (six airtimes at the public
+        // tuple), so the bound never sits below one round trip however long the route is.
+        assertEquals(96_000L, silenceFailureMs(10))
+        assertEquals(132_000L, silenceFailureMs(20))
+        // The firmware's longest path is 63 one-byte hops; past that a number is a misread.
+        assertEquals(60_000L + 63 * 3_600L, silenceFailureMs(63))
+        assertEquals(60_000L + 63 * 3_600L, silenceFailureMs(1_000), "a nonsense hop count cannot hang the page")
     }
 }
 
