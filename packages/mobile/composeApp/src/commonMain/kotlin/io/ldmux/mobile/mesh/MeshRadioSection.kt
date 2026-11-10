@@ -470,8 +470,10 @@ internal fun RadioPresetPanel(
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         for (c in PublicPresets) {
-                            OptionButton(c.label, selected = c.preset == selected) {
-                                chooseWithBudget(c.preset)
+                            // **`applied`, not `preset`.** The row is the feed's; the width written
+                            // is ldmux's (see `PublicPreset.appliedPathHashSize`).
+                            OptionButton(c.label, selected = c.applied == selected) {
+                                chooseWithBudget(c.applied)
                                 region = c.region ?: region
                             }
                         }

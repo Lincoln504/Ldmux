@@ -162,8 +162,27 @@ data class PublicPreset(
     val label: String,
     /** The region whose private band it sits in, or null where ldmux offers no private one. */
     val region: RadioRegion?,
+    /** The row exactly as the community feed carries it, for comparison with every other client. */
     val preset: RadioPreset,
-)
+    /**
+     * The path-hash width ldmux **writes** when this row is applied; the row's own unless stated.
+     *
+     * **The table is a port and the policy is ours; keeping them apart is what lets both be
+     * checked.** The USA/Canada feed value is `null` — "whatever the radio was built with", which is
+     * one byte — and one byte has 254 usable hashes and reaches a fifty-percent chance of a prefix
+     * collision at about twenty co-channel repeaters, where two bytes need about three hundred
+     * (a Canadian survey observed 237 colliding one-byte slices). Two bytes cost about a sixth more
+     * airtime on a measured 9.25-hop network and cap the path at 32 hops instead of 63, which is
+     * still above every path length measured here (20-29). Canada's row is three bytes because the
+     * Canadian community asks for it. Nothing here rewrites a radio that is already running, and a
+     * mesh whose repeaters are older than firmware 1.14 needs one byte, because those drop
+     * multi-byte packets unheard.
+     */
+    val appliedPathHashSize: Int = preset.pathHashSize,
+) {
+    /** The row as ldmux applies it: the feed's four numbers and channels, at ldmux's width. */
+    val applied: RadioPreset get() = preset.copy(pathHashSize = appliedPathHashSize)
+}
 
 /**
  * **The whole public table, ported value-for-value.**
@@ -183,7 +202,16 @@ data class PublicPreset(
  * Japanese 13, and a radio left at 22 in either place is operating outside its limit.
  */
 val PublicPresets: List<PublicPreset> = listOf(
-    PublicPreset("us_canada", "USA / Canada", RadioRegion.UsCanada, RadioPreset(910.525, 62.5, 7, 5, 22, 1)),
+    // **The row is the feed's; the width written is ldmux's** (see `appliedPathHashSize`). The feed
+    // carries `path_hash_size: null` here, which the port fills in with the firmware default of one
+    // byte, and that is what every other client applies.
+    PublicPreset(
+        "us_canada",
+        "USA / Canada",
+        RadioRegion.UsCanada,
+        RadioPreset(910.525, 62.5, 7, 5, 22, 1),
+        appliedPathHashSize = 2,
+    ),
     PublicPreset("us_arizona", "USA \u2014 Arizona", RadioRegion.UsCanada, RadioPreset(908.205, 62.5, 10, 5, 20, 1)),
     PublicPreset("jp_arib_t108", "Japan (ARIB T108)", null, RadioPreset(923.200, 125.0, 10, 5, 13, 1)),
     PublicPreset("jp_meshcore", "Japan (MeshCore)", null, RadioPreset(920.800, 125.0, 12, 8, 13, 1)),
@@ -272,7 +300,9 @@ fun isPublicChannel(preset: RadioPreset): Boolean = RadioRegion.entries.any { r 
 /** The region a tuple most likely belongs to, used to open the preset dialog on the applied tuple. */
 fun regionOfPreset(preset: RadioPreset): RadioRegion {
     for (r in RadioRegion.entries) {
-        if (publicPresets(r).any { it.preset == preset }) return r
+        // **Either form counts.** The radio reports the width it actually holds, which is the
+        // applied one; the feed's row is what another client would hold.
+        if (publicPresets(r).any { it.preset == preset || it.applied == preset }) return r
     }
     return when {
         preset.frequencyMhz < 880.0 -> RadioRegion.EuUk

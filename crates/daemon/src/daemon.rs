@@ -1853,9 +1853,15 @@ impl LdmuxDaemon {
                     sf as u8,
                     cr as u8,
                 );
-                // The path width, in bytes, when the caller named one. The public channel is one
-                // byte by the network's own convention; our own channel is two. A number the
-                // firmware cannot hold is refused here rather than sent and refused later.
+                // The path width, in bytes, when the caller named one. **The width travels inside
+                // every packet** (`path_len` carries the hop count in its low six bits and the width
+                // minus one in the top two), so the originator decides and a repeater on firmware
+                // 1.14 or newer forwards whatever width arrived: this is a per-node choice, not a
+                // setting the two ends must share. Left alone when the caller does not name one,
+                // because a radio's stored width is a decision somebody made — ldmux applies two
+                // bytes for a USA/Canada public preset in the app, and one byte is the firmware
+                // default that a mesh of older repeaters still needs. A number the firmware cannot
+                // hold is refused here rather than sent and refused later.
                 let path_bytes = match params.get("pathBytes").and_then(|v| v.as_u64()) {
                     None => None,
                     Some(n) if (1..=3).contains(&n) => Some(n as u8),

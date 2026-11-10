@@ -157,14 +157,19 @@ shell is and what it is.
 hash width in bytes, and `--power` the transmit power — which the firmware keeps apart from the
 tuple and which a phone can set too, so it is a register two owners share rather than part of the
 channel. `ldmux mesh status` prints all three on the preset line. The firmware keeps the tuple and
-the width apart, but a network does not: MeshCore's public presets name neighbours in **one** byte, so a
-repeater's hash is one byte, and a node that names them in two cannot read a path that repeater
-built. ldmux's own channel is two bytes on both ends, because two bytes per hop is its default and
-one byte collides at ≈20 co-channel repeaters; the public channel is one byte by the
-community's convention. The phone takes the width from its preset and the host from this flag, and
-the host publishes it in the pairing code (`hostPreset`'s fifth number), so the phone's one-press
-`match` copies the whole channel and keeps only its own transmit power. A direct zero-hop packet
-carries no path, which is why a width mismatch is invisible until a repeater is in the way.
+the width apart, and a network does not need them to agree: **each packet carries its own width**
+(the top two bits of `path_len`), a repeater appends its hash at *that* width, and a node on firmware
+1.14 or newer forwards whatever arrived. So a two-byte node and a one-byte node hear each other, and
+a path through repeaters is built at the originator's width. What a width mismatch does cost is
+compatibility with **old repeaters**: firmware 1.13 and older drops two- and three-byte packets
+without a word, so a mesh of those needs everybody on one byte. The remaining reasons are the two
+the default is chosen for — one byte's 254 usable hashes collide at about twenty co-channel
+repeaters where two bytes need about three hundred, and two bytes cost roughly a sixth more airtime
+on a measured 9.25-hop network, with 32 hops of ceiling instead of 63. The phone takes the width from
+its preset and the host from `--path` or the radio's own stored value, and the host publishes it in
+the pairing code (`hostPreset`'s fifth number), so the phone's one-press `match` copies the whole
+channel and keeps only its own transmit power. A direct zero-hop packet carries no path, which is why
+a width setting is invisible on the bench.
 
 **A newline in `Input` is a paste, and the host decides what it means.** The pane is the only place
 that knows whether it negotiated bracketed paste (`CSI ? 2004 h`), so `Profile` carries that flag
@@ -737,14 +742,20 @@ Consequences worth knowing:
   the same prefix both forward a direct message meant for one of them. Two bytes gives 65 536 and
   holds to a few hundred; the price is the hop ceiling — `hash_count × hash_size ≤ 64` (`Packet::
   isValidPathLen`), so **63 hops at one byte, 32 at two, 21 at three**. This mesh's own floods were
-  measured at 18-29 hops on 2026-11-08, so two bytes leaves three to eleven hops of headroom and
-  three bytes would be below the distance actually in use: the mode 2 upgrade is left alone when an
-  operator chose it, but it is not a width ldmux would pick, and a path that hits the ceiling is
-  dropped by `routeRecvPacket` without a word. Both ends therefore put a radio reporting mode 0 onto mode 1 at
-  bind (`DEFAULT_PATH_HASH_MODE`, `set_path_hash_mode`), once, and never touch a radio an operator
-  set to three bytes. The width is a preference about the node's *own* adverts only: a repeater
-  forwards whatever width arrives (`MyMesh.cpp:491`), so this changes what peers hear from us, not
-  what we relay.
+  measured at 18-29 hops on 2026-11-08, so two bytes leaves three to eleven hops of headroom, and
+  three bytes (21) would sit below the distance actually in use: a node that chose three bytes is
+  left alone, but it is not a width ldmux would pick for this mesh, and a path that hits the ceiling
+  is dropped by `routeRecvPacket` without a word.
+- **A radio's stored width is never rewritten at bind.** ldmux used to raise a radio reporting mode 0
+  to mode 1 on every connect, and the "one byte" that meant *never configured* and the one that meant
+  *deliberately on the public channel* are the same byte, so that upgrade silently undid an
+  operator's decision. The width is a property of the node's own origination: repeaters forward
+  whatever arrives, so a two-byte node and a one-byte node hear each other, and only a mesh whose
+  repeaters are older than firmware 1.14 needs everybody on one byte, because those drop multi-byte
+  paths on the floor. What ldmux *applies* is therefore a per-preset default and the radio's own
+  answer is respected after that: a USA/Canada public preset is written with **two** bytes and the
+  Canadian row with three (`RadioPreset`), an operator's own MeshCore app or `ldmux mesh preset …
+  --path N` is the only other writer, and both ends of one channel never have to agree.
 - **ldmux keeps no contacts** (ADR-0030). A route comes from the advert-path cache, keyed by the
   peer's public key (`onDiscoveredContact` → `advert_paths[]`), which needs no contact entry on
   either radio: no auto-add policy, no contact cap to hit, and no per-contact record to grow stale
