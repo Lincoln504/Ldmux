@@ -1264,9 +1264,15 @@ class AndroidRadioLink(
                 // and two records for a route no record needed. A send that finds no route asks for
                 // one itself (`refreshRoute`), so the only case this loop covers is an idle link,
                 // and on an idle link the answer is nothing.
-                val idle = System.currentTimeMillis() - lastSendAt > ROUTE_IDLE_MS &&
-                    routeIsFresh(System.currentTimeMillis())
-                if (!idle) ensureRoute(s)
+                // **A proven, fresh route is asked about for nothing.** This used to ask whenever
+                // the link was busy, so a working link flooded a request every minute — one record
+                // a minute, sixty an hour, on a route that had already carried traffic in both
+                // directions. Evidence beats a timer: a route that has carried a record and is not
+                // stale needs no question, only the free serial reads below, which notice a change
+                // without spending air.
+                val now = System.currentTimeMillis()
+                val needsAsking = !routeIsFresh(now) || !routeProven
+                if (needsAsking && now - lastSendAt <= ROUTE_IDLE_MS) ensureRoute(s)
                 if (!s.canSendRaw()) continue
                 // One command per tick: the companion has one answer window, and a second request
                 // inside it makes both answers ambiguous.
