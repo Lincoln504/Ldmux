@@ -93,6 +93,8 @@ impl SessionSnapshot {
 pub struct SessionHost {
     /// Records this end refused to open, so the journal can tell "not sending" from "discarding".
     inbound_dropped: u32,
+    /// Records this end opened successfully, which is how a session shows it is carrying.
+    records_in: u64,
     responder: Responder,
     pairing: PairingEntry,
     persist: Persister,
@@ -138,6 +140,7 @@ impl SessionHost {
             inbound: VecDeque::new(),
             dropped_inbound: 0,
             inbound_dropped: 0,
+            records_in: 0,
             refused: 0,
             handshakes: 0,
             last_error: None,
@@ -151,6 +154,12 @@ impl SessionHost {
     /// through a repeater can no longer build a full record, so the carrier reports the new limit
     /// and this hands it to the session. Nothing is lost if there is no session yet — the figure is
     /// kept for the next handshake.
+    /// Records that opened on the live session, and handshakes accepted, so a caller can tell
+    /// whether a session carried anything before it was replaced.
+    pub fn carried(&self) -> (u32, u64) {
+        (self.handshakes, self.records_in)
+    }
+
     pub fn set_record_limit(&mut self, record_limit: usize) {
         self.record_limit = record_limit;
         if let Some(session) = self.session.as_mut() {
@@ -191,7 +200,13 @@ impl SessionHost {
                     return;
                 };
                 match session.receive(now_ms, record) {
-                    Ok(Inbound::Data(chunks)) => self.take(chunks),
+                    Ok(Inbound::Data(chunks)) => {
+                        // **A record that opens is the only proof the chain carries.** Counted so
+                        // the carrier can tell "the phone accepted our reply and went quiet" from
+                        // "the phone never got it", and rotate the path in the second case.
+                        self.records_in = self.records_in.saturating_add(1);
+                        self.take(chunks)
+                    }
                     Ok(Inbound::Quiet) => {}
                     Ok(Inbound::Closed) => {
                         self.session = None;

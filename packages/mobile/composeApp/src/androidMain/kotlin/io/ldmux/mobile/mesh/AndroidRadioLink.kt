@@ -246,8 +246,20 @@ class AndroidRadioLink(
     private var scopeCheckAt: Long = 0L
 
     /** The scope key this phone's requests are scoped with, or null for an unscoped flood. */
+    /**
+     * The region our own floods are coded with, or null to send them unscoped.
+     *
+     * **Only the operator's decision codes our packets.** The radio's configured default scope
+     * (`region default`, a setting someone made deliberately) is used; a region overheard from
+     * another node's traffic is *not*, and that is a deliberate restriction. A transport code names
+     * one region exactly, and a repeater that does not carry that region refuses the packet while
+     * every unscoped-capable repeater would have forwarded it — so adopting a region from hearsay
+     * trades a network that works for one that cannot relay us at all. Measured 2026-11-10: a city
+     * mesh where unscoped floods crossed fourteen repeaters, which is the case in which hearsay
+     * adoption would have been strictly worse.
+     */
     private val scopeKey: ByteArray?
-        get() = radioScope ?: adoptedScope
+        get() = radioScope
 
     private var scopeDone: CompletableDeferred<Unit>? = null
 
@@ -502,9 +514,16 @@ class AndroidRadioLink(
                     ) {
                         scopeCheckAt = now
                         RadioRoute.heardScope(raw, RadioRoute.KNOWN_SCOPE_TAGS)?.let { name ->
+                            // **Noted, not adopted.** This is evidence about the network, and it goes
+                            // in the log so an operator can set the radio's region to match it. It
+                            // does not recode our own floods: a region this radio does not belong to
+                            // would be refused by the repeaters that could otherwise carry us.
                             adoptedScope = RadioRoute.scopeKey(name)
                             adoptedScopeName = name
-                            appLog("mesh scope $name learned from the mesh")
+                            appLog(
+                                "mesh hears region $name · set it on this radio to join it " +
+                                    "(floods stay unscoped until then)",
+                            )
                         }
                     }
                 }
@@ -703,6 +722,15 @@ class AndroidRadioLink(
             s.getDefaultFloodScope()
             withTimeoutOrNull(DEVICE_INFO_WAIT_MS) { scopeRead.await() }
             scopeDone = null
+            // **Announce this radio to the mesh, once per connection.** A flooded advert is the
+            // standard "I am here" packet: every node on a MeshCore network understands it, and each
+            // repeater that forwards it writes its own hash into the path — so the advertisement's
+            // hop count is a direct measurement of how far this handset's signal actually got. That
+            // is the question a field test cannot otherwise answer, because a session record is a
+            // direct packet and only the intended peer ever sees it. One packet per connection.
+            runCatching { s.sendSelfAdvert(true) }
+            withTimeoutOrNull(ADVERT_WAIT_MS) { while (!s.isIdle()) delay(20) }
+            appLog("mesh advert sent (flood): this radio is announcing itself")
             // **A route before the first record, and a fresh one.** A route in hand may be an hour
             // old: the phone learned it where it used to be, nothing refuses it, and the radio
             // accepts the send it cannot deliver. So when it is stale — or absent — ask the host
@@ -1226,8 +1254,32 @@ class AndroidRadioLink(
     }
 
     /** How long to wait before asking for a route again: doubling, jittered, capped. */
-    private fun requestIntervalMs(): Long {
-        val step = 1L shl minOf(routeAsks, 3)
+    private fun requestIntervalMs(): Long = requestIntervalFor(routeAsks, System.currentTimeMillis())
+
+    /**
+     * The wait before the next route request, given how many have gone unanswered.
+     *
+     * Pure so the ladder can be asserted rather than inferred: five, ten, twenty seconds, then
+     * twenty, with ±25 % of jitter taken from the clock (which keeps a test's byte stream stable).
+     */
+    internal fun requestIntervalFor(asks: Int, clockMs: Long): Long {
+        val step = 1L shl asks.coerceIn(0, 2)
+        val base = ROUTE_REQUEST_FLOOR_MS * step
+        val spread = (base / 4).coerceAtLeast(1L)
+        val jitter = (clockMs % (2 * spread + 1)) - spread
+        return (base + jitter).coerceAtLeast(ROUTE_REQUEST_FLOOR_MS / 2)
+    }
+
+    @Suppress("unused")
+    private fun requestIntervalMsOld(): Long {
+        // **The ceiling is a marginal link's, not a busy city's.** The doubling exists so a phone
+        // that nobody answers does not spend every repeater's air on itself; four steps of it reach
+        // forty seconds, which is wrong at the edge of coverage, where the only reason to ask again
+        // is that the last copy decoded at the repeater by luck. Measured 2026-11-10: the nearest
+        // repeaters arrived at -107 to -124 dBm, and forty seconds between attempts is two chances a
+        // minute at a link that needs five. Three steps — five, ten, twenty — keeps the courtesy and
+        // triples the chances.
+        val step = 1L shl minOf(routeAsks, 2)
         val base = ROUTE_REQUEST_FLOOR_MS * step
         // ±25 %, from the clock rather than from `Random` so the byte stream of a test is stable.
         val spread = (base / 4).coerceAtLeast(1L)
@@ -1335,23 +1387,45 @@ class AndroidRadioLink(
         // minute is already the moment of maximum doubt, and the count that decides "no coverage"
         // from "deaf" is only available here: the next line is the answer to "is anybody there".
         reportHeard()
-        val packet = RadioRoute.routeRequest(currentPreset().pathHashSize, key, own, scopeKey) ?: return false
         lastRequestAt = now
         routeAsks = (routeAsks + 1).coerceAtMost(8)
-        val answer = CompletableDeferred<RadioSendResult>()
-        val queued = runCatching {
-            s.sendRawPacket(0, packet, RawSendCallback { ok, error ->
-                answer.complete(if (ok) RadioSendResult.Accepted else errorFor(error))
-            })
-        }.getOrDefault(false)
-        if (!queued) return false
-        val result = withTimeoutOrNull(REQUEST_ANSWER_MS) { answer.await() }
+        // **At the edge, one packet is a coin toss.** Measured 2026-11-10 at range: the nearest
+        // repeaters arrived at -107 to -124 dBm, which is the sensitivity floor for this preset, so
+        // a single request decodes at the repeater perhaps half the time and the answer has the same
+        // odds coming back. A short burst turns a coin toss into a link: each copy is one flood of a
+        // handful of bytes, against a handshake that costs a dozen records, so the repetition is the
+        // cheapest air in the whole exchange. The copies are separated by a transmit delay derived
+        // from the airtime, which is what the firmware's own `txdelay` does and what keeps them from
+        // colliding with each other at the receiving repeater.
+        // **The nonce is fresh per copy**, so no repeater's duplicate filter drops the second: the
+        // firmware dedupes on the payload bytes and a repeated request would otherwise be discarded
+        // by the very first repeater that forwarded it.
+        var result: RadioSendResult? = null
+        for (copy in 0 until REQUEST_COPIES) {
+            if (copy > 0) delay(requestCopyDelayMs(currentPreset()))
+            val packet = RadioRoute.routeRequest(
+                currentPreset().pathHashSize,
+                key,
+                own,
+                scopeKey,
+            ) ?: return result == RadioSendResult.Accepted
+            val answer = CompletableDeferred<RadioSendResult>()
+            val queued = runCatching {
+                s.sendRawPacket(0, packet, RawSendCallback { ok, error ->
+                    answer.complete(if (ok) RadioSendResult.Accepted else errorFor(error))
+                })
+            }.getOrDefault(false)
+            if (!queued) break
+            val sent = withTimeoutOrNull(REQUEST_ANSWER_MS) { answer.await() }
+            result = sent ?: RadioSendResult.Failed
+            // A request is a broadcast like an advert, so it is charged like one.
+            if (result == RadioSendResult.Accepted) recordAirtime(packet.size + 3)
+            if (result != RadioSendResult.Accepted) break
+        }
         appLog(
-            "mesh route request (${scopeKey?.let { "scoped" } ?: "unscoped"}): " +
+            "mesh route request (${scopeKey?.let { "scoped" } ?: "unscoped"}) x$REQUEST_COPIES: " +
                 "${result ?: RadioSendResult.Failed}",
         )
-        // A request is a broadcast like an advert, so it is charged like one.
-        if (result == RadioSendResult.Accepted) recordAirtime(packet.size + 3)
         return result == RadioSendResult.Accepted
     }
 
@@ -1635,8 +1709,29 @@ class AndroidRadioLink(
         const val FAILED_ROUTE_HOLD_MS = 120_000L
         /** The least gap between two route requests: a flood every repeater in range repeats. */
         const val ROUTE_REQUEST_FLOOR_MS = 5_000L
+
+        /**
+         * Copies of one route request, and the gap between them.
+         *
+         * A request at the sensitivity floor decodes at a repeater about half the time, and its
+         * answer has the same odds coming back, so one packet is a coin toss for a route. Three
+         * copies of a few dozen bytes cost less than a tenth of the handshake they may save.
+         */
+        const val REQUEST_COPIES = 3
+
+        /**
+         * The gap between those copies: one packet's airtime plus the firmware's own transmit delay
+         * factor, so the copies arrive as separate attempts rather than as a collision.
+         */
+        fun requestCopyDelayMs(preset: RadioPreset): Long =
+            // One packet's airtime plus half again, which is the firmware's own `txdelay` idea: the
+            // delay is the thing being avoided, so it has to be measured in airtime and not seconds.
+            (RadioAirtime.timeOnAirMs(preset, 48) * 1.5).toLong().coerceIn(400L, 3_000L)
         /** How long a route request's own `OK` may take. */
         const val REQUEST_ANSWER_MS = 2_000L
+
+        /** How long to wait for the radio to accept the connect-time advert before carrying on. */
+        const val ADVERT_WAIT_MS = 3_000L
         /** How long to wait for the host's reply before connecting without it. */
         /**
          * How long to wait for an answer to our own route request, before the free cache reads.

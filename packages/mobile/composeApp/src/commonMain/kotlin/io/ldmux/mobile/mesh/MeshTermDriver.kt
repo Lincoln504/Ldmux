@@ -717,7 +717,25 @@ class MeshTermDriver(
      * pairing is not, because waiting cannot cure a token or a key and the screen already offers
      * the cure that can.
      */
-    private fun failed(state: MeshLinkState, why: String = "") {
+    /**
+     * What ended the link, as a value.
+     *
+     * The verdict sentence is for the operator and its wording changes; whether the *route* failed
+     * must not be decided by searching that sentence for a word. It was — `why.contains("ARQ")` —
+     * so rewording a diagnostic silently changed which paths got blamed.
+     */
+    private enum class Blame {
+        /** The radio, the pairing, the host's restart: nothing to say about the path. */
+        Nothing,
+
+        /** Records were owed and none came back: the chain is not carrying. */
+        Route,
+
+        /** A handshake nobody answered down a chain with repeaters in it: same conclusion. */
+        RouteUnlessDirect,
+    }
+
+    private fun failed(state: MeshLinkState, why: String = "", blame: Blame = Blame.Nothing) {
         // **Say why, once, in the log the app already keeps.** "Link dropped" is the only sentence
         // the operator sees, and the four things that produce it — a dead radio, a refused pairing,
         // a handshake nobody answered and a session the host stopped acknowledging — are cured
@@ -745,8 +763,18 @@ class MeshTermDriver(
         // chain that just lost it. But a session also ends for reasons that say nothing about the
         // route: a host restart, a rekey, a record the radio refused. Blaming the path for those
         // banned the direct one for ten minutes and forced a six-hop detour in the same room.
-        val lostRecords = why.contains("ARQ") || why.contains("stopped carrying")
-        gateway.forgetRoute(blame = lostRecords)
+        // **A handshake nobody answered blames the chain too, when there is a chain.** Until this,
+        // only an ARQ failure blamed the route: a ladder that spent every rung sending `msg1` down a
+        // three-hop path and heard nothing kept that path across the rebuild and went straight back
+        // down it — a loop that cannot happen at zero hops, where the chain is empty and works.
+        // Measured 2026-11-10 at range: the host logged `session replaced … (hops=1)` while the phone
+        // re-sent on the same chain for four minutes.
+        val lostRoute = when (blame) {
+            Blame.Nothing -> false
+            Blame.Route -> true
+            Blame.RouteUnlessDirect -> (gateway.routeHops ?: 0) > 0
+        }
+        gateway.forgetRoute(blame = lostRoute)
         forgetMarkPage()
         terminalView = MeshTermView.LinkDown(state)
         // Every one of these is the transport's word, not the user's: a refused link, a handshake
@@ -947,7 +975,9 @@ class MeshTermDriver(
             if (h.needsRekey && terminalView == null) rekey()
             if (terminalView == null) resizeToLink(force = false, pending = h.pending)
             if (terminalView == null) followRoute(h)
-            if (h.failed && terminalView == null) failed(MeshLinkState.SessionFailed, "the ARQ gave up a record")
+            if (h.failed && terminalView == null) {
+                failed(MeshLinkState.SessionFailed, "the ARQ gave up a record", Blame.Route)
+            }
             // **A record the host never answers is a dead link, and the screen must say so.** With
             // nothing outstanding an idle shell is silent by design, so silence alone proves
             // nothing; with something outstanding, twenty seconds of nothing back is longer than
@@ -973,7 +1003,11 @@ class MeshTermDriver(
             if (terminalView == null && h.pending > 0 &&
                 clock() - maxOf(lastInboundAt, lastCarriedAt) > silenceFailureMs(gateway.routeHops)
             ) {
-                failed(MeshLinkState.SessionFailed, "the link stopped carrying while a record was owed")
+                failed(
+                    MeshLinkState.SessionFailed,
+                    "the link stopped carrying while a record was owed",
+                    Blame.Route,
+                )
             }
             if (h.peerClosed && terminalView == null) terminalView = MeshTermView.HostClosed(null)
             // **A live shell whose screen never arrived re-asks here.** The mirror is empty, so the
@@ -1006,11 +1040,12 @@ class MeshTermDriver(
                 // when the truth is that the mesh never gave this phone a route to any repeater.
                 failed(
                     MeshLinkState.SessionFailed,
-                    if (blindAsks > 0) {
+                    why = if (blindAsks > 0) {
                         "no route: nothing answered $blindAsks request(s) across the mesh"
                     } else {
                         "three unanswered handshakes"
                     },
+                    blame = Blame.RouteUnlessDirect,
                 )
             } else if (waited >= handshakeRetryFor(gateway.routeHops) shl handshakeTries) {
                 // **Blind is a different problem with a different cure.** A session record is a

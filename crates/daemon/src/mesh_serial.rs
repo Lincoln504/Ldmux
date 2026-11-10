@@ -168,13 +168,35 @@ fn route_stale(hops: usize) -> Duration {
     PEER_ROUTE_STALE.max(round_trip)
 }
 
-/// The least time between two **route replies** to the same peer.
+/// The least time between two **route replies**, whatever asked for them.
 ///
-/// A request is ~40 bytes and a reply ~40 bytes plus the path, so answering every request is cheap;
-/// the floor is what stops a peer (or a spoofed source) from turning this radio into a responder
-/// that repeats itself. A peer asks again on its own ladder, so one floor per five seconds is far
-/// below anything a working connection needs.
-const ROUTE_REPLY_FLOOR: Duration = Duration::from_secs(5);
+/// A request is ~40 bytes and a reply ~40 bytes plus the path, so answering is cheap; this floor is
+/// only what stops many peers, or a spoofed source, from turning this radio into a responder that
+/// never stops talking. **It is not the per-peer limit any more.** That used to be one reply every
+/// five seconds, which silently answered the first of a phone's request copies and dropped the rest
+/// — so a phone that sends three copies to beat a marginal link got exactly one answer, and the
+/// downlink stayed a coin toss. Answering is now keyed on the request's nonce: three different
+/// questions get three answers, and the same question re-flooded by a dozen repeaters gets one.
+const ROUTE_REPLY_FLOOR: Duration = Duration::from_millis(600);
+
+/// How many answered nonces are remembered, so a repeat of the same question is not answered twice.
+///
+/// A request's nonce is four fresh random bytes (`RadioRoute.routeRequest`), so a duplicate only
+/// means one question arriving by several chains or a replay. Sixteen covers a burst and its
+/// echoes; the ring is a fifo, so the oldest is forgotten rather than the newest refused.
+const ANSWERED_NONCES: usize = 16;
+
+/// Whether this request is one already answered, remembering it when it is not.
+fn first_time_question(answered: &mut std::collections::VecDeque<[u8; 4]>, nonce: &[u8; 4]) -> bool {
+    if answered.contains(nonce) {
+        return false;
+    }
+    if answered.len() == ANSWERED_NONCES {
+        answered.pop_front();
+    }
+    answered.push_back(*nonce);
+    true
+}
 
 
 /// The four bytes that mark a record as a **route hint** rather than a session message.
@@ -1111,6 +1133,9 @@ fn serve_loop<L: ByteLink>(
     // When the "request sent" line last went to the journal, so a failing link cannot flood it.
 
     let mut last_reply: Option<Instant> = None;
+    // The nonces this end has already answered, so one question forwarded by a dozen chains is
+    // answered once while three distinct questions in one burst are answered three times.
+    let mut answered_nonces: std::collections::VecDeque<[u8; 4]> = std::collections::VecDeque::new();
     // When the peer's route was last asked for, so a quiet link does not ask on every tick.
     let mut last_route_ask: Option<Instant> = None;
     // The last record heard from the peer, and the last one this end handed to the radio. They are
@@ -1739,6 +1764,7 @@ fn serve_loop<L: ByteLink>(
                     }
                     if last_reply.is_none_or(|t| t.elapsed() >= ROUTE_REPLY_FLOOR)
                         && left(budget, sent) != Some(0)
+                        && first_time_question(&mut answered_nonces, &req.nonce)
                     {
                         last_reply = Some(Instant::now());
                         let scope = reply_scope(&frame, scope.as_ref());
@@ -1780,15 +1806,33 @@ fn serve_loop<L: ByteLink>(
                 } else if let Some(view) = frame_packet(&frame)
                     && view.is_flood()
                     && view.payload_type == 0x04
-                    && peer_radio.is_some_and(|k| view.payload.starts_with(&k))
                 {
+                    // **Every advert, whoever sent it.** An advert is the one packet type every node
+                    // on a MeshCore network understands, and a repeater that forwards one writes its
+                    // own hash into the path — so "this radio was heard, this far away, this
+                    // strongly" is a question the journal can answer for any node, including a phone
+                    // that is asking whether the mesh can hear it at all. It used to log adverts only
+                    // from the pinned peer, which made the one diagnostic that matters at range
+                    // unreadable: at 2026-11-10 the phone could hear the city and the city could not
+                    // be asked about the phone.
+                    let rssi = frame.get(2).map_or(0, |b| i16::from(*b as i8));
+                    if let Some(key) = view.payload.get(0..32) {
+                        // An advert's payload opens with the sender's 32-byte public key.
+                        let key: &[u8; 32] = key.try_into().expect("32 bytes checked above");
+                        route_log(&format!(
+                            "advert heard from {} hops={} rssi={rssi}dBm",
+                            &hex_key(key)[..8],
+                            view.path.hops
+                        ));
+                    }
                     // **An advert carries its own path, and the receive log shows it.** The radio's
                     // advert cache is 16 slots of RAM and evicts by age, so a route that has been
                     // heard can be gone by the time the daemon asks; the log fires for every packet
                     // before any protocol handling (`Dispatcher.cpp:196-199`), so a flooded advert
                     // from the peer is a route with no query and no eviction. Nothing is spent on
                     // the air: this is a packet that was already received.
-                    if let Some(candidate) = PeerPath::reversed(
+                    if peer_radio.is_some_and(|k| view.payload.starts_with(&k))
+                        && let Some(candidate) = PeerPath::reversed(
                         usize::from(view.path.hash_size),
                         usize::from(view.path.hops),
                         &view.path.bytes,
