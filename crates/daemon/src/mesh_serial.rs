@@ -445,6 +445,17 @@ fn flood_record_limit() -> u8 {
 
 const LDMUX_FLOOD_RECORD_MAX: usize = 162;
 
+/// How long a direct send along `hops` repeaters has to produce something before it is evidence.
+///
+/// Six airtimes per hop is MeshCore's own direct-send factor (`DIRECT_SEND_PERHOP_FACTOR`), the same
+/// arithmetic the session uses for its first retransmission — so this fires exactly when the record
+/// it is judging would have been retried, and not before.
+fn direct_round_trip(hops: usize, airtime_ms: f64) -> Duration {
+    let per = airtime_ms.max(1.0);
+    let ms = 6.0 * per * hops.max(1) as f64;
+    Duration::from_millis(ms as u64).max(Duration::from_secs(2))
+}
+
 fn record_limit(path: Option<&PeerPath>) -> u8 {
     let used = path.map_or(0, |p| p.bytes.len());
     let max = RECORD_MAX
@@ -1166,7 +1177,7 @@ fn serve_loop<L: ByteLink>(
     // demonstrably did not deliver theirs. Measured 2026-11-10, the phone flooded its handshake, the
     // host answered it zero-hop (the flood's arrival path was empty), and the phone at range never
     // heard a thing while its own 26-hop copies of the same flood came back to it.
-    let mut peer_via_flood = false;
+
     // The nonces this end has already answered, so one question forwarded by a dozen chains is
     // answered once while three distinct questions in one burst are answered three times.
     let mut answered_nonces: std::collections::VecDeque<[u8; 4]> = std::collections::VecDeque::new();
@@ -1280,10 +1291,30 @@ fn serve_loop<L: ByteLink>(
                 let path_stale = peer_path_heard.is_none_or(|t| {
                     t.elapsed() >= route_stale(peer_path.as_ref().map_or(1, |p| usize::from(p.hops)))
                 });
-                let flood_when_pathless = (peer_via_flood
-                    || peer_path.is_none()
-                    || path_stale)
-                    && (peer_via_flood || pathless_directs > 0);
+                // **Escalate on evidence, decay on evidence — never mirror the carrier.** Mirroring
+                // ("the peer's record came by flood, so reply by flood") is a loop: each side floods,
+                // hears a flood, floods again, and neither ever sends direct, because the only thing
+                // that would clear it is a direct record arriving. The evidence that matters is
+                // whether the last direct send produced anything: `last_peer_record` newer than
+                // `last_outbound` means it did.
+                // **The silence that counts is the path's own round trip, not the staleness bound.**
+                // `route_stale` is a minute because a *route* is allowed to be quiet; a direct send
+                // that produced nothing within its own round trip is already evidence, and waiting a
+                // minute to act on it leaves the phone re-handshaking into a void.
+                let direct_silent = last_outbound.is_some_and(|sent| {
+                    last_peer_record.is_none_or(|heard| heard < sent)
+                        && sent.elapsed() >= direct_round_trip(
+                            peer_path.as_ref().map_or(1, |p| usize::from(p.hops)),
+                            settings.airtime_ms,
+                        )
+                });
+                // **One cheap attempt first, whatever the reason.** A zero-hop direct packet is one
+                // transmission and is exactly right for a neighbour, so "no path" means "try the
+                // near field once", not "flood immediately". Only after that attempt has produced
+                // nothing does the expensive carrier get used — and any arriving record resets the
+                // count, so a working neighbour never pays for a flood.
+                let want_flood = peer_path.is_none() || path_stale || direct_silent;
+                let flood_when_pathless = want_flood && pathless_directs > 0;
                 // **Two seconds, not ten.** The firmware acknowledges `SEND_RAW_PACKET` *before* it
                 // transmits (`MyMesh.cpp:2003-2016`), so a 10-second wait bought nothing on a busy
                 // channel and meant one stalled radio held the command queue — and the route
@@ -1317,7 +1348,7 @@ fn serve_loop<L: ByteLink>(
                 };
                 let outcome = match attempt {
                     Ok(kind) => {
-                        if kind == SendOutcome::SentDirect && (peer_path.is_none() || path_stale) {
+                        if kind == SendOutcome::SentDirect && want_flood {
                             pathless_directs = pathless_directs.saturating_add(1);
                         }
                         sent = sent.saturating_add(1);
@@ -1974,6 +2005,12 @@ fn serve_loop<L: ByteLink>(
                     // phone's chain in travel order, and reversing it is the chain to answer on. The
                     // record is sealed, so this costs nothing if it is not from the peer: it simply
                     // fails to open.
+                    // **A flooded record always replaces the path.** The only reason this carrier is
+                    // in use is that the path in hand did not carry, so the chain this record
+                    // actually crossed is the newest evidence there is — `dead = true` is exactly
+                    // that statement, and without it the host refuses the repair it just asked for
+                    // and floods again for the same reason, for ever.
+                    let arrived_by_flood = true;
                     if let Some(candidate) = PeerPath::reversed(
                         usize::from(path.hash_size),
                         usize::from(path.hops),
@@ -1982,7 +2019,7 @@ fn serve_loop<L: ByteLink>(
                         peer_path.as_ref(),
                         peer_path_heard,
                         peer_path_proven,
-                        false,
+                        arrived_by_flood,
                         &candidate,
                     ) {
                         // **Once a minute, not once a record.** A link running entirely on the
@@ -2000,7 +2037,6 @@ fn serve_loop<L: ByteLink>(
                         peer_path_proven = true;
                     }
                     last_peer_record = Some(Instant::now());
-                    peer_via_flood = true;
                     // The peer reached us over a flood, so the reply goes back the same way. The
                     // cheap carrier is not what is working for this peer right now.
                     if let (Some(&snr), Some(&rssi)) = (frame.get(1), frame.get(2)) {
@@ -2071,7 +2107,6 @@ fn serve_loop<L: ByteLink>(
                         // later pathless reply starts at zero-hop again instead of flooding, and the
                         // reply to *this* record goes direct.
                         pathless_directs = 0;
-                        peer_via_flood = false;
                         // The frame's own reading: SNR in quarters of a dB, then RSSI in dBm.
                         if let (Some(&snr), Some(&rssi)) = (frame.get(1), frame.get(2)) {
                             peer_signal = Some((snr as i8, rssi as i8));

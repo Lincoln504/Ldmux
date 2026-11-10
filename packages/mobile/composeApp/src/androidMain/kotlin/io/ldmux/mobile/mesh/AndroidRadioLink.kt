@@ -232,6 +232,32 @@ class AndroidRadioLink(
     @Volatile
     private var heardByFlood = false
 
+    /** When a record was last handed up from the radio, by either carrier. */
+    @Volatile
+    private var lastInboundAt = 0L
+
+    /** When a record was last sent as a direct packet, so its silence can be judged. */
+    @Volatile
+    private var lastDirectAt = 0L
+
+    /**
+     * How long a direct send may stay unanswered before the next one may flood.
+     *
+     * The session's own first retransmission interval: six airtimes per hop over the route in hand,
+     * or over the mesh's measured reach when there is none. Waiting less would call a working link
+     * broken; waiting more wastes the trip.
+     */
+    private fun directSilenceMs(): Long {
+        // **The path in hand, not the mesh's reach.** A zero-hop direct packet reaches neighbours and
+        // no further, so a couple of seconds of silence already proves it did not arrive; waiting out
+        // a twelve-repeater round trip before trying the flood is twelve seconds of a link that could
+        // have worked. The reach is the right number only for timing a *flood*, which is the other
+        // delay in this class.
+        val hops = (hostPath?.encoded?.and(0x3F) ?: 0).coerceIn(1, 63)
+        return (6.0 * hops * RadioAirtime.timeOnAirMs(currentPreset(), 172)).toLong()
+            .coerceAtLeast(2_000L)
+    }
+
     /** Floods available to spend now; refilled at [floodIntervalMs], capped at [FLOOD_BURST]. */
     private var floodTokens = FLOOD_BURST
     /** When the bucket was last refilled, so a refill is charged by elapsed time rather than a timer. */
@@ -490,6 +516,7 @@ class AndroidRadioLink(
                 // Something the host sent arrived down this path: it works in the direction that
                 // matters, and no shorter candidate may displace it on hops alone.
                 routeProven = true
+                lastInboundAt = System.currentTimeMillis()
                 // A record arrived on the direct carrier, so the cheap path works: the next send
                 // starts at the direct attempt again instead of escalating, and the reply to *this*
                 // record goes direct.
@@ -551,8 +578,13 @@ class AndroidRadioLink(
                         val record = RadioRoute.heardRecordFlood(raw, own)
                         if (record != null) {
                             heardByFlood = true
+                            lastInboundAt = System.currentTimeMillis()
                             RadioRoute.heardFloodPath(raw)?.let { path ->
-                                adoptRoute(path, "flooded record", proved = true)
+                                // **A flood always replaces the path**, because the only reason this
+                                // carrier is in use is that the path in hand did not carry. Refusing
+                                // its candidate as "longer than the one in hand" is how a link floods
+                                // for ever while a dead proven route blocks the repair.
+                                adoptRoute(path, "flooded record", proved = true, force = true)
                             }
                             if (!inbox.trySend(record).isSuccess) {
                                 appLog("mesh radio inbox full, dropping one flooded record")
@@ -934,10 +966,20 @@ class AndroidRadioLink(
         // (a batch gets four records away at once) and then refills at the paced rate, so a stream
         // of keystrokes still cannot flood the mesh and a burst still completes.
         refillFloodBudget(floodNow)
-        // **Reply on the carrier the peer was heard on.** A record that arrived by flood says the
-        // direct chain is not what is carrying this peer, so the next record goes back the same way
-        // rather than down a path that demonstrably did not deliver theirs.
-        val floodWanted = (heardByFlood || (!fresh && directsSinceStale >= 1)) && floodTokens > 0
+        // **Escalate on evidence, decay on evidence — never mirror the carrier.** A first attempt at
+        // mirroring ("a record came by flood, so reply by flood") is a loop: each side hears a flood,
+        // floods back, and neither ever sends direct again, because the only thing that would clear
+        // it is a direct record arriving and no side ever sends one. The evidence that matters is
+        // simpler: did the last direct send produce anything? If not, the next one may flood; the
+        // moment a record arrives at all, direct is the carrier to try again.
+        val directSilent = lastDirectAt > 0L &&
+            floodNow - lastDirectAt >= directSilenceMs() &&
+            lastInboundAt < lastDirectAt
+        // **One cheap attempt first, whatever the reason.** With no route the direct send is a
+        // single zero-hop packet, which is exactly right for a neighbour; flooding before trying it
+        // would put every first call on the whole city. `directSilent` already requires a completed
+        // direct attempt, so this is "the cheap carrier did not answer" and nothing else.
+        val floodWanted = directSilent && floodTokens > 0
         if (floodWanted && s.canSendRaw()) {
             lastFloodAt = floodNow
             floodTokens--
@@ -969,8 +1011,8 @@ class AndroidRadioLink(
         }
         // One immutable path read for this send, including the packet build.
         val path = hostPath ?: RadioPath(0, ByteArray(0))
-        // Counted before the send: this is the direct attempt that the next one may escalate past.
-        if (!fresh) directsSinceStale++
+        // Counted before the send: this is the direct attempt whose silence the next one may judge.
+        lastDirectAt = System.currentTimeMillis()
         val answer = CompletableDeferred<RadioSendResult>()
         val callback = RawSendCallback { ok, errorCode ->
             answer.complete(if (ok) RadioSendResult.Accepted else errorFor(errorCode))
@@ -1255,6 +1297,7 @@ class AndroidRadioLink(
         heardAt: Long = System.currentTimeMillis(),
         /** The packet carrying this path already crossed it, so the chain is proven, not a guess. */
         proved: Boolean = false,
+        force: Boolean = false,
     ) {
         // **An older source must not age a newer route.** The advert-path cache answers on a timer
         // with whatever advert it holds, and a reply to our own request can be a second old: letting
@@ -1308,6 +1351,7 @@ class AndroidRadioLink(
             proven = routeProven,
             stale = stale,
             rememberedFailed = recentlyFailed(path),
+            force = force,
         )?.let { why ->
             appLog("mesh $source route ignored: $why")
             return

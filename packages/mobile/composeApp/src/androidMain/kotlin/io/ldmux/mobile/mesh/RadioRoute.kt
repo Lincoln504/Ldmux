@@ -35,7 +35,17 @@ internal fun routeRefusal(
     proven: Boolean,
     stale: Boolean,
     rememberedFailed: Boolean,
+    /**
+     * The route in hand has just been shown not to carry — a direct send went unanswered — so this
+     * candidate is evidence about where the peer actually is and replaces it whatever its length.
+     *
+     * **Without this the link can never return to direct.** A flood exists to repair a route; if the
+     * route it repairs to is refused because the dead one is marked "proven", the flood taught
+     * nothing and the next send floods again for the same reason, for ever.
+     */
+    force: Boolean = false,
 ): String? = when {
+    force -> null
     rememberedFailed -> "it lost a session $candidateHops hop(s)"
     // **Only traffic unseats a route that is carrying it.** Being shorter is not evidence of
     // working in both directions; a flood proves one direction only.
