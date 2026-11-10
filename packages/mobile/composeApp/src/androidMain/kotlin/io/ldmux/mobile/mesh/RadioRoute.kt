@@ -15,6 +15,37 @@ package io.ldmux.mobile.mesh
  * companion radio cannot learn a route from an advert on its own (`BaseChatMesh::onAdvertRecv`
  * never touches `out_path`), and a route that only works at earshot is not a route at all.
  */
+/**
+ * **Whether a candidate route may replace the one in hand, and why not when it may not.**
+ *
+ * A pure decision so it can be tested at every combination, because the last version of this logic
+ * had the comparison in a comment and not in the code: `held` was computed and then used only in a
+ * log line, so any candidate that was not remembered as failed was adopted — including a longer one.
+ *
+ * Measured 2026-11-10 at range: a working **0-hop** route at 08:39:49, a 3-hop copy of the same
+ * answer at 08:39:52, adopted; the phone then sent its handshake down three repeaters while the host
+ * answered on the direct path, and neither end heard the other. The firmware does not reroute a
+ * direct packet, so a disagreement like that never heals by itself.
+ *
+ * @return null to adopt, or the reason to refuse (which is what the log line says).
+ */
+internal fun routeRefusal(
+    heldHops: Int?,
+    candidateHops: Int,
+    proven: Boolean,
+    stale: Boolean,
+    rememberedFailed: Boolean,
+): String? = when {
+    rememberedFailed -> "it lost a session $candidateHops hop(s)"
+    // **Only traffic unseats a route that is carrying it.** Being shorter is not evidence of
+    // working in both directions; a flood proves one direction only.
+    proven && !stale -> "proven, ${heldHops ?: 0} hop(s) in hand"
+    // **The copies of one answer are one answer, and the shortest is the one to keep.**
+    heldHops != null && !stale && candidateHops > heldHops ->
+        "$candidateHops hop(s) is longer than $heldHops in hand"
+    else -> null
+}
+
 internal object RadioRoute {
 
     /** A path as the wire carries it: the encoded length byte, and the bytes it counts. */

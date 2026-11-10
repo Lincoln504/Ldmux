@@ -1072,7 +1072,6 @@ class AndroidRadioLink(
             return
         }
         val hops = path.encoded and 0x3F
-        val held = inHand?.encoded?.and(0x3F) ?: Int.MAX_VALUE
         // An unproven route is a candidate, not a route: the shorter of two candidates wins.
         // **A route is trusted for a minute, and a fresh candidate may then displace it.**
         // Sixty seconds is the window the community's own path-gating proposal settled on (fewer
@@ -1093,8 +1092,17 @@ class AndroidRadioLink(
         // which is what a 0-hop copy next to a 5-hop copy means — is otherwise adopted again straight
         // after the failure that proved it dead, and the link loops. Remembered for ten minutes so a
         // route that has genuinely recovered is usable again.
-        if (recentlyFailed(path)) {
-            appLog("mesh $source route ignored: it lost a session ${hops} hop(s)")
+        // **One decision, in one place, and it is a function so it can be tested.** See
+        // `routeRefusal`: a route that has carried traffic is unseated only by evidence it died, and
+        // among candidates that have carried nothing the shortest wins.
+        routeRefusal(
+            heldHops = inHand?.let { it.encoded and 0x3F },
+            candidateHops = hops,
+            proven = routeProven,
+            stale = stale,
+            rememberedFailed = recentlyFailed(path),
+        )?.let { why ->
+            appLog("mesh $source route ignored: $why")
             return
         }
         // **A proven, fresh route is not displaced by anything a flood can say.** The guard used
@@ -1103,10 +1111,6 @@ class AndroidRadioLink(
         // route that was carrying traffic, and the session then went silent until the silence bound
         // ended it. Being shorter is not evidence of working; only traffic is. A route that has
         // genuinely died is cleared by `forgetRoute`, which is the one thing allowed to unseat it.
-        if (routeProven && !stale) {
-            appLog("mesh $source route ignored: proven, ${held} hop(s) in hand")
-            return
-        }
         advertPath = RadioPath(path.encoded, path.bytes)
         routeHeardAt = heardAt
         // A newly adopted route has carried nothing yet, whichever source named it.

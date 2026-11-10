@@ -69,6 +69,13 @@ const PARAM_WATCH: Duration = Duration::from_secs(60);
 /// How often the radio is asked what it measured on the air.
 const STATS_WATCH: Duration = Duration::from_secs(20);
 
+/// How long copies of one request are treated as one burst.
+///
+/// A flooded request is re-transmitted by repeaters on their own schedules and arrives as a handful
+/// of copies within a couple of seconds; ten seconds covers that comfortably and is far shorter than
+/// the shortest staleness window, so a peer that genuinely moved is never held to an old chain.
+const REQUEST_BURST_MS: Duration = Duration::from_secs(10);
+
 /// The firmware's own ceiling for a path, in bytes (`MAX_PATH_SIZE`, `MeshCore.h`).
 const MAX_PATH_SIZE: usize = 64;
 
@@ -360,6 +367,9 @@ fn prefer_route(
     dead: bool,
     candidate: &PeerPath,
 ) -> bool {
+    // `dead` is the caller's statement that the route in hand is not trusted — one request burst,
+    // once. Within a burst the caller passes `proven = false, dead = false` after the first copy so
+    // the burst converges on its shortest instead of on its last.
     let Some(current) = current else {
         return true;
     };
@@ -1065,6 +1075,8 @@ fn serve_loop<L: ByteLink>(
     // this end can reach the peer, and a one-hop copy beside a five-hop truth is how a working link
     // was swapped for a ghost. Cleared whenever the path changes and by a session failure.
     let mut peer_path_proven = false;
+    // When a request's copy was last adopted, so one burst cannot keep replacing the path.
+    let mut peer_path_adopted_at: Option<Instant> = None;
     // Which radio the peer is: from the state record, a route hint or a route request. Without it
     // there is no prefix to look a route up by, and nothing to address a route request to.
     let mut peer_radio: Option<[u8; 32]> = settings.peer_key;
@@ -1668,8 +1680,23 @@ fn serve_loop<L: ByteLink>(
                         usize::from(req.path.hops),
                         &req.path.bytes,
                     );
+                    // **One request is many copies, and the burst must converge on the shortest.**
+                    // `dead = true` lets the first copy of a burst replace whatever is in hand — a
+                    // request is the peer saying it cannot hear us — but if that stayed true for
+                    // every copy, the *last* and longest would win. Measured 2026-11-10: one burst
+                    // arrived at 1, 2, 3, 2, 2 hops and another at 4, 3, 5, so the host's own path
+                    // moved four times inside two seconds while the phone was converging on a
+                    // different chain, and each end answered down the other's idea of the route.
+                    let previous_burst = peer_path_adopted_at
+                        .is_some_and(|t: Instant| t.elapsed() < REQUEST_BURST_MS);
                     if let Some(candidate) = candidate
-                        && prefer_route(peer_path.as_ref(), peer_path_heard, peer_path_proven, true, &candidate)
+                        && prefer_route(
+                            peer_path.as_ref(),
+                            peer_path_heard,
+                            peer_path_proven,
+                            !previous_burst,
+                            &candidate,
+                        )
                     {
                         route_log(&format!(
                             "request from {} hops={} (adopted)",
@@ -1679,6 +1706,7 @@ fn serve_loop<L: ByteLink>(
                         peer_path = Some(candidate);
                         peer_path_heard = Some(Instant::now());
                         peer_path_proven = false;
+                        peer_path_adopted_at = Some(Instant::now());
                     }
                     // **A flood is not an identity.** The request carries only the requester's
                     // radio key and the destination is matched by one hash byte, so any node on the
@@ -2718,6 +2746,15 @@ mod tests {
         // traffic: length says how few repeaters relayed the flood towards us, which is the
         // opposite direction from the one this end sends in.
         assert!(!prefer_route(Some(&path(5)), Some(now), true, false, &path(1)));
+        // **One request arrives as many copies and the burst converges on the shortest.** The first
+        // copy of a burst may replace whatever is in hand (`dead`), because a request is the peer
+        // saying it cannot hear us; the rest of the burst may not, or the *last* — and longest —
+        // copy wins. Measured 2026-11-10: 1, 2, 3, 2, 2 in one burst and 4, 3, 5 in another, so the
+        // host's own path moved four times in two seconds while the phone converged on a different
+        // chain, and each end answered down the other's idea of the route.
+        assert!(prefer_route(Some(&path(5)), Some(now), false, true, &path(4)), "first copy of a burst");
+        assert!(!prefer_route(Some(&path(4)), Some(now), false, false, &path(5)), "later, longer copy");
+        assert!(prefer_route(Some(&path(4)), Some(now), false, false, &path(2)), "later, shorter copy");
         // A dead route still yields to it, proof or not.
         assert!(prefer_route(Some(&path(5)), Some(now), true, true, &path(1)));
     }

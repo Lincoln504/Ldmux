@@ -245,6 +245,28 @@ class RadioRouteTest {
         assertEquals("the chain that was actually measured", 28, RadioRoute.pathHops(28, 28))
     }
 
+    /// **A shorter copy of one answer never widens a route, and only traffic unseats one that works.**
+    ///
+    /// The comparison used to live in a comment: `held` was computed and then used only in a log
+    /// line, so a 3-hop copy adopted over a working 0-hop route at 08:39:52 on 2026-11-10 — and the
+    /// phone then sent its handshake down three repeaters while the host answered direct, with no
+    /// firmware rerouting to heal it.
+    @Test
+    fun `a route decision keeps the shortest and only traffic unseats a working route`() {
+        // Nothing in hand: anything is adopted.
+        assertNull(routeRefusal(heldHops = null, candidateHops = 3, proven = false, stale = false, rememberedFailed = false))
+        // A longer copy of the same answer is refused, fresh or not.
+        assertNotNull(routeRefusal(heldHops = 0, candidateHops = 3, proven = false, stale = false, rememberedFailed = false))
+        // A shorter one is adopted.
+        assertNull(routeRefusal(heldHops = 5, candidateHops = 1, proven = false, stale = false, rememberedFailed = false))
+        // Once it has carried traffic, nothing a flood says unseats it while it is fresh.
+        assertNotNull(routeRefusal(heldHops = 3, candidateHops = 1, proven = true, stale = false, rememberedFailed = false))
+        // A stale one yields to a shorter candidate.
+        assertNull(routeRefusal(heldHops = 3, candidateHops = 1, proven = true, stale = true, rememberedFailed = false))
+        // A path that lost a session is refused whatever else is true.
+        assertNotNull(routeRefusal(heldHops = null, candidateHops = 1, proven = false, stale = true, rememberedFailed = true))
+    }
+
     @Test
     fun `a flooded reply in the receive log carries the route`() {
         val host = ByteArray(32) { 0xA1.toByte() }
