@@ -217,6 +217,15 @@ impl Config {
         let ack = (airtime * 2.0).round().max(1.0) as u64;
         self.ack_delay_ms = ack.max(150).min(self.rto_max_ms / 2);
         self.airtime_ms = airtime.round() as u64;
+        // **A window is a promise about the chain, not about this radio.** Eight records in flight
+        // is eight records' worth of air on *every* repeater between here and the peer: at a
+        // neighbour that is 4.8 s of one channel, at twenty-eight hops it is 135 s of chain time for
+        // one repaint, on a channel shared with everyone else. The channel carries at most 64
+        // records' worth for one exchange window, so the credit divides by the hops — 8 at a
+        // neighbour, 2 at 28 hops, 1 at the 63-hop ceiling. Throughput beyond that cannot be used
+        // anyway: one record is the whole bandwidth-delay product of a long route.
+        let credit = (64.0 / hops).clamp(1.0, 8.0) as u8;
+        self.window = credit;
         self
     }
 }

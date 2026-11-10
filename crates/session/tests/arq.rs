@@ -895,6 +895,16 @@ fn the_first_timeout_covers_each_hop_of_the_route() {
 
     // A route of one (or zero, meaning "unknown") is the direct case, unchanged.
     assert_eq!(Config::for_payload(137).with_path(Some(603.0), 0).rto_initial_ms, 3_618);
+
+    // **The window is a promise about the chain.** Eight records in flight is eight records of air
+    // on every repeater between the ends, so the credit divides by the hops: 8 at a neighbour, 4 at
+    // sixteen, 2 at twenty-eight, 1 at the 63-hop ceiling.
+    let window = |hops: u8| Config::for_payload(137).with_path(Some(603.0), hops).window;
+    assert_eq!(8, window(1));
+    assert_eq!(8, window(8));
+    assert_eq!(4, window(16));
+    assert_eq!(2, window(28));
+    assert_eq!(1, window(63));
 }
 
 /// **The cap must not pre-empt the first rung of its own ladder.**
