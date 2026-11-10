@@ -615,13 +615,17 @@ suite (574 cases) green.
 | 17.115 | A multi-line paste on the radio route ran its first line as a command and the rest went to whatever that line started: the phone turned every newline into a carriage return, because it assumed no pane accepts bracketed paste | FIXED — the phone sends the paste's text with its newlines and the host encodes it for the pane it can see (`paste_bytes`): wrapped in `CSI 200 ~` / `CSI 201 ~` where the pane asked for bracketed paste, carriage returns where it did not, ESC stripped inside the wrap so a clipboard cannot close the paste early, CRLF folded first. Proven end to end over a real keeper and bash (`tests/mesh_paste.rs`): the pasted commands do not run, and the same text with carriage returns does |
 | 17.114 | The host published no path-hash width, so an operator comparing the host's tuple with the phone's `path N B` row compared three quarters of it | FIXED — `pathHashSize` in the snapshot and on the `ldmux mesh status` preset line |
 
-## 18. State and risks at `11f8253` (2026-11-10)
+## 18. State and risks at `548759f` (2026-11-10)
 
 > **This page was first written at `838f101` and the radio path has changed underneath it.** The
-> current truth for everything below is rows **6.169–6.191**: the hop-count decode (6.175), the
+> current truth for everything below is rows **6.169–6.212**: the hop-count decode (6.175), the
 > route-request burst and proof ranking (6.176, 6.188), the retransmission ceiling (6.177), a record
 > the route outgrew (6.178), the window (6.191), the foreground service through a failure (6.169),
-> the failure log (6.170) and the price of an exchange on the status line (6.180). Where this page
+> the failure log (6.170), the price of an exchange on the status line (6.180), the ladder waking for
+> its own rungs (6.194), the two apps sharing one radio (6.196–6.198), the record that is heard and
+> thrown away (6.203), the stale route that counted as a route (6.204), what the receiver actually
+> hears (6.206), the send confirmation the next firmware changes (6.210) and **the second carrier**
+> (6.211–6.212, ADR-0037), which is what makes a record cross with no route at all. Where this page
 > and those rows disagree, the rows are newer.
 
 One page that says what is deployed, what was actually exercised on the air, what was not, and every

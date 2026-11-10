@@ -638,6 +638,18 @@ when its route is direct (`Mesh.cpp`, `case PAYLOAD_TYPE_RAW_CUSTOM`: it checks
 `pkt->isRouteDirect()` and the flood branch is commented out), so a flooded raw record would
 be transmitted and then ignored by every receiver. Direct means the sender must know a path.
 
+**There is a second carrier for exactly that case** (ADR-0037). When no route is fresh, the
+same sealed record rides a `REQ` flood instead:
+`[header 0x01][path byte][dest hash 1][src hash 1][LDMR][nonce 4][record]`. Every repeater
+forward-routes it, and the record inside is opened by the session's own AEAD, so a repeater
+carries it without reading it. The wrapper's nonce is fresh per send and sits **outside** the
+sealed record, for the same duplicate-filter reason the route request carries one. Two
+consequences follow: a record can cross with no route at all, and the flood's travel path is
+the sender's chain reversed, so one reception repairs the route in the direction the answer
+must take. The carrier is chosen per send — direct when the route is fresh, flood when it is
+not — and the host escalates rather than starting there: a pathless zero-hop reply is cheap
+and correct for a neighbour, so the flood is used only after that fails to be answered.
+
 0. **An advert cannot be the mechanism.** A repeater drops an advert once it has travelled
    `flood_max_advert` hops — **8 by default** (`examples/simple_repeater/MyMesh.cpp:907`, upstream
    PR #2702 in v1.16.0). Measured on this machine's local mesh 2026-11-08 from the host radio's own
