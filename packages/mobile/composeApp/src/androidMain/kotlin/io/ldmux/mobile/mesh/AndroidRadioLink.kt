@@ -188,6 +188,8 @@ class AndroidRadioLink(
     private var lastRequestAt: Long = 0L
     /** Unanswered route requests since the last route learned, for the doubling interval. */
     private var routeAsks: Int = 0
+    /** Whether a record has arrived down the route in hand, which is the only proof it works. */
+    private var routeProven: Boolean = false
     /** When this radio last answered a request from the host, so one ask cannot become a storm. */
     private var lastAnsweredAt: Long = 0L
 
@@ -371,7 +373,12 @@ class AndroidRadioLink(
             // directions, and the path-refresh loop then re-flooded a route request every ten
             // seconds on a working link. Arrival is stronger evidence than any timer: the host's own
             // record came down this path.
-            if (advertPath != null) routeHeardAt = System.currentTimeMillis()
+            if (advertPath != null) {
+                routeHeardAt = System.currentTimeMillis()
+                // Something the host sent arrived down this path: it works in the direction that
+                // matters, and a shorter candidate can no longer displace it on hops alone.
+                routeProven = true
+            }
             if (!inbox.trySend(payload).isSuccess) {
                 appLog("mesh radio inbox full, dropping one raw record")
             }
@@ -995,18 +1002,29 @@ class AndroidRadioLink(
         }
         val hops = path.encoded and 0x3F
         val held = inHand?.encoded?.and(0x3F) ?: Int.MAX_VALUE
+        // An unproven route is a candidate, not a route: the shorter of two candidates wins.
         // **A route is trusted for a minute, and a fresh candidate may then displace it.**
         // Sixty seconds is the window the community's own path-gating proposal settled on (fewer
         // hops wins, or the incumbent is older than a minute); it is short enough that a phone that
         // moved does not sit on a dead chain, and long enough that a reply heard twice by two chains
         // does not thrash the route.
+        // **A route is proven by traffic, not by how short it is.** Shortest-wins is only safe
+        // between two candidates that both work, and the ones learned from a flood have been proven
+        // in *one direction only*: a 0-hop path means this radio's transmission reached the host
+        // directly, which says nothing about the host reaching us. Measured 2026-11-09 at six
+        // repeaters, one hop count of zero and five hops in the same second, from the same answer.
+        // Keeping the shortest kept the ghost: the session then carried nothing until the silence
+        // bound ended it. A candidate now displaces a route only when that route is unproven (no
+        // record has arrived on it) or stale, and among unproven ones the shortest still wins.
         val stale = System.currentTimeMillis() - routeHeardAt > ROUTE_TRUST_MS
-        if (hops > held && !stale) {
+        if (routeProven && hops > held && !stale) {
             appLog("mesh $source route ignored: $hops hop(s), ${held} in hand")
             return
         }
         advertPath = RadioPath(path.encoded, path.bytes)
         routeHeardAt = heardAt
+        // A newly adopted route has carried nothing yet, whichever source named it.
+        routeProven = false
         // A route is an answer: the next time one is needed, ask at once rather than after backoff.
         routeAsks = 0
         appLog(
@@ -1026,6 +1044,7 @@ class AndroidRadioLink(
         advertPath = null
         contactPath = null
         routeHeardAt = 0L
+        routeProven = false
         // The next request goes out at once: the floor exists to stop a *failing* link broadcasting,
         // and this is the moment the broadcast is worth the most.
         lastRequestAt = 0L
