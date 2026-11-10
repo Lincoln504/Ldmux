@@ -149,7 +149,10 @@ int32_t ldmux_session_set_airtime(LdmuxSession *s, double airtime_ms);
 int32_t ldmux_session_set_hops(LdmuxSession *s, uint32_t hops);
 
 /* Re-size the record because the route changed: a repeater's hops come out of the same 176-byte
-   radio frame as the record. Queued chunks keep the size they were split at. */
+   radio frame as the record. The queue is re-split losslessly at the new size, and a record already
+   in flight that no longer fits is split when it is next sealed -- the front keeps its sequence
+   number and as much as fits, the tail goes back to the head of that shell's queue. Nothing is
+   dropped, and the caller does not have to end the session. */
 int32_t ldmux_session_set_record_limit(LdmuxSession *s, uint32_t bytes);
 
 /* Chunks queued or in flight. */

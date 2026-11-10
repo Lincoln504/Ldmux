@@ -585,7 +585,10 @@ is already losing a quarter of its records from being flooded by its own repair 
 
 **Small messages share a record, on both sides.** A record is the unit of air, so `Attach` and its
 `Resize` travel together (17 bytes in one record instead of two), and the host packs its replies to
-the record's *live* payload — 143 at an empty path, up to 166 at range — rather than to a constant.
+the record's *live* payload — 143 at an empty path, and less with every repeater, since the path
+occupies the same frame: at 28 hops a record carries 120 application bytes, so a message at the
+protocol's 137-byte input limit becomes two records out there. The figures are per-route, not
+constants.
 Two more records are saved by timing rather than packing: an owed ack waits `max(150 ms, 2 airtimes)`
 before going out alone, so it rides the next outgoing record instead, and the "answer finished"
 marker is sent only when an answer took two or more frames, because a one-frame echo's own commit

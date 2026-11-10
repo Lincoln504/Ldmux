@@ -399,9 +399,11 @@ pub unsafe extern "C" fn ldmux_session_set_hops(s: *mut LdmuxSession, hops: u32)
 /// come out of the record budget: a record built for an empty path is refused by the builder at the
 /// first path byte once the phone walks out of direct range. The phone used to answer that with a
 /// whole new handshake, which at range is a dozen records of air spent to change one number — and a
-/// handshake is only needed when the *keys* change, not the size. Queued chunks keep the size they
-/// were split at, so a shrink governs what is queued next; the driver only resizes with nothing in
-/// flight, which is the case this is written for.
+/// handshake is only needed when the *keys* change, not the size. The queue is **re-split at the new
+/// size**, losslessly, and a record already in flight that no longer fits is split the next time it
+/// is sealed: the front keeps its sequence number and as much as fits, and the tail goes back to the
+/// head of that shell's queue. Nothing is dropped, so a route that grows by one repeater costs one
+/// extra record rather than a session.
 ///
 /// Zero or a size below the record header is ignored rather than accepted as a broken session.
 #[unsafe(no_mangle)]
