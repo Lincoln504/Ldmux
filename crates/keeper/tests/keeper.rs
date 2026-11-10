@@ -1983,6 +1983,61 @@ async fn kill_reaps_the_shell_so_no_zombie_remains() {
     );
 }
 
+/// **A keeper that leaks a descriptor per session dies after a few hundred shells.**
+///
+/// Every session opens a PTY pair, and the emulator thread holds the master while it lives, so a
+/// path that forgets to drop one is invisible for an hour and fatal for a day. Twenty cycles is
+/// enough to tell a leak (two to four descriptors each, so forty to eighty) from the handful the
+/// parallel tests in this binary add at the same time — `/proc/self/fd` is the whole process, so
+/// the bound is deliberately loose rather than exact.
+#[tokio::test]
+async fn a_spawn_and_kill_cycle_leaks_no_descriptors() {
+    let socket = socket_path();
+    let _k = boot(&socket).await;
+    let s = socket.to_string_lossy();
+    let cycle = |n: usize| format!("leak-{n}");
+    let one = |id: String| async {
+        let _ = keeper_call(
+            &s,
+            &spawn_req(&id, 80, 24, None, Some(&["/bin/sh", "-c", "true"])),
+            DEFAULT_TIMEOUT_MS,
+        )
+        .await;
+        let _ = keeper_call(
+            &s,
+            &KeeperMessage::Kill(Kill { session_id: id }),
+            DEFAULT_TIMEOUT_MS,
+        )
+        .await;
+    };
+
+    // One cycle first, so anything allocated once is in the baseline.
+    one(cycle(0)).await;
+    let base = fd_count();
+
+    for i in 1..=20 {
+        one(cycle(i)).await;
+    }
+    // The reaper and the emulator threads finish asynchronously; give them a moment without
+    // asserting on a fixed sleep.
+    let _ = wait_until(|| fd_count() <= base + 6).await;
+    let after = fd_count();
+    // Measured on this machine: 16 before, 17 after twenty cycles. A leak of one PTY pair per
+    // session would be forty, so the bound has room for the parallel tests in this binary and none
+    // for a leak.
+    assert!(
+        after <= base + 12,
+        "twenty sessions closed and {after} descriptors are open, {base} before: a leak per session"
+    );
+}
+
+/// Open descriptors of this process: the keeper runs in it, so this is the keeper's own count.
+fn fd_count() -> usize {
+    std::fs::read_dir("/proc/self/fd")
+        .map(|d| d.count())
+        .unwrap_or(0)
+}
+
 #[tokio::test]
 async fn killing_an_already_dead_session_succeeds_without_signalling() {
     let socket = socket_path();
