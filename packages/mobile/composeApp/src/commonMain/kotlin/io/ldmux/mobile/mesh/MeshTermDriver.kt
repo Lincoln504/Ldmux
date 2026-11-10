@@ -1197,8 +1197,10 @@ class MeshTermDriver(
     suspend fun showOnce() = lock.withLock {
         if (session == null || terminalView != null) return@withLock
         if (attachedId == null && pick != Pick.Attached) return@withLock
-        resyncing = true
-        resyncAskedAt = clock()
+        // **Not a `resyncing`.** That flag is the missing-screen ladder's: while it is set the tick
+        // re-asks on a doubling deadline, up to once a minute. A `show` that draws nothing because
+        // nothing changed must not start that ladder — it would spend a record a minute on an idle
+        // frozen shell for ever. The operator's next press is the retry.
         queue(TermMessage.Resync)
         pump()
         publish()

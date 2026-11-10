@@ -198,6 +198,23 @@ class MeshTermDriverTest {
         assertTrue(repeatAsks in 1..3, "two more asks at most, not one per deadline: $repeatAsks")
     }
 
+    /// **A `show` that draws nothing does not start the resync ladder.**
+    ///
+    /// `resyncing` is the missing-screen flag: while it is set the tick re-asks on a doubling
+    /// deadline, up to once a minute. A `show` on an idle shell legitimately draws nothing (nothing
+    /// changed), and leaving the flag set would spend a record a minute for ever on a frozen view.
+    @Test
+    fun `a show does not start the resync ladder`() = runBlocking<Unit> {
+        val d = driver(); live(d)
+        val before = gw.sent.size
+        d.showOnce()
+        now += 30_000
+        d.tick()
+        now += 60_000
+        d.tick()
+        assertEquals(before + 1, gw.sent.size, "one `Resync`, and no ladder after it")
+    }
+
     private fun stream(vararg m: TermMessage): ByteArray = m.flatMap { it.encode().toList() }.toByteArray()
     private fun data(vararg m: TermMessage) = Received.Data(listOf(Delivered(0, stream(*m))))
 
