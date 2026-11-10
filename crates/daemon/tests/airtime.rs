@@ -340,4 +340,24 @@ async fn live_against_batched_mode() {
             36_000.0 / (bt_up + bt_down).max(0.001),
         );
     }
+
+    // **The claim the mode rests on, pinned as a bound rather than a byte count.** The docs say
+    // batched typing is 90.4 % cheaper and an agent turn 86.8 %; an exact figure would break on
+    // every fixture that changes, so these assert the ratio with room for a record either way. A
+    // regression that adds a record per press shows up here — the numbers are the argument, and an
+    // argument nobody checks is a claim.
+    assert!(
+        batch_total < live * 0.25,
+        "batched typing must stay far cheaper: {batch_total:.2} ms against {live:.2} ms"
+    );
+    assert!(
+        bt_up + bt_down < (t_up + t_down) * 0.25,
+        "a batched turn must stay far cheaper: {:.2} ms against {:.2} ms",
+        bt_up + bt_down,
+        t_up + t_down
+    );
+    assert!(
+        out > 0.0 && out < live,
+        "the answer is the same work in both modes, and smaller than typing a line: {out:.2} ms"
+    );
 }
