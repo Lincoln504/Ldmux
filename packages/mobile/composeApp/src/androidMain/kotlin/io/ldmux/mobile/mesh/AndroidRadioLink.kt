@@ -127,6 +127,9 @@ class AndroidRadioLink(
     private var heardSinceReport = 0
     private var heardReportAt = 0L
     private var heardLast = ""
+    /** The furthest any heard flood had travelled, which is what a route-less send is timed against. */
+    @Volatile
+    private var maxFloodHops = 1
 
     private val _deviceInfo = MutableStateFlow<RadioDeviceInfo?>(null)
     override val deviceInfo: StateFlow<RadioDeviceInfo?> = _deviceInfo.asStateFlow()
@@ -476,6 +479,11 @@ class AndroidRadioLink(
                     val raw = frame.log().raw()
                     heardSinceReport++
                     heardLast = describeHeard(frame)
+                    runCatching { frame.log().packet() }.getOrNull()?.let { p ->
+                        if (p.routeType() == 0 || p.routeType() == 1) {
+                            maxFloodHops = maxOf(maxFloodHops, p.hopCount().coerceIn(1, 63))
+                        }
+                    }
                     // **A record that arrived as a flood, before anything else looks at the frame.**
                     // This is the carrier that works with no route at all: the session gets the same
                     // sealed record it would have got direct, and the path the flood travelled is
@@ -1358,6 +1366,9 @@ class AndroidRadioLink(
      * stopped carrying" — the second also needs a flood, and `routeHops` cannot say which is which.
      */
     fun routeFresh(now: Long = System.currentTimeMillis()): Boolean = routeIsFresh(now)
+
+    /** The furthest a flood has been heard to travel here; 1 until one has been heard. */
+    override fun meshReach(): Int = maxFloodHops
 
     /**
      * Ask the host for a route, right now, over a flood.

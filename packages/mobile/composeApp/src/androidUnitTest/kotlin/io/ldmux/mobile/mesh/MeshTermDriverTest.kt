@@ -262,6 +262,21 @@ class MeshTermDriverTest {
         assertTrue(gw.routeRefreshes > asks, "a route request went out, and a request is a flood")
     }
 
+    /// **A record sent by flood is timed against the mesh, not against one hop.**
+    ///
+    /// With no route the session was told "one hop", so its first retransmission fired after about
+    /// three and a half seconds while the flood it had just sent was still crossing ten repeaters —
+    /// and every retry is another flood over the whole city.
+    @Test
+    fun a_route_less_send_is_timed_against_the_far_flood_it_rode() {
+        assertEquals(1, sessionHopsFor(routeHops = null, meshReach = 1))
+        assertEquals(12, sessionHopsFor(routeHops = null, meshReach = 12))
+        // A known route always answers exactly, however far the mesh has been heard to reach.
+        assertEquals(3, sessionHopsFor(routeHops = 3, meshReach = 12))
+        // And the firmware's ceiling still bounds it.
+        assertEquals(63, sessionHopsFor(routeHops = null, meshReach = 500))
+    }
+
     /// **A list answer that never arrives is asked for again, and only a few times.**
     ///
     /// `launcher()` marks the request in flight and `listShells()` refuses to ask twice ("a list

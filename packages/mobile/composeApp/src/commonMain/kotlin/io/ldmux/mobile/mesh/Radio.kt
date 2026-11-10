@@ -95,6 +95,9 @@ interface RadioLink {
      */
     fun routeFresh(): Boolean = true
 
+    /** The furthest a flood has been heard to travel here, for timing a send with no route. */
+    fun meshReach(): Int = 1
+
     /**
      * This radio's own public key, once the companion handshake has run.
      *
@@ -593,6 +596,7 @@ class MeshRadioGateway(private val link: RadioLink) : GatewayPort {
     override val uplinkRecordMax: Int get() = link.uplinkRecordMax
     override val routeHops: Int? get() = link.routeHops
     override val routeFresh: Boolean get() = link.routeFresh()
+    override val meshReach: Int get() = link.meshReach()
     override val radioPublicKey: ByteArray? get() = link.radioPublicKey
 
     override suspend fun send(record: ByteArray): MeshSendResult =

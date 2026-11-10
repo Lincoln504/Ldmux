@@ -42,6 +42,17 @@ interface GatewayPort {
     val routeFresh: Boolean get() = true
 
     /**
+     * How far a flood has been heard to travel, so a send with no route can size its own patience.
+     *
+     * **A record carried by a flood is not one hop away.** With no route the session used to be told
+     * "one hop", so its first retransmission was timed at six airtimes — about three and a half
+     * seconds — while the flood it had just sent was still crossing ten repeaters. Every retry then
+     * cost the air the timer exists to save, on the most expensive carrier there is. The mesh measures
+     * itself: the furthest any heard flood has travelled is the honest estimate for the next one.
+     */
+    val meshReach: Int get() = 1
+
+    /**
      * Why the link is down, in the link's own words, or null when it has not said.
      *
      * A state is a category and there are five ways to be unable to reach a radio - Bluetooth off,
@@ -894,7 +905,7 @@ class MeshTermDriver(
             // for a route, where the first copy is still travelling when the timer fires and every
             // retry costs the air the timer exists to save. The route was refreshed by `connect()`
             // just before this handshake, so the hop count is the one the session will use.
-            sessionHops = gateway.routeHops?.coerceIn(1, MAX_HOPS) ?: 1
+            sessionHops = sessionHopsFor(gateway.routeHops, gateway.meshReach)
             s.setHops(sessionHops)
             handshakeTries = 0
             // A session is up: the next handshake (after a drop) starts its own clock.
@@ -2514,6 +2525,16 @@ internal fun rejectReason(code: Int): String = when (code) {
     SessionLib.ERR_MALFORMED -> "malformed"
     else -> "code $code"
 }
+
+/**
+ * The hop count the session times its retransmissions by.
+ *
+ * A known route answers it exactly. With no route the record rides a flood, and the honest estimate
+ * is the furthest a flood has been heard to travel here — never one, which is what made a flood's
+ * first retry fire while the record was still crossing the city.
+ */
+internal fun sessionHopsFor(routeHops: Int?, meshReach: Int): Int =
+    (routeHops ?: meshReach).coerceIn(1, MAX_HOPS)
 
 internal fun handshakeRetryFor(hops: Int?): Long =
     answerDeadlineMs(HANDSHAKE_FIRST_RETRY_MS, hops)
