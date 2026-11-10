@@ -25,7 +25,7 @@ object MeshTerm {
      * folder instead of the id it would send. Version 13 adds the phone's grid to `Attach`, so the
      * pane is fitted before the host's first frame instead of being repainted twice.
      */
-    const val VERSION = 13
+    const val VERSION = 14
     const val MIN_VERSION = 1
     /** The first version that has `Key` and the shell id in `Profile`. */
     const val KEY_VERSION = 2
@@ -84,7 +84,14 @@ object MeshTerm {
     const val MAX_MESSAGE = 1 + 2 + MAX_ROWS_BODY
     /** 172 - 24 (ADR-0020) - 5 (ARQ header incl. the per-record mark): one record's capacity. */
     const val RECORD_PAYLOAD = 143
-    const val MAX_INPUT = 96
+    /**
+     * Most bytes in one `Input` message: one record, and a whole one.
+     *
+     * A record's payload is [RECORD_PAYLOAD] (143 bytes) and a message costs three of them for its
+     * tag and length, so 137 is what the narrowest record leaves. The old 96 spent a third of every
+     * record on a long line: a 200-character command was three records where two will do.
+     */
+    const val MAX_INPUT = 137
     const val MAX_SEGMENT = 120
     /** The most lines one history request may ask for. */
     const val MAX_HISTORY_ROWS = 64

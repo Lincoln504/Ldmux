@@ -72,7 +72,7 @@ use std::collections::VecDeque;
 /// `Sessions` page is answered **before** an attach can succeed (the phone learns which shell to
 /// attach to from it), so it cannot be gated on a `Profile`'s version: the page carries a flag of
 /// its own and the host sets it only for a phone that has attached with version 6 or later.
-pub const VERSION: u8 = 13;
+pub const VERSION: u8 = 14;
 /// The oldest profile version a host still speaks.
 pub const MIN_VERSION: u8 = 1;
 /// **The first version whose `Attach` names the phone's grid.**
@@ -182,8 +182,13 @@ pub const MAX_ROWS_BODY: usize = 134;
 pub const MAX_MESSAGE: usize = 1 + 2 + MAX_ROWS_BODY;
 /// The payload of one record after the L3 headers: 172 − 24 (ADR-0020) − 5 (the ARQ header).
 pub const RECORD_PAYLOAD: usize = 143;
-/// Most bytes in one `Input` message.
-pub const MAX_INPUT: usize = 96;
+/// Most bytes in one `Input` message: one record, and a whole one.
+///
+/// **96 left a third of every record empty.** A record's payload is [`RECORD_PAYLOAD`] (143 bytes)
+/// and a message costs three of them for its tag and length, so 137 is what the narrowest record
+/// leaves. A 200-character command was three records where two will do; a thousand-character paste
+/// is two or three fewer.
+pub const MAX_INPUT: usize = 137;
 /// Most bytes of a shell label in a `Sessions` entry (cut at a character boundary by the host).
 pub const MAX_LABEL: usize = 24;
 /// Most bytes of a shell's working directory in a `Sessions` entry (cut at a character boundary
@@ -2803,10 +2808,15 @@ mod tests {
             Message::Key(vec!["Up".into(); MAX_KEYS + 1]).encode(),
             Err(EncodeError::TooLong)
         );
+        // The body cap is `MAX_INPUT` bytes including the separators, so the number of names that
+        // overflow it follows the cap rather than a literal.
+        let name = "M-C-S-Left";
+        let too_many = (MAX_INPUT / (name.len() + 1)) + 1;
         assert_eq!(
-            Message::Key(vec!["M-C-S-Left".into(); 10]).encode(),
+            Message::Key(vec![name.into(); too_many]).encode(),
             Err(EncodeError::TooLong),
-            "ten of eleven bytes plus separators is over the 96-byte cap"
+            "{too_many} names of {} bytes plus separators is over the {MAX_INPUT}-byte cap",
+            name.len()
         );
         // Decode refuses the same, dropping only that message.
         let mut d = Decoder::new();

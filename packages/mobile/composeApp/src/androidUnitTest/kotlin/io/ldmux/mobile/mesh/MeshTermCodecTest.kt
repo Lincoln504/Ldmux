@@ -308,7 +308,10 @@ class MeshTermCodecTest {
         assertFailsWith<TermEncodeException> { TermMessage.Key(listOf("C c")).encode() }
         assertFailsWith<TermEncodeException> { TermMessage.Key(emptyList()).encode() }
         assertFailsWith<TermEncodeException> { TermMessage.Key(List(MeshTerm.MAX_KEYS + 1) { "Up" }).encode() }
-        assertFailsWith<TermEncodeException> { TermMessage.Key(List(10) { "M-C-S-Left" }).encode() }
+        // The body cap counts the separators, so the count that overflows it follows the cap.
+        val name = "M-C-S-Left"
+        val tooMany = (MeshTerm.MAX_INPUT / (name.length + 1)) + 1
+        assertFailsWith<TermEncodeException> { TermMessage.Key(List(tooMany) { name }).encode() }
         // The decoder refuses the same, losing only that message.
         for (body in listOf("C c ", "", "Up  Down", "Up\u0001")) {
             val wire = byteArrayOf(0x06, body.length.toByte()) + body.encodeToByteArray()

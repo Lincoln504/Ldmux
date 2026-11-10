@@ -60,10 +60,13 @@ class MeshInputTest {
     @Test
     fun `a full record leaves at once and is never over the cap, nor splits a character`() {
         val b = MeshInputBatcher()
-        b.appendText(ByteArray(95) { 'a'.code.toByte() } + bytes("é") + bytes("zz"), 0)
+        // One byte short of the cap, then a two-byte character: the piece must stop before it
+        // rather than split it, so the rest travels as the next message.
+        val head = MeshTerm.MAX_INPUT - 1
+        b.appendText(ByteArray(head) { 'a'.code.toByte() } + bytes("é") + bytes("zz"), 0)
         val first = b.peek(0) as MeshOut.Text
         assertTrue(first.bytes.size <= MeshTerm.MAX_INPUT)
-        assertEquals(95, first.bytes.size, "the two-byte character is not cut in half")
+        assertEquals(head, first.bytes.size, "the two-byte character is not cut in half")
         b.accepted(first)
         assertEquals(listOf<MeshOut>(text("ézz")), b.pending)
     }

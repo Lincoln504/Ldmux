@@ -115,7 +115,7 @@ class MeshInputBatcher(
         if (size + cost > capacity) return false
         touch(nowMs)
         if (last is Run.Keys && last.names.size < MeshTerm.MAX_KEYS &&
-            last.names.sumOf { it.length + 1 } + name.length <= MeshTerm.MAX_INPUT
+            last.names.sumOf { it.length + 1 } + name.length <= maxBytes
         ) {
             last.names += name
         } else {

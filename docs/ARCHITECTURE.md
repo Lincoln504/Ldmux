@@ -530,6 +530,14 @@ the old size is refused by the packet builder, its attempt is given back, and th
 to what the route actually leaves. A **fixed** 172 was the old answer, and it was refused by
 ldmux's own builder at the first path byte — so a full record only ever worked at zero hops.
 
+**Every message a phone sends fills its record.** A record's payload is 143 bytes of application
+data, and a message costs three of them for its tag and its two-byte length, so the largest `Input`
+is 137: one keystroke batch, one record, no third of a record spent on nothing. The old 96 was a
+round number, and a 200-character command came out as three records where two fit. The same rule
+sets every other cap here — `MAX_SEGMENT` is what a `Rows` body leaves, and the list and history
+pages are packed by bytes rather than by entries — because a message that does not fill its record
+is air spent on the gap.
+
 **A big frame is compressed, a record is not.** A record is 143 bytes of payload after the L3
 headers, and a full screen is about 900 bytes of text, so compressing a *record* saves nothing — the
 record goes out whole either way (measured: a 114-byte `Rows` compresses to 80 and is still one
