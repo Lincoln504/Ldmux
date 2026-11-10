@@ -22,14 +22,18 @@ object MeshTerm {
      * Version 5 adds the absolute line number to `Commit`: the rows leaving the top of the screen
      * are history the phone already holds, which is the fact a local scrollback is built on.
      * Version 6 adds a shell's working directory to each `Sessions` entry, so the picker shows the
-     * folder instead of the id it would send.
+     * folder instead of the id it would send. Version 13 adds the phone's grid to `Attach`, so the
+     * pane is fitted before the host's first frame instead of being repainted twice.
      */
-    const val VERSION = 12
+    const val VERSION = 13
     const val MIN_VERSION = 1
     /** The first version that has `Key` and the shell id in `Profile`. */
     const val KEY_VERSION = 2
     /** The first version that has `Resize`. */
     const val RESIZE_VERSION = 3
+
+    /** The first version whose `Attach` names the phone's grid. */
+    const val GRID_VERSION = 13
 
     /** First version whose records may carry several messages (the host packs them). */
     const val STREAM_VERSION = 4
@@ -283,7 +287,20 @@ internal fun holderWord(code: Int): String = when (code) {
 data class TermPatch(val y: Int, val append: Boolean, val text: String)
 
 sealed interface TermMessage {
-    data class Attach(val version: Int, val selector: String) : TermMessage
+    /**
+     * Phone → host: take a shell.
+     *
+     * [cols] and [rows] are the grid this phone draws with, from [MeshTerm.GRID_VERSION] on and 0
+     * for "not stated". Stating it is what lets the host fit the pty **before** its first frame: a
+     * phone that says nothing gets a repaint at whatever geometry the desk left behind and then a
+     * second one at its own — measured on the device as **17 records to open a shell**.
+     */
+    data class Attach(
+        val version: Int,
+        val selector: String,
+        val cols: Int = 0,
+        val rows: Int = 0,
+    ) : TermMessage
     class Input(val bytes: ByteArray) : TermMessage {
         override fun equals(other: Any?) = other is Input && bytes.contentEquals(other.bytes)
         override fun hashCode() = bytes.contentHashCode()
@@ -468,7 +485,14 @@ fun TermMessage.encode(): ByteArray {
         is TermMessage.Attach -> {
             val sel = selector.encodeToByteArray()
             if (sel.size > MeshTerm.MAX_SELECTOR) throw TermEncodeException("selector too long")
-            body.add(u8(version, "version")); sel.forEach { body.add(it) }
+            body.add(u8(version, "version"))
+            // **The version decides the shape**, and it is the first byte, so both ends know which
+            // shape they are reading without a second flag.
+            if (version >= MeshTerm.GRID_VERSION) {
+                body.add(u8(cols, "cols"))
+                body.add(u8(rows, "rows"))
+            }
+            sel.forEach { body.add(it) }
             MeshTerm.T_ATTACH
         }
         is TermMessage.Input -> {
@@ -750,9 +774,18 @@ class TermDecoder {
         fun ok(m: TermMessage) = Parsed.Ok(m)
         return when (tag) {
             MeshTerm.T_ATTACH -> {
-                if (body.isEmpty() || body.size - 1 > MeshTerm.MAX_SELECTOR) return Parsed.Bad
-                val sel = utf8(body.copyOfRange(1, body.size)) ?: return Parsed.Bad
-                ok(TermMessage.Attach(b(body, 0), sel))
+                if (body.isEmpty()) return Parsed.Bad
+                val version = b(body, 0)
+                val at = if (version >= MeshTerm.GRID_VERSION) 3 else 1
+                if (body.size < at || body.size - at > MeshTerm.MAX_SELECTOR) return Parsed.Bad
+                val sel = utf8(body.copyOfRange(at, body.size)) ?: return Parsed.Bad
+                ok(
+                    if (version >= MeshTerm.GRID_VERSION) {
+                        TermMessage.Attach(version, sel, b(body, 1), b(body, 2))
+                    } else {
+                        TermMessage.Attach(version, sel)
+                    }
+                )
             }
             MeshTerm.T_INPUT ->
                 if (body.isEmpty() || body.size > MeshTerm.MAX_INPUT) Parsed.Bad else ok(TermMessage.Input(body))

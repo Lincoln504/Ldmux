@@ -115,6 +115,8 @@ async fn a_pasted_pair_of_commands_is_inserted_and_does_not_run() {
     link.phone_says(&Message::Attach {
         version: VERSION,
         selector: rig.session.clone(),
+        cols: 0,
+        rows: 0,
     });
     bridge.tick().await;
     if !bridge.attached(1) {
@@ -166,6 +168,8 @@ async fn the_same_text_with_carriage_returns_runs_each_line() {
     link.phone_says(&Message::Attach {
         version: VERSION,
         selector: rig.session.clone(),
+        cols: 0,
+        rows: 0,
     });
     bridge.tick().await;
     if !bridge.attached(1) {

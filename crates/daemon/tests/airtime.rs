@@ -156,6 +156,8 @@ async fn bridge_on(rig: &Rig) -> (Bridge<DaemonHost, CountingLink>, CountingLink
     link.phone_says(&Message::Attach {
         version: VERSION,
         selector: rig.session.clone(),
+        cols: 0,
+        rows: 0,
     });
     bridge.tick().await;
     if !bridge.attached(1) {

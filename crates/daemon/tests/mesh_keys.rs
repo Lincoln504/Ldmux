@@ -98,6 +98,8 @@ async fn press_up_through_the_bridge(rig: &Rig) -> (Bridge<DaemonHost, FakeLink>
         &Message::Attach {
             version: VERSION,
             selector: rig.session.clone(),
+            cols: 0,
+            rows: 0,
         },
     );
     bridge.tick().await;
@@ -185,6 +187,8 @@ async fn the_profile_names_the_shell_the_host_chose() {
         &Message::Attach {
             version: VERSION,
             selector: String::new(),
+            cols: 0,
+            rows: 0,
         },
     );
     bridge.tick().await;
@@ -226,6 +230,8 @@ async fn a_resize_changes_the_real_pane_and_the_next_profile_says_so() {
         &Message::Attach {
             version: VERSION,
             selector: rig.session.clone(),
+            cols: 0,
+            rows: 0,
         },
     );
     bridge.tick().await;

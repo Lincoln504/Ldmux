@@ -1803,23 +1803,23 @@ class MeshTermDriver(
         holdQueued = false
         drewSinceRelease = false
         val grid = wantedGrid
-        if (grid == null) {
+        // **The grid travels inside the attach, and in the same record.** It used to follow as a
+        // `Resize` in the same frame, which worked but made the host wait out `ATTACH_GRACE` for a
+        // number it already had — and a phone that stated nothing got a repaint at the desk's
+        // geometry before its own. Stated here, the pty is fitted before the first frame is built.
+        val outcome = if (grid == null) {
             queue(TermMessage.Attach(MeshTerm.VERSION, selector))
-            return
+        } else {
+            queue(TermMessage.Attach(MeshTerm.VERSION, selector, grid.first, grid.second))
         }
-        // **The grid travels with the attach, in the same record.** Two records for 17 bytes of
-        // meaning cost a whole extra 0.6 s, and the host's grace then waits for a resize that is
-        // already in its hands. A host that predates `Resize` ignores the message and answers
-        // `Profile` with the flag clear; the version is not known on the first attach, so it is sent
-        // and judged by the answer rather than by a guess.
-        val (cols, rows) = grid
-        val outcome = queueAll(
-            listOf(TermMessage.Attach(MeshTerm.VERSION, selector), TermMessage.Resize(cols, rows)),
-        )
         // **Remembered only when it queued.** `fitHost` starts with "already asked" and would never
         // ask again, so a refusal recorded here left the pane at the desk's grid for the life of the
         // connection - the very case `fitHost` clears the field for.
-        requestedFit = if (outcome == QueueOutcome.Queued) Triple(selector, cols, rows) else null
+        requestedFit = if (outcome == QueueOutcome.Queued && grid != null) {
+            Triple(selector, grid.first, grid.second)
+        } else {
+            null
+        }
     }
 
     private suspend fun pump() {

@@ -72,9 +72,17 @@ use std::collections::VecDeque;
 /// `Sessions` page is answered **before** an attach can succeed (the phone learns which shell to
 /// attach to from it), so it cannot be gated on a `Profile`'s version: the page carries a flag of
 /// its own and the host sets it only for a phone that has attached with version 6 or later.
-pub const VERSION: u8 = 12;
+pub const VERSION: u8 = 13;
 /// The oldest profile version a host still speaks.
 pub const MIN_VERSION: u8 = 1;
+/// **The first version whose `Attach` names the phone's grid.**
+///
+/// The phone knows its own grid before it asks for a shell — the surface has measured it — and
+/// without this the host drew the pane at whatever size the desk left behind and then redrew it at
+/// the phone's: measured on the device 2026-11-09, **17 records to open a shell**, most of them the
+/// wasted first repaint (32 rows at the memory of the last geometry) plus the resize that followed.
+/// A phone that states its grid has the pty fitted before the first frame, so one repaint serves.
+pub const GRID_VERSION: u8 = 13;
 /// The first version that has `Key` and the shell id in `Profile`.
 pub const KEY_VERSION: u8 = 2;
 /// The first version that has `Resize`.
@@ -324,6 +332,9 @@ pub enum Message {
     Attach {
         version: u8,
         selector: String,
+        /// The grid the phone draws with, from [`GRID_VERSION`] on; 0 means "not stated".
+        cols: u8,
+        rows: u8,
     },
     Input(Vec<u8>),
     Resync,
@@ -687,11 +698,22 @@ impl Message {
     pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
         let mut body = Vec::new();
         let tag = match self {
-            Self::Attach { version, selector } => {
+            Self::Attach {
+                version,
+                selector,
+                cols,
+                rows,
+            } => {
                 if selector.len() > MAX_SELECTOR {
                     return Err(EncodeError::TooLong);
                 }
+                // **The version decides the shape**, and it is the first byte, so both ends know
+                // which shape they are reading without a second flag.
                 body.push(*version);
+                if *version >= GRID_VERSION {
+                    body.push(*cols);
+                    body.push(*rows);
+                }
                 body.extend_from_slice(selector.as_bytes());
                 T_ATTACH
             }
@@ -951,13 +973,25 @@ impl Message {
         Ok(Some(match tag {
             T_ATTACH => {
                 let (&version, rest) = body.split_first().ok_or(bad.clone())?;
+                let (cols, rows, rest) = if version >= GRID_VERSION {
+                    let (&cols, rest) = rest.split_first().ok_or(bad.clone())?;
+                    let (&rows, rest) = rest.split_first().ok_or(bad.clone())?;
+                    (cols, rows, rest)
+                } else {
+                    (0, 0, rest)
+                };
                 if rest.len() > MAX_SELECTOR {
                     return Err(bad);
                 }
                 let selector = std::str::from_utf8(rest)
                     .map_err(|_| bad.clone())?
                     .to_owned();
-                Self::Attach { version, selector }
+                Self::Attach {
+                    version,
+                    selector,
+                    cols,
+                    rows,
+                }
             }
             T_INPUT => {
                 if body.is_empty() || body.len() > MAX_INPUT {
@@ -2353,10 +2387,22 @@ mod tests {
         roundtrip(&Message::Attach {
             version: 1,
             selector: "ab12".into(),
+            cols: 0,
+            rows: 0,
         });
         roundtrip(&Message::Attach {
             version: 1,
             selector: String::new(),
+            cols: 0,
+            rows: 0,
+        });
+        // **A version-13 attach states the grid**, and the shape follows the version, so a
+        // version-12 phone still sends what it always did.
+        roundtrip(&Message::Attach {
+            version: GRID_VERSION,
+            selector: String::new(),
+            cols: 46,
+            rows: 17,
         });
         roundtrip(&Message::Input(b"ls\r".to_vec()));
         // Version 7: the phone starts and ends shells, and learns the id of the one it started.
@@ -3049,7 +3095,9 @@ mod tests {
         assert_eq!(
             Message::Attach {
                 version: 1,
-                selector: "x".repeat(MAX_SELECTOR + 1)
+                selector: "x".repeat(MAX_SELECTOR + 1),
+                cols: 0,
+                rows: 0,
             }
             .encode(),
             Err(EncodeError::TooLong)
@@ -3294,9 +3342,13 @@ mod tests {
     fn message_json(m: &Message) -> serde_json::Value {
         use serde_json::json;
         match m {
-            Message::Attach { version, selector } => {
-                json!({"kind":"attach","version":version,"selector":selector})
-            }
+            Message::Attach {
+                version,
+                selector,
+                cols,
+                rows,
+            } => json!({
+                "kind":"attach","version":version,"selector":selector,"cols":cols,"rows":rows}),
             // The inner stream, so a phone test can rebuild the same frame and inflate it: the
             // deflate bytes themselves are not a cross-language contract (any level 6 encoder
             // produces different bytes for the same input), only the length-plus-deflate shape is.
@@ -3365,10 +3417,14 @@ mod tests {
             Message::Attach {
                 version: 1,
                 selector: "ab12".into(),
+                cols: 0,
+                rows: 0,
             },
             Message::Attach {
-                version: 1,
-                selector: String::new(),
+                version: GRID_VERSION,
+                selector: "ab12".into(),
+                cols: 46,
+                rows: 17,
             },
             Message::Marks {
                 first: true,

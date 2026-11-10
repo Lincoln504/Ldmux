@@ -1303,7 +1303,14 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
     }
 
     /// `Attach`, with or without the consent that displaces whoever holds the shell.
-    async fn attach_with(&mut self, shell: u8, version: u8, selector: &str, takeover: bool) {
+    async fn attach_with(
+        &mut self,
+        shell: u8,
+        version: u8,
+        selector: &str,
+        takeover: bool,
+        grid: (u8, u8),
+    ) {
                 if !(MIN_VERSION..=VERSION).contains(&version) {
                     self.reply(
                         shell,
@@ -1390,7 +1397,14 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                         // was drawn and committed before a 46x17 grid arrived, twenty-odd records
                         // for a screen nobody would see. The remembered grid is a hint, not a
                         // promise: the phone resizes on its first relayout and corrects it.
-                        let remembered = self.grids.get(&shell).copied();
+                        // **The grid the phone stated wins over the one it used last time.** The
+                        // attach carries it from version 13 on, so the pane is fitted before the
+                        // first frame is built: the phone gets one repaint at its own size instead
+                        // of a repaint at the old geometry followed by another at the right one
+                        // (measured 2026-11-09: seventeen records to open a shell). Without a
+                        // stated grid, the remembered one is still the best hint there is.
+                        let stated = (grid.0 > 0 && grid.1 > 0).then_some(grid);
+                        let remembered = stated.or_else(|| self.grids.get(&shell).copied());
                         if let Some((cols, rows)) = remembered {
                             let _ = self.host.resize(one, cols, rows).await;
                         }
@@ -1421,8 +1435,9 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                                 // before, the pane was already fitted to that grid above, so
                                 // there is nothing to wait for: 1.4 s of blank screen per
                                 // re-attach was being spent on a record that had arrived.
-                                hold: remembered
-                                    .is_none()
+                                // **A stated grid needs no grace at all**: the pane is already the
+                                // phone's size, so the first frame is the one it will keep.
+                                hold: (remembered.is_none() && stated.is_none())
                                     .then(|| Instant::now() + ATTACH_GRACE),
                                 resync_wanted: false,
                                 owe_frame: false,
@@ -1496,8 +1511,14 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
 
     async fn handle(&mut self, shell: u8, m: Message) {
         match m {
-            Message::Attach { version, selector } => {
-                self.attach_with(shell, version, &selector, false).await;
+            Message::Attach {
+                version,
+                selector,
+                cols,
+                rows,
+            } => {
+                self.attach_with(shell, version, &selector, false, (cols, rows))
+                    .await;
             }
             // **Taking a shell from the desk is the user's decision, so it is a message of its
             // own.** The version is the one this phone attached with: a takeover is not a place to
@@ -1508,7 +1529,10 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                     self.reply(shell, &[Message::Closed { reason: closed::VERSION }]);
                     return;
                 }
-                self.attach_with(shell, version, &selector, true).await;
+                // A takeover keeps the grid the phone already stated; it is not a place to
+                // renegotiate the protocol, and the phone's own `Resize` covers a change.
+                let grid = self.grids.get(&shell).copied().unwrap_or((0, 0));
+                self.attach_with(shell, version, &selector, true, grid).await;
             }
             Message::List => {
                 let Some(listing) = self.host.listing().await else {
@@ -2756,6 +2780,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -2814,6 +2840,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -2835,6 +2863,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -2856,6 +2886,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -2913,6 +2945,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: "abcd".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -3009,6 +3043,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: "abcd".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -3044,6 +3080,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -3076,6 +3114,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -3178,6 +3218,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: "abcd-1".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -3204,6 +3246,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: "abcd-1".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -3227,6 +3271,8 @@ mod tests {
             &Message::Attach {
                 version: MARKS_VERSION - 1,
                 selector: "abcd-1".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -3249,6 +3295,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: "zzzz".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         phone_says(
@@ -3257,6 +3305,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: "abcd".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         phone_says(
@@ -3265,6 +3315,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         phone_says(
@@ -3273,6 +3325,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION + 1,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -3333,6 +3387,8 @@ mod tests {
             &Message::Attach {
                 version: 6,
                 selector: "ab".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -3417,6 +3473,8 @@ mod tests {
             &Message::Attach {
                 version: 1,
                 selector: entries[1].id.clone(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -3438,6 +3496,8 @@ mod tests {
                 &Message::Attach {
                     version,
                     selector: "nope".into(),
+                    cols: 0,
+                    rows: 0,
                 },
             );
             b.tick().await;
@@ -3474,6 +3534,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -3513,6 +3575,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -3554,6 +3618,8 @@ mod tests {
             &Message::Attach {
                 version: 2,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -3570,6 +3636,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -3592,6 +3660,8 @@ mod tests {
             &Message::Attach {
                 version: 1,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -3613,6 +3683,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         phone_says(
@@ -3621,6 +3693,8 @@ mod tests {
             &Message::Attach {
                 version: 1,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -3664,6 +3738,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -3682,6 +3758,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -3714,6 +3792,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -3750,6 +3830,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -3793,6 +3875,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -3921,6 +4005,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -3984,6 +4070,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -4023,6 +4111,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -4056,6 +4146,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -4125,6 +4217,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -4172,6 +4266,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -4194,6 +4290,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -4211,6 +4309,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -4261,6 +4361,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -4318,6 +4420,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: "abcd-1".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -4369,6 +4473,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: "abcd-1".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         phone_says(&link, 1, &Message::Resize { cols: 46, rows: 17 });
@@ -4410,6 +4516,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: "abcd-1".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -4426,6 +4534,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: "abcd-1".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -4464,6 +4574,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: "abcd-1".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -4479,6 +4591,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: "abcd-1".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -4506,6 +4620,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: "abcd-1".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -4542,6 +4658,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: "abcd-1".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -4659,6 +4777,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: "abcd-1".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -4720,6 +4840,8 @@ mod tests {
             &Message::Attach {
                 version: ldmux_protocol::mesh_term::FRAME_VERSION - 1,
                 selector: "abcd-1".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -4759,6 +4881,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -5093,6 +5217,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -5116,6 +5242,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -5144,6 +5272,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: "abcd-1".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -5154,6 +5284,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: "abcd-2".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -5176,6 +5308,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: "abcd-1".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -5185,6 +5319,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: "abcd-1".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -5222,6 +5358,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -5256,6 +5394,8 @@ mod tests {
             &Message::Attach {
                 version: CWD_VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -5291,6 +5431,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -5328,6 +5470,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: "abcd-1".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -5357,6 +5501,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -5392,6 +5538,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: "abcd-1".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -5422,6 +5570,8 @@ mod tests {
                 &Message::Attach {
                     version,
                     selector: String::new(),
+                    cols: 0,
+                    rows: 0,
                 },
             );
             b.tick().await;
@@ -5458,6 +5608,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -5491,6 +5643,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -5519,6 +5673,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: "abcd-1".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -5553,6 +5709,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: "abcd-1".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -5582,6 +5740,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -5640,6 +5800,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: String::new(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;
@@ -5674,6 +5836,8 @@ mod tests {
             &Message::Attach {
                 version: VERSION,
                 selector: "abcd-1".into(),
+                cols: 0,
+                rows: 0,
             },
         );
         b.tick().await;

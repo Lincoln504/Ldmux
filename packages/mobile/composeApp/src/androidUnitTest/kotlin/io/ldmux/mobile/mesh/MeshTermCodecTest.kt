@@ -40,7 +40,12 @@ class MeshTermCodecTest {
         val o = j.jsonObject
         fun i(k: String) = o[k]!!.jsonPrimitive.int
         return when (val kind = o["kind"]!!.jsonPrimitive.content) {
-            "attach" -> TermMessage.Attach(i("version"), o["selector"]!!.jsonPrimitive.content)
+            "attach" -> TermMessage.Attach(
+                i("version"),
+                o["selector"]!!.jsonPrimitive.content,
+                i("cols"),
+                i("rows"),
+            )
             "input" -> TermMessage.Input(unhex(o["bytes"]!!.jsonPrimitive.content))
             "resync" -> TermMessage.Resync
             "hold" -> TermMessage.Hold(o["on"]!!.jsonPrimitive.boolean)

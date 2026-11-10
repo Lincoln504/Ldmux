@@ -1018,9 +1018,10 @@ class MeshTermDriverTest {
 
     @Test
     fun `an attach carries the grid in the same record`() = runBlocking<Unit> {
-        // **Two records for 17 bytes of meaning is 0.6 s of air.** A record is the unit that costs,
-        // so the attach and its resize travel as one: together they are 17 bytes against a 143-byte
-        // payload, and the host's decoder is a stream decoder.
+        // **The grid is inside the attach, not a message after it.** A separate `Resize` cost the
+        // host an `ATTACH_GRACE` wait for a number it already had, and a phone that stated nothing
+        // got a repaint at the desk's geometry before its own: measured as **17 records to open a
+        // shell**. One record, and one repaint at the right size.
         val d = driver()
         d.setGrid(46, 17)
         d.start(); d.onRecord(byteArrayOf(2))
@@ -1031,7 +1032,7 @@ class MeshTermDriverTest {
         d.open("abcd-1")
         assertEquals(1, sess.queued.size, "one record: ${sess.queued.map { it.second.size }}")
         assertEquals(
-            listOf<TermMessage>(TermMessage.Attach(MeshTerm.VERSION, "abcd-1"), TermMessage.Resize(46, 17)),
+            listOf<TermMessage>(TermMessage.Attach(MeshTerm.VERSION, "abcd-1", 46, 17)),
             sess.messages(),
         )
     }

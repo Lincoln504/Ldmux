@@ -71,11 +71,13 @@ async fn a_first_attach_paints_the_pane_at_the_phones_grid() {
     let mut bridge = Bridge::new(DaemonHost(rig.arc.clone()), link.clone());
     // **The attach the phone actually sends: the shell, and the grid it measured.** The grid
     // travelling with the attach is what lets the host fit the pane before its first frame.
+    // **No `Resize` follows**: the grid rides the attach, which is what makes one repaint enough.
     link.phone_says(&Message::Attach {
         version: VERSION,
         selector: rig.session.clone(),
+        cols: 46,
+        rows: 17,
     });
-    link.phone_says(&Message::Resize { cols: 46, rows: 17 });
     bridge.tick().await;
     if !bridge.attached(1) {
         link.phone_says(&Message::Takeover {
@@ -114,11 +116,57 @@ async fn a_first_attach_paints_the_pane_at_the_phones_grid() {
         "and no line is wider than the grid the phone asked for: {:?}",
         mirror.lines
     );
-    // Profile + marks + one framed screen + acks is the honest shape. A desk-sized frame or a
-    // second repaint would be far more than this.
+    // Profile (with the marks) and one framed screen: two records of answer. A desk-sized frame, or
+    // a repaint at the remembered geometry followed by the phone's own, would be far more — measured
+    // on the device as **17 records to open a shell** before the grid rode the attach.
     assert!(
-        records <= 6,
+        records <= 4,
         "a first paint in {records} records: {:?}",
         mirror.lines
+    );
+}
+
+/// **The grid on the attach wins over the geometry this phone used last time.**
+///
+/// The remembered grid is a hint for a phone that states nothing; a phone that states its own has
+/// measured it, and the pane must be fitted to it before the first frame or the phone receives a
+/// repaint it will immediately discard.
+#[tokio::test]
+async fn a_stated_grid_wins_over_the_remembered_one() {
+    let rig = Rig::start().await;
+    let link = FakeLink::default();
+    let mut bridge = Bridge::new(DaemonHost(rig.arc.clone()), link.clone());
+    // First attach states 46x17, and the bridge remembers it.
+    link.phone_says(&Message::Attach {
+        version: VERSION,
+        selector: rig.session.clone(),
+        cols: 46,
+        rows: 17,
+    });
+    bridge.tick().await;
+    if !bridge.attached(1) {
+        link.phone_says(&Message::Takeover {
+            selector: rig.session.clone(),
+        });
+        bridge.tick().await;
+    }
+    assert!(bridge.attached(1));
+    bridge.tick().await;
+
+    // A later attach states a different grid: the first frame must be that one, not the memory.
+    link.phone_says(&Message::Detach);
+    bridge.tick().await;
+    link.phone_says(&Message::Attach {
+        version: VERSION,
+        selector: rig.session.clone(),
+        cols: 40,
+        rows: 12,
+    });
+    bridge.tick().await;
+    let (mirror, _) = phone_view(&link);
+    assert_eq!(
+        mirror.profile.map(|p| (p.0, p.1)),
+        Some((40, 12)),
+        "the profile the phone is given is the grid it stated"
     );
 }
