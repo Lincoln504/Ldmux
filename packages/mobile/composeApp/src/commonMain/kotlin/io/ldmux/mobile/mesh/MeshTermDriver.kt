@@ -441,6 +441,18 @@ class MeshTermDriver(
     private var listAsks: Int = 0
 
     /**
+     * When the attach was last sent, and how many times.
+     *
+     * **An attach whose `Profile` never arrives leaves the page saying "linked, no terminal" for
+     * ever.** The tick re-asks for a *screen* when one is missing, but that needs a profile; nothing
+     * re-asked for the profile itself. A host that could not queue it (its own queue full at the
+     * moment of the attach) therefore left the phone waiting with no cure but the refresh square.
+     * The asks are bounded: a host that answers neither is a state the screen draws.
+     */
+    private var attachAskedAt: Long? = null
+    private var attachAsks: Int = 0
+
+    /**
      * Whether the run of pages now arriving answers a list this link asked for.
      *
      * **Decided once, on the run's first page.** The old code kept two buffers and chose between
@@ -816,6 +828,20 @@ class MeshTermDriver(
             terminalView = null
             connect()
         }
+        // **An attach whose profile never came is asked for again.** Without this the page said
+        // "linked, no terminal" for the life of the connection: the screen retry needs a profile to
+        // compare against, and nothing else re-sent the attach.
+        if (session != null
+            && terminalView == null
+            && mirror.profile == null
+            && attachAskedAt?.let { clock() - it >= ATTACH_RETRY_MS } == true
+        ) {
+            attachAskedAt = null
+            if (attachAsks < ATTACH_ASKS) {
+                queueAttach(attempted ?: "")
+                pump()
+            }
+        }
         // **A list answer that never came is asked for again.** One record, at most
         // [LIST_ASKS] times: a host that is up answers in a handful of records, so a second ask is
         // only ever the cure for a lost one.
@@ -846,7 +872,8 @@ class MeshTermDriver(
         // **A list answer has a deadline too**, or the loop sleeps through it: the idle tick is
         // 30 s, which is longer than anyone will wait for a page of shells.
         val list = listAskedAt?.plus(LIST_ANSWER_MS)
-        listOfNotNull(deadline, retry, list).minOrNull()
+        val attach = attachAskedAt?.plus(ATTACH_RETRY_MS)
+        listOfNotNull(deadline, retry, list, attach).minOrNull()
     }
 
     // ── what the user does ─────────────────────────────────────────────────────────────
@@ -1530,6 +1557,8 @@ class MeshTermDriver(
             is TermMessage.Profile -> {
                 if (pick == Pick.Probing) pick = Pick.Attached
                 appLog("mesh profile ${m.cols}x${m.rows} v${m.version} shell ${m.shell}")
+                attachAskedAt = null
+                attachAsks = 0
                 hostVersion = m.version
                 unsupported = m.unsupported
                 // The host names the shell it attached (version 2), so the header's current marker
@@ -1803,6 +1832,8 @@ class MeshTermDriver(
      * the phone's size rather than the desk's).
      */
     private fun queueAttach(selector: String) {
+        attachAskedAt = clock()
+        attachAsks += 1
         // A fresh attach is a fresh shell on the host, and it starts unheld: whatever this phone
         // told the previous one does not carry over. Nothing has been drawn for it either, so the
         // first hold waits for the first frame.
@@ -2052,6 +2083,16 @@ internal fun silenceFailureMs(hops: Int?): Long =
  * A list is a handful of records each way, so a few seconds is a lost answer and not a slow one.
  */
 private const val LIST_ANSWER_MS = 8_000L
+
+/**
+ * How long an attach may go unanswered before it is asked for again.
+ *
+ * A profile is one record back, so a few seconds is a lost answer and not a slow one.
+ */
+private const val ATTACH_RETRY_MS = 6_000L
+
+/** How many times one attach is asked for before the screen's own refresh is the cure. */
+private const val ATTACH_ASKS = 3
 
 /** How many times a list is asked for before the screen's own refresh is the only cure. */
 private const val LIST_ASKS = 3

@@ -215,6 +215,37 @@ class MeshTermDriverTest {
         assertEquals(before + 1, gw.sent.size, "one `Resync`, and no ladder after it")
     }
 
+    /// **An attach whose profile never arrives is asked for again, a bounded few times.**
+    ///
+    /// The tick re-asks for a *screen* when one is missing, but that needs a profile; nothing
+    /// re-asked for the profile itself. A host that could not queue it left the page saying
+    /// "linked, no terminal" for the life of the connection, with the refresh square as the only
+    /// cure — the same shape as the list answer that never came.
+    @Test
+    fun `an attach with no profile is asked for again`() = runBlocking<Unit> {
+        val d = driver(); probed(d)
+        deliver(d, TermMessage.Sessions(true, listOf(ent("abcd-1"))))
+        assertEquals(1, sess.queued.size, "the attach went")
+        assertEquals(now + 6_000, d.nextWakeMs(), "the loop must wake for the deadline")
+
+        // Nothing comes back: one record a deadline, then the asks stop.
+        now += 3_000
+        d.tick()
+        assertEquals(1, sess.queued.size, "under the deadline nothing is repeated")
+        now += 4_000
+        d.tick()
+        assertEquals(2, sess.queued.size, "past it the attach is asked for once more")
+        repeat(4) {
+            now += 7_000
+            d.tick()
+        }
+        assertTrue(sess.queued.size <= 4, "bounded asks, not one per deadline: ${sess.queued.size}")
+
+        // The profile arrives: the deadline is over.
+        deliver(d, TermMessage.Profile(13, 46, 17, 0, "abcd-1"))
+        assertEquals(null, d.nextWakeMs(), "an answered attach schedules nothing")
+    }
+
     private fun stream(vararg m: TermMessage): ByteArray = m.flatMap { it.encode().toList() }.toByteArray()
     private fun data(vararg m: TermMessage) = Received.Data(listOf(Delivered(0, stream(*m))))
 
