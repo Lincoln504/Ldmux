@@ -201,6 +201,30 @@ class MeshTerminalSourceTest {
         assertEquals("history has a gap here", s.scrollNotice)
     }
 
+    /// **`show` on a frozen view ends after the screen it asked for.**
+    ///
+    /// The wait exists so the host's release can deliver the newest screen. Ending it on quiet
+    /// instead leaves it running for ever on a shell that keeps printing, and the host goes on
+    /// drawing: measured 2026-11-09 as 7 records in 12 s on a pane printing every two seconds.
+    @Test
+    fun `a show ends its wait on the first screen and the view freezes again`() {
+        val (s, _, _) = source()
+        s.setPublicChannel(true)
+        s.show(screenOf(1, "$ one", "$ "), "aa11")
+        assertFalse(s.awaitingSync, "a frozen view is not waiting for anything")
+
+        s.sync()
+        assertTrue(s.awaitingSync, "the release is owed a screen")
+
+        // The screen the release asked for.
+        s.show(screenOf(2, "$ one", "$ two", "$ "), "aa11")
+        assertFalse(s.awaitingSync, "one screen is the whole answer to show")
+
+        // And the freeze resumes at the same grid: the next screen is kept, not drawn.
+        s.show(screenOf(3, "$ one", "$ two", "$ three"), "aa11")
+        assertTrue(s.pullHeld(), "the newest screen was kept, waiting for a show")
+    }
+
     /// **A lost request expires, so the up key never goes dead.**
     ///
     /// One request in flight at a time, or a fast press would queue a record per press. But a

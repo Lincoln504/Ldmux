@@ -52,6 +52,18 @@ internal class PublicChannelHold {
         private set
 
     /**
+     * The wait is for **one** screen, because no answer is owed.
+     *
+     * A press with nothing typed asks to see the newest screen, and the newest screen is what the
+     * release sends. A press that sent text asks for the command's *answer*, which arrives over
+     * several screens and therefore ends on quiet. Treating them alike is what kept the view open
+     * for ever on a shell that never goes quiet: measured 2026-11-09 on a pane printing a line every
+     * two seconds, `show` left the host drawing and the link spent 7 records in 12 s — live mode
+     * with a batch-mode button.
+     */
+    private var awaitingOneScreen = false
+
+    /**
      * The last press actually sent something, so an answer is owed.
      *
      * Separate from [awaiting], which is the draw gate: a press with an empty buffer still unfreezes
@@ -108,6 +120,7 @@ internal class PublicChannelHold {
         if (on == value) return
         on = value
         awaiting = false
+        awaitingOneScreen = false
         waitingOnSend = false
         flushing = false
         reported = false
@@ -124,6 +137,7 @@ internal class PublicChannelHold {
      */
     fun settle() {
         awaiting = false
+        awaitingOneScreen = false
         waitingOnSend = false
         reported = false
     }
@@ -136,6 +150,7 @@ internal class PublicChannelHold {
      */
     fun forget() {
         awaiting = false
+        awaitingOneScreen = false
         waitingOnSend = false
         flushing = false
         reported = false
@@ -193,6 +208,16 @@ internal class PublicChannelHold {
     /** A screen was drawn now: the quiet timer restarts. */
     fun drawn(nowMs: Long) {
         lastPaintAt = nowMs
+        // **One screen is the whole answer to "show me".** The host was released so it could send
+        // what changed; that screen is now on the glass, and the next one is exactly what the
+        // freeze exists to skip. A wait that sent text is untouched: its answer arrives over
+        // several screens and ends on quiet, or on the host's own idle flag.
+        if (awaitingOneScreen) {
+            awaitingOneScreen = false
+            awaiting = false
+            waitingOnSend = false
+            reported = false
+        }
     }
 
     /**
@@ -205,6 +230,7 @@ internal class PublicChannelHold {
         if (!awaiting || lastPaintAt == 0L) return false
         if (nowMs - lastPaintAt < quietMs) return false
         awaiting = false
+        awaitingOneScreen = false
         waitingOnSend = false
         reported = false
         return true
@@ -220,6 +246,7 @@ internal class PublicChannelHold {
     fun answered(): Boolean {
         if (!awaiting) return false
         awaiting = false
+        awaitingOneScreen = false
         waitingOnSend = false
         reported = false
         return true
@@ -240,6 +267,7 @@ internal class PublicChannelHold {
         // is false, so "waiting for answer" is not claimed over a send that never happened.
         waitingOnSend = pending
         awaiting = true
+        awaitingOneScreen = !pending
         lastPaintAt = nowMs
         // **A press never stops a drain that is already running.** `flushing = pending` cleared it
         // when the batcher happened to be empty at that instant — mid-drain, after the pump had

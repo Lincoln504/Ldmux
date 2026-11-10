@@ -361,6 +361,15 @@ struct Attached {
     /// every control message still arrive — and the release sends the difference from the screen the
     /// phone holds, so nothing is repainted.
     held_since: Option<Instant>,
+    /// **A grid change owes the phone one frame, even while frozen.**
+    ///
+    /// Batch mode's hold stops a stream of output the operator is not reading. A rotation or a
+    /// keyboard is not output: it is the view being made valid again, and without a frame the phone
+    /// keeps drawing the rows of the old grid into a new viewport — which reads as the terminal
+    /// having stopped updating until the shell is left and re-entered (reported 2026-11-09, and
+    /// reproduced on the device: rotate while held, one `Resize` record out, no screen back).
+    /// Set by an accepted `Resize`, cleared when that frame is built; the hold resumes after it.
+    resize_frame: bool,
     /// When this shell's screen was last read while the phone had it held.
     ///
     /// **A frozen view is not worth a keeper round trip twenty times a second.** While held nothing
@@ -996,9 +1005,12 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                 && a.held()
             {
                 let now = (self.clock)();
-                let due = a
-                    .held_read_at
-                    .is_none_or(|t| now.saturating_duration_since(t) >= HELD_SCREEN_MS);
+                // **A grid change is read at once.** The once-a-second gate is for a picture nobody
+                // draws; a shell that owes a frame after a resize owes a *current* one, and reading
+                // late draws the pane as it was before the pty changed size.
+                let due = a.resize_frame
+                    || a.held_read_at
+                        .is_none_or(|t| now.saturating_duration_since(t) >= HELD_SCREEN_MS);
                 if !due {
                     continue;
                 }
@@ -1077,7 +1089,22 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
             {
                 a.hold(false, now);
             }
-            if self.shells.get(&shell).is_some_and(Attached::held) {
+            // **The one frame a grid change owes goes out even frozen.** Everything else waits: the
+            // hold is what keeps a build log from spending the hour's allowance on a picture in a
+            // drawer, and a resize is the one change that makes the picture wrong rather than old.
+            let owes_frame = self
+                .shells
+                .get(&shell)
+                .is_some_and(|a| a.held() && a.resize_frame);
+            if owes_frame {
+                // The frame must go at once: the pty has already changed size, so a paced delay is
+                // a wait on nothing. The differ was reset, so what follows is a whole screen.
+                if let Some(a) = self.shells.get_mut(&shell) {
+                    a.changed_last_tick = false;
+                    a.defer_until = None;
+                }
+            }
+            if self.shells.get(&shell).is_some_and(Attached::held) && !owes_frame {
                 if screen.dead {
                     self.reply(
                         shell,
@@ -1188,6 +1215,7 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
             }
             if let Some(a) = self.shells.get_mut(&shell) {
                 a.retry.clear();
+                a.resize_frame = false;
                 a.last_push = Some(now);
                 // **An echo does not open a burst.** The keystroke is sent at once, which is right,
                 // and then the answer it produces is the *next* change: marking this push as a
@@ -1394,6 +1422,7 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                                     .is_none()
                                     .then(|| Instant::now() + ATTACH_GRACE),
                                 resync_wanted: false,
+                                resize_frame: false,
                                 held_since: None,
                                 released_by_sync: false,
                                 defer_until: None,
@@ -1781,9 +1810,17 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                 let accepted = self.host.resize(&session, cols, rows).await.is_ok();
                 if accepted {
                     let pending = self.link.pending();
+                    let held = self.shells.get(&shell).is_some_and(Attached::held);
                     if let Some(a) = self.shells.get_mut(&shell) {
                         a.geometry = Some((cols, rows));
                         a.defer_resync(pending);
+                        if held {
+                            // **A frozen view still owes the frame that makes its grid true.** The
+                            // resync above would be swallowed by the hold, so the shell is marked
+                            // for exactly one frame and the hold resumes after it.
+                            a.resize_frame = true;
+                            a.resync();
+                        }
                     }
                     self.grids.insert(shell, (cols, rows));
                 }
@@ -2224,8 +2261,13 @@ fn history_page(
     lines: &[String],
 ) -> (u32, bool, Vec<String>) {
     let live_top = total.saturating_sub(rows);
-    let oldest_captured = total.saturating_sub(captured);
-    let oldest_available = total.saturating_sub(available);
+    // **`historySize` and `historyLines` count lines above the live screen**, not lines from the
+    // top of the pane: the keeper's numbering is `[live_top - history_size, live_top)` for what
+    // exists and `[live_top - history_lines, live_top)` for what it sent. Subtracting from `total`
+    // instead puts both counters `rows` too high, which is a page that misses by a screen — seen
+    // on the device as `history 9598+17 -> 9615`.
+    let oldest_captured = live_top.saturating_sub(captured);
+    let oldest_available = live_top.saturating_sub(available);
     let start = from.max(oldest_captured).min(live_top);
     let end = start.saturating_add(want).min(live_top);
     // **A row is clamped to what a message can carry.** The wire's line field is one byte and the
@@ -3772,37 +3814,48 @@ mod tests {
     /// up key on a screen the phone joined late used to answer "no history yet on this link" — true
     /// and useless, because the rows exist on the host. This asks for them by absolute line number
     /// so a page joins what the phone holds.
-    /// **The three counts of a keeper snapshot, at the numbers the deployed pane reported.**
+    /// **A page is sliced in the keeper's numbering, at the numbers the device reported.**
     ///
-    /// `totalRows 9912`, `historySize 9895`, `rows 17`, and `historyLines` = whatever was asked
-    /// for. The bug this pins: the old code treated the *requested* history count as the captured
-    /// one, so `oldest` became `total` and every page was empty. The measured pane is also the
-    /// proof that `historySize` is the number a page is clamped against.
+    /// Measured 2026-11-09 on the deployed pane: `totalRows 9632`, `rows 17`, `historySize 9344`,
+    /// and `historyLines 17` for the exact request. The two history counters count lines **above
+    /// the live screen**, so the live screen's first line is `total - rows` and the oldest line
+    /// either counter reaches is measured back from there. Subtracting from `total` instead is a
+    /// page that misses by a whole screen — which is what the device showed as
+    /// `history 9598+17 -> 9615` before this was fixed.
     #[test]
     fn a_history_page_is_sliced_in_the_keepers_numbering() {
-        // 64 history lines captured (lines 9848..9912) plus the 17 live rows (9912..9929).
-        let text: Vec<String> = (9848..9929).map(|n| format!("line {n}")).collect();
-        assert_eq!(text.len(), 81, "64 history + 17 live");
-        // One page just above the live screen: lines 9879..9895.
-        let (start, older, page) = history_page(9912, 17, 64, 9895, 9879, 16, &text);
-        assert_eq!(start, 9879);
-        assert!(older, "the pane kept 9895 lines, so there is more above this page");
-        assert_eq!(page.len(), 16);
-        assert_eq!(page[0], "line 9879");
+        // The 17 history lines the keeper sent (9598..9615) plus the 17 live rows (9615..9632).
+        let text: Vec<String> = (9598..9632).map(|n| format!("line {n}")).collect();
+        assert_eq!(text.len(), 34, "17 history + 17 live");
 
-        // A request that reaches into the live screen is clamped back to its first row.
-        let (start, _, page) = history_page(9912, 17, 64, 9895, 9890, 16, &text);
-        assert_eq!(start, 9890);
-        assert_eq!(page.len(), 5, "9890..9895 is all the history left");
+        // The page asked for, and the page served: the same 17 rows.
+        let (start, older, page) = history_page(9632, 17, 17, 9344, 9598, 17, &text);
+        assert_eq!(start, 9598, "the page starts exactly where it was asked for");
+        assert_eq!(page.len(), 17);
+        assert_eq!(page[0], "line 9598");
+        assert_eq!(page[16], "line 9614");
+        assert!(older, "the pane kept 9344 lines, so there is more above");
 
-        // Older than what this snapshot captured: serve from the oldest line in hand, and say so,
-        // so the phone's next press walks up from there instead of skipping a gap.
-        let (start, older, page) = history_page(9912, 17, 64, 9895, 100, 16, &text);
-        assert_eq!(start, 9848, "the oldest captured line");
-        assert!(older, "there is more history above this page");
-        assert_eq!(page[0], "line 9848");
+        // A request that reaches into the live screen is clamped to the first history row above it.
+        let (start, _, page) = history_page(9632, 17, 17, 9344, 9608, 17, &text);
+        assert_eq!(start, 9608);
+        assert_eq!(page.len(), 7, "9608..9615 is all the history left");
 
-        // Nothing above the live screen at all (a fresh pane): an empty page, not a wrong one.
+        // Older than this snapshot captured: serve from the oldest line in hand and say so, so the
+        // phone's next press walks up from there rather than skipping a gap.
+        let (start, older, page) = history_page(9632, 17, 17, 9344, 100, 17, &text);
+        assert_eq!(start, 9598, "the oldest captured line");
+        assert!(older);
+        assert_eq!(page[0], "line 9598");
+
+        // At the live screen there is no history to serve, and `older` still tells the caller the
+        // pane holds some — that is how it knows to ask again lower down.
+        let (start, older, page) = history_page(9632, 17, 17, 9344, 9615, 17, &text);
+        assert_eq!(start, 9615);
+        assert!(page.is_empty());
+        assert!(older);
+
+        // A pane that never scrolled: nothing above, nothing to serve, and `older` says so.
         let (start, older, page) = history_page(17, 17, 0, 0, 0, 16, &text[..17]);
         assert_eq!(start, 0);
         assert!(!older);
@@ -3844,13 +3897,6 @@ mod tests {
         (lines, last, older)
     }
 
-    /// **The scrollback contract, end to end through the wire.**
-    ///
-    /// The phone asks for an absolute line of the keeper's numbering; the answer is the rows from
-    /// there, `last` when the answer is complete, and `older` when the pane holds history above it.
-    /// The distinction is the whole point: an answer that ends without saying whether anything is
-    /// above forces the phone to spend a record discovering it, and one that says "no more" too
-    /// early strands the operator at the wrong top.
     #[tokio::test]
     async fn a_phone_can_ask_for_the_shells_own_scrollback() {
         let (mut b, host, link) = setup();
@@ -4853,6 +4899,71 @@ mod tests {
     /// Batch mode freezes the picture until the operator presses sync, and the host had no way to
     /// know: a shell printing a build log cost a record a second for screens the phone kept and
     /// dropped. The release must not repaint — the differ still records what the phone holds.
+    /// **A rotation or a keyboard owes one frame, even frozen.**
+    ///
+    /// The hold exists to stop output the operator is not reading; a grid change is not output, it
+    /// is the view being made valid again. Without this frame the phone kept drawing the old grid
+    /// into a new viewport, which reads as the terminal having stopped updating until the shell was
+    /// left and re-entered (reported 2026-11-09; reproduced on the device as one `Resize` record out
+    /// and no screen back). And *one* frame: the rows that follow while the view is still frozen
+    /// are exactly what the hold is for.
+    #[tokio::test]
+    async fn a_resize_on_a_held_shell_sends_one_frame_and_then_freezes_again() {
+        let (mut b, host, link, clock) = attached_paced().await;
+        phone_says(&link, 1, &Message::Hold { on: true });
+        b.tick().await;
+        let base = sent_records(&link);
+        clock.advance(2_000);
+        paced(&host, &["$ ls", "one"]);
+        b.tick().await;
+        assert_eq!(sent_records(&link), base, "frozen: nothing is built");
+
+        // The phone rotates: a new grid, which the pane accepts.
+        phone_says(&link, 1, &Message::Resize { cols: 79, rows: 18 });
+        b.tick().await;
+        let after = link.0.lock().unwrap().sent[base..].to_vec();
+        assert!(!after.is_empty(), "the grid change owes the phone a frame");
+        let mut d = Decoder::new();
+        let msgs: Vec<Message> = after
+            .iter()
+            .flat_map(|(_, bytes)| d.push(bytes).unwrap())
+            .filter_map(|m| m.ok())
+            .collect();
+        // **The frame is the new grid**: a full row set (so the phone starts the screen over rather
+        // than patching 4 rows of an 18-row pane) and the profile that restates it, so its engine is
+        // rebuilt at 79x18 instead of stretching the old one.
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, Message::Rows { full: true, .. })),
+            "the frame starts the screen over: {msgs:?}"
+        );
+        assert!(
+            msgs.iter().any(|m| matches!(
+                m,
+                Message::Profile {
+                    cols: 79,
+                    rows: 18,
+                    ..
+                }
+            )),
+            "and the phone is told the grid it now has: {msgs:?}"
+        );
+
+        // And the freeze resumes: further output while held builds nothing.
+        let base = sent_records(&link);
+        clock.advance(2_000);
+        paced(&host, &["$ ls", "two"]);
+        b.tick().await;
+        clock.advance(2_000);
+        paced(&host, &["$ ls", "three"]);
+        b.tick().await;
+        assert_eq!(
+            sent_records(&link),
+            base,
+            "one frame for the grid change, then frozen again"
+        );
+    }
+
     #[tokio::test]
     async fn a_held_shell_is_not_drawn_until_it_is_released() {
         let (mut b, host, link, clock) = attached_paced().await;

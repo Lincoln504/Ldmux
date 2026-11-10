@@ -33,6 +33,39 @@ class PublicChannelHoldTest {
         assertFalse(h.acceptScreen(painted = true), "kept again: the newest one is what show paints")
     }
 
+    /// **"Show" ends on one screen; a send ends on quiet.**
+    ///
+    /// A press with nothing typed asks to see the newest screen, and the release sends exactly
+    /// that. Waiting for quiet instead kept the view open for ever on a shell that never goes
+    /// quiet — measured 2026-11-09 on a pane printing every two seconds: `show` left the host
+    /// drawing and the link spent 7 records in 12 s, live mode behind a batch-mode button.
+    @Test
+    fun `a show with nothing typed ends after one screen`() {
+        val h = PublicChannelHold()
+        h.set(true)
+        h.sync(pending = false)
+        assertTrue(h.awaiting, "the release is owed a screen")
+        assertFalse(h.waitingOnSend, "nothing was typed, so nobody is owed an answer")
+        h.drawn(1_000)
+        assertFalse(h.awaiting, "the screen arrived: the wait is over and the host is re-held")
+    }
+
+    /// A press that *sent* something is waiting for the command's answer, which is not one screen.
+    @Test
+    fun `a sync that sent text waits for the answer to go quiet`() {
+        val h = PublicChannelHold()
+        h.set(true)
+        assertTrue(h.sync(pending = true))
+        assertTrue(h.waitingOnSend)
+        h.drawn(1_000)
+        assertTrue(h.awaiting, "an answer arrives over several screens")
+        h.drained()
+        assertFalse(h.settleIfQuiet(1_000 + PublicChannelHold.QUIET_MS - 1), "not yet quiet")
+        assertTrue(h.settleIfQuiet(1_000 + PublicChannelHold.QUIET_MS))
+        assertFalse(h.awaiting)
+        assertFalse(h.waitingOnSend)
+    }
+
     @Test
     fun `a sync with nothing waiting asks for the newest screen instead of sending`() {
         val h = PublicChannelHold()

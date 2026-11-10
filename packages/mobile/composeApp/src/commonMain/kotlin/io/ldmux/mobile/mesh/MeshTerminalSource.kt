@@ -458,6 +458,10 @@ class MeshTerminalSource(
         pendingScreen = null
         applyScreen(held)
         hold.painted()
+        // **A pulled screen is a drawn screen**, and a drawn screen is the whole answer to a
+        // `show` that sent nothing: the wait ends here, so the host is re-held instead of
+        // streaming into a frozen view.
+        hold.drawn(now())
         return true
     }
 
