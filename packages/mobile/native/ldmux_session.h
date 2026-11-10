@@ -148,6 +148,10 @@ int32_t ldmux_session_set_airtime(LdmuxSession *s, double airtime_ms);
    MeshCore's own direct-send budget. Zero or one keeps the direct-neighbour timing. */
 int32_t ldmux_session_set_hops(LdmuxSession *s, uint32_t hops);
 
+/* Re-size the record because the route changed: a repeater's hops come out of the same 176-byte
+   radio frame as the record. Queued chunks keep the size they were split at. */
+int32_t ldmux_session_set_record_limit(LdmuxSession *s, uint32_t bytes);
+
 /* Chunks queued or in flight. */
 int32_t ldmux_session_pending(LdmuxSession *s);
 

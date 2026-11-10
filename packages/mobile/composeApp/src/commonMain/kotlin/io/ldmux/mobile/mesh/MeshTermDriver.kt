@@ -91,6 +91,14 @@ interface SessionPort {
      */
     fun setHops(hops: Int) {}
 
+    /**
+     * Re-size the record because the route changed, without a new handshake.
+     *
+     * A repeater's hops come out of the same radio frame as the record, so a path that grows shrinks
+     * what one record can carry. Defaulted: a test double has no session to re-size.
+     */
+    fun setRecordLimit(bytes: Int) {}
+
     fun poll(nowMs: Long, recordsLeft: Int, l2Slots: Int): List<ByteArray>
 
     /**
@@ -383,6 +391,8 @@ class MeshTermDriver(
 
     /** The record size this session was sealed at, and when the last resize re-handshake ran. */
     private var sessionLimit = 0
+    /** Repeaters on the route when the session's timer was last sized, so a route that grows is followed. */
+    private var sessionHops = 0
     private var lastResizeAt = 0L
 
     private val decoder = TermDecoder()
@@ -585,7 +595,15 @@ class MeshTermDriver(
         // survives a daemon restart), so a retry of the handshake ladder is asking the same host
         // that already knows where to answer: re-sending the hint spent a record per rung of a
         // ladder that can climb for a minute.
-        val hintDue = hintSentAt == 0L || clock() - hintSentAt >= HINT_REFRESH_MS
+        // **A hint cannot cross a repeater, so it waits for a route.** It is a direct record and the
+        // repeaters consume a direct packet's path, so the host cannot learn anything from it beyond
+        // the first hop: sent while pathless it is a broadcast to whatever happens to be in earshot,
+        // one record per connect at range. The request that finds the route already carries this
+        // radio's key (`LDRQ`), so the host learns who we are from the packet that also teaches it
+        // where to answer. At earshot a route is known — a zero-hop path counts — and the hint goes
+        // out as it always did.
+        val hintDue = (hintSentAt == 0L || clock() - hintSentAt >= HINT_REFRESH_MS) &&
+            gateway.routeHops != null
         val hint = if (hintDue) gateway.radioPublicKey?.let(RouteHint::record) else null
         if (hint != null) {
             // **A loop, not `repeat`.** `return@repeat` continues the iteration loop, so the hint
@@ -711,7 +729,30 @@ class MeshTermDriver(
         if (clock() - lastResizeAt < RESIZE_FLOOR_MS) return
         lastResizeAt = clock()
         sessionLimit = now
-        rekey()
+        // **Re-size, do not re-handshake.** The size is a property of the route, not of the keys, and
+        // a handshake at range is a dozen records of air — msg1 out, msg2 back, msg3 out, each one
+        // forwarded by every repeater — to change one number the radio already told us. The session
+        // is resized in place, and the host does exactly the same thing from its carrier's own limit.
+        val s = session
+        if (s != null) s.setRecordLimit(now) else rekey()
+    }
+
+    /**
+     * **The retransmission timer follows the route while the session is up.**
+     *
+     * Six airtimes per hop is the budget a record's first copy needs, and it is set once at the
+     * handshake. A phone that walks out of direct range keeps the neighbour's timer on a ten-hop
+     * path: every record is retransmitted while its first copy is still crossing the mesh, which
+     * doubles the traffic on a link that was working — the exact cost the per-hop rule exists to
+     * avoid. The hop count is published by the link (it reverses every path it learns), so it is
+     * re-read here rather than only at handshake time.
+     */
+    private fun followRoute(health: SessionHealth) {
+        val hops = gateway.routeHops?.coerceIn(1, MAX_HOPS) ?: return
+        if (hops == sessionHops) return
+        if (health.pending > 0) return
+        sessionHops = hops
+        session?.setHops(hops)
     }
 
     /** One record from the gateway's `RECV`. */
@@ -733,7 +774,8 @@ class MeshTermDriver(
             // for a route, where the first copy is still travelling when the timer fires and every
             // retry costs the air the timer exists to save. The route was refreshed by `connect()`
             // just before this handshake, so the hop count is the one the session will use.
-            s.setHops(gateway.routeHops ?: 1)
+            sessionHops = gateway.routeHops?.coerceIn(1, MAX_HOPS) ?: 1
+            s.setHops(sessionHops)
             handshakeTries = 0
             // A session is up: the next handshake (after a drop) starts its own clock.
             handshakeBeganAt = 0L
@@ -801,6 +843,7 @@ class MeshTermDriver(
             // the link, so this is not [failed]: the screen stays up and only the keys change.
             if (h.needsRekey && terminalView == null) rekey()
             if (terminalView == null) resizeIfRouteGrew(h)
+            if (terminalView == null) followRoute(h)
             if (h.failed && terminalView == null) failed(MeshLinkState.SessionFailed, "the ARQ gave up a record")
             // **A record the host never answers is a dead link, and the screen must say so.** With
             // nothing outstanding an idle shell is silent by design, so silence alone proves
@@ -2175,7 +2218,13 @@ internal fun silenceFailureMs(hops: Int?): Long =
     // at one byte a hop), and the cap is above one round trip at that length.
     (60_000L + (hops ?: 0).coerceIn(0, MAX_HOPS) * 3_600L).coerceAtMost(300_000L)
 
-/** The firmware's longest legal path in one-byte hops: 64 path bytes. */
+/**
+ * The firmware's longest legal path: a 64-byte path field, so 63 one-byte hops.
+ *
+ * Every route-dependent figure clamps to it — the silence bound, the answer deadlines, the hop count
+ * handed to the session's timer — because a number above it is a misread rather than a route, and a
+ * misread must not become an hour-long timer.
+ */
 internal const val MAX_HOPS = 63
 
 /**

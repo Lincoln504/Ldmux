@@ -73,6 +73,16 @@ class MeshSession internal constructor(
     }
 
     /**
+     * The record size follows the path, one byte a hop, out of the same radio frame.
+     *
+     * A handshake is only needed when the *keys* change; the size is a property of the route, and at
+     * range a handshake is a dozen records of air spent to change one number.
+     */
+    override fun setRecordLimit(bytes: Int) {
+        if (bytes > 0) lib.setRecordLimit(live(), bytes)
+    }
+
+    /**
      * Feed one record from the gateway's `RECV`. A record that fails any check (tag, replay,
      * index, decode) changes no state and comes back as [Received.Rejected]: it is evidence of a
      * noisy link or an attacker, not of a broken session, so it does not end it.

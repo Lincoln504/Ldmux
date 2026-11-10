@@ -76,6 +76,19 @@ Three rules keep the extra air contained:
   too, so it covers the neighbour case at the same cost, and two reply paths would be two things to
   keep correct.
 
+## The answer goes back under the request's scope
+
+A dense mesh configures its repeaters to deny unscoped floods (`region denyf *`), and some cap them
+at a handful of hops (`flood.max.unscoped`). An unscoped answer to a scoped request is therefore
+dropped before it crosses the region: the phone asks, the host answers, and nothing arrives.
+
+So the reply is sent under **the scope the request arrived on**, which is MeshCore's own
+`ReplyScope::REPLY_SCOPE_REQUEST`. The transport code is an HMAC over *the packet's own* payload and
+type, so it is computed for the reply rather than copied from the request. This end can only honour
+a scope it can name, so the order is: its own radio's scope when the request's code matches it, then
+a public region whose derived key reproduces the code, then unscoped — which is exactly what an
+unscoped request gets, and what a request from an unknown private region gets.
+
 ## Rejected
 
 - **Flooding the session records themselves.** Impossible: a raw custom packet is only delivered on a

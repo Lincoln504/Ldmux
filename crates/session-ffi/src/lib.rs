@@ -390,6 +390,28 @@ pub unsafe extern "C" fn ldmux_session_set_hops(s: *mut LdmuxSession, hops: u32)
     }
 }
 
+/// **Re-size the record, because the route changed under a live session.**
+///
+/// The packet is `[header][path][record]` inside the radio's 176-byte frame, so a repeater's hops
+/// come out of the record budget: a record built for an empty path is refused by the builder at the
+/// first path byte once the phone walks out of direct range. The phone used to answer that with a
+/// whole new handshake, which at range is a dozen records of air spent to change one number — and a
+/// handshake is only needed when the *keys* change, not the size. Queued chunks keep the size they
+/// were split at, so a shrink governs what is queued next; the driver only resizes with nothing in
+/// flight, which is the case this is written for.
+///
+/// Zero or a size below the record header is ignored rather than accepted as a broken session.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_session_set_record_limit(s: *mut LdmuxSession, bytes: u32) -> i32 {
+    // SAFETY: the caller passes a live handle from this ABI, or null (which `with_session` refuses).
+    unsafe {
+        with_session(s, |sess| {
+            sess.inner.set_record_limit(bytes as usize);
+            LDMUX_OK
+        })
+    }
+}
+
 /// Run `f` on the session behind `*s`, or `LDMUX_ERR_NULL` if the slot or handle is null.
 unsafe fn with_session(s: *mut LdmuxSession, f: impl FnOnce(&mut LdmuxSession) -> i32) -> i32 {
     guard(|| {

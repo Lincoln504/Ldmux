@@ -139,7 +139,14 @@ const ROUTE_REASK_FLOOR: Duration = Duration::from_secs(2);
 /// The phone uses the same figure. A route is only true while the repeaters that carried it are
 /// still there, and a peer that walks away leaves a well-formed path that nothing refuses — the
 /// radio transmits and nobody answers.
-const PEER_ROUTE_STALE: Duration = Duration::from_secs(120);
+/// How long a route beats a fresher candidate with more hops.
+///
+/// Sixty seconds is the window the community's own path-gating proposal settled on (accept a
+/// candidate when the route is unknown, when it has fewer hops, or when the one in hand is older
+/// than a minute). Two minutes was long enough for a dead one-hop route to outlive the phone that
+/// had moved three repeaters away, and a shorter window costs nothing while a route is working:
+/// an equal-or-shorter candidate always wins anyway.
+const PEER_ROUTE_STALE: Duration = Duration::from_secs(60);
 
 /// The least time between two **route replies** to the same peer.
 ///
@@ -242,6 +249,7 @@ fn send_route_reply<L: ByteLink>(
     companion: &mut Companion<L>,
     req: &RouteRequest,
     own_key: &[u8; 32],
+    scope: Option<&FloodScope>,
 ) -> bool {
     let Some(send) = PeerPath::reversed(
         usize::from(req.path.hash_size),
@@ -255,13 +263,14 @@ fn send_route_reply<L: ByteLink>(
     // (`Packet::calculatePacketHash`), and the phone would learn nothing. A flooded reply that the
     // phone heard a second time would otherwise be discarded as its own duplicate, and a *cannot
     // arrive* is worse than a *arrives twice* on a mesh where the first copy is what a lost hop ate.
-    let Ok(packet) = ldmux_companion::build_route_reply_flood(
+    let Ok(packet) = ldmux_companion::build_route_reply_flood_in_scope(
         own_key,
         &req.peer_key,
         send.hash_size,
         send.hops,
         &send.bytes,
         &req.nonce,
+        scope,
     ) else {
         return false;
     };
@@ -289,6 +298,24 @@ fn route_reply(record: &[u8]) -> Option<PeerPath> {
         usize::from(path.hops),
         &path.bytes,
     )
+}
+
+/// The scope a reply should go back under: **the request's own**, once matched to a key.
+///
+/// A dense mesh denies unscoped floods (`region denyf *`) and may cap them at a few hops, so an
+/// unscoped answer to a scoped request never crosses the region. MeshCore's own rule is
+/// `ReplyScope::REPLY_SCOPE_REQUEST`; this end can only honour it for a scope it can name, so the
+/// order is: this radio's own scope when the request's code matches it, then a public region whose
+/// derived key reproduces the code, then nothing (unscoped, which is what an unscoped request gets).
+fn reply_scope(frame: &[u8], own: Option<&FloodScope>) -> Option<FloodScope> {
+    let view = frame_packet(frame)?;
+    let code = view.transport_codes?[0];
+    if let Some(scope) = own
+        && ldmux_companion::transport_code(&scope.key, view.payload_type, view.payload) == code
+    {
+        return Some(scope.clone());
+    }
+    identify_scope(&view, KNOWN_SCOPE_TAGS)
 }
 
 /// A flooded route request in a receive-log frame, when it is addressed to `own_key`.
@@ -1580,8 +1607,13 @@ fn serve_loop<L: ByteLink>(
                         && left(budget, sent) != Some(0)
                     {
                         last_reply = Some(Instant::now());
-                        let ok =
-                            send_route_reply(&mut companion, &req, &settings.preset.public_key);
+                        let scope = reply_scope(&frame, scope.as_ref());
+                        let ok = send_route_reply(
+                            &mut companion,
+                            &req,
+                            &settings.preset.public_key,
+                            scope.as_ref(),
+                        );
                         route_log(&format!("reply sent ok={ok}"));
                         if ok {
                             sent = sent.saturating_add(1);
@@ -2254,7 +2286,7 @@ mod tests {
         let mut link = MemoryLink::new();
         link.push_payload(&[0x00]); // the radio answers OK
         let mut companion = Companion::new(link);
-        assert!(send_route_reply(&mut companion, &req, &own));
+        assert!(send_route_reply(&mut companion, &req, &own, None));
 
         // The frame the radio is handed: `[0x3C][u16 n][0x41][0][header][path byte][path][record]`.
         let written = companion.link_mut().written.clone();

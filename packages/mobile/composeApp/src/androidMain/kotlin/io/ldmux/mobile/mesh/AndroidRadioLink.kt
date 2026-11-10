@@ -971,9 +971,21 @@ class AndroidRadioLink(
         // own candidates (`prefer_route`), and here it stops a late copy from widening a route that
         // is already working.
         val inHand = advertPath
+        // **The same answer arrives several times, and the second is not news.** One flooded reply
+        // was logged four times on the device in a single reception (2026-11-09), which is the
+        // radio's log reporting one packet more than once; adopting it again is harmless but it
+        // logged four lines and rewrote the same value. A path already in hand is not adopted again.
+        if (inHand != null && inHand.encoded == path.encoded && inHand.bytes.contentEquals(path.bytes)) {
+            return
+        }
         val hops = path.encoded and 0x3F
         val held = inHand?.encoded?.and(0x3F) ?: Int.MAX_VALUE
-        val stale = System.currentTimeMillis() - routeHeardAt > ROUTE_FRESH_MS
+        // **A route is trusted for a minute, and a fresh candidate may then displace it.**
+        // Sixty seconds is the window the community's own path-gating proposal settled on (fewer
+        // hops wins, or the incumbent is older than a minute); it is short enough that a phone that
+        // moved does not sit on a dead chain, and long enough that a reply heard twice by two chains
+        // does not thrash the route.
+        val stale = System.currentTimeMillis() - routeHeardAt > ROUTE_TRUST_MS
         if (hops > held && !stale) {
             appLog("mesh $source route ignored: $hops hop(s), ${held} in hand")
             return
@@ -1305,6 +1317,16 @@ class AndroidRadioLink(
         const val ROUTE_IDLE_MS = 30_000L
         /** A route older than this is not trusted for a new connection. */
         const val ROUTE_FRESH_MS = 120_000L
+
+        /**
+         * How long a route is trusted over a fresher candidate with more hops.
+         *
+         * Not the same number as [ROUTE_FRESH_MS]: freshness decides whether to *ask*, and asking
+         * costs a flood, so it is generous. Trust decides whether a candidate may displace the
+         * route in hand, and sixty seconds is the window the community's path-gating proposal
+         * settled on.
+         */
+        const val ROUTE_TRUST_MS = 60_000L
         /** The least gap between two route requests: a flood every repeater in range repeats. */
         const val ROUTE_REQUEST_FLOOR_MS = 5_000L
         /** How long a route request's own `OK` may take. */

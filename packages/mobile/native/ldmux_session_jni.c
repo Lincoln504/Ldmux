@@ -260,6 +260,12 @@ JNIEXPORT jint JNICALL JNI(setHops)(JNIEnv *env, jclass cls, jlong h, jint hops)
   return (jint)ldmux_session_set_hops(session_of(h), (uint32_t)(hops < 1 ? 1 : hops));
 }
 
+/* The record size follows the path. A route that grows shrinks each record by one byte a hop. */
+JNIEXPORT jint JNICALL JNI(setRecordLimit)(JNIEnv *env, jclass cls, jlong h, jint bytes) {
+  (void)env; (void)cls;
+  return (jint)ldmux_session_set_record_limit(session_of(h), (uint32_t)(bytes < 0 ? 0 : bytes));
+}
+
 JNIEXPORT jint JNICALL JNI(pending)(JNIEnv *env, jclass cls, jlong h) {
   (void)env; (void)cls;
   return ldmux_session_pending(session_of(h));

@@ -94,6 +94,16 @@ interface SessionLib {
      */
     fun setHops(h: Long, hops: Int): Int
 
+    /**
+     * **Re-size the record because the route changed**, without a new handshake.
+     *
+     * A repeater's hops come out of the same 176-byte frame as the record, so a full record built
+     * for an empty path is refused at the first path byte once the phone walks out of direct range.
+     * A handshake is only needed when the keys change; the size is a property of the route, and at
+     * range a handshake is a dozen records of air spent to change one number.
+     */
+    fun setRecordLimit(h: Long, bytes: Int): Int
+
     fun close(h: Long): Int
     fun status(h: Long, nowMs: Long): Int
     fun pending(h: Long): Int

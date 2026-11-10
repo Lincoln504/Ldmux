@@ -736,6 +736,27 @@ pub fn build_route_reply_flood(
     path: &[u8],
     nonce: &[u8; 4],
 ) -> Result<Vec<u8>, CodecError> {
+    build_route_reply_flood_in_scope(own_key, peer_key, hash_size, hops, path, nonce, None)
+}
+
+/// The same reply, sent under a **region scope**.
+///
+/// **A reply must go back the way the request came, scope and all.** A dense mesh configures its
+/// repeaters to deny unscoped floods (`region denyf *`), and some set `flood.max.unscoped` to a
+/// handful of hops, so an unscoped answer to a scoped request is dropped before it has crossed the
+/// region — the phone asks, the host answers, and nothing arrives. MeshCore's own rule for this is
+/// `ReplyScope::REPLY_SCOPE_REQUEST`: reuse the scope the request arrived on. The transport code is
+/// an HMAC over *this* packet's payload and type, so it has to be computed for the reply rather than
+/// copied, which is why the scope's key is what this takes.
+pub fn build_route_reply_flood_in_scope(
+    own_key: &[u8; 32],
+    peer_key: &[u8; 32],
+    hash_size: u8,
+    hops: u8,
+    path: &[u8],
+    nonce: &[u8; 4],
+    scope: Option<&FloodScope>,
+) -> Result<Vec<u8>, CodecError> {
     let inner = build_route_reply_with_nonce(hash_size, hops, path, nonce)?;
     let mut payload = Vec::with_capacity(2 + ROUTE_REPLY_MAGIC.len() + 32 + inner.len());
     // The firmware's own `REQ` envelope: the destination and sender hash bytes, then the body.
@@ -746,8 +767,18 @@ pub fn build_route_reply_flood(
     payload.extend_from_slice(ROUTE_REPLY_MAGIC);
     payload.extend_from_slice(own_key);
     payload.extend_from_slice(&inner);
-    let mut out = Vec::with_capacity(2 + payload.len());
-    out.push(ROUTE_FLOOD_HEADER);
+    let mut out = Vec::with_capacity(6 + payload.len());
+    match scope {
+        None => out.push(ROUTE_FLOOD_HEADER),
+        Some(scope) => {
+            out.push(ROUTE_FLOOD_SCOPED_HEADER);
+            // `HMAC(key, payloadType || payload)` cut to two little-endian bytes, and the second
+            // code slot reserved as the firmware leaves it.
+            let code = transport_code(&scope.key, 0, &payload);
+            out.extend_from_slice(&code.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+        }
+    }
     // The travel path, empty at origin, at the width the carried path uses so a repeater appends
     // hashes of the same size. The receiver ignores this path entirely.
     out.push(path_byte(hash_size, 0)?);
@@ -1515,6 +1546,45 @@ mod tests {
         assert!(parse_route_reply_flood(&short, &host).is_none());
         // A ragged carried path is refused where it is built, not on the air.
         assert!(build_route_reply_flood(&host, &phone, 2, 1, &[0x11], &[0; 4]).is_err());
+    }
+
+    /// **A reply goes back under the request's scope.** A dense mesh denies unscoped floods
+    /// (`region denyf *`), so an unscoped answer is dropped before it crosses the region: the phone
+    /// asks, the host answers, and nothing arrives. The code is an HMAC over *this* packet, so the
+    /// reply computes its own rather than copying the request's.
+    #[test]
+    fn a_scoped_reply_carries_a_code_over_its_own_payload() {
+        let host = [0xA1; 32];
+        let phone = [0xB2; 32];
+        let scope = FloodScope::from_name("us-co");
+        let packet = build_route_reply_flood_in_scope(
+            &host,
+            &phone,
+            1,
+            2,
+            &[0x11, 0x22],
+            &[1, 2, 3, 4],
+            Some(&scope),
+        )
+        .expect("builds");
+        assert_eq!(packet[0], ROUTE_FLOOD_SCOPED_HEADER, "a transport-coded flood");
+        let view = parse_packet(&packet).expect("parses");
+        assert!(view.is_flood());
+        let codes = view.transport_codes.expect("scoped packets carry codes");
+        assert_eq!(
+            codes[0],
+            transport_code(&scope.key, view.payload_type, view.payload),
+            "the code is over the reply, not the request"
+        );
+        assert_eq!(codes[1], 0, "the second slot is reserved, as the firmware leaves it");
+        // And the request's own identification works on it, which is how the daemon proves the
+        // scope before answering under it.
+        let found = identify_scope(&view, &["us", "us-co"]).expect("the scope is recognisable");
+        assert_eq!(found.name, scope.name);
+        // Unscoped stays unscoped: a plain flood, no codes.
+        let plain = build_route_reply_flood(&host, &phone, 1, 2, &[0x11, 0x22], &[0; 4]).unwrap();
+        assert_eq!(plain[0], ROUTE_FLOOD_HEADER);
+        assert!(parse_packet(&plain).unwrap().transport_codes.is_none());
     }
 
     /// The path width travels **in the packet**, because forwarding is width-agnostic and the two

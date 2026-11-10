@@ -675,6 +675,12 @@ be transmitted and then ignored by every receiver. Direct means the sender must 
    radio discards. The phone reads it out of the same receive log an advert comes through
    (`RadioRoute.heardRouteReply`), so nothing here needs a contact, a telemetry permission or a
    firmware change.
+   **The reply goes back under the request's scope.** A dense mesh denies unscoped floods
+   (`region denyf *`) and may cap them at a few hops, so an unscoped answer is dropped before it
+   crosses the region; MeshCore's rule is `ReplyScope::REPLY_SCOPE_REQUEST`, and the code is an HMAC
+   over the reply's own payload, so it is computed rather than copied. The order is this radio's own
+   scope when the request's code matches it, then a public region whose key reproduces the code,
+   then unscoped.
    **A route is invalidated by the evidence, on both ends.** The phone drops its route when a session
    dies on it, so the rebuild after a failure asks rather than retrying the chain that just lost the
    records. The host treats an incoming request as proof that the path it holds is dead, because the
