@@ -502,6 +502,16 @@ fun MeshTerminalScreen(
                 PumpStep.Waiting -> delay(150)
                 PumpStep.Blocked -> delay(150)
                 PumpStep.Idle -> {
+                    // **An idle terminal does not poll.** This waited 50 ms (and refined that to as
+                    // little as 10) for ever, so a page nobody was typing into woke the CPU twenty
+                    // to a hundred times a second to look at an empty buffer — a real battery cost
+                    // on a phone, and it did it while the operator was reading. With nothing held
+                    // and nothing being sent there is nothing to look at: wait for the buffer to
+                    // change instead, which is exactly the next keystroke or sync.
+                    if (!handle.hasPending) {
+                        snapshotFlow { handle.pendingLabel }.first { it.isNotEmpty() }
+                        continue
+                    }
                     val due = batcher.nextDueMs()
                     delay(if (due == null) 50L else (due - clock()).coerceIn(10L, 50L))
                 }
