@@ -125,6 +125,16 @@ fun App() {
                         // reading and not the cautious default. `connectionKey` excludes this field, so
                         // saving does not rebuild the connection.
                         onRadioClassified = { public -> store.update(store.config.value.copy(meshPublicChannel = public)) },
+                        // **The grid this phone draws with, remembered past the process.** A cold
+                        // start that states nothing makes the host paint the desk's 255x82 pane and
+                        // then the phone's own: a dozen seconds of air for a picture nobody sees.
+                        // A stale grid costs one `Resize`, which is what the cost was before.
+                        onGridMeasured = { c, r ->
+                            val g = "$c,$r"
+                            if (store.config.value.meshLastGrid != g) {
+                                store.update(store.config.value.copy(meshLastGrid = g))
+                            }
+                        },
                     )
                 } else {
                     AppContent(config, store, onOpenSettings = { showSettings = true })

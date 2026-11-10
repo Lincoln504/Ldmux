@@ -223,6 +223,13 @@ fun MeshTerminalScreen(
      * this and the settings dialog no longer has to.
      */
     onRadioClassified: (Boolean) -> Unit = {},
+    /**
+     * The grid the terminal surface measured, so the next cold start can state it on the attach.
+     *
+     * See `LdmuxConfig.meshLastGrid`: stating nothing costs a repaint at the desk's size before the
+     * phone's own arrives.
+     */
+    onGridMeasured: (Int, Int) -> Unit = { _, _ -> },
 ) {
     val scope = rememberCoroutineScope()
     // Reconnection is the caller's decision by contract (the mesh connection never retries by
@@ -887,7 +894,14 @@ fun MeshTerminalScreen(
         // **One coroutine, in order.** Two launches have no order between them, and the whole point
         // is that the grid is known *before* the attach is queued.
         scope.launch {
-            lastGrid?.let { (c, r) -> conn.driver.setGrid(c, r) }
+            // The measured grid, else the one this phone measured last time it ran: a cold start
+            // has nothing of its own, and stating nothing costs a repaint at the desk's size.
+            val grid = lastGrid ?: config.meshLastGrid
+                .split(',')
+                .mapNotNull { it.toIntOrNull() }
+                .takeIf { it.size == 2 && it.all { n -> n > 0 } }
+                ?.let { it[0] to it[1] }
+            grid?.let { (c, r) -> conn.driver.setGrid(c, r) }
             conn.driver.open(first)
         }
     }
@@ -1149,6 +1163,9 @@ fun MeshTerminalScreen(
                         val opened = TimeSource.Monotonic.markNow()
                         source.onGrid = grid@{ c, r ->
                             lastGrid = c to r
+                            // Remembered past the process, so a cold start can state it too: see
+                            // `LdmuxConfig.meshLastGrid`.
+                            onGridMeasured(c, r)
                             // **Leaving is not a resize.** The list shrinks the layout, the surface
                             // reports the smaller grid, and the pending job then sent a `Resize`
                             // for a shell this screen had just let go of — which the host applied

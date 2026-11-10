@@ -144,6 +144,17 @@ data class LdmuxConfig(
      * radio session alive to receive it, which costs airtime for something the list already says.
      */
     val notifyMarks: Boolean = false,
+    /**
+     * The terminal grid this phone last measured, as `cols,rows`; empty before the first one.
+     *
+     * **A cold start has measured nothing, and that costs a repaint nobody sees.** Opening a shell
+     * from the list with no grid to state made the host draw the pane at whatever size the desk left
+     * behind — a 255x82 pane is twenty-odd records, a dozen seconds of air — and then draw it again
+     * at the phone's own 46x17. Remembered, the attach states the grid and the host draws once; a
+     * phone that changed orientation or font size states a stale one and the surface corrects it
+     * with a single `Resize`, which is what this cost before the remember existed.
+     */
+    val meshLastGrid: String = "",
 ) {
 
     /**

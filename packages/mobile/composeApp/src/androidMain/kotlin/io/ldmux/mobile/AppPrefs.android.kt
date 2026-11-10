@@ -57,6 +57,7 @@ actual object AppPrefs {
     private const val KEY_MESH_OPEN_AIRTIME = "mesh_open_airtime"
     private const val KEY_MESH_PUBLIC_CHANNEL = "mesh_public_channel"
     private const val KEY_MESH_INPUT_MODE = "mesh_input_mode"
+    private const val KEY_MESH_LAST_GRID = "mesh_last_grid"
     /** The desktop's tuple from the pairing code: four numbers, never a secret. */
     private const val KEY_MESH_HOST_PRESET = "mesh_host_preset"
     /**
@@ -108,6 +109,7 @@ actual object AppPrefs {
             meshInputMode = sp.getString(KEY_MESH_INPUT_MODE, null)
                 ?.let { name -> MeshInputMode.entries.firstOrNull { it.name == name } }
                 ?: LdmuxConfig.DEFAULT.meshInputMode,
+            meshLastGrid = sp.getString(KEY_MESH_LAST_GRID, LdmuxConfig.DEFAULT.meshLastGrid) ?: "",
         )
     }
 
@@ -144,6 +146,7 @@ actual object AppPrefs {
             .putString(KEY_THEME, config.theme.name)
             .putBoolean(KEY_SOUNDS, config.sounds)
             .putString(KEY_MESH_INPUT_MODE, config.meshInputMode.name)
+            .putString(KEY_MESH_LAST_GRID, config.meshLastGrid)
             .putString(KEY_MESH_HOST_PRESET, config.meshHostPreset)
             .apply()
         // **The token is rewritten only when it changed.** Every settings save used to re-encrypt it
