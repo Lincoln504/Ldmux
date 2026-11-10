@@ -590,6 +590,14 @@ class AndroidRadioLink(
         _deviceInfo.value = null
         // A voltage from the previous session must not be attached to this one's DEVICE_INFO.
         batteryMv = null
+        // **Ask any other app holding this radio to let go, before touching the adapter.** A
+        // MeshCore companion takes exactly one central and drops the second one later, mid-traffic,
+        // so a connect that races another app produces a link that works for a few seconds and then
+        // vanishes — which the operator sees as "handshake, fail, handshake, fail". Android has no
+        // API to close another app's GATT link, so the only cure is to ask. See `RadioLease`.
+        if (RadioLease.acquire(context)) {
+            appLog("mesh radio lease: granted by another app")
+        }
         _state.value = MeshLinkState.Connecting
         val t = AndroidBleTransport(context)
         val s = MeshcoreSession("ldmux", t, listener)
@@ -706,7 +714,19 @@ class AndroidRadioLink(
         } catch (e: Exception) {
             Log.d("ldmux", "radio connect failed: " + e)
             closeTransport()
-            _lastProblem.value = e.message ?: "radio connect failed"
+            // **"Connected but refused" has one overwhelmingly likely cause on this phone.** A
+            // MeshCore companion takes exactly one BLE central, so a connect while another app holds
+            // the radio ends in status 133 (not established) or 257 (no GATT client free) rather than
+            // in anything that names the truth. The lease asks the other app to let go first; when
+            // the answer still comes back refused, saying so is the difference between an operator
+            // who closes the other app and one who walks a mile with a radio they cannot use.
+            val text = e.message ?: "radio connect failed"
+            val refused = text.contains("133") || text.contains("257") || text.contains("GATT")
+            _lastProblem.value = if (refused) {
+                "the radio refused the connection: another app may be holding it"
+            } else {
+                text
+            }
             _state.value = MeshLinkState.RadioUnavailable
             throw RadioLinkException(MeshLinkState.RadioUnavailable, _lastProblem.value!!)
         }
@@ -909,6 +929,9 @@ class AndroidRadioLink(
     }
 
     override fun close() {
+        // The radio is free again the moment this end stops using it, and a silence here is what
+        // left the other app waiting for a turn that never came.
+        runCatching { RadioLease.release(context) }
         RadioLinks.close(this)
     }
 

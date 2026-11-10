@@ -13,6 +13,15 @@ actual fun appLogDump(lines: List<String>) {
     val context = runCatching { AndroidApp.context }.getOrNull() ?: return
     runCatching {
         context.openFileOutput("mesh-last-failure.log", android.content.Context.MODE_PRIVATE).use { out ->
+            // **The rolling log first**, because it is the one record with wall-clock stamps and it
+            // survives a run that never reached a verdict. The in-memory buffer follows: it holds
+            // the lines emitted before the file sink existed and the ones the sink could not write.
+            val tail = AppLogFile.tail(600)
+            if (tail.isNotEmpty()) {
+                out.write(tail.toByteArray())
+                out.write("\n".toByteArray())
+            }
+            out.write("--- this process's buffer ---\n".toByteArray())
             out.write(lines.joinToString("\n").toByteArray())
             out.write("\n".toByteArray())
         }

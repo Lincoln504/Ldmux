@@ -158,6 +158,36 @@ class MeshTermDriverTest {
         assertIs<MeshTermView.Handshaking>(d.view.value, "and the screen still says so")
     }
 
+    /// **The handshake's own ladder is what the loop wakes for.**
+    ///
+    /// The screen's loop sleeps until `nextWakeMs` says something is due, and that list did not
+    /// include the handshake: with no session there is no session deadline, so the loop fell back to
+    /// the 30 s idle tick and looked at the ladder only once per tick. Every figure in the ladder —
+    /// 8 s, then 16, then 32, and the total budget built to outlast them — was therefore fiction on
+    /// the device. Measured 2026-11-10: the operator reported the handshake timing out "after thirty
+    /// seconds", which is the idle tick, not the ladder.
+    @Test
+    fun the_loop_wakes_for_the_handshakes_own_rungs(): Unit = runBlocking {
+        val d = driver()
+        val began = now
+        d.start()
+        assertIs<MeshTermView.Handshaking>(d.view.value)
+        // The first ask has just gone: the next rung is eight seconds away, and the loop must know it
+        // rather than discover it on the next idle tick.
+        assertEquals(now + handshakeRetryFor(null), d.nextWakeMs(), "the first re-ask is scheduled")
+        now += handshakeRetryFor(null)
+        d.tick()
+        // The second rung is the doubled one, measured from the re-ask that just happened.
+        assertEquals(now + (handshakeRetryFor(null) shl 1), d.nextWakeMs(), "and then the doubled one")
+        // The whole handshake's budget is a deadline of its own: whichever comes first, the loop must
+        // never sleep past the moment the handshake is given up on.
+        val budget = began + handshakeWaitMs(null)
+        assertTrue(
+            (d.nextWakeMs() ?: Long.MAX_VALUE) <= budget,
+            "the loop must not sleep past the handshake's budget",
+        )
+    }
+
     /// **A list answer that never arrives is asked for again, and only a few times.**
     ///
     /// `launcher()` marks the request in flight and `listShells()` refuses to ask twice ("a list

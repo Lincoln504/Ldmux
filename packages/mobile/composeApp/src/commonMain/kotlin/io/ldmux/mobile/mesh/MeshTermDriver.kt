@@ -1042,7 +1042,20 @@ class MeshTermDriver(
         val list = listAskedAt?.plus(answerDeadlineMs(LIST_ANSWER_MS, hops))
         val attach = attachAskedAt?.plus(answerDeadlineMs(ANSWER_RETRY_MS, hops))
         val create = createAskedAt?.plus(answerDeadlineMs(ANSWER_RETRY_MS, hops))
-        listOfNotNull(deadline, retry, list, attach, create).minOrNull()
+        // **A handshake has two deadlines and neither was here.** The screen said "securing the
+        // link" and the loop slept on the 30 s idle tick, so the ladder's own rungs — 8 s, then 16,
+        // then 32 — were only ever looked at every thirty seconds, and the total budget built to
+        // outlast all of them fired a whole tick late. On the device that read as "it times out
+        // after thirty seconds of handshaking", which is exactly what the operator reported on
+        // 2026-11-10. Both are returned, whichever comes first.
+        val handshake = if (handshake != null && handshakeSince > 0) {
+            val budget = handshakeBeganAt + (handshakeWaitOverride ?: handshakeWaitMs(hops))
+            val reask = handshakeSince + (handshakeRetryFor(hops) shl handshakeTries)
+            minOf(budget, reask)
+        } else {
+            null
+        }
+        listOfNotNull(deadline, retry, list, attach, create, handshake).minOrNull()
     }
 
     // ── what the user does ─────────────────────────────────────────────────────────────

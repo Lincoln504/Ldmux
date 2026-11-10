@@ -13,5 +13,9 @@ import android.util.Log
  */
 actual fun appLog(message: String) {
     AppLogBuffer.record(message)
+    // **On disk as well as in the buffer**, because a field failure can end without ever reaching a
+    // verdict — see [AppLogFile]: the device sat on "securing the link", `failed` never ran, and the
+    // one file that would have held the evidence was nine hours stale.
+    AppLogFile.append(message)
     Log.d("ldmux", message)
 }

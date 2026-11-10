@@ -48,6 +48,12 @@
       permits it and where the tailnet-only rule is actually enforced); there is no
       app-wide `usesCleartextTraffic`. The token must not be backed up or transferred.
     -->
+    <!-- Apps that may hold the same physical radio, so an explicit lease broadcast can be
+         addressed to them. Without this the send is silently dropped on Android 11+. -->
+    <queries>
+        <package android:name="com.iotone.meshmore_sns_app" />
+    </queries>
+
     <application
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
