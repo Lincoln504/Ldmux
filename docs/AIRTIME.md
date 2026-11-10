@@ -113,6 +113,28 @@ At the bench tuple (500 kHz, SF7, CR5) every record is eight times cheaper in ai
 is ≈16 s typed and 2.0 s batched. The ratio between the modes belongs to the modes; the absolute
 numbers belong to the tuple.
 
+## What one press costs (measured on the device, us-public tuple)
+
+Figures are records, both directions, for the actions batch mode exists for. A record is 602.6 ms
+here, so one record is a third of a second of air.
+
+| action | records | notes |
+|---|---|---|
+| open a shell, first paint | 8 | one repaint: the `Attach` states the grid, so the pane is fitted before the first frame |
+| `show` on a frozen view, nothing changed | 1 | one `Resync` out; the host answers only if something changed |
+| `show` after the shell printed | 2 | the `Resync` and the difference back |
+| a synced command (typing plus answer) | 2 down | the echo rides the answer |
+| rotate, or open/close the keyboard | 3 | one `Resize` out, one frame back at the new grid |
+| scroll up one page of history | 2 | `WantHistory` out, one page back |
+| idle for 12 s while the shell prints | **0** | the hold stops the building, not the looking |
+| back to the list | 2 | `Detach` and `ListRequest` in one record, the pages back |
+
+**Two of these were several times worse before 2026-11-09**, and both were the same mistake in
+different places: work the phone threw away. The attach carried no grid, so the host drew the pane at
+the geometry the phone used last time and then again at its own (**17 records** to open a shell); and
+`show` released the hold, waited and re-held (**3 records**, and the freeze never resumed on a shell
+that kept printing).
+
 ## What follows
 
 - Batch mode is not a preference; on a public channel it is the only way an agent turn fits any
