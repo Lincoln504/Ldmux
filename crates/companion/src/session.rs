@@ -198,12 +198,22 @@ impl<L: ByteLink> Companion<L> {
     /// The reply means "the firmware queued it", not "a peer heard it": an advert is a broadcast
     /// with no acknowledgement, which is why the path it teaches can take minutes to appear.
     pub fn send_self_advert(&mut self, flood: bool) -> Result<(), SessionError> {
+        self.send_self_advert_within(flood, Duration::from_secs(10))
+    }
+
+    /// The same, with a bounded wait for the radio's answer.
+    ///
+    /// **A radio that stopped answering must not hold the serving loop.** The firmware acknowledges
+    /// `SEND_SELF_ADVERT` from its own queue, so two seconds is already a hundred times what the
+    /// answer needs, and the ten-second form blocked the one loop that also has to read received
+    /// frames — every peer record arriving during that wait queued behind it.
+    pub fn send_self_advert_within(
+        &mut self,
+        flood: bool,
+        timeout: Duration,
+    ) -> Result<(), SessionError> {
         let mode = u8::from(flood);
-        self.request(
-            &[commands::SEND_SELF_ADVERT, mode],
-            codes::OK,
-            Duration::from_secs(10),
-        )?;
+        self.request(&[commands::SEND_SELF_ADVERT, mode], codes::OK, timeout)?;
         Ok(())
     }
 

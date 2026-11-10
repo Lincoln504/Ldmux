@@ -281,11 +281,26 @@ fn print_mesh_status(v: &serde_json::Value) {
     // **The route in one line, because it is the first thing a field test needs.** `capacity` alone
     // says how large a record can be and nothing about how far away the peer is; an operator at
     // range wants "12 hops" beside it, and a direct link wants to see the zero.
-    match v.get("peerHops").and_then(serde_json::Value::as_u64) {
+    let hops = v.get("peerHops").and_then(serde_json::Value::as_u64);
+    match hops {
         Some(0) => println!("route    direct (no repeater in the path)"),
         Some(1) => println!("route    1 repeater"),
         Some(hops) => println!("route    {hops} repeaters in the path"),
         None => println!("route    unknown (no route to the peer yet)"),
+    }
+    // **What one exchange costs on this route, which is the number that decides whether the
+    // terminal is usable at all.** A record and its ack each cross every hop, so an exchange is
+    // `2 × hops × airtime`: four seconds at a neighbour, thirty-four at twenty-eight hops, where a
+    // single repaint is minutes of chain time. Without this an operator reads "12 hops" and has no
+    // way to tell "far" from "unusable".
+    if let (Some(hops), Some(airtime)) = (
+        hops,
+        v.get("airtimeMs").and_then(serde_json::Value::as_f64),
+    ) && hops > 0
+        && airtime > 0.0
+    {
+        let exchange = 2.0 * hops as f64 * airtime / 1000.0;
+        println!("cost     one exchange ~ {exchange:.0} s (a record out and its ack back)");
     }
     // **Not a limit this host enforces.** The radio's firmware runs the transmitter's duty cycle,
     // and what it reports is its own count: printing it as a budget read like a gate the daemon

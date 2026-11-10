@@ -257,3 +257,47 @@ fn refusing_a_sealed_record_by_its_sequence_retries_at_the_radio_pace() {
         "resealed, so the radio does not drop it as a duplicate"
     );
 }
+
+/// **A route that grows under an in-flight record must not end the session.**
+///
+/// A slot keeps the payload it was split at, so a smaller record limit makes the front record
+/// unsealable. That used to discard the whole batch — acks and perfectly good records with it — and
+/// charge an attempt per poll until the session died. Measured shape: the path gains one repeater
+/// mid-screen, the record limit drops by one byte, and a working link tears itself down.
+#[test]
+fn a_route_that_grows_mid_record_splits_it_instead_of_failing() {
+    let (mut phone, mut host) = pair(172);
+    // A payload that fills a 172-byte record exactly, queued at the wide size.
+    let wide = ldmux_session::record::application_bytes(172) - ldmux_session::arq::HEADER;
+    let msg: Vec<u8> = (0..u16::try_from(wide).expect("small")).map(|i| i as u8).collect();
+    phone.send(1, &msg).unwrap();
+    let first = phone.poll(0, PLENTY).expect("the wide record seals");
+    assert_eq!(1, first.len());
+
+    // The path grows: the host resizes the link to a record four bytes smaller.
+    phone.set_record_limit(168);
+    let next = phone
+        .poll(10_000, PLENTY)
+        .expect("a record the new size cannot hold is split, not fatal");
+    assert_eq!(1, next.len(), "the retransmission goes out anyway");
+    assert!(next[0].len() <= 168, "and it fits the smaller record");
+
+    // Nothing was lost: the tail is queued, and the peer reassembles the original bytes in order.
+    let mut got = Vec::new();
+    let mut now = 20_000;
+    for _ in 0..24 {
+        for rec in phone.poll(now, PLENTY).unwrap() {
+            if let Inbound::Data(d) = host.receive(now, &rec).unwrap() {
+                got.extend(d.into_iter().flat_map(|x| x.payload));
+            }
+        }
+        for rec in host.poll(now, PLENTY).unwrap() {
+            phone.receive(now, &rec).unwrap();
+        }
+        now += 5_000;
+        if got.len() >= msg.len() {
+            break;
+        }
+    }
+    assert_eq!(msg, got, "every byte arrives, in order, after the split");
+}

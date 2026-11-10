@@ -386,6 +386,13 @@ impl SessionHost {
                         "the radio kept refusing a record without transmitting it for {} s",
                         ldmux_session::arq::REFUSAL_DEADLINE_MS / 1000
                     ),
+                    // The peer's queue had no room to hold the tail of a record that had to be
+                    // split: the application sent faster than the link can carry, which is not a
+                    // dead link. Reported so the operator knows to slow down, and the session is
+                    // rebuilt because bytes were owed and are gone.
+                    ldmux_session::arq::Failure::QueueFull => {
+                        "the send queue filled while a record had to be split".to_owned()
+                    }
                 });
                 self.session = None;
             }

@@ -896,3 +896,36 @@ fn the_first_timeout_covers_each_hop_of_the_route() {
     // A route of one (or zero, meaning "unknown") is the direct case, unchanged.
     assert_eq!(Config::for_payload(137).with_path(Some(603.0), 0).rto_initial_ms, 3_618);
 }
+
+/// **The cap must not pre-empt the first rung of its own ladder.**
+///
+/// Every test above asserts the *configured* first timeout; `rto()` clamps each attempt by
+/// `rto_max_ms`, and that ceiling was `max(30 s, 40 × airtime)` — 30 s at the public tuple, i.e.
+/// below the first timeout for every route of nine hops or more. A 28-hop record was therefore
+/// re-sent after 30 s while its first copy was still 17 s from even reaching the far end and 34 s
+/// from an answer, and five such attempts ended a session that was working.
+#[test]
+fn the_cap_is_never_below_the_route_it_times() {
+    let far = Config::for_payload(137).with_path(Some(603.0), 28);
+    assert_eq!(far.rto_initial_ms, 101_304, "six airtimes a hop");
+    assert!(
+        far.rto_max_ms >= far.rto_initial_ms,
+        "the ceiling ({} ms) is below the first timeout ({} ms)",
+        far.rto_max_ms,
+        far.rto_initial_ms
+    );
+    assert_eq!(far.rto_max_ms, 202_608, "twice the route's own budget");
+    // And the timer the ARQ actually sets agrees with it, through the public behaviour.
+    let mut a = Arq::new(far);
+    a.send(0, b"x").expect("room for one record");
+    let _ = a.poll(0, PLENTY);
+    assert!(
+        a.poll(30_000, PLENTY).is_empty(),
+        "a 28-hop record is still in the air at thirty seconds"
+    );
+    assert_eq!(
+        a.poll(101_304, PLENTY).len(),
+        1,
+        "and is re-sent at the route's own budget"
+    );
+}

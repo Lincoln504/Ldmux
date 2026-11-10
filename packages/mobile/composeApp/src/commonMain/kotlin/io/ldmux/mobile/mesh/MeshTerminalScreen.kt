@@ -595,6 +595,9 @@ fun MeshTerminalScreen(
     // answer without asking anyone to open a dialog. Saving it does not rebuild the connection:
     // `connectionKey` excludes this field on purpose.
     val classifiedNow by rememberUpdatedState(config.meshPublicChannel)
+    // The tuple the radio reported, kept for the one place that needs to price a route: a record's
+    // airtime is a property of the preset, and it is the only way to turn "28 hops" into seconds.
+    var measuredPreset by remember(conn) { mutableStateOf<io.ldmux.mobile.mesh.RadioPreset?>(null) }
     LaunchedEffect(conn) {
         conn.radio.selfInfo.collect { info ->
             if (info == null) return@collect
@@ -608,6 +611,7 @@ fun MeshTerminalScreen(
                 // stamp width cannot change this answer; 1 stands in for "not read here".
                 pathHashSize = 1,
             )
+            measuredPreset = preset
             // **The typing window follows the record the link can actually carry.** A 100 ms
             // pause is one record on a 75 ms bench tuple and a wasted record on the public preset,
             // where a record is 602.6 ms: `pace` sets both windows to one airtime (floored, so a
@@ -1064,7 +1068,14 @@ fun MeshTerminalScreen(
     val barRow: (@Composable (Modifier) -> Unit)? = if (config.meshHoldsInput) {
         { m ->
             PublicChannelBar(
-                evidence = { linkEvidenceText(conn.driver.hopsNow(), conn.driver.answeredAgoMs()) },
+                evidence = {
+                    val hops = conn.driver.hopsNow()
+                    linkEvidenceText(
+                        hops,
+                        conn.driver.answeredAgoMs(),
+                        exchangeMs(hops, measuredPreset),
+                    )
+                },
                 summary = handle.heldSummary,
                 awaiting = source.awaitingAnswer,
                 reported = source.answerOverdue,
@@ -1300,9 +1311,11 @@ fun MeshTerminalScreen(
                                         null
                                     } else {
                                         {
+                                            val hops = conn.driver.hopsNow()
                                             linkEvidenceText(
-                                                conn.driver.hopsNow(),
+                                                hops,
                                                 conn.driver.answeredAgoMs(),
+                                                exchangeMs(hops, measuredPreset),
                                             )
                                         }
                                     },

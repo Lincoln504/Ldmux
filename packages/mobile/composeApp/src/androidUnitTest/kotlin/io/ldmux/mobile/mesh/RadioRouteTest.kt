@@ -205,6 +205,46 @@ class RadioRouteTest {
      * (`ReplyRoute::REPLY_ROUTE_PATH_RETURN`), and the layout below is the exact contract between
      * `build_route_reply_flood` in `crates/companion` and this reader.
      */
+    /**
+     * **The hop count is the low six bits, and every timer in the driver is built from it.**
+     *
+     * This read the width out of the hop count for two days, so a path of one to three repeaters
+     * reported *zero*: the session retried at a neighbour's 3.6 s on a link whose round trip was
+     * seven seconds, the repair deadline fired at its twenty-second floor on a twenty-hop route,
+     * and the handshake ladder asked for a new path before its own attempt could have arrived.
+     * Every one of the range failures since 2026-11-08 was measured with this number wrong.
+     */
+    @Test
+    fun `a path byte decodes to the hops it carries at every width`() {
+        // One byte a hop: the deployed configuration. The measured failure was 1→0, 2→0, 3→0,
+        // 5→2, 17→8 — the width read out of the hop count.
+        for (hops in listOf(0, 1, 2, 3, 4, 5, 10, 17, 28, 62, 63)) {
+            assertEquals("one byte, $hops hop(s)", hops, RadioRoute.pathHops(hops, hops))
+        }
+        // Two bytes a hop: the width is in the top two bits, so the byte is 0x40 | hops.
+        for (hops in listOf(0, 1, 2, 16, 32)) {
+            assertEquals(
+                "two bytes, $hops hop(s)",
+                hops,
+                RadioRoute.pathHops(0x40 or hops, hops * 2),
+            )
+        }
+        // Three bytes a hop.
+        for (hops in listOf(0, 1, 7, 21)) {
+            assertEquals(
+                "three bytes, $hops hop(s)",
+                hops,
+                RadioRoute.pathHops(0x80 or hops, hops * 3),
+            )
+        }
+        // Width 4 is reserved and refused by the firmware; a byte count that is not whole hops is
+        // malformed. Neither invents a route.
+        assertEquals("width 4 is not a path", 0, RadioRoute.pathHops(0xC1, 1))
+        assertEquals("five bytes is not whole two-byte hops", 0, RadioRoute.pathHops(0x40 or 3, 5))
+        // And the driver's own view agrees with the decoder it delegates to.
+        assertEquals("the chain that was actually measured", 28, RadioRoute.pathHops(28, 28))
+    }
+
     @Test
     fun `a flooded reply in the receive log carries the route`() {
         val host = ByteArray(32) { 0xA1.toByte() }

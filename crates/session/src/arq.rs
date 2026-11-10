@@ -185,12 +185,10 @@ impl Config {
         // took to come back — measured 2026-11-09, a first paint waited eleven seconds for one lost
         // record on a noisy link — and a loss is the common case this timer exists for.
         let scaled = (airtime * 6.0 * hops).round() as u64;
-        // **The cap has to be above the route's own round trip, or the timer is the bug.** Sixty
-        // seconds is sixteen hops at the public tuple; a record on a fifty-hop path is still in the
-        // air when a sixty-second timer fires, so the retransmission doubles the traffic on a route
-        // that was working. Six airtimes per hop is MeshCore's own direct-send budget and the figure
-        // that belongs here; ten minutes bounds a nonsense hop count rather than a real route.
-        self.rto_initial_ms = self.rto_initial_ms.max(scaled).min(600_000);
+        // **Assigned, not raised, so this is a function of the route.** `max` made it one-way: a
+        // session that had once seen a 28-hop chain kept a 101-second timer after the phone came
+        // home, and every retry on a neighbour's link then waited a hundred seconds.
+        self.rto_initial_ms = scaled.clamp(2_000, 600_000);
         // **A pure ack must not cost its own record when a little patience avoids it.** An owed ack
         // used to wait a fixed 150 ms for outgoing data and then go as a record of its own, which at
         // 0.6 s per record is 0.6 s of air for a 5-byte body — one record in every exchange where the
@@ -204,12 +202,21 @@ impl Config {
         // window of it. Patience that scales with the route is not patience, it is latency — and the
         // case the delay exists for, an ack riding the next data record, is decided by whether data
         // is going out in the next couple of records, not by how far the route is.
-        // The airtime this call was given, not the field: that is assigned a few lines below.
-        let ack = (airtime * 2.0).round().max(1.0) as u64;
-        self.ack_delay_ms = ack.max(self.ack_delay_ms).min(self.rto_max_ms / 2);
-        self.airtime_ms = airtime.round() as u64;
+        // **The cap has to be above the route's own round trip, or the timer is the bug.** The
+        // doubling ladder is useless if its ceiling is below the first rung: at the public tuple
+        // `40 × airtime` is 24 s, so `max(30 s, 24 s)` left the cap at **30 s for every route of
+        // nine hops or more** and every retransmission was scheduled before its first copy could
+        // have crossed. Twice the route's own budget is the floor the cap must clear, and the
+        // ladder still has four rungs above it before the firmware's ten-minute bound.
         let cap = (airtime * 40.0).round() as u64;
-        self.rto_max_ms = self.rto_max_ms.max(cap).min(600_000);
+        self.rto_max_ms = cap
+            .max(30_000)
+            .max(self.rto_initial_ms.saturating_mul(2))
+            .min(600_000);
+        // The airtime this call was given, not the field: that is assigned below.
+        let ack = (airtime * 2.0).round().max(1.0) as u64;
+        self.ack_delay_ms = ack.max(150).min(self.rto_max_ms / 2);
+        self.airtime_ms = airtime.round() as u64;
         self
     }
 }
@@ -221,6 +228,9 @@ pub enum Failure {
     /// The radio kept refusing the record without ever transmitting it: a full transmit table that
     /// never drained, a record the firmware will not parse, or a radio that is not really there.
     RadioRefused,
+    /// The queue had no room for the tail of a record that had to be split, so bytes would have
+    /// been lost. A caller that sees this has outrun the link, not lost the link.
+    QueueFull,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -719,6 +729,28 @@ impl Arq {
         let shift = u32::from(attempts.saturating_sub(1)).min(20);
         base.saturating_mul(1u64 << shift)
             .min(self.cfg.rto_max_ms)
+    }
+
+    /// Put the tail of a record that no longer fits back at the head of the queue.
+    ///
+    /// **A route that grows mid-flight must not end the session.** Slots keep the payload they were
+    /// split at, so a smaller record limit makes one of them unsealable; refusing it used to cost
+    /// the whole batch (acks included) and one attempt per poll until the session died. The sender
+    /// keeps the front slot's sequence number and a prefix that fits, and the remainder is queued as
+    /// the next thing that shell sends — same order, same bytes, one extra record.
+    ///
+    /// The slot's own attempt count is untouched: it was already charged for this transmission.
+    pub fn requeue_remainder(&mut self, shell: u8, remainder: Vec<u8>) {
+        if remainder.is_empty() {
+            return;
+        }
+        if self.queue.len() >= self.cfg.queue_max {
+            // No room to hold it: the honest failure is a session error, which the caller reports,
+            // rather than bytes silently lost.
+            self.failed = Some(Failure::QueueFull);
+            return;
+        }
+        self.queue.push_front((shell, remainder));
     }
 
     /// The earliest time something becomes due, for the caller's timer.

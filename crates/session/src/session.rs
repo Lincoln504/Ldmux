@@ -246,11 +246,32 @@ impl Session {
         let mut sealed = Vec::new();
         for o in self.arq.poll(now_ms, limits) {
             let seq = o.seq;
-            sealed.push(Sealed {
-                seq: Some(seq),
-                bytes: self.seal(&o)?,
-                new_data: o.kind == crate::arq::Kind::Data && !o.retransmit,
-            });
+            let new_data = o.kind == crate::arq::Kind::Data && !o.retransmit;
+            match self.seal(&o) {
+                Ok(bytes) => sealed.push(Sealed { seq: Some(seq), bytes, new_data }),
+                // **A record the route has outgrown is split, not fatal.** This slot was queued when
+                // the path was shorter and its payload filled the old record; the front keeps its
+                // sequence number and as much as fits, and the rest goes back to the head of its
+                // shell's queue. Refusing it discarded the whole batch — acks and good records with
+                // it — and charged an attempt per poll until the session died on a route that had
+                // merely grown by one repeater.
+                Err(SessionError::Record(RecordError::TooLong)) => {
+                    let room = record::application_bytes(self.record_limit);
+                    let payload = o.payload;
+                    if room <= arq::HEADER || payload.len() + arq::HEADER <= room {
+                        // Nothing can be trimmed (or the arithmetic disagrees with `seal`): this is
+                        // a real sizing fault, and the caller must rekey deliberately.
+                        return Err(SessionError::Record(RecordError::TooLong));
+                    }
+                    let head = payload.len().min(room - arq::HEADER);
+                    let (fits, tail) = payload.split_at(head);
+                    let short = Outgoing { payload: fits.to_vec(), ..o };
+                    let bytes = self.seal(&short)?;
+                    self.arq.requeue_remainder(short.shell, tail.to_vec());
+                    sealed.push(Sealed { seq: Some(seq), bytes, new_data });
+                }
+                Err(e) => return Err(e),
+            }
         }
         Ok(sealed)
     }

@@ -71,14 +71,24 @@ internal data class LinkEvidence(val hops: Int?, val answeredAgoMs: Long?)
  * vocabularies for the same fact is how a screen ends up contradicting its own tooltip. "direct" is
  * said rather than "0 hops" because zero repeaters is the good case, not an absence.
  */
-internal fun linkEvidenceText(hops: Int?, answeredAgoMs: Long?): String {
+internal fun linkEvidenceText(
+    hops: Int?,
+    answeredAgoMs: Long?,
+    exchangeMs: Long? = null,
+): String {
     val where = hops?.let { if (it <= 0) "direct" else "$it hop${if (it == 1) "" else "s"}" }
     val back = when {
         answeredAgoMs == null -> "nothing back yet"
         answeredAgoMs < 2_000L -> "answered just now"
         else -> "answered ${answeredAgoMs / 1000} s ago"
     }
-    return if (where == null) back else "$where · $back"
+    // **The price of one exchange, because that is the number that decides whether typing is
+    // possible.** A record and its ack each cross the whole route, so one exchange is
+    // `2 × hops` records: 4 s at a neighbour, 34 s at twenty-eight hops. Without it the operator
+    // reads "28 hops" and has no way to know that the terminal is unusable there rather than slow.
+    val price = exchangeMs?.takeIf { it > 0L && (hops ?: 0) > 0 }
+        ?.let { "~${it / 1000}s/exchange" }
+    return listOfNotNull(where, price, back).joinToString(" · ")
 }
 
 @Composable
@@ -248,4 +258,20 @@ internal fun PublicChannelBar(
             }
         }
     }
+}
+
+/**
+ * One exchange over a route of `hops` repeaters, in milliseconds: a record out and its ack back.
+ *
+ * `2 × hops × airtime` is the floor, and it is the number that decides whether a terminal is usable
+ * on this route at all: a 172-byte record at the public tuple is 603 ms, so one exchange is 4 s at a
+ * neighbour and 34 s at twenty-eight hops. Null when the preset is unknown, so the line says what it
+ * knows and never invents a price.
+ */
+internal fun exchangeMs(hops: Int?, preset: RadioPreset?): Long? {
+    val h = hops ?: return null
+    if (h <= 0 || preset == null) return null
+    val airtime = RadioAirtime.timeOnAirMs(preset, MeshTerm.RECORD_PAYLOAD + 29)
+    if (!airtime.isFinite() || airtime <= 0.0) return null
+    return (2.0 * h * airtime).toLong()
 }

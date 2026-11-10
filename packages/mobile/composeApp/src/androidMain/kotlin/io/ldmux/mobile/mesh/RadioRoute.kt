@@ -34,6 +34,26 @@ internal object RadioRoute {
      * bits it is packed into. A caller treats `null` as "no route", which is what a malformed cache
      * entry means — better than sending a packet that no repeater will recognise.
      */
+    /**
+     * How many repeaters a path holds, from the firmware's encoded length byte.
+     *
+     * `path_len` packs `((width - 1) << 6) | hops`: the low six bits are the hop count, the high
+     * two are the hash width minus one. **One decoder, because two readers of the same byte
+     * disagreed**: `RadioPath.hops()` read the hop count out of the width bits and returned 0 for
+     * every path of one to three repeaters, so every route-derived timer in the driver was sized
+     * for a neighbour while the phone was ten hops out (`41d6bbc`, 2026-11-08 → 2026-11-10).
+     *
+     * Width 4 is reserved and refused by the firmware (`Packet::isValidPathLen`), so a frame that
+     * claims it describes no path at all; and a byte count that does not match whole hops is
+     * malformed rather than rounded down.
+     */
+    fun pathHops(pathLength: Int, byteCount: Int): Int {
+        val width = ((pathLength ushr 6) and 0x03) + 1
+        if (width == 4) return 0
+        if (byteCount < 0 || byteCount % width != 0) return 0
+        return (byteCount / width).coerceAtMost(0x3F)
+    }
+
     fun reversed(pathLength: Int, bytes: ByteArray): Path? {
         val hashSize = ((pathLength ushr 6) and 0x03) + 1
         // The two width bits encode 1..=4 and the firmware reserves 4 for the future

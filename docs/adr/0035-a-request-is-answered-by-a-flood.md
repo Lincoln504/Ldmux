@@ -69,7 +69,7 @@ Three rules keep the extra air contained:
 - **Discovery costs one transmission per repeater in range**, not one in total. That is the price of
   an answer that arrives, it is paid only while the phone has no route, and it is the same price
   MeshCore's own path discovery pays.
-- **A dead route is discarded within one ask instead of after `PEER_ROUTE_STALE` (120 s).** The old
+- **A dead route is discarded within one ask instead of after the route trust window (`route_stale(hops)`, at least 60 s).** The old
   rule kept a *shorter* dead path in preference to a longer working one, which is exactly backwards
   when the shorter one has just lost a session.
 - The direct reply is gone rather than kept alongside: at zero hops a flood is a single transmission

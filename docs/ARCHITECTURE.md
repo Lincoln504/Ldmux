@@ -326,7 +326,7 @@ ADR-0010 is the decision. The practice:
 | the phone takes a shell the desk has | the desk is told and stops, the pane is fitted to the phone, and when the phone lets go the pane is put back to the size it displaced |
 | the app is backgrounded | pages detach after the platform grace, the shell stays in the keeper, and returning re-attaches |
 | the radio's airtime allowance runs out | the host stops sending **new** records until the hour refills (`records_left` from the carrier's countdown), while acks and retransmissions still go, so the link stays alive and the pane stops updating; a record the firmware itself refuses is handed back to the retry ladder so it does not count as a lost attempt, and `last_error` says what happened |
-| a record is larger than the path leaves room for | the limit is `min(171, 172 − path)`, advertised on bind and revised when the route changes; a chunk queued at the old size is refused by the builder, its attempt is given back, and the reconnect re-sizes |
+| a record is larger than the path leaves room for | the limit is `min(171, 172 − path)`, advertised on bind and revised when the route changes; a chunk queued at the old size is refused by the builder, its attempt is given back, and the link re-sizes **in place**: the queue is re-split losslessly, and a record already in flight that no longer fits is split too — the front keeps its sequence number and a prefix, the tail goes back to the head of that shell's queue |
 | nothing is heard and nothing answers | the radio's own stats (`CMD_GET_STATS`) report the noise floor, and the RSSI and SNR of the last packet it heard: `mesh status` prints them, so "nothing heard yet" is a measurement rather than a missing feature, and a reading is what distinguishes "not being heard" from "heard and not answered" |
 | a scoped mesh drops our floods | the session still works wherever a direct route exists, because scoping gates floods only; discovery needs the region, so `ldmux mesh status` prints the scope and the log names a scope learned from the air (ADR-0033) |
 | a mesh setting is malformed | the mesh link is disabled with a message and the daemon keeps running, because a bad key must not kill the shells |
@@ -586,7 +586,7 @@ is already losing a quarter of its records from being flooded by its own repair 
 **Small messages share a record, on both sides.** A record is the unit of air, so `Attach` and its
 `Resize` travel together (17 bytes in one record instead of two), and the host packs its replies to
 the record's *live* payload — 143 at an empty path, up to 166 at range — rather than to a constant.
-Two more records are saved by timing rather than packing: an owed ack waits `max(150 ms, rto/3)`
+Two more records are saved by timing rather than packing: an owed ack waits `max(150 ms, 2 airtimes)`
 before going out alone, so it rides the next outgoing record instead, and the "answer finished"
 marker is sent only when an answer took two or more frames, because a one-frame echo's own commit
 already ends the phone's wait.
@@ -691,9 +691,13 @@ be transmitted and then ignored by every receiver. Direct means the sender must 
    dies on it, so the rebuild after a failure asks rather than retrying the chain that just lost the
    records. The host treats an incoming request as proof that the path it holds is dead, because the
    peer asks only when nothing it sends is arriving — without which the shortest-path rule kept a
-   dead one-hop route for the full two minutes of `PEER_ROUTE_STALE` while the peer asked every few
-   seconds. Unanswered requests double their interval from five seconds to a forty-second cap, with
-   ±25 % jitter, and any route learned resets it.
+   dead one-hop route for the whole trust window (`route_stale(hops)` = `max(60 s, 2 x hops x
+   airtime)`) while the peer asked every few seconds. **A shorter chain always displaces a longer
+   one, an equal one does not disturb it, and a route known dead yields to anything**: the first
+   version cleared the "heard" stamp before every candidate, so each copy of one request replaced
+   the path and the *longest* copy won (measured 2026-11-10: copies at 1, 2, 4, 17, 19, 20, 26, 27,
+   28 hops, and the host kept the 28-repeater chain). Unanswered requests double their interval from
+   five seconds to a forty-second cap, with ±25 % jitter, and any route learned resets it.
 3. **A route heard on the air is adopted on the event.** Both ends receive
    `PUSH_CODE_LOG_RX_DATA` (0x88) for every packet their radio hears, path included, so an advert
    from the peer updates the route the moment it arrives. The radio's own advert-path cache is
@@ -713,8 +717,9 @@ be transmitted and then ignored by every receiver. Direct means the sender must 
    request, a reply or the 36-byte **route hint** (`LDRH` and the phone's public key, sent before the
    session handshake), and **remembers it** in `<state>/mesh-peer` — without that, a daemon restarted
    while the phone had moved could not address anything to it and could only wait for an advert.
-   Either end that lacks a route floods a request: at most every 10 s, and the host answers at most one
-   per 5 s, so neither can be turned into an amplifier by a peer that repeats itself.
+   Either end that lacks a route floods a request: the phone's ladder doubles from 5 s to a 40 s cap
+   with ±25 % jitter, and the host answers at most one per 5 s, so neither can be turned into an
+   amplifier by a peer that repeats itself. A proven, fresh route is not asked about at all.
 4. **Every reply follows the reverse of the path that was learned.** `PeerPath::reversed` flips the
    hop groups (per `hash_size` bytes, not per byte) and the radio thread sends every record along it.
    With no route, records go zero-hop, which reaches only the radios in earshot.
@@ -754,9 +759,12 @@ Consequences worth knowing:
 - **Timing follows airtime.** One 172-byte record at 62.5 kHz SF7 is 603 ms (the firmware's own
   formula: 32 preamble symbols below SF9, `preambleLengthForSF`), and each repeater holds a packet
   for a random delay of up to two airtimes, so the session's first retry is
-  `max(2 s, 6 x airtime)` (`Config::with_airtime`), handed to the session by the carrier
-  (`Bound::airtime_ms`) and by the app (`ldmux_session_set_airtime`). A fixed two-second retry
-  would duplicate records the peer already has and spend the hour's allowance doing it.
+  `6 x airtime x hops`, and its ceiling is at least twice that, so the doubling ladder always has
+  room above its first rung (`Config::with_path`). The figure comes from the route, handed to the
+  session by the carrier (`Bound::hops`) and by the app (`ldmux_session_set_hops`); a fixed
+  two-second retry would duplicate records the peer already has and spend the hour's allowance
+  doing it, and a flat sixty-second cap made every route of nine hops or more retransmit before its
+  first copy could have crossed.
 - **Paths move.** The phone floods a route request whenever the route it holds is older than two
   minutes — on every connect attempt, when a shell is opened, and on a 10 s timer while it has
   nothing usable (`ROUTE_FRESH_MS`, `ROUTE_REQUEST_FLOOR_MS`) — and reads its radio's cache as a
@@ -768,11 +776,15 @@ Consequences worth knowing:
 - **What is proven and what is not.** The route request and reply, the reverse-path rule, the
   zero-hop fallback, the per-`hash_size` hop reversal (both directions: `PeerPath::reversed` and
   `RadioRoute.reversed`), the advert-path decoding and the airtime-scaled timers are unit-tested.
-  **Nothing in this tree has yet run through a real repeater**: the two radios on the bench hear each
-  other directly, so the path is always empty there. The first on-air test — two radios far enough
-  apart that a public repeater is the only way between them — is what proves the route-learning step
-  end to end, and the diagnostics for it are the daemon log's `route` lines (`journalctl --user -u
-  ldmux | grep route`) and the app's `mesh … route: N hop(s)` log entries.
+  **The route-learning step has run through public repeaters**: on 2026-11-09 and 2026-11-10 a
+  phone at range discovered the host through one and then through a chain of public repeaters, held
+  a session across it, and logged the whole exchange — `route request … hops=N`,
+  `route reply sent ok=true`, `session replaced after N s (hops=H, reason)` on the host and
+  `flooded reply … route: N hop(s)` in the app. What those runs also measured is the cost: at 28
+  hops one record crosses 28 transmissions, so an *exchange* is `2 x hops x airtime` ≈ 34 s and a
+  full-screen repaint is minutes of chain time. That is why the CLI now prints a `cost` line and the
+  app prices the route beside its hop count: the honest radius for an interactive terminal on this
+  preset is single-digit hops, and beyond it the mode is batch by nature rather than by setting.
 - **Two bytes per path hop, and that is ldmux's default.** The firmware ships at mode 0, one byte:
   254 usable hashes, and 0x00 and 0xFF are reserved. At ≈20 co-channel repeaters a one-byte
   prefix collides with coin-flip probability, and a collision is not cosmetic — two repeaters with

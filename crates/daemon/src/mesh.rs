@@ -365,6 +365,9 @@ impl MeshSnapshot {
             "uplinkRecordMax": self.uplink_record_max,
             "recordsLeft": self.records_left,
             "peerHops": self.peer_hops,
+            // The airtime of one record at this tuple, so the CLI can price the route: `2 × hops ×
+            // airtime` is one exchange, and that is the figure that says whether typing is possible.
+            "airtimeMs": self.airtime_ms,
             "snrDb": self.snr_quarter_db.map(|q| f32::from(q) / 4.0),
             "noiseFloorDbm": self.noise_floor_dbm,
             "radioRssi": self.radio_rssi,

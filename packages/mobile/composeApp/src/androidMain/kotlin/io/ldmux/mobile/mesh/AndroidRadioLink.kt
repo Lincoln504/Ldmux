@@ -131,11 +131,20 @@ class AndroidRadioLink(
      * path.
      */
     private data class RadioPath(val encoded: Int, val bytes: ByteArray) {
-        /** How many repeaters this path passes through. */
-        fun hops(): Int {
-            val width = (encoded and 0x03) + 1
-            return bytes.size / width
-        }
+        /**
+         * How many repeaters this path passes through.
+         *
+         * **The encoded byte is `((width - 1) << 6) | hops`, not the other way round.** This read
+         * the hops out of the *width* bits and divided by the hop count, which returned 0 for every
+         * path of one to three repeaters, 2 for five, 8 for seventeen and 28 only for a 28-hop
+         * chain: every route-derived figure — the session's first retransmission, the repair
+         * deadline, the silence bound, the handshake ladder, every answer deadline — has been sized
+         * from that wrong number since 2026-11-08 (`41d6bbc`). At one repeater it said "adjacent",
+         * so the session retried at 3.6 s on a link whose round trip is seven, doubling the air on a
+         * half-duplex channel and walking a working session apart: "works at home, fails at range".
+         * The decoder proper lives in [RadioRoute.reversed]; this is the same arithmetic.
+         */
+        fun hops(): Int = RadioRoute.pathHops(encoded, bytes.size)
     }
 
     /**
@@ -377,10 +386,14 @@ class AndroidRadioLink(
             // directions, and the path-refresh loop then re-flooded a route request every ten
             // seconds on a working link. Arrival is stronger evidence than any timer: the host's own
             // record came down this path.
-            if (advertPath != null) {
+            // **Whichever source is in hand, this is proof.** Measuring freshness against the
+            // advert slot alone left a route that lives in the contact fallback permanently
+            // "unproven", so the maintenance loop re-flooded a request every few seconds on a link
+            // that was carrying traffic in both directions.
+            if (hostPath != null) {
                 routeHeardAt = System.currentTimeMillis()
                 // Something the host sent arrived down this path: it works in the direction that
-                // matters, and a shorter candidate can no longer displace it on hops alone.
+                // matters, and no shorter candidate may displace it on hops alone.
                 routeProven = true
             }
             if (!inbox.trySend(payload).isSuccess) {
@@ -400,8 +413,15 @@ class AndroidRadioLink(
             } else {
                 // The firmware's own out-path, already in sending order. Validated by the same rule
                 // the advert path goes through, so one malformed answer cannot become a route.
-                contactPath = RadioRoute.fromContact(c.outPathLen(), c.activePath())
+                // **And checked against the same grave.** A session that dies on the contact path
+                // used to be handed the identical path back by the next read, because only
+                // `adoptRoute` consulted the failed-route memory — the loop it exists to break.
+                val candidate = RadioRoute.fromContact(c.outPathLen(), c.activePath())
                     ?.let { RadioPath(it.encoded, it.bytes) }
+                contactPath = candidate?.takeUnless { recentlyFailed(it) }
+                if (candidate != null && contactPath == null) {
+                    appLog("mesh contact route ignored: it lost a session")
+                }
             }
             contactDone?.complete(Unit)
         }
@@ -1030,8 +1050,14 @@ class AndroidRadioLink(
             appLog("mesh $source route ignored: it lost a session ${hops} hop(s)")
             return
         }
-        if (routeProven && hops > held && !stale) {
-            appLog("mesh $source route ignored: $hops hop(s), ${held} in hand")
+        // **A proven, fresh route is not displaced by anything a flood can say.** The guard used
+        // to fire only for a *longer* candidate (`hops > held`), so a shorter one — including the
+        // one-hop ghost that a single answer produced beside a five-hop truth — still displaced a
+        // route that was carrying traffic, and the session then went silent until the silence bound
+        // ended it. Being shorter is not evidence of working; only traffic is. A route that has
+        // genuinely died is cleared by `forgetRoute`, which is the one thing allowed to unseat it.
+        if (routeProven && !stale) {
+            appLog("mesh $source route ignored: proven, ${held} hop(s) in hand")
             return
         }
         advertPath = RadioPath(path.encoded, path.bytes)
@@ -1059,7 +1085,7 @@ class AndroidRadioLink(
         // banning the direct path for those forced a six-hop detour in the same room: measured
         // 2026-11-10 as `flooded reply route ignored: it lost a session 0 hop(s)` three times while
         // the radios were a metre apart.
-        advertPath?.takeIf { blame }?.let { path ->
+        hostPath?.takeIf { blame }?.let { path ->
             // Remember what failed, so the next answer cannot hand back the same ghost.
             failedRoutes.addLast(
                 ((path.encoded and 0xFF) or (path.bytes.contentHashCode() shl 8)) to
@@ -1103,14 +1129,21 @@ class AndroidRadioLink(
     }
 
     /** Whether this path lost a session within the memory window. */
-    private fun recentlyFailed(path: RadioRoute.Path): Boolean {
+    private fun recentlyFailed(path: RadioRoute.Path): Boolean =
+        recentlyFailed(path.encoded, path.bytes)
+
+    /** The same question about a path already unwrapped into this link's own type. */
+    private fun recentlyFailed(path: RadioPath): Boolean =
+        recentlyFailed(path.encoded, path.bytes)
+
+    private fun recentlyFailed(encoded: Int, bytes: ByteArray): Boolean {
         val now = System.currentTimeMillis()
         while (failedRoutes.isNotEmpty() && now - failedRoutes.first().second > FAILED_ROUTE_HOLD_MS) {
             failedRoutes.removeFirst()
         }
         // The bytes, not their length: two five-hop paths with different repeaters share a length
         // and must not share a grave.
-        val key = (path.encoded and 0xFF) or (path.bytes.contentHashCode() shl 8)
+        val key = (encoded and 0xFF) or (bytes.contentHashCode() shl 8)
         return failedRoutes.any { it.first == key }
     }
 
@@ -1125,7 +1158,7 @@ class AndroidRadioLink(
     }
 
     private fun routeIsFresh(now: Long): Boolean =
-        advertPath != null && routeHeardAt > 0L && now - routeHeardAt <= ROUTE_FRESH_MS
+        hostPath != null && routeHeardAt > 0L && now - routeHeardAt <= ROUTE_FRESH_MS
 
     /**
      * Ask the host for a route, right now, over a flood.
