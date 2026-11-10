@@ -1285,6 +1285,15 @@ class AndroidRadioLink(
                 val needsAsking = !routeIsFresh(now) || !routeProven
                 if (needsAsking && now - lastSendAt <= ROUTE_IDLE_MS) ensureRoute(s)
                 if (!s.canSendRaw()) continue
+                // **A radio fact that never arrived is asked for again here.** `readDeviceInfo` runs
+                // once at bind, racing the route request for the one answer window the companion
+                // has: when it loses, the path width, the radio's limits and the panel's readout all
+                // stay unknown for the life of the connection, and nothing ever asked again. The
+                // maintenance tick is idle by definition, so this is where a second attempt belongs.
+                if (deviceInfo.value == null) {
+                    readDeviceInfo()
+                    continue
+                }
                 // One command per tick: the companion has one answer window, and a second request
                 // inside it makes both answers ambiguous.
                 //
