@@ -166,7 +166,7 @@ class MeshTerminalSource(
      * A press that actually sent something is waiting for its answer.
      *
      * What the bar may claim. A `show` press with an empty buffer unfreezes the view but owes no
-     * answer, so "waiting for answer" about it would be a control describing a send that never
+     * answer, so "sent · …" about it would be a control describing a send that never
      * happened.
      */
     val awaitingAnswer: Boolean get() = hold.awaiting && hold.waitingOnSend
@@ -316,7 +316,7 @@ class MeshTerminalSource(
      * **The wait survives it.** Drawing what is held does not end the wait, because the answer to a
      * sync is "the next screen the host sends" and a slow answer is the normal answer on this link.
      * Clearing the wait here meant the late answer was *held* and the user pressed the button again
-     * — the press they had already made, spent on nothing. The bar says "no answer yet" until the
+     * — the press they had already made, spent on nothing. The bar says "no answer · …" until the
      * answer arrives, and the answer is drawn when it does.
      */
     fun syncTimedOut(): Boolean {

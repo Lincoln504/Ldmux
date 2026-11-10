@@ -97,8 +97,7 @@ internal fun PublicChannelBar(
     /**
      * What the link has actually said, for the line that says what this mode is doing.
      *
-     * **"waiting for answer" is a claim about the caller; "nothing back for 12 s" is a fact about
-     * the air.** At range the difference is the whole diagnosis: an answer that is coming takes
+     * **"sent · …" is a claim about the caller; "nothing back yet" is a fact about the air.** At range the difference is the whole diagnosis: an answer that is coming takes
      * `2 × hops × airtime`, and a person watching a still screen cannot tell that from a link that
      * has stopped carrying anything. The two numbers are cheap — the hop count the link already
      * holds, and how long since a record last arrived — and they turn the status from a spinner into
@@ -121,10 +120,10 @@ internal fun PublicChannelBar(
     // **top** of the side panel's scrolling area. Either way it never covers a row of the shell's
     // output and never moves with the view's scroll.
     //
-    // **The status is the feature.** "sending…" then "waiting for the answer" then "12
-    // characters" is the only place the mode says what it is doing. "no answer yet" is a fact
-    // about the last press and stays until the answer arrives, because the answer is still
-    // coming — the deadline reports, it does not cancel. A live region: it changes without the
+    // **The status is the feature.** "sending…", then "sent · direct · nothing back yet", then
+    // "12 characters": the only place the mode says what it is doing. The evidence half is a fact
+    // about the link and stays until the answer arrives, because the answer is still coming — the
+    // deadline reports, it does not cancel. A live region: it changes without the
     // user touching the control that caused it, so a reader would otherwise read it once and
     // never hear that the send finished or that the answer arrived. Polite: it waits for the
     // current utterance rather than interrupting.

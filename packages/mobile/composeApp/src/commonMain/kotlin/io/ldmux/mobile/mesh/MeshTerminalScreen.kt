@@ -642,7 +642,7 @@ fun MeshTerminalScreen(
             return@LaunchedEffect
         }
         delay(left)
-        // Reports through the bar's own status line ("no answer yet: the link may be busy or down")
+        // Reports through the bar's own status line ("no answer · direct · nothing back yet")
         // rather than a notice over the terminal: the row is where the mode speaks, and the answer
         // that arrives late is still drawn when it arrives.
         source.syncTimedOut()
@@ -1595,12 +1595,15 @@ internal fun meshRowSubtitle(e: SessionEntry): String =
 /**
  * A wait, in words.
  *
- * It used to count seconds and, past a minute, add "nothing back yet". That number was never the
- * age of the attempt: it was the age of the *screen*, so it climbed through retries that were
- * working exactly as intended and reached four figures on a link that was being re-asked every six
- * seconds (measured on the device, 2026-10-31: "107 s", "290 s" while the driver retried). A
- * number that measures the wrong thing is worse than no number - the state is what the user needs,
- * and the retry itself is the proof that something is happening.
+ * The seconds are **this attempt**, and the evidence is **the link** — "direct · nothing back
+ * yet", "6 hops · answered 4 s ago". The two answer different questions: how long the phone has
+ * been asking, and whether anything is coming back. The first draft counted the age of the *screen*
+ * instead of the attempt, so it climbed through retries that were working exactly as intended and
+ * reached four figures (measured 2026-10-31: "107 s", "290 s" on a link re-asked every six
+ * seconds); a number that measures the wrong thing is worse than none.
+ *
+ * The evidence is drawn **only when the batch bar is not**, because the bar already says it there:
+ * one fact, one place. In live mode this line is the only place it can be said.
  */
 @Composable
 private fun WaitingLine(text: String, key: Any?, evidence: (() -> String)? = null) {
