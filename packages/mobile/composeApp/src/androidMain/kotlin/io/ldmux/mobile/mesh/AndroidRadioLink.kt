@@ -228,6 +228,10 @@ class AndroidRadioLink(
     @Volatile
     private var directsSinceStale = 0
 
+    /** Whether the last record from the peer arrived by flood, so the reply takes the same carrier. */
+    @Volatile
+    private var heardByFlood = false
+
     /** Floods available to spend now; refilled at [floodIntervalMs], capped at [FLOOD_BURST]. */
     private var floodTokens = FLOOD_BURST
     /** When the bucket was last refilled, so a refill is charged by elapsed time rather than a timer. */
@@ -487,8 +491,10 @@ class AndroidRadioLink(
                 // matters, and no shorter candidate may displace it on hops alone.
                 routeProven = true
                 // A record arrived on the direct carrier, so the cheap path works: the next send
-                // starts at the direct attempt again instead of escalating.
+                // starts at the direct attempt again instead of escalating, and the reply to *this*
+                // record goes direct.
                 directsSinceStale = 0
+                heardByFlood = false
             }
             if (!inbox.trySend(payload).isSuccess) {
                 appLog("mesh radio inbox full, dropping one raw record")
@@ -544,6 +550,7 @@ class AndroidRadioLink(
                     if (own != null) {
                         val record = RadioRoute.heardRecordFlood(raw, own)
                         if (record != null) {
+                            heardByFlood = true
                             RadioRoute.heardFloodPath(raw)?.let { path ->
                                 adoptRoute(path, "flooded record", proved = true)
                             }
@@ -927,7 +934,10 @@ class AndroidRadioLink(
         // (a batch gets four records away at once) and then refills at the paced rate, so a stream
         // of keystrokes still cannot flood the mesh and a burst still completes.
         refillFloodBudget(floodNow)
-        val floodWanted = !fresh && directsSinceStale >= 1 && floodTokens > 0
+        // **Reply on the carrier the peer was heard on.** A record that arrived by flood says the
+        // direct chain is not what is carrying this peer, so the next record goes back the same way
+        // rather than down a path that demonstrably did not deliver theirs.
+        val floodWanted = (heardByFlood || (!fresh && directsSinceStale >= 1)) && floodTokens > 0
         if (floodWanted && s.canSendRaw()) {
             lastFloodAt = floodNow
             floodTokens--

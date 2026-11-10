@@ -1161,6 +1161,12 @@ fn serve_loop<L: ByteLink>(
     // Pathless replies sent as a plain zero-hop packet since the peer was last heard: the counter
     // that decides when a reply escalates to a flood.
     let mut pathless_directs: u32 = 0;
+    // **Reply on the carrier the peer was heard on.** A record that arrived by flood says the direct
+    // chain is not what is carrying this peer: answering it direct sends the reply down a path that
+    // demonstrably did not deliver theirs. Measured 2026-11-10, the phone flooded its handshake, the
+    // host answered it zero-hop (the flood's arrival path was empty), and the phone at range never
+    // heard a thing while its own 26-hop copies of the same flood came back to it.
+    let mut peer_via_flood = false;
     // The nonces this end has already answered, so one question forwarded by a dozen chains is
     // answered once while three distinct questions in one burst are answered three times.
     let mut answered_nonces: std::collections::VecDeque<[u8; 4]> = std::collections::VecDeque::new();
@@ -1274,7 +1280,10 @@ fn serve_loop<L: ByteLink>(
                 let path_stale = peer_path_heard.is_none_or(|t| {
                     t.elapsed() >= route_stale(peer_path.as_ref().map_or(1, |p| usize::from(p.hops)))
                 });
-                let flood_when_pathless = (peer_path.is_none() || path_stale) && pathless_directs > 0;
+                let flood_when_pathless = (peer_via_flood
+                    || peer_path.is_none()
+                    || path_stale)
+                    && (peer_via_flood || pathless_directs > 0);
                 // **Two seconds, not ten.** The firmware acknowledges `SEND_RAW_PACKET` *before* it
                 // transmits (`MyMesh.cpp:2003-2016`), so a 10-second wait bought nothing on a busy
                 // channel and meant one stalled radio held the command queue — and the route
@@ -1991,8 +2000,9 @@ fn serve_loop<L: ByteLink>(
                         peer_path_proven = true;
                     }
                     last_peer_record = Some(Instant::now());
-                    // The peer reached us over a flood, so the cheap carrier is not what is
-                    // working: leave the counter where it is, and the next reply stays a flood.
+                    peer_via_flood = true;
+                    // The peer reached us over a flood, so the reply goes back the same way. The
+                    // cheap carrier is not what is working for this peer right now.
                     if let (Some(&snr), Some(&rssi)) = (frame.get(1), frame.get(2)) {
                         peer_signal = Some((snr as i8, rssi as i8));
                     }
@@ -2058,8 +2068,10 @@ fn serve_loop<L: ByteLink>(
                         }
                         last_peer_record = Some(Instant::now());
                         // **The cheap carrier is working again.** A record arrives direct, so a
-                        // later pathless reply starts at zero-hop again instead of flooding.
+                        // later pathless reply starts at zero-hop again instead of flooding, and the
+                        // reply to *this* record goes direct.
                         pathless_directs = 0;
+                        peer_via_flood = false;
                         // The frame's own reading: SNR in quarters of a dB, then RSSI in dBm.
                         if let (Some(&snr), Some(&rssi)) = (frame.get(1), frame.get(2)) {
                             peer_signal = Some((snr as i8, rssi as i8));

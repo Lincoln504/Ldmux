@@ -1092,7 +1092,11 @@ class MeshTermDriver(
                     runCatching { gateway.refreshRoute() }
                     return@withLock
                 }
-                handshakeTries++
+                // **The counter names the attempt, and there are only so many.** It was unbounded
+                // while the screen prints "n/3", so a ladder that was being restarted faster than the
+                // budget ran printed `handshake 4/3` — measured 2026-11-10 at range — which reads as a
+                // counter that is broken rather than as a link that is failing.
+                handshakeTries = (handshakeTries + 1).coerceAtMost(handshakeRetries)
                 handshakeNo = handshakeTries
                 attemptsThisLink++
                 // **A handshake that was not answered is asked again, not waited out.** `msg1` is
