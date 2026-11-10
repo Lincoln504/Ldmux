@@ -692,6 +692,18 @@ below is either **derived** (a formula over airtime, hops or the radio's own rep
 | `ROUTE_TRUST_MS` / `ROUTE_FRESH_MS` / `FAILED_ROUTE_HOLD_MS` | 60 s / 120 s / 120 s | **Policy** — the community's path-gating window, and how long a bad path is remembered |
 | `MAX_HOPS` | 63 | **Firmware** — a 64-byte path field, one byte a hop |
 
+### Deliberately not changed, with the reason
+
+Four findings from the 2026-11-10 audits are decisions, not omissions. Each is recorded here so a
+later reader does not re-open it as a defect.
+
+| Finding | Why not |
+|---|---|
+| **Candidate sets and path rotation on the first retransmission** — keep N paths and try the next when one fails | The record limit is derived from the path in use, so a rotation would have to re-size per attempt or size for the largest candidate, and every attempt on a new path would be a record the peer may never have heard of. The proof rule (6.188) already stops a working route being unseated, and a failed session clears the path and asks once — one flood, one transmission for us. The complexity is worse than the failure it fixes |
+| **One shared wall-clock budget for session death** | The phone's silence verdict (`60 s + 3.6 s × hops`, 161 s at 28 hops) already fires long before the host's five-attempt ladder, and the host accepts a fresh `msg1` while a session is live, so the phone is the authority in practice. Making it formal changes the protocol for no behavioural gain |
+| **Retrying the close record** | A close is a courtesy: the peer's own silence bound ends the session anyway, and a close that arrives after the peer has already rebuilt lands on a dead index and is dropped. A retry would cost air to say something the receiver has already decided |
+| **`max_attempts = 5` as a count rather than a time budget** | With the ceiling above the route's round trip (6.177) five attempts is `5 × 6 × airtime × hops` — bounded and derived. A wall-clock budget would be prettier and would produce the same five attempts at every route this protocol can carry |
+
 ### By design, not a fault
 
 A scope is never invented (ADR-0033); ldmux keeps no contacts (ADR-0030); session records are never
