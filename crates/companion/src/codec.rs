@@ -16,6 +16,12 @@
 /// Response and push codes this crate interprets.
 pub mod codes {
     pub const OK: u8 = 0x00;
+    /// `RESP_CODE_SENT` — the answer to a raw send on firmware that confirms sends.
+    ///
+    /// Ten bytes on the v1.18 protocol: the route flag, the tag, and **the firmware's own suggested
+    /// timeout** for that send. A client that only knows `OK` sees this as a framing fault, so the
+    /// same command works on one firmware and fails on the next with no configuration change.
+    pub const SENT: u8 = 0x06;
     pub const ERROR: u8 = 0x01;
     pub const SELF_INFO: u8 = 0x05;
     pub const CONTACT_START: u8 = 0x02;

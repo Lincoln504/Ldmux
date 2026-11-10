@@ -120,6 +120,8 @@ pub struct Companion<L: ByteLink> {
     pending: VecDeque<Vec<u8>>,
     pub self_info: Option<SelfInfo>,
     pub device_info: Option<DeviceInfo>,
+    /// The timeout the firmware suggested for the last raw send, when it said one.
+    last_suggested_timeout: Option<Duration>,
 }
 
 impl<L: ByteLink> Companion<L> {
@@ -130,6 +132,7 @@ impl<L: ByteLink> Companion<L> {
             pending: VecDeque::new(),
             self_info: None,
             device_info: None,
+            last_suggested_timeout: None,
         }
     }
 
@@ -295,8 +298,37 @@ impl<L: ByteLink> Companion<L> {
         payload.push(commands::SEND_RAW_PACKET);
         payload.push(0); // priority
         payload.extend_from_slice(packet);
-        self.request(&payload, codes::OK, timeout)?;
+        // **Two answers mean the same thing.** Firmware up to at least 1.17 acknowledges a raw send
+        // with a bare `OK`; the v1.18 protocol answers `RESP_CODE_SENT`, which carries the route
+        // flag, a tag and the firmware's own suggested timeout. A client that waits only for `OK`
+        // works until the radio is updated and then fails every send with "unexpected response",
+        // which reads as a broken link rather than a protocol the client does not know.
+        let reply = self.request_any(&payload, &[codes::OK, codes::SENT], timeout)?;
+        // **The firmware's own idea of how long the send takes beats our arithmetic.** It knows the
+        // packet's airtime and the route length; we estimate both. Recorded so the session's first
+        // retransmission can use it.
+        if reply.first() == Some(&codes::SENT) {
+            self.last_suggested_timeout = Self::suggested_timeout_ms(&reply).map(Duration::from_millis);
+        } else {
+            self.last_suggested_timeout = None;
+        }
         Ok(())
+    }
+
+    /// The suggested timeout out of a `RESP_CODE_SENT` frame, in milliseconds.
+    ///
+    /// `[0x06][route][tag x4][suggested x4]` on the v1.18 protocol. Anything shorter is a firmware
+    /// that confirms the send without saying how long it should take, which is not a fault.
+    fn suggested_timeout_ms(frame: &[u8]) -> Option<u64> {
+        let bytes = frame.get(6..10)?;
+        let ms = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        // Zero is the firmware's "I have no opinion", not a zero-length wait.
+        (ms > 0).then(|| u64::from(ms))
+    }
+
+    /// The timeout the firmware suggested for the last raw send, when it said.
+    pub fn suggested_timeout(&self) -> Option<Duration> {
+        self.last_suggested_timeout
     }
 
     /// Set the radio's clock from this machine's wall clock.
@@ -427,6 +459,7 @@ impl<L: ByteLink> Companion<L> {
                 | codes::NO_MORE_MESSAGES
                 | codes::CHANNEL_MSG_RECV
                 | codes::CHANNEL_MSG_RECV_V3
+                | codes::SENT
         )
     }
 
@@ -462,6 +495,78 @@ impl<L: ByteLink> Companion<L> {
     }
 
     /// Send one command and wait for the reply with `expect` as its first byte.
+    /// One command, answered by any of `expect`.
+    ///
+    /// A transport has to speak the firmware's protocol at more than one version: the same command
+    /// is answered by different codes across releases, and refusing the newer one turns a working
+    /// radio into an unreachable one.
+    fn request_any(
+        &mut self,
+        payload: &[u8],
+        expect: &[u8],
+        timeout: Duration,
+    ) -> Result<Vec<u8>, SessionError> {
+        let framed = encode(payload)?;
+        let start = Instant::now();
+        let deadline = start + timeout;
+        let mut last_send = start;
+        let mut heard_anything = false;
+        self.link.write_all(&framed)?;
+        loop {
+            if self.pump(POLL_TIMEOUT_MS)? {
+                heard_anything = true;
+            }
+            let mut pushes: Vec<Vec<u8>> = Vec::new();
+            let mut outcome: Option<Result<Vec<u8>, SessionError>> = None;
+            while let Some(frame) = self.pending.pop_front() {
+                match frame.first().copied() {
+                    Some(code) if expect.contains(&code) => {
+                        outcome = Some(Ok(frame));
+                        break;
+                    }
+                    Some(codes::DISABLED) => {
+                        outcome = Some(Err(SessionError::Disabled));
+                        break;
+                    }
+                    Some(codes::ERROR) => {
+                        let code = frame.get(1).copied().unwrap_or(0);
+                        outcome = Some(Err(SessionError::Rejected {
+                            code,
+                            meaning: error_meaning(code),
+                        }));
+                        break;
+                    }
+                    Some(code) if code >= 0x80 => {
+                        pushes.push(frame);
+                        heard_anything = true;
+                    }
+                    Some(got) if Self::is_known_response(got) => pushes.push(frame),
+                    Some(got) => {
+                        outcome = Some(Err(SessionError::Unexpected { got }));
+                        break;
+                    }
+                    None => {}
+                }
+            }
+            for push in pushes {
+                self.pending.push_back(push);
+            }
+            if let Some(result) = outcome {
+                return result;
+            }
+            if Instant::now() >= deadline {
+                return Err(SessionError::Timeout {
+                    expected: expect.first().copied().unwrap_or(0),
+                    waited: timeout,
+                });
+            }
+            if !heard_anything && last_send.elapsed() >= RESEND_INTERVAL {
+                self.link.write_all(&framed)?;
+                last_send = Instant::now();
+            }
+        }
+    }
+
     fn request(
         &mut self,
         payload: &[u8],

@@ -20,7 +20,9 @@ import io.iotone.meshcore.frames.DecodeFailure;
 import io.iotone.meshcore.frames.MeshcoreInbound;
 import io.iotone.meshcore.frames.MessagesWaitingFrame;
 import io.iotone.meshcore.frames.NoMoreMessagesFrame;
+import io.iotone.meshcore.frames.MsgSentFrame;
 import io.iotone.meshcore.frames.OkFrame;
+import io.iotone.meshcore.model.MsgSent;
 import io.iotone.meshcore.frames.ErrorFrame;
 import io.iotone.meshcore.frames.RawDataFrame;
 import io.iotone.meshcore.frames.SelfInfoFrame;
@@ -108,6 +110,20 @@ public final class MeshcoreSession {
      * most one raw send in flight, and a timeout is a dead link rather than a
      * reason to start another command that a late answer could resolve.</p>
      */
+    /**
+     * The firmware's own estimate of how long the last raw send should take, in milliseconds.
+     *
+     * Sent by firmware that answers {@code RESP_CODE_SENT}; 0 when the radio said nothing. It is the
+     * one number that accounts for the packet's real airtime and the route length, both of which
+     * this side only estimates.
+     */
+    private volatile int suggestedSendTimeoutMs = 0;
+
+    /** @return the firmware's estimate for the last raw send, or 0 when it did not say */
+    public int suggestedSendTimeoutMs() {
+        return suggestedSendTimeoutMs;
+    }
+
     private final AtomicReference<RawSendCallback> pendingRaw =
             new AtomicReference<>();
 
@@ -992,6 +1008,21 @@ public final class MeshcoreSession {
             // LDMUX disables auto-drain; clients that keep it on still need
             // the message queue to advance after a raw push.
             if (autoDrain) continueDrain();
+            return;
+        }
+        // **A send is confirmed two ways, depending on firmware.** Up to at least 1.17 a raw send is
+        // answered with a bare `OK`; the v1.18 protocol answers `RESP_CODE_SENT`, which carries the
+        // route flag, the tag and the firmware's own estimate of how long that send should take.
+        // Handling only `OK` makes every send hang on a radio that was merely updated, which reads
+        // as a dead link rather than a protocol this client does not know. The estimate is kept, so
+        // it can be shown beside a stuck send instead of a number this side invented.
+        if (frame instanceof MsgSentFrame) {
+            MsgSent sent = ((MsgSentFrame) frame).sent();
+            suggestedSendTimeoutMs = (int) Math.min(Integer.MAX_VALUE, sent.estTimeoutMs());
+            RawSendCallback pending = pendingRaw.getAndSet(null);
+            if (pending != null) {
+                pending.onResult(true, -1);
+            }
             return;
         }
         if (frame instanceof OkFrame || frame instanceof ErrorFrame) {
