@@ -821,3 +821,108 @@ during this audit** — the only file written is this one.
 ---
 
 95:**Worst finding:** A-140 and A-143 together — the uplink has no compression at all while the downlink is compressed, so a 1,640-byte paste is 12 records / 7 s of air (21 s as flood copies, 3 windows ≈ 4 minutes) where deflate makes it 2 records / 1.2 s; and the queue that accepts it is a fixed 64 KiB regardless of the link, i.e. 478 records ≈ 14 minutes of air that also block every keystr
+
+### A-160 · live: typing is invisible — no local echo, no pending indicator, in live mode · blocker
+
+- Evidence: `packages/mobile/composeApp/src/commonMain/kotlin/io/ldmux/mobile/mesh/MeshTerminalScreen.kt:629` — `if (source.publicChannel) source.echoHeld(handle.echoText) else source.echoHeld("")`; the bar that would show held text is built only in held mode, `MeshTerminalScreen.kt:1068` (`if (config.meshHoldsInput) … else null`); the IME's buffer is a 1 dp, fully transparent field, `packages/mobile/composeApp/src/androidMain/kotlin/io/ldmux/mobile/TerminalSurface.android.kt:891-899` (`BasicTextField`, `size(1.dp)`, `alpha(0f)`); the echo machinery itself exists and is safe — `MeshTerminalSource.kt:544-551` (`echoHeld` rebuilds the host's last screen then writes the held text on top), guarded by `MeshScreenBytes.kt:20` (the cursor travels in `Commit`).
+- Finding: on a private tuple in live mode the phone shows **nothing at all** for a keystroke until the host's echo arrives. The typed characters go into an invisible IME buffer; the local echo is wired only to the held/public-channel mode; the pending label is rendered only by `PublicChannelBar`, which does not exist in live mode. The tailnet's predictive echo (`Predictor.kt`, `FramePacing.predict`) is not used by the mesh path at all (`grep FramePacing|predict` over `mesh/` → no hits).
+- Why it hurts at range: at range the echo takes 13 s on a working direct route and ~64 s by flood (A-164, A-165 arithmetic below). A person typing into a screen that does not change for that long concludes the app is broken and starts pressing things — which is exactly the reported behaviour, and it also costs airtime, because pressing again doubles the work.
+- Proposed fix (NOT applied): drive `echoHeld` from live mode too, with the text that is **sent but not yet echoed** rather than the batcher's pending text (see A-163), and draw it faint as the held echo already does. The existing rule — rebuild from the host's screen each time, autowrap off, nothing on an alternate screen — already makes it safe; the only new piece is the "sent, unacknowledged" set.
+- Open questions: whether a faint echo is honest enough for a password prompt (the tailnet predictor stops predicting after the echo stops, which this should copy); whether the line should be marked as provisional after N seconds in flight.
+- Investigator: live round · 2026-11-11
+
+### A-161 · live: the phone has no per-keystroke state, so it cannot echo, count or confess · major
+
+- Evidence: `MeshTermDriver.kt:1002-1009` (`quietForMs` needs `pending > 0` and measures from `maxOf(lastInboundAt, lastCarriedAt)` — a single link-wide timestamp); `MeshSession.kt:278-286` (`SessionHealth` = failed, peerClosed, needsRekey, pending, dropped — nothing per record); `crates/session/src/arq.rs:475-477` (`smoothed_rtt_ms()` is measured) vs `crates/session-ffi/src/lib.rs` exports (no `rtt` accessor anywhere in the list, lines 171-737).
+- Finding: the session measures a smoothed round trip and the daemon can see per-record acknowledgement, but **none of it reaches the phone**. There is no notion of "this text was sent at T and has not been echoed", and no measured round trip to compare the promise against. The user is told "link quiet · N s" only when something is unacknowledged, which brings A-162 and A-168 with it.
+- Why it hurts at range: every honest sentence ("sent 12 s ago", "the mesh has not passed this yet"), every local echo, and every adaptive window needs the same missing fact. Without it, the UI can only say "live" and be wrong.
+- Proposed fix (NOT applied): export `ldmux_session_rtt_ms` (and per-record send/ack timestamps, or at least the age of the oldest unacknowledged record) through `session-ffi`, surface it in `SessionHealth`, and let the driver keep a bounded list of sent-but-unseen input.
+- Open questions: whether the ARQ's `srtt` is meaningful when the route changes underneath it (A-80 suggests it currently is not); how many sent-but-unseen inputs should be remembered.
+- Investigator: live round · 2026-11-11
+
+### A-162 · live: the one warning that the link is not carrying is suppressed by the user's own typing · major
+
+- Evidence: `MeshTermDriver.kt:1002-1009` (`quietForMs` returns null when `pending <= 0`, and measures from `maxOf(lastInboundAt, lastCarriedAt)`); `lastCarriedAt` is set on every successful hand-off to the radio (`MeshTermDriver.kt:2274-2276`, `:988`); `MeshTerminalScreen.kt:180` (`QUIET_NOTICE_MS = 10_000`), rendered at `MeshTerminalScreen.kt:1359` (`Notice("link quiet · ${quietSecs} s")`).
+- Finding: the quiet notice starts its clock at the last *successful send*, and every keystroke updates it. A person typing continuously into a link that is delivering nothing therefore never sees the notice: the timer is restarted by each send, which is the very activity that fails to arrive.
+- Why it hurts at range: this is the failure mode at range — records are accepted by the local radio (send OK) and lost on the mesh. The one indicator that exists is precisely disabled by the behaviour it should be warning about.
+- Proposed fix (NOT applied): measure quiet from the last record **acknowledged by the peer** (or from the oldest unacknowledged record's send time), not from the last local send.
+- Open questions: whether the local radio's `OK` should count as "carried" at all; on a store-and-forward mesh it means "queued", not "delivered".
+- Investigator: live round · 2026-11-11
+
+### A-163 · live: echo and burst pacing — and every in-flight window — are hop-blind · blocker
+
+- Evidence: `crates/daemon/src/mesh_bridge.rs:518-522` (`echo_gap` = one **airtime**, clamped 200 ms..1 s), `:507-514` (`burst_gap` = two airtimes, clamped 300 ms..1 s), `:2488` (`PENDING_LIMIT = 8` records), `:2499` (`FRAME_MESSAGES = 12`), and `grep -n hops crates/daemon/src/mesh_bridge.rs` → **no hits**: the bridge never learns the route length. The only quantity it is given is `Link::airtime_ms()` (`mesh_bridge.rs:212-214`), which is one record's air on **one** hop.
+- Finding: on a 14-hop route a record occupies `14 × 602.6 ms ≈ 8.4 s` of mesh time, while the bridge paces a fresh echo every **0.49 s** and a burst every 1 s, and allows **8** records in flight. The pacing and the window are sized for a link where flight time ≈ airtime, which is true at one hop and false everywhere else.
+- Why it hurts at range: typing for 4 s produces ~8 echo frames, each needing 8.4 s of air, so the queue saturates at `PENDING_LIMIT` immediately and every frame after the first carries a screen that is up to a minute stale by the time it lands. The phone paints old news; the mesh spends ~67 s of airtime to deliver 4 seconds of typing.
+- Proposed fix (NOT applied): give the bridge the hop count (it already reaches the daemon through the session's own figure, `mesh_serial.rs` knows `peer_path.hops`), and express `echo_gap`, `burst_gap` and `PENDING_LIMIT` in **flight time** — `hops × airtime` — rather than in airtime alone. On a 14-hop route that is one echo per 8.4 s and a window of one or two records.
+- Open questions: whether `PENDING_LIMIT` should be 1 at range (the differ then always sends the newest state, which is what a terminal wants) — this is the same question as A-102/A-108 from the attach round, from the other end.
+- Investigator: live round · 2026-11-11
+
+### A-164 · live: keystroke-to-echo arithmetic at range, and why floods are the wrong carrier for typing · blocker
+
+- Evidence: MeshCore's forwarding delay, `~/Documents/mesh-research/clones/filter-firmware/src/Dispatcher.cpp:55-57` — `calcRxDelay(score, air_time) = (10^(0.85 − score) − 1) × air_time` — applied **only to floods** (`:243-252`), while a direct packet is processed immediately (`:254-256`); score from `filter-firmware/src/helpers/radiolib/RadioLibWrappers.cpp:319-328`; our airtime `Radio.kt:493-498` (preamble 32 at SF7); the phone's own flood carrier `AndroidRadioLink.kt:1013` (A-120's latch), `:1026-1053` (three copies), `:298-301` (`floodIntervalMs`).
+- Finding: at SNR −6.75 dB a 42 B record scores 0.063 and is held **1.15 s per repeater**, a 172 B frame scores 0.025 and is held **3.43 s per repeater**; below the −7.5 dB SF7 threshold the score is 0 and every flood costs the maximum **6.08 × airtime** per hop. Summed over a 14-hop route:
+  - **direct (a working path):** 3.1 s up + 8.4 s down + 0.6 s batcher + 0.5 s echo gap ≈ **13 s** from keypress to visible echo;
+  - **flood:** ~16 s up + ~48 s down ≈ **64 s**, per visible character.
+- Why it hurts at range: the phone's carrier rule prefers flood until a record arrives *direct* (A-120), so at range the default carrier for a keystroke is the one that is delayed seconds per hop. Typing over a flood at range cannot be faster than about a minute per character — no window, timer or copy count changes that, only switching carrier does.
+- Proposed fix (NOT applied): input should be the one record class that insists on the direct carrier, and when there is no direct route the UI should say so rather than accept keystrokes into a minute-long queue (see A-160/A-165). Also: `calcRxDelay` belongs in our own arithmetic — the phone already models airtime (`Radio.kt:455-498`) and does not model delay.
+- Open questions: whether repeated copies of a flood are *each* held by a repeater (they are distinct packets, so probably) — which would make three copies cost three times the forwarding delay, not three times the airtime.
+- Investigator: live round · 2026-11-11
+
+### A-165 · live: the typing windows are set in airtimes (0.6 s) when the round trip is 13–64 s · minor (but it is the visible "inconsistent, not slow" feel)
+
+- Evidence: `MeshInput.kt:246-250` (`pace(airtimeMs)` → `idleMs = airtime.coerceIn(IDLE_MS, 900)`, `maxHoldMs = max(idleMs, MAX_HOLD_MS)`), constants at `MeshInput.kt:236-241`; applied from the radio's report at `MeshTerminalScreen.kt:613-626` (`batcher.pace(RadioAirtime.timeOnAirMs(preset, MeshTerm.RECORD_PAYLOAD + 29))`).
+- Finding: the coalescing window exists so a pause does not cost a record. At range a record costs ≥ 13 s of round trip, so coalescing 0.6 s of typing saves **nothing** while making the first character arrive 0.6 s later than it could; and the corresponding `MAX_HOLD_MS` ceiling means continuous typing is flushed every 0.6 s into a link whose queue already holds 8 records.
+- Why it hurts at range: the windows are calibrated in the one unit that is not the bottleneck. On a link where flight time dominates, the right window is "the queue is empty and the last echo has landed", not a fraction of an airtime.
+- Proposed fix (NOT applied): make the flush condition "the session has room and the previous echo has been seen", with the airtime window only as a floor for a link that is fast.
+- Open questions: whether a typist at range would rather have coalescing of several seconds (fewer, larger records) — that is a UX choice worth a measurement.
+- Investigator: live round · 2026-11-11
+
+### A-166 · live: deleting a long line costs one record per 16 backspaces · major
+
+- Evidence: `packages/mobile/composeApp/src/commonMain/kotlin/io/ldmux/mobile/InputDelta.kt:44-45` — `val deleted = previous.length - shared; if (deleted > 0) ops += InputOp.Keys(List(deleted) { "BSpace" })`, no run-length encoding; `MeshInput.kt:150-165` coalesces names into one `Run.Keys` up to `MAX_KEYS`; `crates/protocol/src/mesh_term.rs:160` (`MAX_KEYS = 16`); the key table has no repeat form (`MeshInput.kt:520-530`, `keyGlyph` shows `‹Name›` only).
+- Finding: clearing a 300-character line at the IME (select all, delete) emits 300 named `BSpace` keys, packed 16 per record: **19 records**. Each `Key` message is `grep -c` … a full record, and on the flood carrier each is three transmissions.
+- Why it hurts at range: 19 records × 8.4 s of mesh air ≈ **2.6 minutes** of airtime, plus the session's window, to express something the shell would accept as one byte — and the shell's line discipline already has `C-u`/`C-w` for exactly this, which the key bar can already send as a named key (`MeshInput.kt:520-530`).
+- Proposed fix (NOT applied): a bounded repeat form for `BSpace` (e.g. `BSpace×12` as one name, decoded by the host into N deletes), or map a bulk deletion to the pane's own kill-line key. Sending fewer, larger messages is the same rule the rest of the protocol already follows.
+- Open questions: whether a run of backspaces could be collapsed at the host instead (it sees the same 300 keys), which needs no protocol change and no version gate.
+- Investigator: live round · 2026-11-11
+
+### A-167 · live: an arrow or control key gives no feedback at all and costs a full record each · minor
+
+- Evidence: `MeshInput.kt:503-508` (`sendKey` → `pushKey` → `appendKey`), `MeshInput.kt:412-420` (`echoText` renders only `Enter`, `Tab`, `BSpace`; everything else renders as nothing, with the reason spelled out), `MeshInput.kt:487-500` (`heldSummary` counts keys as "N keys").
+- Finding: named keys are deliberately never echoed (correct — their effect is the pane's), but they also carry no in-flight marker, so a `C-c` on a stalled link is completely invisible: nothing is drawn, nothing is counted on screen in live mode (the summary lives in the held-mode bar), and the interrupt may take 13–64 s to arrive.
+- Why it hurts at range: an interrupt that appears to do nothing invites the user to press it again, and each press is another record on a shared channel — the exact behaviour the batcher's `urgent` rule exists to prevent on the sending side but does not address afterwards.
+- Proposed fix (NOT applied): show "C-c sent ⟨time⟩" (or a small pending chip) for named keys until the next screen arrives; the count machinery already exists in `summarize`/`readable`.
+- Open questions: whether an interrupt should ever be sent twice on a silent link (the ARQ already retries; a second press adds a second record for nothing).
+- Investigator: live round · 2026-11-11
+
+### A-168 · live: the one latency number the user is given is 4–8× optimistic at range · minor
+
+- Evidence: `packages/mobile/composeApp/src/commonMain/kotlin/io/ldmux/mobile/mesh/PublicChannelBar.kt:271-277` — `exchangeMs = 2 × hops × airtime(172)`, used by the held-mode bar (`MeshTerminalScreen.kt:1074-1079`).
+- Finding: the estimate counts one record each way and **no repeater hold**. On a 14-hop route it says 16.9 s; the same exchange by flood is ~64 s because `calcRxDelay` adds 1.2–3.7 s per hop (A-164). It is also shown only in held mode, so in live mode the user has no expectation set at all.
+- Why it hurts at range: the number is the only statement the app makes about how long the link takes, and it is wrong by a factor of four in exactly the regime where the user is deciding whether the link is broken.
+- Proposed fix (NOT applied): `2 × hops × (airtime + rxDelay(score, airtime))` with the score derived from the last measured SNR (the radio reports it, `codec.rs:1142`), and say which carrier the estimate assumes.
+- Open questions: whether SNR is available often enough on the phone to make this stable (it arrives with `Status`).
+- Investigator: live round · 2026-11-11
+
+### A-169 · live: IME composition and autocorrect reach the shell as keystroke-by-keystroke edits · question
+
+- Evidence: `InputDelta.kt:35-69` (`inputOpsFor` turns whole-value changes into backspaces + text, with no notion of an IME composing region) and `TerminalSurface.android.kt:891-900` (the field is read as a plain value).
+- Finding: a keyboard that *extends* its composition (the common case) produces the right result by accident — each intermediate value is a prefix, so only the newly added characters are sent. A keyboard that *rewrites* its composition (autocorrect, transliteration, swipe) produces backspaces plus replacement text, which is correct but costs one `Keys` record plus one `Text` record per rewrite.
+- Why it hurts at range: on a 0.6 s-per-hop link a single autocorrect correction can cost more airtime than the sentence did. It is not wrong, only expensive — hence a question rather than a fault.
+- Proposed fix (NOT applied): if it proves common, hold input while the IME reports a composing region (`TextFieldValue.composition`), which this path does not read.
+- Open questions: how often rewriting keyboards are used on this device; whether Compose exposes composition on the hidden field at all.
+- Investigator: live round · 2026-11-11
+
+### A-170 · live: a full-screen program is declared "large and slow" but nothing changes behaviour · minor
+
+- Evidence: `MeshTerminalScreen.kt:1364-1365` (`live?.screen?.alternate == true → Notice("full-screen program: updates large and slow")`), while the echo path skips the local echo on an alternate screen (`MeshTerminalSource.kt:~590`, "not on a full-screen program") and the bridge keeps the same `echo_gap`/`burst_gap`.
+- Finding: in `vim`/`less` the app tells the user the truth in words and then does nothing differently: no local echo (correct), no different pacing, no smaller frames. The notice is therefore a permanent apology rather than a decision.
+- Why it hurts at range: a full-screen program repaints whole rows, so its frames are the largest; at 14 hops each is 8.4 s of air and the same 1 s burst gap applies, which is the worst case for the queue (A-163).
+- Proposed fix (NOT applied): make the notice a real policy switch — on an alternate screen, coalesce to flight time and prefer cursor-only updates.
+- Open questions: whether the differ already minimises an alternate-screen frame to changed rows (it appears to).
+- Investigator: live round · 2026-11-11
+
+---
+
+106:**Worst finding:** A-160 with A-163/A-164 — in live mode the phone shows nothing for a keystroke until the host's echo comes back, and that echo takes **~13 s on a working direct route and ~64 s by flood at 14 hops**, because MeshCore holds every flood for `calcRxDelay` seconds per repeater (`filter-firmware/src/Dispatcher.cpp:241-256`) while our pacing and in-flight windows are sized in single-hop airtime and 
