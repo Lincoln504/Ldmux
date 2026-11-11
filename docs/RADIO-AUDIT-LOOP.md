@@ -1366,3 +1366,106 @@ during this audit** — the only file written is this one.
 108:**Genuinely sound:** the record layer and the handshake's cryptographic construction (A-250) — separate directional keys, nonce-from-counter with re-sealing per retransmission, a full tag, a post-tag replay commit, a domain-separated filter, prologue-bound suite, fresh-handshake rekey, and `0600` persisted secrets.
 110:**Also sound, worth noting:** route requests are bounded rather than free — `ROUTE_REPLY_FLOOR = 600 ms`, `answered_nonces` (16), `FLOOD_BURST = 4`, and the pinned-peer refusal at `mesh_serial.rs:2040-2065` mean a request flood cannot be used as an amplifier without the PSK. That is the property `SECURITY.md` claims, and it holds for requests — it is handshakes where it does not.
 112:**What I could not determine:** (1) whether a replayed `msg1` re-derives identical keys — it does **not**, because the responder contributes a fresh ephemeral in Noise IK, so the consequence is availability and airtime, never record injection (this is why A-240 is graded a session-kill rather than an integrity break); (2) whether the local repeaters enforce any pre-companion rate limit on fl
+
+The short answer to "would any test have caught these": **two were unreachable, two were unmeasurable, two were tested at the wrong layer or pinned as intent.** None was a missing assertion in an otherwise-covered path.
+
+### A-260 · tests: five of the six blockers live where no harness can stand · blocker
+- Evidence: `crates/daemon/src/mesh.rs:685` — `async fn supervise(...)` is private, and the whole `mesh.rs` test module is config/snapshot only (`:1739`, `:1755`, `:1787`, `:1803`, `:1815`, `:1852`); `packages/mobile/composeApp/src/androidMain/kotlin/io/ldmux/mobile/mesh/AndroidRadioLink.kt:65` — `class AndroidRadioLink(private val context: Context, …)`, and no file under `androidUnitTest/` references it, while *pure* functions in the same source set (`RadioRoute.kt`) are tested (`RadioRouteTest.kt:152`, `:274`), so the barrier is the `Context`, not the source set; `crates/companion/src/link.rs:225` — `MemoryLink` is two byte buffers with no clock, no refusal and no reordering.
+- Finding: the three harnesses that exist cannot express what the blockers are about. The daemon's session loop is uninstantiable (private `supervise`), the phone's carrier policy is inside a BLE adapter (needs `Context`), and the only fake carrier has no time. A-120 and A-180 are therefore not *untested* — they are *untestable as written*; A-61 and A-102 are testable but have no harness that can see a transmission.
+- Why it hurts at range: every range-only defect in this audit is a timing-and-state defect. The topology has no place to put either, so the only detector is a field trip.
+- Proposed fix (NOT applied): three small seams, in cost order. (1) A `ScriptedLink` in `crates/companion` with a virtual clock and injectable delays/refusals, plus `pub(crate)` on `supervise` (or a `#[cfg(test)]` entry point), which makes the loop testable. (2) Move the phone's carrier decision out of `AndroidRadioLink` into a pure `commonMain` function, exactly as `routeRefusal` already is for routes — the adapter keeps I/O only. (3) Make the harnesses count transmissions, not records (A-264).
+- Open questions: whether `MeshRuntime`'s `wake` handle is enough to drive `supervise` deterministically, or whether the loop needs a clock trait; how much of `AndroidRadioLink` is pure enough to move without touching BLE.
+- Investigator: tests round · 2026-11-11
+
+### A-261 · tests: the multi-hop simulation's physics is three to five times too optimistic · major
+- Evidence: `crates/session/tests/lossy_multihop.rs:44` — `one_way_ms: hops * airtime_ms`, stated as the model at `:3-4` ("each holding it for up to an airtime") and `:156` ("Twenty-eight hops is the chain measured on 2026-11-10"); against A-41's measured `calcRxDelay` of ≈2.7 s per hop for a 133 B record where the airtime is 0.49 s.
+- Finding: the only multi-hop harness models a repeater as propagating within one airtime. At 28 hops that is 16.9 s one-way where the firmware's own hold makes it roughly 60–115 s. Both of its tests (`:162` "2 KB across twenty-eight lossy hops", `:203` "a clean route costs about one record per chunk") pass with timers that are wrong on the real link, and it feeds the session the *true* hop count (`:117-118`) rather than the one the carrier would publish.
+- Why it hurts at range: this is the harness whose docstring says it exists because "the timers are the part no amount of reading settles". It cannot catch A-41 or A-80, because one is an error in *how long a hop takes* and the other in *which hop count the session is told* — neither of which it models.
+- Proposed fix (NOT applied): add a per-hop hold to `Air::new` (`hold_ms`, taken from a `calc_rx_delay(score, airtime)` table — `mesh-research/clones/mcrs` and `mcsim` both carry one), and add one test that sets `hops` to what the carrier's shortest-inbound rule would publish (1) while the air is a 16-hop route. That second test reproduces A-80 with no radio at all.
+- Open questions: whether the score→delay table is stable enough across firmware versions to pin in a test, or should be a parameter.
+- Investigator: tests round · 2026-11-11
+
+### A-262 · tests: the daemon's connection loop has no test whatsoever · blocker
+- Evidence: `crates/daemon/src/mesh.rs:967` (`last_carrier = Instant::now()` on any event), `:1118` (the watchdog), `:1123-1140` (credit expiry), `:685` (`supervise`); grep for "stopped answering" across `crates/daemon/src` and `crates/daemon/tests` finds the code and no test.
+- Finding: nothing drives `supervise`. The silence watchdog, the credit-expiry sweep, the carrier-event handling and the reconnection decision are entirely unverified. A-180 (a `Status` every 500 ms that never touches the radio defeats the watchdog) could not fail a test because no test runs the loop.
+- Why it hurts at range: the loop *is* the range behaviour — it decides when a dead carriage is replaced. Its only current test is the user restarting the daemon by hand.
+- Proposed fix (NOT applied): same seam as A-260 item 1; the first test should be "a carrier that publishes status but answers nothing ends the connection within `silence`", which fails today by A-180.
+- Investigator: tests round · 2026-11-11
+
+### A-263 · tests: the phone's carrier policy is not referenced by any test, and its fix shipped with none · blocker
+- Evidence: `git show --stat ce0e600` → one file, `AndroidRadioLink.kt`, +13/−1, no test; grep for `directWorks`, `floodTokens`, `floodWanted` across `androidUnitTest/` and `commonTest/` → zero hits; the policy itself at `AndroidRadioLink.kt:1013` (`floodWanted = (!directWorks || directSilent) && floodTokens > 0`), `:2022` (`FLOOD_BURST = 4`), `:2032` (`RECORD_FLOOD_COPIES = 3`).
+- Finding: A-120's latch is a two-flag feedback rule with four state transitions and no test exercises any of them. The commit that introduced it added no test, and (A-260) could not have: the rule is inside an adapter that needs a `Context`.
+- Why it hurts at range: this is the rule that decides which carrier every byte takes. It was changed twice in one evening (`ce0e600`, then the bucket gating at `:987`), both times unverified, and the second change is what starved the handshake copies.
+- Proposed fix (NOT applied): extract to a pure function (`fun floodWanted(directWorks: Boolean, directSilent: Boolean, tokens: Int): Boolean`) plus a small state object, and test the latch: "one flood heard, then silence ⇒ direct is never attempted again" would have failed A-120 immediately.
+- Investigator: tests round · 2026-11-11
+
+### A-264 · tests: no harness counts transmissions, so the cost findings are outside what tests can see · major
+- Evidence: `crates/daemon/src/mesh_serial.rs:513` `const RECORD_FLOOD_COPIES: u32 = 3` and `AndroidRadioLink.kt:2032` `const val RECORD_FLOOD_COPIES = 3` — two independent literals, referenced by no test (grep) and absent from the cross-language fixture that pins the record limits (`MeshTermCodecTest.kt:139-150` pins `recordFloor`, `recordMax`, `creditWindow`); the existing cost assertions count *records handed to a link* (`crates/daemon/tests/mesh_paint.rs:123` `records <= 4`; `crates/daemon/src/mesh_bridge.rs:4708` `records <= 3`).
+- Finding: the quantity that matters at range — transmissions on the air — is measured by nothing. Records are the link's input; airtime is copies × retries × records. A-102/A-108 (an attach costing 18–27 transmissions, A-23's replacements) cannot fail a test even in principle, and the two ends' copy counts could drift apart silently.
+- Why it hurts at range: every blocker in this audit is a multiplier on the same transmission count. A gate that cannot see the multiplier cannot see the regression.
+- Proposed fix (NOT applied): give the test link a counter for `send` calls per record (the `CountingLink` in `crates/daemon/tests/airtime.rs:38` already does this) and make one attach's transmission count an ordinary assertion; pin `RECORD_FLOOD_COPIES` and `FLOOD_BURST` in the cross-language fixture beside the record limits.
+- Open questions: whether `records_left`/`l2_slots` already imply the copy multiplier at the session boundary, which would let the assertion live in Rust alone.
+- Investigator: tests round · 2026-11-11
+
+### A-265 · tests: the only airtime measurement is excluded from the gate · major
+- Evidence: `crates/daemon/tests/airtime.rs:239` `#[ignore = "measurement, not a gate: run with --ignored --nocapture"]`, and the module doc at `:3` telling a reader to run it by hand; `scripts/test-parallel.py` runs the default set only (`-- --ignored` is documented at `:20` as "the slow tier").
+- Finding: the project's single instrument for the thing this audit is about runs only when someone remembers, and nothing records its output between runs, so there is no history to regress against.
+- Why it hurts at range: cost is the constraint. An ungated measurement is a number nobody looks at until the link is already failing.
+- Proposed fix (NOT applied): keep it `#[ignore]`d, but have it write a JSON baseline into the repo and add a cheap default-set test that fails when a recorded workload's records/airtime exceed the baseline by a margin. That converts a measurement into a ratchet without adding slow tests to the gate.
+- Investigator: tests round · 2026-11-11
+
+### A-266 · tests: the Kotlin suite is in no automated gate, and there is no CI · major
+- Evidence: `scripts/test-parallel.py:2-10` (Rust binaries only); `flake.nix:242` (`cargo test --workspace`); `flake.nix:276-289` — `mobile-test` runs `node --test packages/mobile/test/*.test.ts` only; no `.github` directory exists (despite `flake.nix:246` saying such tests "run in the dev-shell gate and in CI").
+- Finding: 72 `MeshTermDriverTest` cases plus the cross-language constant fixture are not run by `nix flake check` and not run by any CI. The phone half of the protocol — where A-21 and A-100 live — is verified only when a person types `./gradlew testDebugUnitTest`.
+- Why it hurts at range: the failure shape of tonight was phone-side (data discarded after a host-side success). A gate that only exercises the host cannot see it.
+- Proposed fix (NOT applied): add a `checks.mobile-unit` that runs `:composeApp:testDebugUnitTest` offline in the devshell toolchain (the deps are already vendored: `nix develop ..#mobile --command ./gradlew --offline` works), or at minimum document the two commands as one script so the gate cannot be half-run.
+- Investigator: tests round · 2026-11-11
+
+### A-267 · tests: two tests *pin* blockers as intended behaviour · major
+- Evidence: `packages/mobile/composeApp/src/androidUnitTest/kotlin/io/ldmux/mobile/mesh/MeshTermDriverTest.kt:1380` — `a handshake record that cannot be finished ends the connection`, body `d.onRecord(byteArrayOf(7))` while a handshake is pending, asserting `LinkDown`; `crates/daemon/src/mesh_serial.rs` prefer_route test asserting `prefer_route(Some(&path(4)), Some(now), false, false, &path(2))` — "later, shorter copy" — introduced by `a80523c` ("the two ends agreed on nothing, because neither kept the shortest path").
+- Finding: A-21 and A-80's routing half are not coverage gaps; they are requirements with tests. A one-byte record finishing a pending handshake is asserted as correct, and the shortest inbound copy displacing the route in hand is asserted as correct. Any fix must argue with these tests rather than add coverage around them.
+- Why it hurts at range: both rules are defensible for a neighbour and wrong for a 16-hop link — the first converts a late answer into a dead link, the second hands the timer a hop count of 1. A test that encodes the wrong regime is worse than no test, because it makes the fix look like a regression.
+- Proposed fix (NOT applied): change each test to state the range case explicitly — a record whose kind is not `0x12` while a handshake is pending is ignored, and a shorter inbound path may change *where we send* but not *how long we wait*.
+- Investigator: tests round · 2026-11-11
+
+### A-268 · tests: the A-20 fix was tested one layer below where the defect lives · major
+- Evidence: `git show --stat 2ea77bb` → `crates/session/src/handshake.rs`, `crates/session/tests/handshake_and_record.rs` (+23), `crates/session-ffi/tests/abi.rs` (+9); the consequence lives in `crates/daemon/src/mesh_session.rs:283-334`; every `on_record` call in its tests uses a distinct timestamp (`:751`, `:848`, `:887`, `:937`) or two different ones (`:976`, `:983`), and none sends the same bytes twice.
+- Finding: the commit proved the responder *accepts* a duplicate, and never asked what the host does when it accepts three. The new assertion's own wording — "an equal timestamp is a duplicate copy of the same attempt" — assumed an idempotence that did not exist, so the test documented the defect as if it were the fix.
+- Why it hurts at range: this is the most instructive failure in the audit. A test at the wrong layer does not merely miss the bug, it certifies it.
+- Proposed fix (NOT applied): `on_record(same msg1)` twice must leave `handshakes == 1`, `next_index` unchanged and `outbox.len() == 1`; that one test fails today and would have blocked `2ea77bb`.
+- Investigator: tests round · 2026-11-11
+
+### A-269 · tests: no test connects route choice to the retransmission timer · major
+- Evidence: `Session::set_hops` is called from tests only at `crates/session/tests/lossy_multihop.rs:117-118` with the true hop count; in production it is fed by `crates/daemon/src/mesh_serial.rs:1877-1890` (`hops_now` from the chosen `peer_path`) into `crates/daemon/src/mesh_session.rs:177`; the test that names the status path (`mesh_serial.rs:3191`, `the_budget_is_republished_while_the_link_is_idle`) asserts only `statuses >= 2` (`:3232`) and never `hops`.
+- Finding: the seam where A-80 happens — chosen path → `Limit.hops` → `set_hops` → `rto_initial` — is untested on both sides. Each half is tested alone: `prefer_route` by unit assertions, `rto_initial` by `lossy_multihop` given the true count.
+- Why it hurts at range: every composed rule in this system fails at the seam, and the seams are exactly what the tests do not cross.
+- Proposed fix (NOT applied): a `mesh_session` test — `set_hops(1)` then assert `first_rto_ms()` equals `6 × airtime`, and a mesh_serial test that publishes a 16-hop flood record and asserts the resulting `Limit.hops` is not 1. The pair makes the seam visible.
+- Investigator: tests round · 2026-11-11
+
+### A-270 · tests: `reply_delay` and the blocking send path have no test at all · minor
+- Evidence: `crates/daemon/src/mesh_serial.rs:524` (`fn reply_delay`), used at `:335` (`std::thread::sleep(reply_delay(airtime_ms))`) inside the push handler; `send_retrying` at `:490-505` sleeps `200 × 2^round` ms up to three rounds; grep for `reply_delay` across `crates/` finds those two lines and no test; `git show --stat f413baf` → `mesh_serial.rs` + `RELEASE-AUDIT.md`, no test.
+- Finding: a delay deliberately inserted into the thread that also reads the radio has no unit test for its bound and no assertion that the loop stays responsive while it sleeps; the retry ladder adds up to 1.4 s of additional sleeps plus send deadlines in the same thread.
+- Why it hurts at range: A-61 is exactly "we sleep where the reference implementation enqueues". The test that should exist is not about the delay's value but about arrivals during it.
+- Proposed fix (NOT applied): a `ScriptedLink` test that pushes a request, then a second record 100 ms later, and asserts the second record is *read* before the reply is sent — i.e. that the answer is queued, not slept on.
+- Investigator: tests round · 2026-11-11
+
+### A-271 · tests: nothing tests a full attach, or a replacement while one is in flight · major
+- Evidence: `crates/daemon/tests/mesh_paint.rs:123` asserts `records <= 4` for a first paint; there is no test that drives list → profile → grid → first frame as one sequence, and `MeshTermDriverTest` has no case where a handshake completes (or a session is replaced) while a `ListRequest` is outstanding; A-100's buffer (`MeshTermDriver.kt:471`, cleared only at `:2145`) is asserted nowhere.
+- Finding: the failure the user reported — "asking host for shell", counts to 100, resets to 0 — has no test shape. Nothing asserts what happens to application state in flight when the session beneath it is replaced (`mesh_session.rs:329-330`), and nothing asserts that a repeated run's pages cannot merge with an abandoned one.
+- Why it hurts at range: this is the user-visible symptom of the most common range event (session replacement), and it is entirely unrepresented in the suite.
+- Proposed fix (NOT applied): two tests — (1) host: replace the session mid-list, assert the outstanding answer is reported rather than dropped silently; (2) phone: start a list run, fail the session, start another, assert the committed list is the new run's alone.
+- Investigator: tests round · 2026-11-11
+
+### A-272 · tests: worth adopting from `mcsim` — two pieces, not the simulator · question
+- Evidence: `mesh-research/clones/mcsim/crates/mcsim-link/src/predict.rs:112` (SNR thresholds per spreading factor), `:637` (`let link_margin = median_snr - snr_threshold`), `:208-215` (Excellent/Good/Marginal/Unreliable bands); `mcrs` and `mcsim` both implement the repeater hold delay.
+- Finding: the two things this project's tests lack — a reception-probability model and a per-hop hold — are both small, both already written in a clone here, and neither requires the simulator's air interface. Adopting the whole of `mcsim` is a much larger claim than the evidence supports.
+- Why it hurts at range: with those two pieces, the existing `lossy_multihop` becomes able to fail on A-41 and A-80; without them it stays a harness that validates timers against physics five times kinder than the field.
+- Proposed fix (NOT applied): copy the SNR→reception table and the `calc_rx_delay` formula into the test harness as two pure functions, with a comment naming the clone and the firmware function. No new dependency.
+- Open questions: whether the reception model should drive loss probabilistically (flaky tests) or as a deterministic score threshold (preferable); how to keep the harness fast.
+- Investigator: tests round · 2026-11-11
+
+---
+
+102:**The single test to write first:** `on_record(same msg1 bytes) twice leaves one session` — it fails today, it is four lines, it sits at the layer where A-20 lives, and it is the defect currently costing every field trial.
+104:**Is simulation with `mcsim`'s model worth the effort:** yes, but only two of its pieces (A-272). The existing `lossy_multihop` is the right harness with the wrong physics; adopting `mcsim` wholesale would be a new project, and the host loop (A-180, A-220) is a bigger hole than the physics is.
+106:**Could not determine:** (1) whether `supervise` can be driven deterministically without a clock trait, since it awaits `tokio::select!` over a timer and a `Notify` (`mesh.rs:1103-1106`) and the timer is wall-clock; (2) whether `AndroidRadioLink`'s carrier state can be moved to `commonMain` without pulling BLE types with it, since `RadioLink`'s interface is already common (`commonMain/.../Radi
