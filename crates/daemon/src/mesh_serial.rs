@@ -292,6 +292,7 @@ fn send_route_reply<L: ByteLink>(
     req: &RouteRequest,
     own_key: &[u8; 32],
     scope: Option<&FloodScope>,
+    airtime_ms: f64,
 ) -> bool {
     let Some(send) = PeerPath::reversed(
         usize::from(req.path.hash_size),
@@ -325,6 +326,13 @@ fn send_route_reply<L: ByteLink>(
     // range, only while the phone has no route at all, and after the first answer every record is
     // direct again.
     //
+    // **Wait for the request's own echo to clear.** A reply sent the instant a flood arrives collides
+    // with that flood: every repeater still forwarding the request is deaf, and so is the phone if it
+    // is transmitting its next copy. MeshCore's own path return waits 500 ms for this reason
+    // (`createPathReturn`, `sendDirect(..., 500)`), and it randomises so two responders do not answer
+    // in step. Measured 2026-11-10: the host answered every request `ok=true`, radiated the traffic,
+    // and the phone — which heard other nodes' floods at twenty hops — never heard one reply.
+    std::thread::sleep(reply_delay(airtime_ms));
     // **Retried, because a busy radio is not a refusal.** This runs inside the push handler, before
     // the record that arrived is delivered upward, so it must not hold the loop for long — but
     // dropping the answer to a route request leaves the phone asking again, which costs more air than
@@ -506,6 +514,19 @@ const RECORD_FLOOD_COPIES: u32 = 3;
 
 /// How many times a send is attempted when the radio says "not now".
 const SEND_ROUNDS: u32 = 3;
+
+/// How long to let a flood's echo clear before answering it.
+///
+/// The firmware spreads retransmissions over `5 x txdelay x airtime` (txdelay 0.5 by default), which
+/// at 62.5 kHz is a couple of seconds; MeshCore's own path return uses 500 ms as the floor. This is
+/// that floor plus a random share of the spread, so a reply lands in a quiet slot rather than on top
+/// of the packet it is answering.
+fn reply_delay(airtime_ms: f64) -> Duration {
+    let spread = (5.0 * 0.5 * airtime_ms.max(1.0)) as u64;
+    let entropy = u64::from(u32::from_le_bytes(route_nonce()));
+    let jitter = if spread == 0 { 0 } else { entropy % spread };
+    Duration::from_millis(500 + jitter)
+}
 
 fn raw_send_deadline(airtime_ms: f64) -> Duration {
     let ms = 4_000.0 + airtime_ms.max(1.0);
@@ -2034,6 +2055,7 @@ fn serve_loop<L: ByteLink>(
                             &req,
                             &settings.preset.public_key,
                             scope.as_ref(),
+                            settings.airtime_ms,
                         );
                         route_log(&format!("reply sent ok={ok}"));
                         if ok {
@@ -2825,7 +2847,7 @@ mod tests {
         let mut link = MemoryLink::new();
         link.push_payload(&[0x00]); // the radio answers OK
         let mut companion = Companion::new(link);
-        assert!(send_route_reply(&mut companion, &req, &own, None));
+        assert!(send_route_reply(&mut companion, &req, &own, None, 0.0));
 
         // The frame the radio is handed: `[0x3C][u16 n][0x41][0][header][path byte][path][record]`.
         let written = companion.link_mut().written.clone();
