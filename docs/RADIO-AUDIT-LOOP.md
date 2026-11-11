@@ -627,3 +627,103 @@ during this audit** — the only file written is this one.
 ---
 
 109:**Worst finding:** A-80 — at range nothing is ever "proven", so `prefer_route` keeps adopting the shortest *inbound* copy; the journal shows the host flipping 1 ↔ 16 hops inside 11 s and settling on 1, which sets the first retransmission to 2.94 s against a 43 s crossing. Every record is then duplicated ~15 times and five attempts are exhausted in ~12 s, so the session dies while both radios are healthy. It is the same class as A-20: a rule that is right when the evidence is trustworthy,
+
+### A-120 · carrier: the two "sticky flood" flags form the mutual latch ADR-0038 rejects · blocker
+- Evidence: `AndroidRadioLink.kt:1013` (`floodWanted = (!directWorks || directSilent) && floodTokens > 0`), `:531` (`directWorks = true` only on a **direct** arrival), `:594` (`directWorks = false` on **any flood** arrival); `mesh_serial.rs:1285`/`:2208`/`:2278` (`peer_via_flood` set by a flood, cleared only by a direct arrival), `:1413-1425` (`want_flood` includes it); ADR-0038 `docs/adr/0038-carrier-selection-escalate-on-silence.md` ("**any** record arrives → failures = 0 → **direct**", "Rejected: mirroring the carrier — positive feedback").
+- Finding: ADR-0038 says decay happens on *any* arrival; the code implements decay on a *direct* arrival only, on both ends. Once either end has heard one flood, it refuses to send direct, so the other end never hears direct, so neither flag is ever cleared. The latch is absorbing. It is escapable in exactly two ways: the phone's bucket running dry (`floodTokens == 0` falls through to the direct path at `:1057`), or a zero-hop host direct that happens to reach.
+- Why it hurts at range: at 14–17 hops a zero-hop direct packet reaches only neighbours, so the only escape is a bucket-dry direct send — one attempt per ~3 records — and it must itself cross the chain. Until it does, **every** record on both sides rides the flood carrier with three copies each. This is the mirroring loop the ADR rejects, deduced from the two flags rather than stated anywhere.
+- Proposed fix (NOT applied): make the decay rule what the ADR says — *any* arrival from the peer clears the escalation — and keep one bounded exception: a periodic cheap direct probe (one record per N records, not per bucket exhaustion) so the path carrier is re-tested deliberately rather than by accident.
+- Open questions: was the intent that `directWorks` mean "the path in hand has carried", i.e. it should also be cleared when the path *changes* (a new path is unproven by definition)? 
+- Investigator: carrier round · 2026-11-11
+
+### A-121 · carrier: `6838508`'s session gate was removed by `ce0e600`, and the comment still claims it · major
+- Evidence: `git log -S "!sessionUp && directSilent"` → `6838508 fix(mesh): carrier silence is not evidence while a session is up`; `git show ce0e600` → `- val floodWanted = !sessionUp && directSilent && floodTokens > 0` / `+ val floodWanted = (!directWorks || directSilent) && floodTokens > 0`; the surviving comment at `AndroidRadioLink.kt:993-1012` still says "**Only while there is no session.** Carrier silence is not evidence of failure when the peer simply has nothing to say … measured 2026-11-10 a healthy link sent a 43-byte record as a flood for that reason".
+- Finding: the gate that commit removed was the subject of an earlier fix, and the comment describing it was left in place, so the code and its own explanation now disagree. A healthy session floods its data whenever the last inbound happened to arrive by flood.
+- Why it hurts at range: it removes the only thing that limited flood traffic during a live session, and it makes the source lie to the next reader — the same class of fault as the `handshake 4/3` counter.
+- Proposed fix (NOT applied): decide which rule is intended. If the session gate is wanted back, restore it as `(!sessionUp || !directWorks)`-style logic with the bucket; if not, delete the stale comment. Leaving both is the worst option.
+- Open questions: whether the three-copies-per-record traffic measured on 2026-11-10 at 22:18–22:22 (every rung `1/3, 2/3, 3/3`) is entirely pre-session, or whether data records also flooded.
+- Investigator: carrier round · 2026-11-11
+
+### A-122 · carrier: the flood carrier's steady-state throughput is one record per ~58 s, and the host has no bucket at all · blocker
+- Evidence: `AndroidRadioLink.kt:2022` (`FLOOD_BURST = 4`), `:298-301` (`floodIntervalMs = 2 × reach × airtime(172)`, clamp 5–90 s), `:1027`/`:1038` (up to `RECORD_FLOOD_COPIES` tokens spent per record); `mesh_serial.rs` has **no** token bucket (grep for `token|bucket|FLOOD_BURST` returns only unrelated matches), only `budget_per_hour`, which is `None` on US frequencies (`:3036`).
+- Finding: at a measured reach of 16 hops the refill is 2 × 16 × 602.6 ms = **19.3 s per token**, and a record costs three tokens, so sustained flood throughput is **one 143-byte record per 58 s ≈ 2.5 B/s**. A 2 KB repaint (14 records) is therefore **≈13.5 minutes** on the flood carrier. The host side is unbounded by comparison: it emits three flood copies per inbound flooded record (`:1466-1485`) with no pacing whatsoever.
+- Why it hurts at range: this is the arithmetic behind "it just counts and resets". It also makes the two ends' airtime discipline asymmetric — the phone is throttled to 2.5 B/s while the host can transmit freely, so the shared mesh sees the host's side of the conversation at ~3× the phone's rate.
+- Proposed fix (NOT applied): give the host the same bucket (it is the end with no limiter), and price the bucket per **byte** rather than per record so a short handshake is not charged like a full screen.
+- Open questions: whether `floodIntervalMs` should use the record actually being sent rather than a fixed 172 bytes (it currently under-charges short records and over-charges none).
+- Investigator: carrier round · 2026-11-11
+
+### A-123 · carrier: the host's three flood copies go out back to back, so they buy no time diversity · major
+- Evidence: `mesh_serial.rs:1468-1484` — `for _ in 0..RECORD_FLOOD_COPIES { … send_retrying(|d| companion.send_packet_within(&packet, d)) }` with no delay between iterations; contrast the phone's `:1028` `if (copy > 0) delay(requestCopyDelayMs(currentPreset()))`, and `:1425`'s own comment that the firmware acknowledges a send **before** it transmits.
+- Finding: the host's three copies are queued into the radio's transmit queue immediately, so they occupy the channel contiguously. At ~0.49 s of air per 133-byte copy that is ~1.5 s of continuous transmission — one fade longer than 1.5 s kills all three. The phone spaces its copies; the host does not.
+- Why it hurts at range: three copies exist for time diversity against a margin fade (A-40 measured margin ≈ 0 dB). Unexpanded, they are 3× the airtime for roughly 1× the reliability — the worst trade available.
+- Proposed fix (NOT applied): space the host's copies by one airtime of the packet being sent (the same derivation the phone uses), and make it a shared helper so the two ends cannot drift.
+- Open questions: whether `send_packet_within` returns before or after the firmware's own `txdelay`, which decides whether a host-side delay would even separate them.
+- Investigator: carrier round · 2026-11-11
+
+### A-124 · carrier: `send_retrying` retransmits identical bytes, which repeater dedup swallows · major
+- Evidence: `mesh_serial.rs:487-506` — three rounds, each calling `attempt(deadline)` with the **same** `packet`; called at `:1479` inside the flood copy loop; the dedup rule (`SHA256(payload_type ‖ payload)`, 160-entry FIFO) is recorded in `docs/MESH-RADIO-CONSIDERATIONS.md` and is why every flood copy uses a fresh `route_nonce()` (`:1471`).
+- Finding: the code knows a repeat needs a fresh nonce — the copy loop does exactly that — but `send_retrying`, which fires on `Disabled` and `Timeout`, resends the identical packet. For `Disabled` (never transmitted) that is right; for `Timeout` (possibly transmitted) the retry is silently dropped by the first repeater that already saw it.
+- Why it hurts at range: `Timeout` is the common case on a crowded channel, so the retry ladder's most-used branch is the one that cannot work. It burns the deadline (4 s + airtime per round) without buying air.
+- Proposed fix (NOT applied): rebuild the packet with a fresh nonce for each `Timeout` retry (only the `Disabled` case may reuse it), or drop the `Timeout` branch entirely and let the ARQ/copies provide redundancy.
+- Open questions: whether the radio's `Timeout` ever means "not transmitted" in practice, which would justify keeping one identical retry.
+- Investigator: carrier round · 2026-11-11
+
+### A-125 · carrier: adopting a route commits the link to direct for ~58 s, which is most of the attach window · major
+- Evidence: `mesh_serial.rs:2029-2033` (adoption sets `peer_path_heard = Some(Instant::now())`), `:1388-1392` (`path_stale` false until `route_stale(hops)`), `:1401-1408` (`direct_silent` needs `direct_round_trip(hops, airtime)` = 6 × airtime × hops), `:536-541`; journal `22:20:44 route request from 26f6071f hops=16 (adopted)`.
+- Finding: adoption marks the path fresh, so the next sends go **direct**, and the verdict "this direct chain did not carry" is not available until 6 × 0.603 s × 16 = **57.8 s** later. With the phone's attach wait of ~100 s (`handshakeWaitMs`/attach budget), only one escalation fits inside a single attempt.
+- Why it hurts at range: it converts a route-repair success into a minute of silence on a chain that may be 16 repeaters long. The user sees "asking host for shell" counting down exactly once, which is the reported symptom.
+- Proposed fix (NOT applied): judge direct silence against the **carrier actually used last** and against the mesh's measured reach rather than the adopted hop count, or allow one flood in parallel with the first direct attempt when the path is long and unproven.
+- Open questions: whether `direct_round_trip` should include the repeater hold delay measured in A-41 (≈2.7 s/hop), which would make the verdict *later*, not earlier — i.e. whether the real fix is instead to flood first when `hops` exceeds some threshold.
+- Investigator: carrier round · 2026-11-11
+
+### A-126 · carrier: path churn every request burst — a 16-hop chain displaced a 1-hop chain 11 s later · major
+- Evidence: `mesh_serial.rs:2014-2026` (`dead = !previous_burst`, `REQUEST_BURST_MS = 10 s`), `:404-434` (`prefer_route`: `dead || stale → return true`, bypassing both the proven-route protection and the shortest-wins rule); journal `22:20:33 hops=1 (adopted)`, `22:20:44 hops=16 (adopted)`, `22:21:20 hops=1 (adopted)`, `22:21:42 hops=1 (adopted)`.
+- Finding: eleven seconds apart, the adopted path moved from 1 hop to 16 and back. Because `dead` is true for the first copy of every burst, *any* candidate wins at that moment, so the path is effectively whichever copy arrives first after the 10-second window.
+- Why it hurts at range: each replacement changes both the carrier decision and the silence verdict (A-125). The link's idea of its own route flaps on a timescale shorter than one exchange.
+- Proposed fix (NOT applied): keep `dead` only as "the route in hand has been silent for its own round trip", not "a burst window expired", so a burst cannot displace a healthy path on recency alone.
+- Open questions: whether the 1-hop and 16-hop arrivals are the same physical route (a 1-hop path via one repeater that both ends hear) — the RSSI/hop pairs in the journal suggest two distinct chains and it is not decidable from the log.
+- Investigator: carrier round · 2026-11-11
+
+### A-127 · carrier: `route_stale` hardcodes a 603 ms airtime · minor
+- Evidence: `mesh_serial.rs:166-169` (`Duration::from_millis(2 * 603 * hops.max(1))`), against `:1110` (`airtime_ms = self_info.time_on_air_ms(RECORD_MAX)`) which is the derived value used everywhere else.
+- Finding: the only flat airtime in the radio path. At the public preset it coincides with the derived value (602.6 ms); at a slow preset (SF12, ≈7.3 s) it under-states staleness by ~12× and at a fast one it over-states it.
+- Why it hurts at range: a route judged stale too late keeps a dead chain in use; too early and a working route is replaced needlessly. Both are carrier decisions driven by a constant that ignores the preset the link is actually running.
+- Proposed fix (NOT applied): pass `settings.airtime_ms` into `route_stale`, as `direct_round_trip` already does.
+- Open questions: whether the 60 s floor should also be derived (`2 × hops × airtime` with no floor) for meshes slower than the public preset.
+- Investigator: carrier round · 2026-11-11
+
+### A-128 · carrier: `heardByFlood` is written and never read · minor
+- Evidence: `AndroidRadioLink.kt:233` (declaration), `:537` (`= false` on a direct arrival), `:593` (`= true` on a flood arrival); no other reference in the file.
+- Finding: dead state left by the abandoned "reply on the carrier you were heard on" rule that ADR-0038 rejects.
+- Why it hurts at range: it is an invitation to reintroduce the loop — the next reader sees a flag named exactly like the rejected policy and may wire it up.
+- Proposed fix (NOT applied): delete it.
+- Open questions: none.
+- Investigator: carrier round · 2026-11-11
+
+### A-129 · carrier: carrier decisions are logged at most once a minute, so a session's carrier history is invisible · major
+- Evidence: `mesh_serial.rs:217-222` (`route_log_rare`: one line per 60 s per slot), used for the carrier line (`:1496-1505`), the flooded-record line (`:2174`) and the route-from-flood line (`:2197`); `journalctl --user -u ldmux --since "2026-11-10 18:00"` contains exactly **two** carrier lines for the whole evening (`sent by flood over 1 hop`, `sent by flood over 0 hop`).
+- Finding: the single most important fact about a radio session — which carrier each record rode — is rate-limited to one line a minute across the entire evening.
+- Why it hurts at range: every conclusion in this audit about carrier behaviour has had to be derived from code rather than measured, because the measurement does not exist. The phone has per-record carrier lines (`record by flood 1/3 …`); the host does not.
+- Proposed fix (NOT applied): per-record carrier at trace level (`LDMUX_MESH_TRACE`), plus a **counter** (`records_by_flood`, `records_by_direct`, bytes each) published in `ldmux mesh status` and logged once a session — the summary is what a field report needs.
+- Open questions: whether a counter is enough or whether the phone should also publish its carrier counts over the session so both ends' views can be compared.
+- Investigator: carrier round · 2026-11-11
+
+### A-130 · carrier: `directWorks` survives reconnects because links are cached per address · minor
+- Evidence: `AndroidRadioLink.kt:2085-2102` (`RadioLinks.acquire` returns the cached link and only calls `updateHostKey`), `:237` (`directWorks` is instance state, never reset on connect/disconnect).
+- Finding: a new connection inherits the previous connection's opinion of the direct carrier. A stale `true` sends the first records direct with no path (they die silently); a stale `false` keeps a fresh link on the flood carrier.
+- Why it hurts at range: it adds a second, invisible source of carrier choice that depends on session history rather than on the link in front of you.
+- Proposed fix (NOT applied): reset `directWorks`, `lastDirectAt`, `lastInboundAt` and the bucket in `updateHostKey`/on a new session, so a link starts with no opinion.
+- Open questions: whether `RadioLinks` caching is needed for a reason that would preclude resetting on `updateHostKey`.
+- Investigator: carrier round · 2026-11-11
+
+### A-131 · carrier: the aggregate airtime one exchange costs on a 14-hop flood · question (arithmetic)
+- Evidence: `mesh_serial.rs:513` (`RECORD_FLOOD_COPIES = 3`), `:1468` (3 copies), `AndroidRadioLink.kt:2026` (3 copies), airtime ≈0.49 s per 133-byte transmission at the public preset, 14 repeaters from `docs/MESH-RADIO-CONSIDERATIONS.md` and the journal's 14–17 hop readings.
+- Finding: one record each way by flood = 6 origin transmissions × 15 nodes ≈ 90 transmissions × 0.49 s ≈ **44 s of aggregate channel time** for a single request/response pair. A handshake rung (3 × msg1 + 3 × msg2) is ~88 s of channel time before any data.
+- Why it hurts at range: on a shared city mesh this is the number that matters, and it is not computed or logged anywhere.
+- Proposed fix (NOT applied): none of its own — this exists so later rounds and any future change can be priced. The reducible parts are A-123 (no spacing), A-124 (dead retries) and the copy count itself.
+- Open questions: the measured value, which needs the host's `tx_air_secs` (`codec.rs:1120`, currently never read) surfaced in the journal.
+- Investigator: carrier round · 2026-11-11
+
+---
+
+101:**Worst finding:** A-120 — the two sticky flags (`directWorks` on the phone, `peer_via_flood` on the host) make flooding self-sustaining, because the only thing that clears either is a direct record and neither end will send one while its flag is set. ADR-0038's decay rule ("any arrival") was implemented as "a direct arrival", which is precisely the mirroring loop the ADR rejected.
