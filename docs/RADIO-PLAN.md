@@ -1,488 +1,401 @@
-# The radio path: what is wrong, what to keep, and the order to fix it
+# The radio path: plan of record
 
-This is the plan of record for the public-mesh (`LoRa`) route. It replaces
-`docs/RADIO-DESIGN-PROPOSAL.md` as the document that decides work. That proposal's carrier and
-timing model were built on two assumptions the firmware does not support (§1.9), and three of its
-decisions would introduce new failures: auto-replaying unacknowledged input across a new session
-(double execution), a 15-second idle heartbeat (continuous airtime for a mode whose point is that
-it needs no connection), and marking an outbound path proven by an inbound flood (§3.2, §3.3).
+The public-mesh route (`LoRa`) for ldmux. This document decides work; the evidence behind it is
+`docs/RADIO-AUDIT-LOOP.md` and the disposition of every entry in it is
+`docs/RADIO-AUDIT-DISPOSITION.md`. `docs/RADIO-DESIGN-PROPOSAL.md` is superseded and deleted: its
+carrier and timing model rested on firmware behaviour that does not exist (§1.10).
 
-`docs/RADIO-AUDIT-LOOP.md` stays as the evidence record: 300-odd findings, some wrong, corrected
-in place. This document cites only what was verified in source or in the field logs.
+## 0. The requirement, and the model that follows
 
-Three things are true and shape everything below.
+**A useful remote terminal over a shared public mesh, whose failures are visible and whose airtime
+is defensible.**
 
-1. **The requirement is a useful remote terminal over a shared public mesh.** "Batch" is a means,
-   not a requirement: it exists because a continuous interactive stream is the wrong thing to put
-   on a channel other people share. Anything that serves the requirement better than batch does
-   should replace it.
-2. **The link is intermittent by nature.** A 14–28 hop crossing over repeaters that may be
-   holding, dropping, rate-limiting or re-routing is not a connection. Designs that treat
-   "session established" as a precondition for the user doing anything have failed on every field
-   trip, and will keep failing.
-3. **One crossing is expensive.** A record is 490–603 ms of air at the public preset and it is
-   repeated at every hop it crosses. A design's cost is measured in crossings, not in messages.
-
----
+- The link is intermittent. A 14–28 hop crossing over repeaters that hold, drop, rate-limit and
+  re-route is not a connection, and nothing the user does may depend on one being "up".
+- A crossing is expensive: 490–603 ms of air per record at the public preset, repeated at every
+  hop. Cost is measured in crossings.
+- Therefore: **tap to send, tap to receive.** Nothing streams back on its own. A send owns exactly
+  one answer, delivered when the shell settles. A second tap while it is still working fetches the
+  current state. There is no live mode on the radio.
+- The notebook model: the phone is a terminal you keep notes in, the host is the machine. What you
+  typed is kept per shell; what came back is kept per shell; a link failure costs a wait, not your
+  place.
 
 ## 1. What is actually wrong
 
-Ordered by what it costs the user, with the evidence that establishes it. Everything here was
-re-read in source; ledger ids are given so the detail is findable, not as authority.
+Each item is verified in source. Severity is justified by what the user loses, not by how odd the
+code is. Ledger groups (G1–G10) are in `RADIO-AUDIT-DISPOSITION.md`.
 
-### 1.1 Data the link "sent" can be silently undeliverable — **blocker**
+### 1.1 Flooded records above a hop-dependent size are never delivered — **blocker** (G1)
 
-The radio's receive path and our send path enforce different ceilings.
+- App → radio: 176-byte frame, `[0x41][priority][packet]`, so packet ≤ 174.
+- Radio → app: a received packet is pushed only if `len + 3 ≤ 176`, so packet ≤ 173
+  (`examples/companion_radio/MyMesh.cpp:291-299`).
+- A flooded record is `12 + hops × hash + record`, so it arrives only while
+  `record ≤ 161 − hops × hash` (4 bytes less when scoped).
+- We publish a flat **162** (`mesh_serial.rs:461-465`, `MeshRecordLimits.kt:34-43`), derived from
+  the send side alone.
 
-- App → radio: `[0x41][priority][packet]` inside a 176-byte frame, so **packet ≤ 174**
-  (`examples/companion_radio/MyMesh.cpp:2047-2060`, `src/helpers/BaseSerialInterface.h:5`).
-- Radio → app: a received packet is pushed only if `len + 3 <= 176`, so **packet ≤ 173**;
-  otherwise nothing is emitted at all (`MyMesh.cpp:291-299`, `logRxRaw`).
-- A flooded record is `1 header + 1 path byte + hops × hash + 2 hashes + 4 magic + 4 nonce +
-  record`, so at the far end `12 + hops × hash + record ≤ 173`.
-- Our published flood limit is a flat **162** on both ends (`mesh_serial.rs:461-465`,
-  `MeshRecordLimits.kt:34-43`), justified in comments from the *send* budget only.
-
-Consequences, arithmetically exact:
-
-| record | received while |
+| record | arrives while |
 |---|---|
-| 162 B | **never** (174 + 3 > 176 even at zero hops) |
+| 162 B | never |
 | 143 B | hops ≤ 18 |
 | 133 B | hops ≤ 28 |
 | 120 B | hops ≤ 41 |
 
-The field log's `record by flood … 133 B` beside a 28-hop session sits exactly one hop from that
-cliff. Every larger record leaves the radio, is counted as sent, and is never reported by the
-peer's companion. **No amount of retry, timing or carrier tuning fixes a packet the receiver
-cannot push.**
+The field log's `record by flood … 133 B` on a 28-hop route is this arithmetic. Nothing reports it:
+the sender is told "sent", the receiver's companion emits nothing.
 
-### 1.2 A shrinking record limit duplicates and reorders delivered bytes — **blocker**
+### 1.2 A record limit that shrinks mid-flight duplicates and reorders bytes — **blocker** (G2)
 
-When the route grows, `Session::poll_with_seq` splits an already-numbered in-flight payload: the
-head keeps the sequence number, the tail is pushed to the front of the queue and numbered later
-(`session.rs:246-276`, `arq.rs:746-766`). The peer has already received the whole original record
-in the ack-lost case, so the tail is delivered **twice**; and because `arq.poll` numbered later
-records in the same call, the tail arrives **after** bytes that follow it in the stream.
+`Session::poll_with_seq` splits an already-numbered in-flight record when the route grows: the head
+keeps the sequence, the tail goes to the front of the queue and is numbered later
+(`session.rs:246-276`, `arq.rs:746-766`). If the whole original had already arrived (ack lost), the
+tail is delivered **twice**; and because later records were numbered in the same poll, out of order.
+Corrupts a paste or a command line. `requeue_remainder`'s "same order, same bytes" contract is false.
 
-This is reachable in exactly the situation the mechanism was written for — a route that grows one
-repeater — and it corrupts a paste, a command line or a screen patch rather than merely slowing
-it. `requeue_remainder`'s stated contract ("same order, same bytes, one extra record") is false.
+### 1.3 The handshake is not idempotent — **blocker** (G6)
 
-### 1.3 Three copies of one handshake made three sessions — **blocker, fixed in the working tree**
+Three copies of one `msg1` built three sessions, three indices and up to nine replies; a captured
+`msg1` replayed was an unauthenticated session-kill (because equal timestamps are accepted), two
+fsyncs, and three flooded answers. The phone finished on whichever answer arrived first, the host
+kept whichever request arrived last, and mismatches read as `handshakes 3` on a dead link.
 
-The phone sends `msg1` as three floods; the host had no content dedup, so after the timestamp
-guard was relaxed each copy built its own Noise responder, its own session index and its own
-reply — up to nine flooded answers. The phone finished on whichever arrived first, the host kept
-whichever arrived last, and when they disagreed every phone record failed its tag while the
-journal read `handshakes 3` (looks healthy).
+Fixed in the working tree (uncommitted, unvalidated): an idempotent responder cache keyed on the
+request bytes, with a superseded-initiation refusal and a bounded cache that never evicts a
+replayable request.
 
-Fixed by an idempotent responder cache in `mesh_session.rs` (working tree, unvalidated):
-identical `msg1` → identical cached `msg2`, no new session, no index advance, no outbox clear; a
-replay of a *superseded* initiation is refused rather than replacing the newer session. It also
-makes a captured `msg1` unable to destroy a live session, which the `2ea77bb` tolerance had
-allowed.
+### 1.4 The phone finishes a handshake with any record — **blocker** (G6)
 
-### 1.4 The phone finishes a handshake with any record at all — **blocker**
+`MeshTermDriver.onRecord` consumes the pending handshake with the first record of any kind and calls
+`finish` on it (`:906-916`). A stale transport record or a stranger's packet spends a rung.
 
-`MeshTermDriver.onRecord` takes the first record of any kind when a handshake is pending, sets
-`handshake = null`, and calls `finish` on it (`MeshTermDriver.kt:906-916`). A leftover transport
-record, a stranger's packet or a surplus answer therefore destroys the attempt and spends a rung.
-Crossings are seconds long, so late answers are normal, not exceptional.
+### 1.5 The carrier was a latch, and proof came from the wrong direction — **blocker** (G3, G4)
 
-### 1.5 The carrier was chosen per record from a latch, and proof came from the wrong direction — **blocker**
+`directWorks` / `peer_via_flood` are cleared by a flood and set only by a direct arrival, so both
+ends can wait for a direct record the other never sends. `peer_path_proven` is set by a **flooded**
+record — an inbound chain reversed into an outbound guess — and never by a direct arrival; the timer
+then takes the shortest inbound hop count, which the journal shows flipping 1↔16 hops in 11 s.
 
-Both ends keep "we heard a flood, so send floods" flags (`peer_via_flood` in `mesh_serial.rs`,
-`directWorks` in `AndroidRadioLink.kt`), cleared only by a direct arrival. One flood on each side
-latches both sides into flood forever.
+### 1.6 Every flooded record is sent three times — **major** (airtime)
 
-Separately, `peer_path_proven` is set by a **flooded** record (`mesh_serial.rs:2204`) — that
-chain is an inbound observation, and the stored path is its reversal, a guess about the outbound
-direction — while the direct-arrival branch sets nothing. The timer then takes its hop count from
-the shortest inbound path, which the journal shows flipping 1↔16 hops in eleven seconds.
+`RECORD_FLOOD_COPIES = 3` on both ends for every flooded record, and `REQUEST_COPIES = 3` for route
+requests (`mesh_serial.rs:513,1468`; `AndroidRadioLink.kt:2032`). Three copies of a handshake is the
+right trade; three copies of every data record on a shared mesh is the largest avoidable multiplier
+in the system.
 
-### 1.6 The host stops reading the radio while it answers — **blocker**
+### 1.7 A press is not a transaction — **blocker for the mode** (G2, G9)
 
-Answering a route request sleeps the reader for up to ~17 s (`mesh_serial.rs` reply path with a
-`reply_delay` sleep), so handshakes arriving in that window are never read. MeshCore's own clients
-enqueue delayed sends and keep receiving. One outbound queue with `not_before` removes the class.
-
-### 1.7 A press is not a transaction — **blocker for the mode**
-
-Verified end to end:
-
-- `sync()` sets `urgent = true` and opens a gate; the pump drains the **live** buffer, so text
-  typed after the press leaves with it (`MeshTerminalSource.kt:266`, `MeshTerminalScreen.kt:537-560`).
+- `sync()` sets `urgent` and opens a gate; the pump drains the **live** buffer, so text typed after
+  the press leaves with it.
 - `batcher.accepted()` removes a piece when the ARQ **queues** it, not when the peer has it; a
-  session death then drops it with nothing said (`MeshInput.kt:300-320`,
-  `MeshTermDriver.kt:765-790`).
-- `Input` for a shell no longer attached returns silently — no reply, no counter
-  (`mesh_bridge.rs:1816-1820`). The phone's `Live` view survives that.
-- A paste split across records is applied piece by piece, each newline running on arrival; a loss
-  mid-paste leaves half a command in the pane.
-- One draft buffer and one mirror per **connection**, not per shell
-  (`MeshTerminalScreen.kt:478-482`), so a shell switch or a rebuild takes the draft with it.
-- `resumeShell` is declared "the value that must survive a rebuild" and is only ever assigned `""`
-  (`MeshTerminalScreen.kt:256, 342, 914, 974`), which makes the resume path and the held-screen
-  pause unreachable and lands every rebuild on the launcher.
+  session death then drops it silently.
+- `Input` for a shell no longer attached returns with no reply and no counter.
+- A paste split across records is applied piece by piece, newlines running on arrival.
+- One draft and one mirror per **connection**, not per shell; `resumeShell` is only ever `""`, so a
+  rebuild lands on the launcher and the resume path is unreachable.
 
-The wire has no batch identity and no execution answer, so none of this is checkable by any local
-test. That is why it shipped green.
+### 1.8 Claims outlive the phone; the UI states facts it does not have — **major** (G7, G9)
 
-### 1.8 Claims outlive the phone; the UI has no bounded truth
+A mesh claim is skipped by the release sweep, made indisplaceable by `engaged()`, and released only
+when the session dies — but an idle session never dies. Every mesh client is the same device id, so
+two phones share one shell. The screen replaces its only moving evidence at 30 s while the ladder
+runs for 176–372 s, and a session death sets `session = None` before anything is logged.
 
-A mesh claim is exempt from the release sweep and `engaged()` makes it indisplaceable; the only
-thing that releases it needs the session to die, and an idle shell has nothing outstanding. A quiet
-shell can stay held for hours at the phone's geometry, refusing a desk window. Every mesh client is
-also the same device id (`"mesh-link"`), so two phones silently share one shell.
+### 1.9 The host stops reading the radio while it answers — **major** (G8)
 
-The screen shows a verdict at 30 s while the ladder continues for 176–372 s, and deletes its only
-moving evidence at that moment; the session death reason is computed and then discarded
-(`mesh_session.rs` sets `session = None` before any log).
-
-### 1.9 Every flooded record is transmitted three times — **major, airtime**
-
-`RECORD_FLOOD_COPIES = 3` on both ends (`mesh_serial.rs:513,1468`,
-`AndroidRadioLink.kt:2032`), and route requests are `REQUEST_COPIES = 3` as well. A flooded record
-is therefore 3× the air per repeater chain — for the handshake (where it is the right trade) **and
-for every data record on the flood carrier** (where it is not: a retry is cheaper than a third
-copy, and a lost screen is refetched as a snapshot, not repeated). On a shared mesh this is the
-largest avoidable airtime multiplier in the system, and it is invisible in the UI.
+`std::thread::sleep(reply_delay(airtime_ms))` runs inside the push handler, before the arriving
+record is delivered upward (`mesh_serial.rs:335`). Handshakes arriving in that window are not read.
+MeshCore's own clients queue delayed sends and keep receiving.
 
 ### 1.10 The measurements we designed against were not measurements
 
-- `calcRxDelay` is **0** on stock repeater, companion and room-server builds (`rx_delay_base`
-  default 0.0); what actually delays a flood at each repeater is a randomised retransmit delay
-  `nextInt(0, 5 × airtime × tx_delay_factor)`. The proposal's universal 2.70 s/hop hold does not
-  exist, so neither does its 65.6 s flood crossing or its 6.7× flood penalty.
-- `packetScore` is `clamp((snr − threshold)/10) × (1 − len/256)`, labelled "Approximate", used
-  **only** to schedule receive processing. It is not a delivery probability, so "0 dB margin ⇒ a
-  coin toss" is an inference, not a fact.
+- `calcRxDelay` returns **0** on stock repeater, companion and room-server builds (`rx_delay_base`
+  defaults to 0.0); what delays a flood at each repeater is a randomised retransmit delay
+  `nextInt(0, 5 × airtime × tx_delay_factor)`. The proposal's universal 2.70 s/hop, 65.6 s flood
+  crossing and 6.7× penalty do not exist.
+- `packetScore` is a length-and-SNR heuristic used only to schedule receive processing, not a
+  delivery probability, so "0 dB ⇒ coin toss" is an inference.
 - The ARQ computes a true smoothed round trip on every ack and exposes it only to tests
-  (`arq.rs:670-683`, `:475`), so every timer was tuned without the one number that settles it.
-
----
+  (`arq.rs:475`), so every timer was tuned without the one number that settles it.
 
 ## 2. What to keep
 
-Real, hard-won, and not to be lost in a rewrite:
-
-1. **The renderer split.** libghostty-vt per shell on the host, a row mirror on the phone, diffs on
-   the wire. A repaint is 2–3 records and an echo is 1 because of it.
-2. **Frame compression with the pinned dictionary** — 1318 B screen → 3 records. Extend it
-   uplink; do not replace it.
-3. **Row diffing with a known base** and the absolute top line: already snapshot-shaped.
-4. **AEAD + pairing**: pinned static keys, credential files in the persist dir, the record layout
-   and its replay window.
-5. **Local echo, the draft batcher's windows, and scrubbing secrets on background.**
-6. **The tailnet route, the desk attach client, and takeover consent.** Only liveness-based
-   expiry is wrong.
-7. **Airtime accounting and refusal bookkeeping.** The app does not spam; keep that property.
-8. **The durable phone log and the host journal vocabulary** — the only reason any of this was
-   diagnosable.
-9. **The launcher, `new shell` as its first row, history fetch, grid/fit, and `Detach`/`restore_grid`.**
-10. **The honest constants**: 143-byte record payload, 137-byte input, credit window 8.
-
----
+1. The renderer split: libghostty-vt per shell on the host, a row mirror on the phone, diffs on the
+   wire.
+2. Frame compression with the pinned dictionary (1318 B screen → 3 records), extended uplink.
+3. Row diffing with a known base and the absolute top line.
+4. AEAD and pairing: pinned static keys, persist-dir credentials, the record layout and replay window.
+5. Local echo, the draft batcher's windows, scrubbing secrets on background.
+6. The tailnet route, the desk client, claims and consented takeover.
+7. Airtime accounting and refusal bookkeeping.
+8. The durable phone log and the host journal vocabulary.
+9. The launcher, `new shell`, history fetch, grid/fit, `Detach`/`restore_grid`.
+10. 143-byte record payload, 137-byte input, credit window 8.
 
 ## 3. The design
 
-Four layers, each with one job and a rule that makes the failure classes above unrepresentable.
-
 ### 3.1 Device (L0)
 
-- One owner, enforced by the advisory lock we already take; ldmux keeps the radio.
-- `ERR_CODE_UNSUPPORTED_CMD` from a send is **terminal**: this radio cannot carry ldmux. Say so once
-  and stop retrying it as "busy".
-- Re-synchronise the frame parser on a bad length instead of eating ~15 kB of following frames.
-- Re-assert the radio clock on every open (advert ages and route questions depend on it).
-- Handshake-bearing command timeouts are derived from the firmware's own budgets
-  (`500 + 16 × airtime` flood; `500 + (6 × airtime + 250) × (hops + 1)` direct).
+- One owner, advisory lock as today. `ERR_CODE_UNSUPPORTED_CMD` from a send is **terminal**: this
+  radio cannot carry ldmux. Say so once, stop retrying it as busy.
+- Re-synchronise the frame parser on a bad length instead of eating the following frames; count
+  skipped bytes and publish the count.
+- Re-assert the radio clock on every open.
+- Command timeouts from the firmware's own budgets (`500 + 16a` flood; `500 + (6a + 250)(h+1)` direct).
 
 ### 3.2 Carrier (L1)
 
-- **The carrier is chosen per attempt, never per record.** Attempt 1 with a held path builds a
-  direct `RAW_CUSTOM` packet; attempt *n* builds a flood. Nothing persists between attempts, so no
-  latch exists to fix.
-- **The record budget is the receiver's**: `min(161 − hops_max × hash − scoped×4, 171 − path)` for a
-  flood, `172 − path` (capped 171) for a direct packet, floored at the session's 108-byte minimum.
-  `hops_max` is the largest hop count observed from this peer, not the shortest inbound path.
-  Before any hop count is known, publish **120**.
-- **One copy of a data record per attempt**, and one copy of a route request. Three copies only for
-the 121-byte `msg1`, where a lost request costs a whole epoch; the copy count becomes a measured
-setting, not a constant applied to every flood.
-- **A flood arrival means "the peer cannot reach us".** Answer with a direct path teach (one small
-  packet, throttled per peer), never by mirroring the flood.
-- **Scoped when the radio has a default scope**, and the 4-byte cost is part of the budget.
-- **No unsolicited output on the public mesh**: a held shell is not read, and pushed screens are
-  opt-in per open.
-- **Native binary datagrams (`CMD_SEND_CHANNEL_DATA`)** stay unimplemented until a measurement says
-  the corrected budget is insufficient. They would buy 165 B independent of hops, but cost a
-  persistent channel slot on both radios, share a FIFO with chat that evicts channel frames first,
-  carry a 2-byte MAC and no sender identity, and offer no acknowledgement at all.
+- **Chosen per attempt, never per record.** Attempt 1 with a held path builds a direct
+  `RAW_CUSTOM` packet; attempt *n* builds a flood. Nothing persists between attempts, so no latch.
+- **The budget is the receiver's**: flood `≤ 161 − hops_max × hash − (scoped ? 4 : 0)`; direct
+  `≤ min(172 − path, 171)`; floored at the session minimum 108. Before a hop count is known, publish
+  **120**. `hops_max` is the largest hop count seen from this peer.
+- **One copy per data record and per route request.** Three copies only where a measurement
+  justifies it (the 121-byte `msg1` today).
+- **A flood arrival means "the peer cannot reach us"**: answer with a direct path teach, throttled,
+  never by mirroring the flood.
+- **Scope when the radio has one**, and the 4 bytes are in the budget.
+- **Nothing is pushed unprompted**; no adverts by default; no heartbeat.
+- `GRP_DATA` stays unimplemented until a measurement says the corrected budget is insufficient. It
+  would carry 165 B independent of hops, but costs a channel slot on both radios, shares a FIFO that
+  evicts channel frames first, has a 2-byte MAC and no sender identity, and no acknowledgement.
 
-### 3.3 Identity and session (L2)
+### 3.3 Epoch (L2)
 
-- **Keep Noise IKpsk2 and the sealed record.** The alternative (a long-lived symmetric key derived
-  from the PSK) trades per-session forward secrecy for one less round trip and is not worth it.
-- **Drop liveness as a precondition.** A session/handshake is an *epoch*: it is established once per
-  app start (or rekey), and it is not what a press waits on. A press before the epoch is up is held
-  locally and sent when it exists; the UI says "connecting", not "failed".
-- **`msg1` is idempotent** (done, §1.3), and the phone finishes a handshake **only** on a `msg2`
-  (`KIND_MSG2`), treating anything else as stale.
-- **The answer is retried once on its own timer**, then the epoch is re-attempted deliberately —
-  no blind ladder per rung.
-- **No auto-replay of unacknowledged user input across epochs.** After a replacement, the phone
-  keeps the un-applied part of a submit in the draft and says so; it never re-executes silently.
+- Keep Noise IKpsk2 and the sealed record; keep forward secrecy per epoch.
+- **An epoch is not a connection.** It is established once per app run (or rekey) and is never a
+  precondition for the user. A press before it exists is queued and sent when it does; the UI says
+  "connecting".
+- `msg1` is idempotent; the phone finishes only on `KIND_MSG2`; a stale record does not spend an
+  attempt; the answer is retried on its own derived timer.
+- No auto-replay of user input across epochs. A send that never reached the host stays queued and
+  is shown as queued.
+- The link stays warm while the app is in use (foreground service included), so a press normally
+  pays no handshake.
 
-### 3.4 Delivery (L3)
-
-Five messages replace an ordered stream in both directions. Every one is independently retryable
-and every retry is safe.
+### 3.4 Exchanges (L3)
 
 **Phone → host**
 
-- `Submit { id: u16, shell: u8, part: u8, last: bool, body }` — text and/or key names. The host
-  assembles by `id` and applies **only on `last`**, so no partial paste ever reaches the pty.
-- `Fetch { shell: u8, want: Full | Diff { base: u32 } | History { before: u32, rows: u8 } | List }`
-- `Release { shell: u8 }` — the explicit "I am done" that replaces liveness-based claim expiry.
+- `Send { id: u16, shell: u8, part: u8, last: bool, body }` — text and key names. The host assembles
+  by `id` and applies **once on `last`**, so no partial paste reaches the pty.
+- `Fetch { shell: u8, want: Full | Diff { base } | History { before, rows } | List }`
+- `Release { shell: u8 }` — the explicit "I am done", replacing liveness-based claim expiry.
 
 **Host → phone**
 
-- `Snapshot { id: u32, base: Option<u32>, parts: u8, part: u8, body, producing: bool }` — a row set
-  or a compressed frame. Applying it twice is the same screen; an incomplete set is discarded; a
-  `base` that does not match is refused and answered with `Full` next time. `producing` is the
-  honest "the shell is still working", derived from the host's own observed activity.
-- `Applied { id: u16, outcome: Ok | Refused(reason) }` — one small message, and it rides on the
-  snapshot the submit produced when there is one. **That is the one-press win**: the answer to a
-  press *is* the screen.
+- `Snapshot { id: u32, base: Option<u32>, parts: u8, part: u8, body, producing: bool }` — idempotent;
+  applying twice is the same screen; an incomplete set is discarded; a `base` mismatch is answered
+  with `Full` next time.
+- `Applied { id: u16, outcome: Ok | Refused(reason) }`, riding on the snapshot the send produced.
 
-Semantics, stated honestly:
+**Rules**
 
-- **Idempotent delivery, at-most-once execution.** A repeated `Submit` id returns the cached
-  `Applied` without touching the pty, in the same daemon process. After a daemon restart the ring
-  is gone, so the phone is told `Unknown` and asked to resend rather than being told nothing.
-  A crash between the pty write and the ring entry can duplicate one batch; that window is one
-  instruction wide and is disclosed, not hidden.
-- **A snapshot supersedes output; it never replays.** Losing a screen costs one `Fetch`, never a
-  duplicate or a reorder.
-- **Ordering is per submit**, not per byte stream: a submit is applied whole, in order, or not at
-  all.
-- **Backpressure is a reply**, not a silent drop: a `Fetch` the host cannot serve in the budget, a
-  `Submit` it cannot queue, and an `Input` for a shell that is gone all answer.
+- **One answer per send, on settle.** The host pushes exactly one snapshot when the shell has been
+  quiet long enough to call it finished. If it never settles, nothing is pushed; the answer stays
+  owed and a tap fetches the current state.
+- **Sends queue in order**; each owns its settle-answer. **Fetches coalesce** — a newer fetch
+  supersedes a pending one, because its purpose is "show me the current state".
+- **Idempotent delivery, at-most-once execution.** A repeated `Send` id returns the cached
+  `Applied` without touching the pty. After a daemon restart the ring is gone: the phone is told
+  `Unknown` and shows the text as unsent rather than retrying silently. The one-instruction window
+  between the pty write and the ring entry is disclosed, not hidden.
+- **Backpressure answers.** A send the host cannot queue, a fetch it cannot serve, and a send for a
+  shell that is gone all reply.
+- **Applied on `last` only**, so a paste is one pty write and the line discipline sees whole lines.
 
-### 3.5 Terminal protocol and UI (L4)
+### 3.5 Interaction (L4)
 
-- Keep `Rows`/`Commit`/`Frame`/`FrameDict`, `Profile`, `Sessions` (with page indices), `Marks`,
-  `HistoryPage`, `Resize`, `Create`, `Close`, `Takeover`, `MakeLive`, `Created`, `Detach`.
-- Add the uplink twin of a frame: a large paste is compressed before it leaves (`MAX_INPUT` stays
-  one record per piece, but the pieces are deflated).
-- **Per-shell state objects**: draft, mirror, snapshot id, history cache and scroll anchor live
-  with the shell, not with the connection. `resumeShell` becomes real.
-- **Three truthful states**, never collapsed: *sent* (the radio accepted the record), *applied*
-  (`Applied{Ok}`), *carried* (a snapshot came back). "Waiting for the answer" becomes "still
-  producing" while the shell works, and always clears.
-- **Live mode is an adjacent-mesh affordance** and says so; batch is the range mode. The mode
-  choice stays in settings beside the channel.
-- **Cost is visible before the press**: records, and whether the route is direct or flood.
+- **Two controls, not one.** `send` sends and is dimmed with an empty draft; `refresh` fetches and
+  never sends. The ambiguity of one control that meant "flush the hold" in one state and "ask again"
+  in another is the source of the "press show again" history, and with a settle-answer there is no
+  longer a reason to merge them.
+- **After a send** the bar says `sent · shell working`; it clears when the answer lands. If the
+  shell never settles it keeps saying so, and `refresh` returns the current screen.
+- **After a drop inside one app run**, the app returns to the shell it was in, paints the last known
+  screen marked `stale`, and refreshes. After an app restart it opens on the shell list.
+- **Switching shells** paints that shell's last known screen instantly, marked `stale`, and fetches.
+- **Drafts are per shell** and cleared when the app goes to the background; queued sends clear with
+  them, because they are part of the draft.
+- **The list shows only the existing done/attention marks.** No extra "new output" dot.
+- **No cost display, no cap per press.** The protocol keeps airtime honest; the screen does not
+  lecture.
+- **Notifications**: one per shell when an answer lands while the app is off screen, **without
+  terminal text**, cleared by opening the shell. Marks keep their own separate, off-by-default
+  notification; the two are different facts (see §3.7).
+- **Screens are truthful**: `sent` (radio accepted), `applied` (`Applied{Ok}`), `carried` (a snapshot
+  came back), `stale`, `queued`, `producing`, `not delivered`.
+- **Held views disappear.** With nothing pushed unprompted, `Hold` is retired.
 
----
+### 3.6 Terminal protocol
 
-## 4. Stages
+Keep `Rows`/`Commit`/`Frame`/`FrameDict`, `Profile`, `Sessions` (with page indices), `Marks`,
+`HistoryPage`, `Resize`, `Create`, `Close`, `Takeover`, `MakeLive`, `Created`, `Detach`. Add the
+uplink frame (a large send is deflated before it leaves). Give runs page indices so a lost middle
+page is detectable.
 
-Each stage is shippable, deletes something, and is judged by its own test. Ordering is forced where
-marked.
+### 3.7 Marks, notifications and the agent skill
 
-### S0 · Instrument and make the seam testable
-- **S0.1** Expose `srtt`, hops, carrier-per-send, attempts, snapshot parts and per-record outcome
-  counts in `ldmux mesh status --json` and in one journal line per exchange.
-- **S0.2** Publish the corrected flood budget (§3.2) on both ends, floored at 120, and log when a
-  record is refused for size instead of falling back silently.
-- **S0.3** Count and name every silent drop: unattached `Input`, queue overflow, session death
-  reason (log at the point of death), rate-limited lines carry their suppressed count.
-- **S0.4** Test seams: a `ScriptedLink` with a virtual clock and injectable delays/refusals in
-  `crates/companion`; a `#[cfg(test)]` entry point for the mesh supervisor; the phone's carrier
-  policy moved out of `AndroidRadioLink` into a pure function.
-- **Deletes:** nothing. **Why first:** every later stage is judged by numbers that do not exist yet.
+Two different facts, deliberately not merged:
 
-### S1 · Delivery correctness in the existing stream
-- **S1.1** Split records **before** sequence assignment inside `arq.poll`; an in-flight slot that no
-  longer fits fails the session with a named `RetransmitTooLong` instead of being split. Remove
-  `requeue_remainder` as a general API. *(fixes §1.2)*
+- **A mark** is the shell raising its hand: `ldmux buzz --kind done|attention`, set by an agent or a
+  script. It is row state in the launcher, delivered on the tailnet by presence and on the radio
+  with `Sessions`/`Attach`. Its notification is optional and off by default, and it is tailnet-only
+  in practice because the radio cannot push an idle phone.
+- **An answer notification** is the result of a press you made. It is not a mark, carries no text,
+  and is suppressed while the app is on screen.
+
+The `contrib/skills/ldmux-shell` skill stays: it is the only way a shell can say "turn finished" or
+"waiting for you" without producing output, and it also names the shell. It is not extended to
+answer notifications, and answer notifications do not fire for marks. On the radio a mark is only
+timely at attach, and that is correct: it costs no airtime.
+
+## 4. Decisions taken, with the owner's answers (2026-11-11)
+
+| question | decision |
+|---|---|
+| one press, shell still working | one answer when it settles; nothing automatic if it never does; a tap fetches the state |
+| after a drop | same app run: back to the shell, marked stale; after an app restart: the shell list |
+| unsent text | per shell; cleared on background, including queued sends |
+| live typing on radio | removed |
+| never-settling command | nothing pushed until a tap |
+| answer size | the finished screen only; older output via history |
+| notification | yes, per shell, without terminal text |
+| cost display | none |
+| idle link | kept warm while the app is in use |
+| second press | sends queue in order; fetches coalesce |
+| switch shell | last known screen, marked stale, then refresh |
+| list state | only the existing done/attention marks |
+
+## 5. Stages
+
+Every stage ships alone, deletes something, and is measured by its own test. Groups in brackets are
+the ledger mechanisms it closes.
+
+### S0 · Instrument and make the seam testable *(G10)*
+- **S0.1** Expose `srtt`, hops, carrier per send, attempts and per-record outcome counts in
+  `ldmux mesh status --json` and one journal line per exchange.
+- **S0.2** Publish the corrected flood budget on both ends, floored at 120; log a size refusal
+  instead of falling back silently. *(G1)*
+- **S0.3** Name every silent drop: unattached input, queue overflow, session death reason, and the
+  suppressed count of any rate-limited line.
+- **S0.4** Seams: `ScriptedLink` with a virtual clock in `crates/companion`; a test entry point for
+  the supervisor; the phone's carrier decision moved into a pure function.
+- **Deletes:** nothing. **First** because every later stage is judged by numbers that do not exist.
+
+### S1 · Delivery correctness *(G2)*
+- **S1.1** Split records **before** sequence assignment; an in-flight record that no longer fits
+  fails the session with a named `RetransmitTooLong`. Remove `requeue_remainder`.
 - **S1.2** Clear the refusal window only on evidence of acceptance, so `REFUSAL_DEADLINE_MS` is
   reachable.
-- **S1.3** Never clear the phone's whole outgoing queue on one refusal; scrub only on a rebuild, and
-  say why.
-- **S1.4** Do not drop the oldest from an application queue: refuse new work, so no hole is created
-  in a byte stream. Do not advance the ack for bytes the application has not accepted.
-- **S1.5** Tests: duplicate/reorder/amplifier cases for the split, refusal deadline, queue-flush,
-  ack-vs-deliver.
-- **Deletes:** the false "same order, same bytes" contract.
+- **S1.3** Never clear the phone's whole outgoing queue on one refusal.
+- **S1.4** Never drop the oldest from an application queue; refuse new work. Do not advance the ack
+  for bytes the application has not accepted.
+- **S1.5** Tests: duplicate, reorder and amplifier cases; refusal deadline; queue flush; ack vs
+  deliver.
 
-### S2 · Handshake
-- **S2.1** Land the idempotent responder cache (working tree) with its three tests. *(§1.3)*
-- **S2.2** Phone finishes a handshake only on `KIND_MSG2`; anything else is stale and does not
-  spend a rung. *(§1.4)*
-- **S2.3** Retry the answer once on its own derived timer; replace the blind ladder with one
-  deliberate re-attempt and a clear "connecting" state.
-- **S2.4** Keep the replay tolerance, and count a superseded-initiation refusal separately from an
-  attack so the journal is readable.
-- **Deletes:** the ladder that gates the mode, and the permanent-lockout shape.
+### S2 · Handshake *(G6)*
+- **S2.1** Land the idempotent responder cache with its tests.
+- **S2.2** Finish only on `KIND_MSG2`; stale records do not spend an attempt.
+- **S2.3** One deliberate re-attempt on a derived timer; no blind ladder; "connecting" is a state,
+  not a failure.
+- **S2.4** Count a superseded initiation separately from an attack.
+- **Deletes:** the ladder that gates the mode.
 
-### S3 · Transactions (Submit / Applied)
-- **S3.1** `Submit{id, part, last}` with host-side assembly and atomic apply. *(§1.7)*
-- **S3.2** `Applied{id, outcome}`, cached in a small per-device ring; `Unknown` after a restart.
-- **S3.3** Phone keeps the submit's bytes until `Applied`, then removes them; the draft is an
-  immutable prefix taken at the press, and later typing waits.
-- **S3.4** Every refusal answers (unattached shell, displaced shell, queue full, budget).
-- **S3.5** Uplink compression for a large submit, gated by a feature bit.
-- **Deletes:** "queued = sent", silent drops, and the partial-paste application.
+### S3 · Exchanges *(G2, G9)*
+- **S3.1** `Send{id, part, last}` with host assembly and one atomic apply.
+- **S3.2** `Applied{id, outcome}` with a per-device ring; `Unknown` after a restart.
+- **S3.3** The phone keeps a send until `Applied`; the draft is an immutable prefix taken at the
+  press; later typing waits.
+- **S3.4** Every refusal answers.
+- **S3.5** Uplink compression for a large send.
+- **Deletes:** "queued = sent", silent drops, partial-paste application.
 
-### S4 · Snapshots
+### S4 · Snapshots *(G9)*
 - **S4.1** `Fetch`/`Snapshot{id, base, parts, producing}`; paint only complete sets.
-- **S4.2** Remove the idle marker and the 4 s quiet timer as the answer boundary; keep the marker as
-  a hint. *(R8, P2)*
-- **S4.3** Page indices for runs (list, marks, history) so a lost middle page is detectable.
-- **S4.4** Held shells cost nothing until a `Fetch`.
-- **Deletes:** the "press show again" class and the freeze-as-listener contract.
+- **S4.2** One settle-answer per send; retire the idle marker as an answer boundary and retire
+  `Hold`.
+- **S4.3** Page indices on every run (list, marks, history, snapshot parts).
+- **S4.4** History and older output on demand only.
+- **Deletes:** the "press show again" class, the 4 s quiet guess, freeze-as-listener.
 
-### S5 · Carrier
-- **S5.1** Per-attempt carrier; delete `peer_via_flood` and `directWorks` as persistent state.
-- **S5.2** Proof: only a direct record or a direct ack marks a path proven; a flood chain teaches a
-  teach, never a timer.
-- **S5.3** Time by `srtt`, floored by the firmware's own formulas; never by the shortest inbound
-  path, never by `calcRxDelay`.
-- **S5.4** Queue outbound sends with `not_before`; the reader never sleeps. *(§1.6)*
-- **S5.5** One data copy per attempt, three only for `msg1`; scope when the radio has one.
-- **Deletes:** the latch, the 162 cliff, and the blocked reader.
+### S5 · Carrier *(G3, G4, G8)*
+- **S5.1** Per-attempt carrier; delete `peer_via_flood` and `directWorks`.
+- **S5.2** Proof only from a direct record or a direct ack; a flood chain teaches a teach.
+- **S5.3** Time by `srtt`, floored by the firmware formulas; never the shortest inbound path, never
+  `calcRxDelay`.
+- **S5.4** Outbound queue with `not_before`; the reader never sleeps.
+- **S5.5** One data copy per attempt; three only where measured; scope when available.
+- **Deletes:** the latch, the 162 cliff, the blocked reader.
 
-### S6 · Claims and per-shell state
-- **S6.1** Claims released by `Release`, `Detach`, shell exit, or consented takeover. No liveness
-  expiry, no heartbeat.
-- **S6.2** Per-link device id, so two phones are two devices and `HeldBy` works over radio.
-- **S6.3** Per-shell draft/mirror/snapshot-id/history/scroll state; `resumeShell` real; a drop
-  costs a pause, not the user's place.
-- **Deletes:** hours-long quiet claims and the launcher bounce.
+### S6 · Claims and per-shell state *(G7)*
+- **S6.1** Claims end on `Release`, `Detach`, shell exit or consented takeover. No heartbeat, no
+  liveness expiry; a stale claim is displaceable by consent and the phone learns on its next
+  exchange.
+- **S6.2** Per-link device id.
+- **S6.3** Per-shell draft, mirror, snapshot id, history cache, scroll anchor.
+- **Deletes:** hours-long quiet claims, the launcher bounce, the dead `resumeShell`.
 
 ### S7 · Lifecycle and device
 - **S7.1** Wake-lock lifetime follows the service, not the notification text (patch ready in a
   worktree; review, then land).
-- **S7.2** Switching route must not tear down a live radio epoch silently; if it must, say so and
-  do not restart the ladder from rung one.
+- **S7.2** A route switch must not silently tear down a warm epoch; if it must, say so once.
 - **S7.3** Off-screen release sends `Detach`.
-- **S7.4** Frame-parser resync; clock restored on open; `UNSUPPORTED_CMD` terminal.
-- **Deletes:** the silent 30–55 minute dead zone, and the "wedged radio" class that was really a
-  truncated frame.
+- **S7.4** Parser resync; clock on open; `UNSUPPORTED_CMD` terminal.
+- **Deletes:** the off-screen dead zone and the "wedged radio" class that was a truncated frame.
 
-### S8 · UX
-- **S8.1** One press: `Submit` + implicit `Fetch`; the result is the screen. No second press ever.
-- **S8.2** Local echo everywhere the draft is visible; held text never leaves the process.
-- **S8.3** Honest vocabulary: sent / applied / carried / producing / not delivered after N tries.
-- **S8.4** Cost before the press (records, carrier), state on screen, transport named in the log.
-- **S8.5** Scrolling: up/down fetch a page, typing returns to the bottom, buttons only, controls
-  grey out rather than disappear, batch controls absent in live mode.
-- **Deletes:** "connection dropped" in a mode that has no connection.
+### S8 · Interaction *(G9)*
+- **S8.1** Two controls: `send` and `refresh`; sends queue, fetches coalesce.
+- **S8.2** Local echo of the draft; per-shell drafts; cleared on background.
+- **S8.3** The vocabulary of §3.5, including `stale`, `queued` and `producing`.
+- **S8.4** Answer notification without text; marks unchanged and separate.
+- **S8.5** Remove live typing and its controls from the radio; keep the tailnet's stream, labelled.
+- **S8.6** Scrolling: a page per tap, typing returns to the bottom, buttons only, controls grey out
+  rather than disappear.
 
 ### S9 · Retire and document
-- **S9.1** Remove the ARQ stream machinery that S3–S5 replaced (ordering, window, cumulative ack),
-  keeping parts+retry for bulk only.
-- **S9.2** Update `ARCHITECTURE.md`, `AIRTIME.md`, `RELEASE-AUDIT.md §18`, the ADRs (new: carrier
-  per attempt; identified transactions; snapshots), and this plan — in the same commits.
-- **S9.3** Delete the superseded proposal document or mark it historical.
+- **S9.1** Remove the ordered-stream machinery S3–S5 replaced (window, cumulative ack, rekey as a
+  gate), keeping parts and retry for bulk.
+- **S9.2** Update `ARCHITECTURE.md` (§2, §5–§9, §11a), `AIRTIME.md`, `RELEASE-AUDIT.md` §18, the
+  ADRs (new: carrier per attempt, exchanges, snapshots; superseded: 0029, 0032, 0037, 0038), and
+  this plan, in the same commits.
+- **S9.3** Keep `RADIO-AUDIT-LOOP.md` and `RADIO-AUDIT-DISPOSITION.md` as labelled audit records,
+  not design.
 
-**Forced order:** S0 before S5 (or carrier work is unmeasurable); S1 before S3 (transaction retries
-must not ride a duplicating stream); S2 before S3 (a press must not need a handshake); S3 before S4
-(snapshots need ids); S4 before S6/S8 (UI must stop inferring).
+**Forced order:** S0 before S5; S1 before S3; S2 before S3; S3 before S4; S4 before S6/S8.
 
----
+## 6. Integration surfaces
 
-## 4a. Integration surfaces (what else these stages touch)
+- **Protocol** (`mesh_term.rs`): `Send`, `Applied`, `Fetch`, `Snapshot`, `Release`; page indices;
+  uplink frame. One version bump; an old phone is refused with `Closed { VERSION }`. Pre-release,
+  both ends deploy together.
+- **Keeper**: unchanged. The bridge buffers a send in memory and writes once on `last`.
+- **Ownership**: `Release` maps to the claim table; a send for a vanished handle answers
+  `Refused(NotAttached)` and the phone keeps the text.
+- **Two routes, one phone**: the tailnet client keeps its stream; the mesh gains explicit exchanges;
+  both share the codec, mirror and UI states.
+- **Rollback**: remove `LDMUX_MESH_SERIAL` and the daemon never opens the port; the tailnet and the
+  desk client are unaffected. A radio change can never cost a shell.
 
-- **Protocol crate** (`mesh_term.rs`): `Submit`, `Applied`, `Fetch`, `Snapshot`, `Release`; page
-  indices on `Sessions`, `Marks`, `HistoryPage`; the uplink frame. One version bump, and an old
-  phone is refused with `Closed { VERSION }` as today. Pre-release, both ends deploy together, so
-  no feature-bit scaffolding is kept beyond what already exists.
-- **Keeper**: unchanged. The bridge buffers a `Submit` in memory and calls `host.input(session,
-  bytes)` once on `last`, so a batch is one write to the pty and the pty's own line discipline
-  sees whole lines.
-- **Daemon ownership**: `Release` maps to the claim table; a `Submit` for a shell handle that no
-  longer exists answers `Applied { Refused(NotAttached) }` and the phone keeps the draft. The
-  shell handle is per attach, and a submit in flight across a re-attach is refused rather than
-  applied to whatever now holds that number.
-- **Two routes, one phone**: the tailnet client is untouched. The mesh client is the only one that
-  gains `Submit`/`Fetch`; the shared parts are the terminal codec, the mirror and the UI, which is
-  where the user-visible behaviour must match.
-- **Claims**: the daemon's `mesh_watched` set disappears; claims come from `Release`, `Detach`, shell
-  exit and consented takeover.
-- **Docs to update in the same commits**: `ARCHITECTURE.md` §2, §5–§9, §11; `AIRTIME.md` (the
-  3-copy multiplier and the corrected budget); `RELEASE-AUDIT.md` §18; new ADRs for carrier per
-  attempt, identified transactions and snapshots; and the ADRs that describe the session as a live
-  connection (0029, 0032, 0037, 0038) marked superseded where the plan changes them.
+## 7. How it is proven without a field trip
 
----
+- `crates/session/tests/lossy_multihop.rs` extended to the exchange layer: loss, duplication,
+  reordering, a route that grows or shrinks mid-flight, a replayed `msg1`.
+- `ScriptedLink` plus a virtual clock for the carrier: delayed sends, refusals, a silent radio, a
+  partial frame, a burst of frames.
+- A pure carrier function on the phone, so the policy is a table test.
+- Bench with both radios at minimum power: does `0x41` exist on this firmware, real airtime, does a
+  group datagram arrive, does the wakelock survive an hour. One afternoon.
+- A field trip is only for reach: how far, how many hops, which carrier wins. S0's log turns it into
+  a table.
 
-## 4b. How each stage is proven without a field trip
+## 8. What would make this plan wrong
 
-Existing seams first, new ones only where a defect has no home:
-
-- **`crates/session/tests/lossy_multihop.rs`** already drives the session over a lossy, multi-hop
-  model. Extend it to the transaction layer: loss, duplication, reordering, a route that shrinks or
-  grows mid-flight, and a replayed `msg1`. This is where S1/S2/S3's correctness lives.
-- **`ScriptedLink` with a virtual clock** in `crates/companion` (S0.4) for the carrier: delayed
-  sends, refusals, a radio that stops answering, a partial frame, a burst of frames.
-- **Pure carrier function** on the phone (S0.4) so `directWorks`/`floodWanted` become a table test
-  rather than a BLE experiment.
-- **Bench with two radios at minimum power** (both on the host's desk) answers what only hardware
-  can: does `0x41` exist on this firmware, what is the real per-record airtime, does a native
-  group datagram arrive, and does the wakelock survive an hour. That is one afternoon, not a range
-  trip.
-- **A field trip is only for reach**: how far the mesh carries, how many hops, and which carrier
-  wins at that distance. The instrumented log (S0) turns it into a table instead of an anecdote.
-
----
-
-## 4c. Compatibility and rollback
-
-- Every stage keeps the host and phone speakable at the same commit; a mismatch is refused with a
-  version reason, never a half-working link.
-- The radio path can always be turned off by removing `LDMUX_MESH_SERIAL`, which leaves the tailnet
-  route and the desk client untouched. That is the rollback for any stage that misbehaves in the
-  field.
-- The keeper and its shells are never part of a radio change: a radio failure cannot cost a shell.
-
----
-
-## 5. Decisions taken, and the questions that are not mine to settle
-
-Taken, on the evidence above:
-
-- Keep Noise; drop liveness as a gate (epoch, not connection).
-- Keep `RAW_CUSTOM` direct + `REQ` flood with the corrected budget; **do not** build GRP_DATA until a
-  measurement says so.
-- Identified submits and idempotent snapshots; **no auto-replay of user input across epochs**.
-- At-most-once execution per daemon lifetime, with `Unknown` after a restart rather than a silent
-  retry.
-- Claims end by action, never by heartbeat.
-- Live mode is declared an adjacent-mesh affordance.
-
-Open, and it needs a decision before S8:
-
-- **The airtime policy for one press.** The user's own sentences are "latency above airtime" and
-  "airtime minimised at all costs", which conflict whenever a second copy would cut latency. The
-  proposal that satisfies both: a **hard cap per press** (records, shown before the press) with
-  latency optimised inside it. That needs a number: 8 records per press, 12, or "whatever the
-  screen needs, capped at one full frame".
-
----
-
-## 6. What would make this plan wrong
-
-- If `hops_max` on the real route is small (≤6), the flood budget fix matters less and GRP_DATA is
-  not worth its cost.
-- If the mesh never carries a direct packet on the route in use, the direct-first rule costs a
-  crossing per attempt and flood-first is correct; S5.1 makes that a policy change, not a rewrite.
-- If `srtt` proves too noisy at the margin, the floor becomes the firmware formula and `srtt` only
-  ever raises the timer.
-- If a daemon crash between pty write and the applied-ring entry proves to matter in practice, the
-  fix is an execution journal written *before* the write with an `Unknown` state on recovery — more
-  machinery than the current evidence justifies.
+- If `hops_max` on the real route is small, the budget fix matters less and `GRP_DATA` is not worth
+  its cost.
+- If the route in use never carries a direct packet, flood-first is correct and S5.1 becomes a
+  policy change, not a rewrite.
+- If `srtt` is too noisy at the margin, the firmware floor leads and `srtt` only raises the timer.
+- If the pty-write/ring-entry window proves to matter in practice, the answer is an execution
+  journal written before the write, with `Unknown` on recovery. Not justified yet.
