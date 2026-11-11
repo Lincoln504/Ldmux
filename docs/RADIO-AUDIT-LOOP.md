@@ -3528,3 +3528,7 @@ Read-only investigation, 2026-11-11. Evidence is `file:line` or a command output
 - Proposed fix (NOT applied): release the claim on `Closed{EXITED}` in the bridge (the attach is gone, so the claim has nothing behind it), and start `unbacked_since` at the deadline rather than after it, so the restored grace means what its name says.
 - Open questions: whether releasing on `EXITED` races the keeper's own session teardown, which also releases claims (the daemon's `registry` retains the session id briefly).
 - Investigator: claims round · 2026-11-11
+
+## Design proposal
+
+The replacement design for the radio path, written after seventeen investigation rounds and keyed to the entries it closes: **docs/RADIO-DESIGN-PROPOSAL.md**.
