@@ -1546,3 +1546,267 @@ The short answer to "would any test have caught these": **two were unreachable, 
 
 77:**The three sentences I would change first:** (1) `"no answer from host"` / `"check the host is on the same channel, then refresh"` (`MeshBody.kt:33-35`) — the wrong cause and the most expensive cure, and it is the sentence a range user sees for most of every attempt; (2) `"link quiet · ${quietSecs} s"` with `ok = true` (`MeshTerminalScreen.kt:1359-1360`) — the one warning of a dead link, 
 79:**What I could not determine:** (1) whether the phone's `MeshStatus` carries the *inbound* carrier or only the outbound, which decides whether A-282 can be fixed in the bar alone; (2) whether the companion status exposes SNR per reading on the phone side, so A-283's second half may be a proto change; (3) whether `heldScreen` actually survives the rebuild in practice — the code path at `:1017`
+### A-300 · docs: ADR-0038 says decay is "on any arrival"; code decays only on a direct arrival · blocker
+
+- Evidence: `docs/adr/0038-carrier-selection-escalate-on-silence.md:27` (`| **any** record arrives | something works | failures = 0 → **direct** |`), `:22-24` ("flood is an escalation … decays the moment that evidence changes"), `:57` (`Mirroring the carrier — positive feedback` listed under **Rejected**), `docs/adr/README.md:41` ("decayed by any arrival"); code `crates/daemon/src/mesh_serial.rs:2208` (`peer_via_flood = true` on a flood), `:2278` (`peer_via_flood = false` **only** in the direct-arrival branch), `:1413-1417` (`want_flood = … || peer_via_flood`); phone `AndroidRadioLink.kt:531` (`directWorks = true` only on a direct record), `:594` (`directWorks = false` on any flood), `:1013` (`floodWanted = (!directWorks || directSilent)`).
+- Finding: the decay the ADR defines happens on a **direct** arrival only, on both ends. A flood arrival sets the latch and nothing but a direct arrival clears it — so the "positive feedback loop" the ADR explicitly rejects as an alternative is the implemented behaviour. The ADR's own `Why this converges` section ("flood → the flood's travel chain becomes the new candidate and is adopted forcibly → failures reset → **direct** on the new candidate") describes a convergence path that does not exist in the code.
+- Why it hurts at range: the next engineer reads ADR-0038, believes the link returns to direct after one flood, and looks for the bug elsewhere; meanwhile every record on both ends rides the flood carrier with three copies each, indefinitely, on a mesh that measures −107…−124 dBm.
+- Proposed fix (NOT applied): the code should implement the ADR — a flood arrival resets the escalation (the reversed chain is already adopted as the candidate at `mesh_serial.rs:2183-2199`), with one bounded exception (a periodic deliberate direct probe) recorded as a new ADR line. If instead the latch is intended, ADR-0038, `README.md:41` and `ARCHITECTURE.md:649` must be rewritten to say so and the `Mirroring the carrier` rejection removed.
+- Open questions: which of the two is intended — the ledger's A-120 grades the latch a blocker, so the docs are probably right and the code wrong.
+- Investigator: docs round · 2026-11-11
+
+### A-301 · docs: ADR-0037 and ARCHITECTURE still describe "flood when the route is not fresh" · blocker
+
+- Evidence: `docs/adr/0037-two-carriers-direct-by-default-flood-when-there-is-no-route.md:37` ("**When each is used.** The phone floods a record when its route is not fresh. The host, with no path, sends the first reply as a plain zero-hop direct packet … and escalates to a flood only if the peer is still re-handshaking after that. Any record that arrives resets the escalation"), and again at `:62`; `docs/ARCHITECTURE.md:649-652` ("The carrier is chosen per send — direct when the route is fresh, flood when it is not — and the host escalates rather than starting there: a pathless zero-hop reply is cheap and correct for a neighbour, so the flood is used only after that fails to be answered"); code `mesh_serial.rs:1413-1418` (`want_flood` also set by `path_stale`, `direct_silent`, `answer_flood_with_flood`, `peer_via_flood`), `:1425` (`flood_now = answer_flood_with_flood || (want_flood && pathless_directs > 0)`), `AndroidRadioLink.kt:1013`.
+- Finding: three separate claims in these two documents are false of the code: (a) the phone does not test route freshness at all — it tests `directWorks`/`directSilent`; (b) the host does not send a zero-hop direct reply first when the peer's record arrived by flood — `answer_flood_with_flood` makes the very next reply a flood; (c) "any record that arrives resets the escalation" is false for floods (A-300).
+- Why it hurts at range: ARCHITECTURE is the authoritative design; a reader debugging "why is everything flooded" is told by this paragraph that flooding requires a stale route, and the real cause (`peer_via_flood`) is never mentioned in any document outside the ledger.
+- Proposed fix (NOT applied): rewrite ARCHITECTURE:641-652 and ADR-0037:37 to state the four escalation causes and the zero-hop-first exception as the code has them, or change the code to match. Also record the flood-reach hop count that the session is timed against when pathless (`mesh_serial.rs:1873-1876`), which no design document mentions at all.
+- Open questions: whether `path_stale` should be an escalation cause now that `direct_silent` exists — the ADR explicitly rejects "flooding by staleness alone".
+- Investigator: docs round · 2026-11-11
+
+### A-302 · docs: ADR-0038 says floods are paced by a token bucket; the host has no bucket · major
+
+- Evidence: `docs/adr/0038…:42` ("**Floods are paced by a token bucket** (four back to back, refilled at one per flood round trip), because a batch is thirteen records and a terminal must not become a broadcast"); `grep -n "bucket\|throttle\|pace\|tokens" crates/daemon/src/mesh_serial.rs` → only an unrelated comment at `:493`; the bucket exists solely in `AndroidRadioLink.kt:274-288, 987, 2022` (`FLOOD_BURST = 4`).
+- Finding: the pacing decision is documented as a property of the carrier rule, and only one end implements it. The host floods without limit, and each flooded record is **three copies** (`mesh_serial.rs:513`, `:1468`), with `peer_via_flood` (A-300) making that permanent at range.
+- Why it hurts at range: the document that says "a terminal must not become a broadcast" is cited as evidence the design is safe, while the end that talks to the mesh most (the host answering a phone that re-handshakes) has no bound at all.
+- Proposed fix (NOT applied): either add the bucket to the host's flood path (same `FLOOD_BURST`, refill from the measured flood round trip) or state in ADR-0038 that the host relies on the ladder and the reply floor instead, and why that is enough.
+- Open questions: whether the host's `last_reply` floor (600 ms, A-303) plus `answer_flood_with_flood` can out-pace the phone's bucket in practice.
+- Investigator: docs round · 2026-11-11
+
+### A-303 · docs: "one reply per 5 s" is now 600 ms, and no request floor of 10 s exists · major
+
+- Evidence: `docs/SECURITY.md:47` ("Both ends rate limit (one reply per 5 s, one request per 10 s) so a peer cannot use either as an amplifier"); `docs/ARCHITECTURE.md:736` ("the host answers at most one per 5 s"); code `mesh_serial.rs:180` (`const ROUTE_REPLY_FLOOR: Duration = Duration::from_millis(600);`), and `git log -L180,180:crates/daemon/src/mesh_serial.rs` → `db4623b` replaced `from_secs(5)` with `from_millis(600)` and touched no document; the phone still answers at 5 s (`AndroidRadioLink.kt:1984` `REQUEST_ANSWER_FLOOR_MS = 5_000L`), so "both ends" is false in both directions; the only 10 s constant is `REQUEST_BURST_MS = 10 s` (`mesh_serial.rs:77`), which coalesces one request's copies and is not a request rate limit — the host re-asks at `ROUTE_REASK_FLOOR = 2 s` (`:142`) and the phone at `ROUTE_REQUEST_FLOOR_MS = 5 s` (`AndroidRadioLink.kt:1990`).
+- Finding: the documented amplifier bound is **8× tighter than the code on the host**, and the documented request bound does not exist. The asymmetry (host 600 ms, phone 5 s) is documented nowhere.
+- Why it hurts at range: this is the one paragraph a reader consults to decide whether an unauthenticated flood can be turned into an amplifier, and it is wrong in the unsafe direction — a spoofed request stream makes the host emit one flooded reply per 600 ms, and with the three-copy behaviour of A-304 potentially more.
+- Proposed fix (NOT applied): restore 5 s on the host or document 600 ms as a deliberate cost with its justification; delete "one request per 10 s" or name the constant that implements it.
+- Open questions: whether `first_time_question`'s nonce memory (`mesh_serial.rs:182-186`) caps the rate for a *repeating* attacker, which is the realistic case.
+- Investigator: docs round · 2026-11-11
+
+### A-304 · docs: row 6.228 claims the host's flooded reply is repeated three times; it is one packet · major
+
+- Evidence: `docs/RELEASE-AUDIT.md:312` (row 6.228: "FIXED, three copies with a fresh wrapper nonce each, on the phone's flooded records **and on the host's flooded replies**"); `git show c8c5d3b -- crates/daemon/src/mesh_serial.rs` added `RECORD_FLOOD_COPIES = 3` and the copy loop to the **record** send only (`mesh_serial.rs:513`, `:1468`); the reply path `send_route_reply` (`:290-355`) still builds one packet and sends it through `send_retrying(|d| companion.send_packet_within(&packet, d))`, which retries **the same bytes** — and the function's own comment says an identical repeat is swallowed by MeshCore's duplicate filter, so a retry after a lost ack teaches the phone nothing.
+- Finding: the row records as fixed the half of the asymmetry that was not fixed. The reply — the packet that has never been heard at range — remains a single transmission with at most a same-bytes retry.
+- Why it hurts at range: an investigator reading the audit concludes the answer-half of discovery is covered and looks elsewhere; the measured field evidence ("`route reply sent ok=true` and the phone never sees it") is consistent with a single lost copy.
+- Proposed fix (NOT applied): make `send_route_reply` loop `RECORD_FLOOD_COPIES` times with `route_nonce()` re-stamped (the reply already echoes the request nonce, so the wrapper nonce is what must vary), or correct row 6.228 to say the reply was left at one copy and why.
+- Open questions: `send_retrying`'s rounds (`SEND_ROUNDS = 3`) fire only on `Disabled`/`Timeout`, so on a busy radio that is three identical packets — does the first repeater's dedup drop copies two and three?
+- Investigator: docs round · 2026-11-11
+
+### A-305 · docs: three rows of the "every timing figure" table are stale · major
+
+- Evidence: `docs/RELEASE-AUDIT.md:722` (`| handshakeWaitMs | retry << 3 | …`) vs `MeshTermDriver.kt:2612-2623` (`ladder = rung * 7`, budget `= ladder + max(rung, HANDSHAKE_ANSWER_WINDOW_MS)` with `HANDSHAKE_ANSWER_WINDOW_MS = 120_000`, i.e. 176 s at a neighbour, changed in `499de61`); `:729` (`| ROUTE_REPLY_FLOOR | 5 s |`) vs `mesh_serial.rs:180` (600 ms, `db4623b`); `:703` (R13, "a raw send waits at most 2 s") vs `mesh_serial.rs:494` (`raw_send_deadline(900.0) + 300 ms << round` → 4.9 s + 0.3/0.6/1.2 s, and `raw_send_deadline` is `max(2 s, 4000 + airtime)`).
+- Finding: the table is presented as the register of every derived number with its basis, and three of its rows describe numbers the code no longer uses — the handshake budget by 2.75×, the reply floor by 8×, the raw-send hold by 2.5× (and up to 8.5× with retry rounds).
+- Why it hurts at range: this table is what a reviewer checks when asking "is anything a flat constant?" — the flat-constant audit is being performed against stale rows.
+- Proposed fix (NOT applied): regenerate the table from the constants, and add the rows that are missing (the answer window, the flood-reach hop count, `direct_round_trip`).
+- Open questions: whether `499de61` and `db4623b` should have failed a doc gate; no test reads these numbers.
+- Investigator: docs round · 2026-11-11
+
+### A-306 · docs: §18's "Deployed" table names a four-day-old commit · major
+
+- Evidence: `docs/RELEASE-AUDIT.md:638` ("## 18. State and risks at `548759f` (2026-11-10)") and `:644` (`| Desktop daemon | 838f101, ldmuxd 838f101 (protocol 1) …|`); the deployed binary reports `ldmux 2ea77bb (protocol 1)` (`ldmux --version`), HEAD is `5523167`, and the phone's APK was rebuilt at 22:07 after that.
+- Finding: the section's stated purpose is "what is deployed, what was actually exercised on the air, what was not, and every risk that remains", and its first table is wrong by ~100 commits; its `Verified on the air` and `Not verified` lists are from the same era (e.g. "A session establishes with one accepted handshake" and "Not verified: a full session over more than one repeater since the `TooLong` fix" are both superseded by 2026-11-10's runs, and the current blockers — duplicate `msg1` sessions, the latch, the timer following the shortest inbound path — appear nowhere).
+- Why it hurts at range: this is the document a person reads cold before a field trip, and it would send them to test the wrong things with a build they do not have.
+- Proposed fix (NOT applied): rewrite §18's header, `Deployed` table and the two verification lists from the current tree, and move the historical section under a "superseded" heading.
+- Open questions: whether §18 should be regenerated automatically from `ldmux --version` plus the ledger's open blockers, so it cannot drift again.
+- Investigator: docs round · 2026-11-11
+
+### A-307 · docs: the per-hop delay model is wrong in both directions · major
+
+- Evidence: `docs/ARCHITECTURE.md:775-778` ("each repeater holds a packet for a random delay of up to two airtimes, so the session's first retry is `6 x airtime x hops`"), `:368-370` (same factor), `docs/RELEASE-AUDIT.md:721` (`handshakeRetryFor` basis "the firmware's forward delay is up to 2 airtimes a hop"); firmware `mesh-research/clones/filter-firmware/src/Dispatcher.cpp:241-252` (`if (pkt->isRouteFlood()) { int _delay = calcRxDelay(score, air_time); … } else { n_recv_direct++; processRecvPacket(pkt); }`), `:55-57` (`calcRxDelay = (10^(0.85 − score) − 1) × air_time`), `Mesh.cpp:17-21` (`getRetransmitDelay = rng(0,5) × (airtime × 52/50)/2`, i.e. 0–2 airtimes), `Mesh.cpp:22-24` (`getDirectRetransmitDelay` → **0**).
+- Finding: the firmware has two different per-hop costs and the documents describe a third. A **flood** is held at each repeater for `calcRxDelay` — 5.5 airtimes at the measured score of 0.036 for a 133 B packet, i.e. ≈2.7 s, not 0.98 s — before it is even queued, and then re-transmitted after `getRetransmitDelay` (0–2 airtimes). A **direct** packet gets no retransmit delay at all. So "up to two airtimes a hop" understates a flood hop by roughly 3× and overstates a direct hop.
+- Why it hurts at range: every derived figure that names this premise (`handshakeRetryFor` 2 s/hop, `answerDeadlineMs` 2 s/hop, the ARQ's `6 × airtime × hops`) is justified by a number the firmware contradicts, and at range the carrier in use is the flood — the expensive case.
+- Proposed fix (NOT applied): restate the premise as two figures — direct: `≈1 airtime per hop`; flood: `calcRxDelay(score, airtime) + getRetransmitDelay()`, with the measured 5.5 airtimes at a marginal score — and re-derive the hop-scaled deadlines from the flood figure whenever the flood carrier is in use.
+- Open questions: whether `ACTION_RETRANSMIT_DELAYED`'s own `_delay` (`Dispatcher.cpp:266-272`) stacks on `calcRxDelay` or replaces it, which decides whether ≈5.5 or ≈7.5 airtimes is the flood figure.
+- Investigator: docs round · 2026-11-11
+
+### A-308 · docs: AIRTIME's "first timeout is `(window + 2) × airtime`" is a superseded design · major
+
+- Evidence: `docs/AIRTIME.md:158-161` ("**A retransmission timer has to cover the burst it started.** The ARQ hands a whole window to the radio at once, so the first timeout is `(window + 2) × airtime` — 6 s at 62.5 kHz"); code `crates/session/src/arq.rs:181-187` ("The burst is no longer a reason to stretch this, because a slot's timer starts at its own air slot … `let scaled = (airtime * 6.0 * hops).round()`"), and `ARCHITECTURE.md:363-367` states the slot-based rule — contradicting AIRTIME in the same document set.
+- Finding: AIRTIME documents a rule the code removed on purpose, and it is the only document that explains why the timer is what it is; ARCHITECTURE's version is correct. Two documents in one set give different formulas for the same constant.
+- Why it hurts at range: someone auditing "is the retransmission timer long enough at 14 hops" gets 6 s from AIRTIME and 50 s from the code, and would `fix` a non-bug or miss the real one (A-80: the hop count itself is wrong).
+- Proposed fix (NOT applied): delete the sentence, or restate it as "the burst is covered by per-slot timer start, not by stretching the timeout", citing `arq.rs:181`.
+- Open questions: none — this is a plain stale paragraph.
+- Investigator: docs round · 2026-11-11
+
+### A-309 · docs: `DIRECT_SEND_PERHOP_FACTOR` is cited to the wrong file, and its formula loses two terms · major
+
+- Evidence: `docs/AIRTIME.md:153-155` ("`DIRECT_SEND_PERHOP_FACTOR` in the firmware's `Dispatcher.cpp` is 6.0 airtimes per hop (its flood factor is 16.0)"); `docs/ARCHITECTURE.md:368-369` (`(Dispatcher.cpp)`); `crates/session/src/arq.rs:167` (same citation); firmware: the constants live in `filter-firmware/examples/companion_radio/MyMesh.cpp:109-110`, not `Dispatcher.cpp`, and the budget is `MyMesh.cpp:891-896`: `500 + ((airtime × 6.0 + 250) × (hops + 1))`, with the flood form `500 + 16.0 × airtime` (`:888-890`).
+- Finding: the citation is wrong, and "six airtimes per hop" is only the leading term of the firmware's own budget: it omits a 500 ms base, a 250 ms per-hop constant, and the `+1` hop. At a neighbour the firmware waits **8.2 s** where ldmux waits 3.6 s; at 14 hops **58.5 s** where ldmux waits 50.7 s. The firmware also treats this as a *send timeout* (when to declare the send unanswered), not as a physical forward delay — which is what the documents call it.
+- Why it hurts at range: the one figure the design leans on for "we are at least as patient as MeshCore" is 2.3× shorter than MeshCore at the hop count where the link is hardest, and the document asserts parity.
+- Proposed fix (NOT applied): correct the citation to `MyMesh.cpp:110` and restate the figure as `500 + (6·airtime + 250)·(hops+1)`, noting that it is a timeout and not a delay.
+- Open questions: whether `arq.rs:187`'s `6.0 × airtime × hops` should adopt the full formula (the ledger's A-80 says the hop count is the bigger bug).
+- Investigator: docs round · 2026-11-11
+
+### A-310 · docs: a constant that does not exist, with a third of its real value · major
+
+- Evidence: `docs/ARCHITECTURE.md:322` ("On the phone, 20 s with something outstanding ends the session (`SILENCE_FAILURE_MS`)"); no such symbol exists (`grep -rn "SILENCE_FAILURE_MS" packages/` → nothing); the function is `silenceFailureMs(hops)` at `MeshTermDriver.kt:2473-2479`, `min(60_000 + 3_600 × hops, 300_000)` — 60 s at a neighbour, 110 s at 14 hops.
+- Finding: the sentence names a symbol a reader can search for and fail to find, and understates the wait by 3×.
+- Why it hurts at range: "how long before the phone gives up" is the first question in every field report, and this table answers it wrongly; it also hides the fact that the bound now scales with the route.
+- Proposed fix (NOT applied): replace with `silenceFailureMs(hops)` = `min(60 s + 3.6 s a hop, 300 s)`, matching row `:717`-adjacent table entries.
+- Open questions: none.
+- Investigator: docs round · 2026-11-11
+
+### A-311 · docs: the carriage-silence backstop is documented as working, and it cannot fire · major
+
+- Evidence: `docs/ARCHITECTURE.md:323` ("75 seconds with a record outstanding ends the connection, so `supervise` can build another"), `docs/RELEASE-AUDIT.md:730` (`ps carrier silence | max(75 s, 3 × rto) | Derived`); code `crates/daemon/src/mesh.rs:1111-1120` (correct: `CARRIER_SILENCE.max(3 × first_rto)`) but `:966-967` (`last_carrier = Instant::now()` on **any** event) together with `mesh_serial.rs:1809-1812` (`Event::Status` every `STATUS_REFRESH` = 500 ms, computed from internal counters only).
+- Finding: the value the docs describe is implemented, and the mechanism that uses it is defeated by a self-generated heartbeat that proves nothing about the radio — the ledger's A-180. The documents state the outcome ("ends the connection") as if it happened.
+- Why it hurts at range: an operator whose radio wedged is told by the docs that the daemon recovers by itself, so the manual restart that actually fixes it (five of them on 2026-11-10) is treated as a mystery rather than the expected behaviour.
+- Proposed fix (NOT applied): fix the watchdog (A-180), and until then add a sentence to `:323` saying the backstop depends on a status refresh that itself proves only that the thread is alive.
+- Open questions: whether `Event::Status` should carry a "last successful radio command" sequence so silence is measurable at all.
+- Investigator: docs round · 2026-11-11
+
+### A-312 · docs: "the phone's ladder doubles from 5 s to a 40 s cap"; the cap is 20 s · minor
+
+- Evidence: `docs/ARCHITECTURE.md:735` ("the phone's ladder doubles from 5 s to a 40 s cap with ±25 % jitter"); code `AndroidRadioLink.kt:1508-1513` (`requestIntervalFor`: `step = 1 << asks.coerceIn(0, 2)`, so 5/10/20 s), and the 40 s figure survives only in the unused `requestIntervalMsOld` (`:1516-1522`, `@Suppress("unused")`).
+- Finding: the documented ceiling is double the implemented one. The phone asks the mesh twice as often as the design says.
+- Why it hurts at range: request floods are the cheapest discovery packet but they are still every repeater's airtime; a document that says "40 s at the edge of coverage" hides that the code reaches 20 s and that a dead function kept a 40 s design alive.
+- Proposed fix (NOT applied): correct the sentence, and delete `requestIntervalMsOld` so the design cannot be read off dead code.
+- Open questions: whether 20 s was the intended ceiling (the comment in `requestIntervalMsOld` argues for 40 s at the margin).
+- Investigator: docs round · 2026-11-11
+
+### A-313 · docs: the advertised record limit at range is 162, not `min(171, 172 − path)` · major
+
+- Evidence: `docs/ARCHITECTURE.md:329` and `:538` ("the limit is `min(171, 172 − path)`", "The limit advertised to the session is therefore `min(171, 172 − path)`"); code `mesh_serial.rs:542-548` (`record_limit` ✓ matches) but `:1318-1322` and `:1869-1876`: when no path is fresh the published limit is `flood_record_limit()` = **162** (`:461-465`), and the hop count published with it is the flood reach, not the path; `docs/RELEASE-AUDIT.md:299` (6.215) and `:302` (6.218) record this as fixed.
+- Finding: the authoritative design document states the ceiling formula for the case that no longer governs at range. With no fresh route — the normal state for the user this system exists for — the session is sized to 162, not 171, and no design document says so outside the audit rows.
+- Why it hurts at range: a reader sizing a change (a screen chunk, a paste limit) to 171 will produce records the flood builder refuses, which is exactly row 6.215's field failure re-introduced by following the doc.
+- Proposed fix (NOT applied): state both limits in §11 — `min(171, 172 − path)` on a fresh path, `162` when the record will ride the flood — and name the constant.
+- Open questions: whether the 12-byte wrapper cost should be a named constant shared with the Kotlin side rather than `162` derived twice.
+- Investigator: docs round · 2026-11-11
+
+### A-314 · docs: ADR-0037's capacity arithmetic is stale, and its conclusion is false · minor
+
+- Evidence: `docs/adr/0037…:62` ("Record capacity on the flood carrier is *larger* than on a long path (`172 − 10` versus `172 − path bytes`), so a record that fits a direct path always fits the flood"); code `crates/companion/src/codec.rs:167` (`PACKET_MAX = 174`), `mesh_serial.rs:463-465` ("the 12-byte wrapper (header, path byte, two hashes, magic, nonce)" → 162), `:542-548` (`record_limit(None) = 171`).
+- Finding: both subtrahends are stale (`172` was the old fixed record max, 10 was an earlier wrapper width), and the conclusion does not hold: 162 < 171, so a record that fits a **short** direct path does not fit the flood. Only paths longer than about ten hops make the flood the larger carrier.
+- Why it hurts at range: the sentence is the ADR's justification for not needing a size check when switching carriers; row 6.215 exists precisely because that conclusion was false in the field.
+- Proposed fix (NOT applied): rewrite as `174 − 12 = 162` versus `min(171, 174 − 2 − path)`, and state that a carrier switch can shrink the record and must be announced (which `Event::Limit` does).
+- Open questions: none.
+- Investigator: docs round · 2026-11-11
+
+### A-315 · docs: the handshake's clock rule is documented without its tolerance · major
+
+- Evidence: `docs/SECURITY.md:70-71` ("The host pins the phone's static key on the first accepted handshake, and the handshake timestamp is bounded to a 5 minute window against a stored floor"); code `crates/session/src/handshake.rs:66-71` (`TIMESTAMP_WINDOW_MS = 5 min`) **and** `:69` (`HANDSHAKE_REPLAY_TOLERANCE_MS = 10 min`), with the floor test at `:316-333` (`timestamp + 10 min < last → Replay`).
+- Finding: the document describes a strict 5-minute rule; the code accepts any timestamp within ±5 minutes of the host clock **and** up to 10 minutes behind the stored floor — so the floor check can never fire (the ledger's own A-240 analysis reaches the same conclusion independently). The security section therefore advertises a bound that does not exist.
+- Why it hurts at range: this is the paragraph a reviewer reads to decide whether a captured handshake can be replayed; the answer it gives is wrong, and the actual bound (the ±5-minute window alone) is what an attacker exploits.
+- Proposed fix (NOT applied): state the real rule — "within ±5 minutes of the host's clock, and never more than ten minutes behind the last accepted timestamp; a duplicate inside that is a retry of the same attempt and is idempotent" — once the ledger's A-20 cache makes duplicates idempotent.
+- Open questions: whether the tolerance should be dropped entirely once `msg1` handling is idempotent, since equality would no longer need special handling.
+- Investigator: docs round · 2026-11-11
+
+### A-316 · docs: the phone's advert cadence is documented as three minutes and is sixty seconds; "off by default" is host-only · minor
+
+- Evidence: `docs/SECURITY.md:48-50` ("The phone's radio also advertises while it is trying to reach the host, once when the link binds and then at most every three minutes while nothing has been heard"); code `AndroidRadioLink.kt:2041` (`ADVERT_INTERVAL_MS = 60_000L`), `:864` (advert at bind), `:1632-1642` (`maybeAdvertise` on the same 60 s); `docs/ARCHITECTURE.md:425-427` ("An advert is a maintenance broadcast, not the way a peer finds us …, and it is **off by default**") — true of the host (`mesh_serial.rs:101-107`, default 0) and false of the phone; `docs/AIRTIME.md:150-152` states the host case as if universal; and `ARCHITECTURE.md:719` contradicts `:425` by adopting a route from an advert "the moment it arrives".
+- Finding: three documents give three different pictures of who advertises how often. The phone advertises **three times as often** as the security document states, and the design document's "not the way a peer finds us" sits beside a paragraph that uses adverts as a route source.
+- Why it hurts at range: an advert is a flood every node in range repeats, and the security section is where its cost is accounted for; the numbers there are off by 3×, and "off by default" invites the assumption that a radio-only phone is quiet when it is the opposite.
+- Proposed fix (NOT applied): state the phone's 60 s cadence in SECURITY.md, scope ARCHITECTURE's "off by default" to the host, and reconcile `:425` with `:719`.
+- Open questions: whether 60 s is intended given `flood.max.advert = 3` (A-60's finding that adverts die at eight hops).
+- Investigator: docs round · 2026-11-11
+
+### A-317 · docs: `MESH-RADIO-CONSIDERATIONS.md` describes the budget and the fix it was written to ask for · minor
+
+- Evidence: `docs/MESH-RADIO-CONSIDERATIONS.md:75-76` ("**Our ladder:** rungs at `8 s + 2 s/hop` … budget `rung × 8` = **64 s at 0 hops**") and `:146` ("1. **Handshake timing to the firmware's formula** … The phone abandons handshakes the host has already established"); code `MeshTermDriver.kt:2612-2631` (budget `rung × 7 + max(rung, 120_000)` = 176 s at a neighbour, `499de61`).
+- Finding: the document's own headline defect is fixed in the code and still listed as the top open item, and the budget it states is 2.75× the real one. Written 2026-11-10 and stale within a day.
+- Why it hurts at range: it is the document a newcomer reads first for "everything about this path"; it now teaches the pre-`499de61` arithmetic and hides that the answer window exists.
+- Proposed fix (NOT applied): update §§5 and the open-items list to the shipped figures, and add the A-20/A-301/A-307/A-313 items from this ledger so the summary matches reality.
+- Open questions: whether this document should be folded into ARCHITECTURE §11 rather than maintained separately (it overlaps heavily and drifts fastest).
+- Investigator: docs round · 2026-11-11
+
+### A-318 · docs: "asked again with fresh keys at 8, 16 and 32 seconds" is not what the ladder does · major
+
+- Evidence: `docs/ARCHITECTURE.md:321` (failure table: "a handshake gets no answer | it is asked again with fresh keys at 8, 16 and 32 seconds, then the connection is rebuilt"); code `MeshTermDriver.kt:1093-1121`: while the route is unknown, **only every third rung** sends a handshake (`if (blindAsks % 3 == 0)`), the other rungs send a route request and reset the ladder (`handshakeTries = 0`), and `handshakeWaitMs` is 176 s at a neighbour rather than the 56 s the three rungs imply.
+- Finding: the table describes the neighbour case as if it were universal; at range, two rungs in three spend their airtime on a route request and the connection is rebuilt after 176 s, not ~56 s. The code comment that justifies it ("A session record is a direct packet, and a direct packet crosses no repeater") has been false since ADR-0037.
+- Why it hurts at range: this row is the canonical answer to "why does it sit on handshaking", and the real answer (skipped handshakes plus a 176 s budget) is in neither document.
+- Proposed fix (NOT applied): replace the row with the two cases — a route in hand (8/16/32 s) and blind (every third rung handshakes, the rest ask for a route, budget 176 s + the flood reach).
+- Open questions: whether the blind ratio should be inverted now that a handshake record can ride a flood (the ledger's A-24).
+- Investigator: docs round · 2026-11-11
+
+---
+
+**Most misleading sentence in the docs today** (and the reason it is first): `docs/adr/0038-carrier-selection-escalate-on-silence.md:27` — "`| **any** record arrives | something works | failures = 0 → **direct** |`". It is the sentence a reader would use to conclude the link cannot latch onto the flood carrier, and the latch is the ledger's A-120 blocker.
+
+**Could not determine:** whether `db4623b`'s 600 ms floor and the missing host token bucket are deliberate costs recorded in a commit message I did not read closely enough to grade as policy rather than drift (both are stated as decisions nowhere in `docs/`); whether `ACTION_RETRANSMIT_DELAYED`'s `_delay` stacks on `calcRxDelay` (decides 5.5 vs 7.5 airtimes per flood hop in A-307); whether `requestIntervalFor`'s 20 s ceiling or the dead 40 s is the intended design (A-312); and whether any doc number is machine-checked anywhere — `grep` found no test reading `docs/`, so every one of these drifts passed the gate.
+Implemented: a read-only documentation-vs-code audit of the radio path — **19 entries (A-300…A-318)** delivered above in the requested ledger schema, each with doc line **and** contradicting code line, severity, range impact, proposed fix, and open questions.
+
+Changed files: none — the brief was read-only, no ledger writes, no builds, no adb. `git status --short` is empty.
+
+Validation: every entry was checked against both sides. The load-bearing verifications: `mesh_serial.rs:2208/2278` (decay only on a direct arrival) against `adr/0038:27`; `git log -L180,180:crates/daemon/src/mesh_serial.rs` showing `db4623b` changed 5 s → 600 ms with no doc edit; `git show c8c5d3b` showing `RECORD_FLOOD_COPIES` reached only the record path, not `send_route_reply`; `filter-firmware/examples/companion_radio/MyMesh.cpp:110,891-896` giving the real `DIRECT_SEND_PERHOP_FACTOR` file and the full `500 + (6a + 250)(h+1)` formula; `filter-firmware/src/Dispatcher.cpp:241-252` + `Mesh.cpp:17-24` showing floods are delayed and direct packets are not; `ldmux --version` → `2ea77bb` against §18's `838f101`.
+
+Open risks/questions: the four ungraded items are listed at the end of the report (whether 600 ms and the missing host bucket are policy or drift; whether `ACTION_RETRANSMIT_DELAYED`'s delay stacks on `calcRxDelay`; whether 20 s or the dead 40 s is the intended request ceiling; and that no test reads `docs/`, which is why all nineteen drifts passed the gate).
+
+Recommended next step: the parent appends these to `docs/RADIO-AUDIT-LOOP.md`, then acts on the two that change behaviour on their own — A-300/A-301 (make the docs and the code agree about carrier decay, which is the ledger's A-120) and A-304 (the host's flooded reply is one packet, not three, so row 6.228 is closed prematurely).
+
+```acceptance-report
+{
+  "criteriaSatisfied": [
+    {
+      "id": "criterion-1",
+      "status": "satisfied",
+      "evidence": "Delivered exactly the assigned aspect (docs vs code) as 19 schema-conformant entries A-300..A-318; made no edits, builds, service restarts, adb calls, commits, or ledger writes, per the brief's hard rules. git status --short returned 0 lines."
+    },
+    {
+      "id": "criterion-2",
+      "status": "satisfied",
+      "evidence": "Every claim carries both sides: e.g. adr/0038:27 (any arrival -> direct) vs mesh_serial.rs:2208/2278 and AndroidRadioLink.kt:531/594; RELEASE-AUDIT:722 (handshakeWaitMs retry<<3) vs MeshTermDriver.kt:2612-2623; AIRTIME:154 vs filter-firmware/examples/companion_radio/MyMesh.cpp:110,891-896; git log -L180,180 proves the db4623b doc drift; git show c8c5d3b proves row 6.228's reply claim never reached send_route_reply."
+    }
+  ],
+  "changedFiles": [],
+  "testsAddedOrUpdated": [],
+  "commandsRun": [
+    {
+      "command": "git log -L180,180:crates/daemon/src/mesh_serial.rs --oneline",
+      "result": "passed",
+      "summary": "Shows db4623b replacing ROUTE_REPLY_FLOOR from_secs(5) with from_millis(600); no doc touched"
+    },
+    {
+      "command": "git show c8c5d3b -- crates/daemon/src/mesh_serial.rs",
+      "result": "passed",
+      "summary": "RECORD_FLOOD_COPIES added to the record send path only; send_route_reply still sends one packet"
+    },
+    {
+      "command": "grep -rn 'DIRECT_SEND_PERHOP_FACTOR|calcRxDelay|getRetransmitDelay|getDirectRetransmitDelay' ~/Documents/mesh-research/clones/filter-firmware",
+      "result": "passed",
+      "summary": "Constant is in examples/companion_radio/MyMesh.cpp:110; direct retransmit delay is 0; flood delay is score-dependent calcRxDelay"
+    },
+    {
+      "command": "ldmux --version; git log --oneline -1",
+      "result": "passed",
+      "summary": "Deployed 2ea77bb, HEAD 5523167, against RELEASE-AUDIT §18's claimed 838f101"
+    },
+    {
+      "command": "git status --short | wc -l",
+      "result": "passed",
+      "summary": "0 — read-only audit left the tree untouched"
+    }
+  ],
+  "validationOutput": [
+    "A-300: ADR-0038:27 says decay on any arrival; mesh_serial.rs:2278 clears peer_via_flood only in the direct branch, AndroidRadioLink.kt:531/594 mirrors it -> documented rule not implemented (blocker)",
+    "A-303: SECURITY.md:47 and ARCHITECTURE.md:736 say one reply per 5 s; mesh_serial.rs:180 is 600 ms (db4623b) and no 10 s request floor exists -> amplifier bound 8x weaker than documented",
+    "A-304: RELEASE-AUDIT:312 claims three fresh-nonce copies on the host's flooded replies; send_route_reply:290-355 sends one packet via send_retrying, which reuses identical bytes",
+    "A-307: ARCHITECTURE:775-778 basis 'up to two airtimes a hop'; firmware calcRxDelay gives 5.5 airtimes for a 133 B packet at the measured score, and direct retransmit delay is 0",
+    "A-309: AIRTIME:154 and ARCHITECTURE:369 cite Dispatcher.cpp; the factor is MyMesh.cpp:110 and the budget is 500+(6a+250)(h+1) — 8.2 s at 1 hop where ldmux waits 3.6 s",
+    "A-313: ARCHITECTURE:329/538 give min(171,172-path); publish path at 162 when no route is fresh (mesh_serial.rs:461-465,1318-1322), as rows 6.215/6.218 already record",
+    "A-306: RELEASE-AUDIT:644 'Deployed 838f101' vs ldmux --version 2ea77bb; §18 verification lists are from the same stale era"
+  ],
+  "residualRisks": [
+    "Whether db4623b's 600 ms reply floor and the host's missing token bucket are deliberate policy or drift: neither is stated as a decision anywhere in docs/, so A-302/A-303 could be mis-graded",
+    "A-307's flood per-hop figure (5.5 vs 7.5 airtimes) depends on whether ACTION_RETRANSMIT_DELAYED's own _delay stacks on calcRxDelay — not resolved from the firmware read",
+    "A-312 cannot say whether 20 s or the dead 40 s is the intended request ceiling; the dead function keeps a rival design readable",
+    "No test reads docs/, so all nineteen drifts passed the gate and will recur unless a doc gate or generated table is added"
+  ],
+  "noStagedFiles": true,
+  "diffSummary": "No diff: read-only investigation. The deliverable is the 19 ledger entries in the final response, written for the parent to append.",
+  "reviewFindings": [
+    "blocker: docs/adr/0038-carrier-selection-escalate-on-silence.md:27 - documented decay on any arrival; code decays only on a direct arrival (mesh_serial.rs:2208/2278, AndroidRadioLink.kt:531/594), which is the ledger's A-120 latch",
+    "blocker: docs/ARCHITECTURE.md:649-652 and docs/adr/0037:37 - describe flood-on-stale-route and zero-hop-first; code escalates on direct_silent/peer_via_flood/answer_flood_with_flood (mesh_serial.rs:1413-1425)",
+    "major: docs/SECURITY.md:47 and ARCHITECTURE.md:736 - claim one reply per 5 s; code is 600 ms (mesh_serial.rs:180) and no 10 s request floor exists",
+    "major: docs/RELEASE-AUDIT.md:312 - row 6.228 claims three fresh-nonce copies on the host's flooded replies; send_route_reply sends one packet with same-bytes retries",
+    "major: docs/ARCHITECTURE.md:775-778, 368-370, AIRTIME.md:154, arq.rs:167 - the per-hop delay premise and the DIRECT_SEND_PERHOP_FACTOR citation are both wrong versus the firmware",
+    "major: docs/ARCHITECTURE.md:321-323 - handshake ladder row, a nonexistent SILENCE_FAILURE_MS, and a carriage-silence backstop that cannot fire (ledger A-180)",
+    "major: docs/RELEASE-AUDIT.md:638-646 - §18's Deployed table names 838f101 while 2ea77bb is deployed; its verification lists predate the current blockers",
+    "major: docs/ARCHITECTURE.md:329,538 - the published record limit at range is 162, not min(171,172-path)",
+    "major: docs/SECURITY.md:70-71 - the handshake clock rule is documented without the 10-minute replay tolerance, which makes the floor check unreachable",
+    "minor: docs/adr/0037:62 capacity arithmetic (172-10) is stale and its 'fits direct fits flood' conclusion is false below ~10 hops",
+    "minor: docs/ARCHITECTURE.md:735 forty-second request cap versus requestIntervalFor's 20 s, with the rival design living in dead code",
+    "minor: docs/SECURITY.md:48-50 three-minute phone advert versus ADVERT_INTERVAL_MS 60 s, and ARCHITECTURE's host-only 'off by default' stated as universal",
+    "minor: docs/MESH-RADIO-CONSIDERATIONS.md:75-76,146 describe the pre-499de61 64 s budget and list a fixed item as open"
+  ],
+  "manualNotes": "How to read the nineteen entries: A-300/A-301 are the same defect seen in three documents and are the documentation half of the ledger's A-120 blocker; A-303, A-304, A-306 and A-315 are claims that are false in the unsafe or premature-confidence direction; A-307 and A-309 are the two places where a firmware number was transcribed into the docs with the wrong file, the wrong formula, or the wrong physical meaning. Nothing was appended to docs/RADIO-AUDIT-LOOP.md because the brief reserved that file to the parent."
+}
+```
