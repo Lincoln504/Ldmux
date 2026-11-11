@@ -519,3 +519,111 @@ during this audit** — the only file written is this one.
 **Worst finding:** `A-102` combined with `A-108` — a pathless record goes out three times, the credit window lets eight records be handed over at once, and the receive window between them is 1 ms, so a list answer is 18–27 transmissions that deafen the host while the phone is acknowledging them; the ARQ's own timer (41 s at 14 hops) then expires before even one round trip completes (A-101), so the run repeats. That is minutes per open, by construction, not by bad luck.
 
 **Arithmetic for an attach answer at 14 hops:** 6–9 records (list 3–4, profile+marks 1, first paint 2–4) → **18–27 flood transmissions ≈ 9–13 s of air**; crossing ~38 s one way at 2.7 s/hop, two crossings plus serialisation ≈ **80–120 s**; with the one retransmission pass the 41 s timer forces: **36–54 transmissions, 18–26 s of air**, and up to three overlapping runs if the phone's 34–36 s deadlines fire first.
+
+### A-80 · session: the retransmission timer follows the *shortest inbound* path, which can be a ghost · blocker
+
+- Evidence: `crates/daemon/src/mesh_serial.rs:404-436` (`prefer_route`: `if proven { return false } … candidate.hops < current.hops`), `:2036` (`max_flood_hops` learns only from route requests), `:2192-2204` (a flooded record sets `peer_path_proven = true` with *its own* chain), `:1877-1881` (`hops_now = peer_path…map_or(1, |p| p.hops)`); `crates/session/src/arq.rs:187-191` (`rto_initial = 6 × airtime × hops`); journal 2026-11-10: `22:20:33 route request from 26f6071f hops=1 (adopted)`, `22:20:44 … hops=16 (adopted)`, `22:21:20 … hops=1 (adopted)`, `22:21:42 … hops=1 (adopted)`.
+- Finding: at range no record ever crosses **direct**, so `proven` is never set by the carrier that matters and every request burst re-adopts whatever path is shortest *inbound* — the journal flips between 1 and 16 hops within 11 s, and ends at 1. The session is then told `hops=1`, so `rto_initial = 6 × 0.490 s = 2.94 s` while one crossing of the real chain is ≈43 s (`calcRxDelay` arithmetic, A-41).
+- Why it hurts at range: the first retransmission fires at 4.6 % of the true round trip, so every record is transmitted 15–20 times before its first copy can land; five attempts are exhausted in ≈12 s and the session dies — which is exactly "it handshakes and then nothing works". The shortest inbound path is also not evidence about the outbound one, and the code's own comment (`:427-430`) says so — the guard just does not apply while nothing is proven.
+- Proposed fix (NOT applied): split the two quantities. The path used to *send* may stay the shortest that carries, but the path used to *time* must never be shortened by an inbound copy: take the maximum hop count seen from the peer's own traffic in the last stale window (the flood reach), and let the peer's handshake carry its own `meshReach`, which the phone already computes (`sessionHopsFor`, `MeshTermDriver.kt:2588`). Then `proven` should also be set by "this route has been carrying records and being acked", not only by a direct arrival.
+- Open questions: whether the 1-hop copy is a genuine long single link or a path-byte artefact; whether the host should simply refuse a candidate shorter than half the current one absent any ack evidence.
+- Investigator: session round · 2026-11-11
+
+### A-81 · session: the first retransmission is designed below the real round trip at the margin · major
+
+- Evidence: `crates/session/src/arq.rs:187` (`let scaled = (airtime * 6.0 * hops).round()`), `:191`; `mesh-research/clones/filter-firmware/src/Dispatcher.cpp:55` (`calcRxDelay = (pow(10, 0.85f - score) - 1.0) * air_time`), used at `:243`; score values from round 1 (48 B 0.061, 133 B 0.036).
+- Finding: the timer budgets **one airtime per hop for the whole round trip**. Measured per-hop hold at the margin is `(10^(0.85−0.036) − 1) = 5.52` airtimes for a 133 B record and `5.15` for a 48 B ack, so a real round trip is ≈11 airtimes per hop, not 6. At hops=16 the timer is 47 s against a 63 s round trip — 74 % of the way there, i.e. every record retransmitted with nothing lost at all.
+- Why it hurts at range: a duplicate transmitted before the original has crossed is not redundancy, it is collision on a half-duplex channel, and it spends the air the timer exists to save. This is the single largest avoidable airtime cost on a working link.
+- Proposed fix (NOT applied): derive the first timeout from the repeater's own hold arithmetic rather than a flat factor — `rto_initial = hops × (hold(score_record) + hold(score_ack))`, with `hold` the firmware formula and the score from the last SNR. Keep MeshCore's `6 × airtime × hops` only as the floor for a healthy link where the margin is large.
+- Open questions: whether the score used should be the last packet's SNR or a smoothed value; whether `calcRxDelay` is applied by every repeater in the chain or only by some firmware.
+- Investigator: session round · 2026-11-11
+
+### A-82 · session: the simulated air is five times faster than the real air, so timing regressions pass the tests · major
+
+- Evidence: `crates/session/tests/lossy_multihop.rs:51-53` (`one_way_ms: hops * airtime_ms`), used at `:165` and `:206` with `603`; the two tests assert record counts and ordering, not elapsed time.
+- Finding: the harness models one airtime of delay per repeater. The firmware's own hold is up to 5.5 airtimes at the margin, so the simulation is optimistic by that factor in every timing assertion. A timer that is 2× too short passes here and fails in the field.
+- Why it hurts at range: every timing bug found in the field (2 s/poll bursts, the 30 s cap, the 6-airtime floor) was invisible to this harness, and there is no test that would have caught A-80 or A-81.
+- Proposed fix (NOT applied): parameterise the harness by `(airtime, score)` and derive the per-hop delay from `calcRxDelay`; add a case at score 0.036 over 16 hops and assert that no record is retransmitted while its first copy is still in flight, and that total elapsed time stays within a stated bound.
+- Open questions: whether a repeater's forward delay applies per hop compounded or sampled once per packet.
+- Investigator: session round · 2026-11-11
+
+### A-83 · session: the window is far below the bandwidth-delay product, so the ceiling is ~8 bytes a second · major
+
+- Evidence: `crates/session/src/arq.rs:227-228` (`credit = (64.0 / hops).clamp(1.0, 8.0)`), `:53` (`MAX_WINDOW = CREDIT_WINDOW`), `crates/mesh/src/constants.rs:14` (`CREDIT_WINDOW = 8`), `crates/session/src/record.rs:24-30` (overhead 24 B), flood limit 162 B (`mesh_serial.rs:465`) ⇒ 133 B payload.
+- Finding: at 16 hops the window is 4 records; with a 63 s round trip that is `4 × 133 / 63 ≈ 8.4 B/s`. A 600-byte body (`crates/protocol/src/mesh_term.rs:170`, `MAX_BODY = 600`) is five records, i.e. two windows ≈ 2 minutes. The comment justifies the division by chain occupancy, but the effect is that the link runs at a few percent of its own capacity and every exchange costs whole round trips.
+- Why it hurts at range: at range every UI action — attach, list, page, paint — is a multiple of 63 s, and no timeout in the app is sized for that. This is the arithmetic behind "counts to 100 and resets".
+- Proposed fix (NOT applied): none in the window itself (the L2 credit of 8 is the hard ceiling, and a shared mesh should not take more), but the UX and the protocol must be designed against ~8 B/s: fewer bytes per exchange (compress, one-record attach answer), and every wait derived from `ceil(bytes/133) × RTT`.
+- Open questions: measured throughput at range from the phone's own counters; whether the credit window could be raised to 16 for a proven private route.
+- Investigator: session round · 2026-11-11
+
+### A-84 · session: recovery from a burst of loss is serialised, one record per timeout · major
+
+- Evidence: `crates/session/src/arq.rs:820-880` (a single `front_due`, at most one retransmission per poll), `:665-690` (`fast_due` only ever set on `inflight.front_mut()`), no selective acknowledgement anywhere.
+- Finding: only the oldest unacknowledged record can be retransmitted, and only one per poll. With window 4 and three consecutive records lost — which is what a fade does — recovery costs three full timeouts, i.e. ≈3 × 47 s at 16 hops.
+- Why it hurts at range: bursts of loss are the normal case at the margin, so the ARQ's worst case is the field's typical case, and every extra timeout is also a window that cannot advance.
+- Proposed fix (NOT applied): let a poll emit up to `l2_slots` retransmissions (ordering by sequence), and mark every slot at or below the peer's acked point + 1 as `fast_due` when a non-advancing ack proves a gap, rather than only the front.
+- Open questions: whether MeshCore's mesh layer can even carry four records back to back from one node without the transmit table refusing (see A-89).
+- Investigator: session round · 2026-11-11
+
+### A-85 · session: the phone refuses to follow the route while anything is pending, which is always · major
+
+- Evidence: `packages/mobile/composeApp/src/commonMain/kotlin/io/ldmux/mobile/mesh/MeshTermDriver.kt:883-890` (`followRoute`: `if (hops == sessionHops) return; if (health.pending > 0) return`).
+- Finding: the timer is re-scaled only when the queue is empty. During any transfer — the exact time the route matters — a change from 1 to 16 hops never reaches the session, so the phone keeps a neighbour's timer on a long route. This is the failure `followRoute` was written to prevent.
+- Why it hurts at range: a phone that walks out of range re-handshakes, gets the right hops, then loses them at the first packet in flight, and every record after that is retransmitted far too early.
+- Proposed fix (NOT applied): apply the change to *new* slots only (per-slot timing in the ARQ), or update when hop count differs by more than one and nothing was sent for one RTO; the host already updates mid-session via `Event::Limit` (`mesh.rs:982`), so the asymmetry is unintended.
+- Open questions: whether the guard exists to avoid re-splitting records mid-flight (that is `set_record_limit`, a different call).
+- Investigator: session round · 2026-11-11
+
+### A-86 · session: a flood's own chain is taken as proof of the timing distance · major
+
+- Evidence: `crates/daemon/src/mesh_serial.rs:2192-2204` (`peer_path_proven = true`, candidate = the flood's chain), `:1877-1881` (`hops_now` from that path).
+- Finding: a flood's path is how many repeaters it crossed **toward us**. Treating it as proof that the return route is the same length is optimistic on an asymmetric mesh, and it is the same mistake A-80 describes from the other side.
+- Why it hurts at range: if the return chain is longer, the timer is short by exactly the asymmetry, and the window is sized for a chain half the length — silent, and only visible as duplicates and stalls.
+- Proposed fix (NOT applied): keep the flood's chain as a *lower bound* and use `max(path, max_flood_hops)` for timing, which is what the phone already does (`sessionHopsFor`). The host is the less careful of the two ends here, which is the opposite of what one would expect.
+- Open questions: how often the two directions differ in this mesh — an advert heard at 6 hops whose own path back is 16 would settle it.
+- Investigator: session round · 2026-11-11
+
+### A-87 · session: a zero-hop path publishes `hops = 0` and is then silently clamped · minor
+
+- Evidence: `crates/daemon/src/mesh_serial.rs:1879` (`peer_path.as_ref().map_or(1, |p| p.hops)` — the `1` is the *absence* case, a present path of 0 passes through), `crates/session/src/session.rs:123` (`self.hops = hops.max(1)`).
+- Finding: "no path" and "a path of zero hops" are conflated at the publish site, and the clamp happens two layers away.
+- Why it hurts at range: harmless in effect, but it means a log line cannot distinguish a neighbour from an unknown, and the timing hops are then decided by a clamp rather than by evidence.
+- Proposed fix (NOT applied): clamp at the publish site and log `hops=0 (direct)` distinctly.
+- Investigator: session round · 2026-11-11
+
+### A-88 · session: retransmissions are exempt from the duty-cycle budget, so the software can overspend the meter it publishes · major
+
+- Evidence: `crates/session/src/arq.rs:34-39` (module docs: retransmissions, acks and the close are not charged), `crates/daemon/src/mesh.rs:795-808` (`poll_budget`, the 1 % countdown), `mesh.rs:1041` (`records_left = status.ops_left_this_hour`).
+- Finding: only new data is charged. With A-81 causing a retransmission on nearly every record, the operator's 1 % countdown can be exceeded by a factor of two, and the radio then refuses (the firmware's own limiter is a 50 % duty cycle, per the same comment) — after `REFUSAL_DEADLINE_MS` the session dies as `RadioRefused`.
+- Why it hurts at range: the failure arrives exactly when the link is worst, and it is self-inflicted: the software reports a budget it is not honouring.
+- Proposed fix (NOT applied): charge retransmissions against the same counter (the exemption was introduced so a spent hour would not kill a live exchange — that can be served by a small reserve instead), and print the spend including them.
+- Open questions: whether any operator-facing number currently claims compliance.
+- Investigator: session round · 2026-11-11
+
+### A-89 · session: a refusal rewinds the attempt counter, so an unbuildable record is hammered for 30 s · minor
+
+- Evidence: `crates/session/src/arq.rs:705-730` (`on_refused`: `attempts = attempts.saturating_sub(1).max(1)`), `:333-343` (`REFUSAL_DEADLINE_MS = 30_000`), `:869-878` (deadline check inside `poll`).
+- Finding: every refusal is treated as "not yet", so `too long` — a permanent, local fault — is retried until the wall-clock deadline. The carrier already distinguishes refusal kinds (`resizeToLink`, `ff625f3`), but the ARQ does not.
+- Why it hurts at range: a route that grows mid-flight makes a record too long, and instead of one resize the session spends 30 s of poll cycles and then fails with a name that blames the radio.
+- Proposed fix (NOT applied): pass the refusal kind into `on_refused`; `TooLong` re-sizes and re-offers at once, `Busy` keeps the 350 ms pace.
+- Investigator: session round · 2026-11-11
+
+### A-90 · session: three flooded copies are one ARQ transmission, so the ARQ's own accounting is wrong · minor
+
+- Evidence: `crates/daemon/src/mesh_serial.rs:513` (`RECORD_FLOOD_COPIES = 3`), `:1468`; `crates/session/src/arq.rs` `Slot.attempts` increments once per `poll` decision.
+- Finding: a record sent by the flood carrier occupies up to 3 × 490 ms of air, but the ARQ records one attempt and one record against the budget, and its RTO starts from the first copy's send time rather than from the last copy's.
+- Why it hurts at range: the timer is up to two copy-spacings early on the flood carrier, and the spend reports 1 where the air took 3.
+- Proposed fix (NOT applied): have the carrier report copies per send and let the ARQ stamp `sent_at` at the last copy and charge the copies to the meter.
+- Investigator: session round · 2026-11-11
+
+### A-91 · session: the parts that are correct, so a later pass does not "fix" them · question
+
+- Evidence: `arq.rs:1-45` (module rules), `:629-700` (`apply_ack`, Karn's rule, non-advancing ack as evidence), `:540-560` (duplicates mark an ack owed, not a reply each), `:268-275` (`mark` defeating MeshCore's packet-hash dedup), `:559-575` (`resize_pending` merges losslessly), `:748-760` (`requeue_remainder`).
+- Finding: cumulative acks, one-mark-per-transmission, Karn's rule, the refused-vs-lost distinction, the lossless re-split after a record-size change, and refusing rather than growing a queue are all correct and well argued. The failure at range is in *which numbers feed the timers*, not in the mechanism.
+- Why it hurts at range: nothing directly — this entry exists so the register does not turn into a rewrite of sound code, which is the cheapest way to lose the properties above.
+- Proposed fix (NOT applied): none. Every change above (A-80…A-90) should be made inside these rules, not by replacing them.
+- Investigator: session round · 2026-11-11
+
+---
+
+109:**Worst finding:** A-80 — at range nothing is ever "proven", so `prefer_route` keeps adopting the shortest *inbound* copy; the journal shows the host flipping 1 ↔ 16 hops inside 11 s and settling on 1, which sets the first retransmission to 2.94 s against a 43 s crossing. Every record is then duplicated ~15 times and five attempts are exhausted in ~12 s, so the session dies while both radios are healthy. It is the same class as A-20: a rule that is right when the evidence is trustworthy,
