@@ -1900,3 +1900,90 @@ Recommended next step: the parent appends these to `docs/RADIO-AUDIT-LOOP.md`, t
 - Open questions: whether the local repeaters are `filter-firmware` (no unscoped cap) or `mcrs` (default 5) — one `set` line from an operator settles which policy applies, and it decides whether A-60 is latent or live here.
 - Investigator: shape round · 2026-11-11
 
+### A-320 · paging: every shell switch destroys the screen, so five shells cost five repaints · major ·
+- Evidence: `packages/mobile/composeApp/src/commonMain/kotlin/io/ldmux/mobile/mesh/MeshTermDriver.kt:1374` (`open()` — `mirror = RowMirror()`), `:1408` (`takeover`), `:1698` (`releaseShell`); `MeshTerminalScreen.kt:1168`/`:1399` (`onShow = selectShell(id)`, and `selectShell` is `open` at `:1485`); `crates/daemon/src/mesh_bridge.rs:1488` (`differ: Differ::for_attach(version, one)` — a fresh differ per attach). Measured with the real `FRAME_DICTIONARY` (extracted from `crates/protocol/src/mesh_term.rs:586`) and raw deflate on a realistic 46x38 screen (`LDMR` rows + commit): **1318 B raw = 10 records unframed, 294 B with the dictionary = 3 records**.
+- Finding: the phone keeps exactly one `RowMirror` and the host keeps exactly one `Differ` per channel, both reset on attach. There is no per-shell screen cache anywhere, so paging the header through five shells re-attaches each one and re-sends a full screen every time: 5 × (1 `Attach` up + ~3 records down).
+- Why it hurts at range: at 14 hops the ARQ credit is `64/hops` = 4 records in flight and one round trip is 76–86 s (A-41 arithmetic), so a repaint is roughly one round trip per shell. Five switches is **20 records and five round trips — around 5–7 minutes** of wall clock to look at five shells once, with every record repeated three times if the flood carrier is in use.
+- Proposed fix (NOT applied): keep a bounded per-shell screen cache on the phone (the last N shells' rows and epoch) and let the host keep the `Differ` for a shell across a `Detach` for a short window, so a re-attach of a shell the phone already holds is a diff and not a repaint. Alternatively, make the launcher's rows carry the screen they last saw, so switching to a recently-seen shell paints immediately and asks for a diff.
+- Open questions: whether `Differ` state is cheap enough to keep per session id instead of per channel; whether a cached screen can be invalidated safely when the shell printed while off-screen (it can — the epoch moves).
+- Investigator: paging round · 2026-11-11
+
+### A-321 · paging: switching shells throws away the phone's own scrollback · major ·
+- Evidence: `MeshTerminalScreen.kt:709-716` (`LaunchedEffect(shells.current)` → `source.clear()` when the shell changes), `MeshTerminalSource.kt:631-645` (`clear()` → `forgetScreen()` → `history.clear()`), `MeshTerminalSource.kt:121` (`history = MeshHistory(MESH_HISTORY_MAX)`, `MESH_HISTORY_MAX = 2_000` at `:44`).
+- Finding: two thousand rows of locally accumulated scrollback are dropped the moment the operator looks at another shell, and returning re-requests history from the host (`WantHistory` + pages). The rule is deliberate for *pixels* ("one shell's rows are never under another's name") but is applied to the scrollback too, which belongs to a shell and has a shell id.
+- Why it hurts at range: the one thing a slow link makes precious is what you already have. A user who scrolls back, switches shells to check something, and returns pays a round trip (1 up + up to 3 pages down = measured 250 B framed = 2 records) to see what was free a moment before — and at 14 hops that is another minute.
+- Proposed fix (NOT applied): hold history per shell id (a small map keyed by id, bounded overall by `MESH_HISTORY_MAX`), and drop only the engine and the drawn screen on a switch.
+- Open questions: whether `MeshHistory`'s absolute-line numbering survives being kept across a switch (it does — `firstLine` comes from the host's `Commit`, which is per shell).
+- Investigator: paging round · 2026-11-11
+
+### A-322 · paging: the launcher is re-asked on every return, and its answer is 3 records · minor ·
+- Evidence: `MeshTermDriver.kt:1456` (`openList()` queues `ListRequest` unconditionally), `:2106` (`backToList()` does the same), `MeshTerminalScreen.kt:749` (also once per connection when first live). Host answer: `crates/daemon/src/mesh_bridge.rs:1620-1666` (`Message::List` → `session_pages(...)` + `marks_pages(...)`). Measured with the real list on this host (13 shells, all v14 flags: id 10 B, label ≤24 B, cwd 60 B, origin/owner 1 B, shell 17 B): **8 pages, 806 B raw, 324 B deflated = 3 records**, and the marks page is appended to the same answer.
+- Finding: the launcher costs 1 record up and 3 down, every time it is opened, whether or not anything changed, and the marks table is appended to every list even when it is empty (`mesh_bridge.rs:1667-1669` — "one record per list, empty included").
+- Why it hurts at range: a user flipping between list and shell pays ~4 records ≈ 2 s of air direct, 6 s if flooded, plus a round trip each way. It is the cheapest screen in the app and it is still a minute at range.
+- Proposed fix (NOT applied): nothing structural — but the list could be answered from a cached `listing()` with a short validity (the host already caches claims), and the marks page could be omitted when it would say nothing and the previous page said nothing.
+- Open questions: how often the marks table is genuinely non-empty in use; whether the host's `listing()` RPC to the keeper is the real latency here rather than airtime.
+- Investigator: paging round · 2026-11-11
+
+### A-323 · paging: the list buffer merges runs and the first page of a run decides what the whole run means · major ·
+- Evidence: `MeshTermDriver.kt:471` (`pages = ArrayList<SessionEntry>()`), `:2134-2146` (`onSessions`: `if (pages.isEmpty()) { listAskedAt = null; listAsks = 0; pagesAsked = listingForHeader || pick == Pick.Listing }`, then `pages.addAll(m.entries)`, and `if (!m.last) return`), `:2145` (`pages = ArrayList()` only on a `last` page); `MeshTermDriver.kt:805` (`failed()` clears `outgoing`, `handshake`, `session` and calls `forgetMarkPage()` — never `pages`).
+- Finding: a run is identified by "the buffer was empty at the first page". A run interrupted by a session death, by a `List` answered after a `Detach`/`Attach` pair, or by a *pushed* list arriving mid-run leaves its pages in the buffer, and the next run's pages are appended to them; `distinctBy { it.id }.take(MAX_SESSIONS)` then commits a set drawn from two different answers, and the meaning of the whole thing was decided by the first page (asked-for vs pushed).
+- Why it hurts at range: session replacement is the normal event at range (A-20, A-23), so a partially delivered list is the normal case rather than the exception — and the launcher then shows rows that are stale, duplicated-by-removal, or missing, with the user's cure (refresh) appending to the same buffer.
+- Proposed fix (NOT applied): tag each page with the session index (or a run sequence) and drop pages from a different run; clear `pages` in `failed()` exactly as `forgetMarkPage()` is cleared there.
+- Open questions: whether the host can be asked for a page-numbered list at all (it cannot today — `Sessions` carries only `last`, no index, `mesh_term.rs:405-414`).
+- Investigator: paging round · 2026-11-11
+
+### A-324 · paging: the list protocol has no page index, so a lost page is undetectable · major ·
+- Evidence: `crates/protocol/src/mesh_term.rs:405-414` (`Sessions { last, cwd, origin, owner, shell, entries }` — no page number, no total), `:917-968` (the encoder); contrast `Marks`, which does carry `first`/`last` (`:429-430`). Phone side: `MeshTermDriver.kt:2145-2150` (a run ends only when `m.last` arrives).
+- Finding: the only sequencing in a list answer is the `last` flag. If one middle page of an eight-page list is lost — the normal case at range, where each page is its own record — the phone receives `last` on the final page, has no idea a page is missing, and commits a launcher that silently omits shells. There is no gap detection, no retry of the missing page, and no sentence that says so.
+- Why it hurts at range: lists are 3 records framed and 8 pages when unframed (A-322); losing one is expected at −120 dBm, and the resulting bug report is "some of my shells are gone", which is indistinguishable from "the shell died".
+- Proposed fix (NOT applied): add a page index (or a first/next pair, as `Marks` already has) gated on a new `Sessions` flag bit; the phone then knows when a gap occurred, can ask once for the whole list again, and can say "list incomplete".
+- Open questions: whether a stale-page-safe design is preferable (each page self-describing with a total count), and whether framing makes this moot in practice (framed, the list is 3 records, so a loss is per-record — still possible).
+- Investigator: paging round · 2026-11-11
+
+### A-325 · paging: a history press is unanswered for the route's whole round trip, with no feedback but one word · major ·
+- Evidence: `MeshTerminalSource.kt:840` (`HISTORY_WAIT_MS = 10_000L`), `:787-800` (`askForHistory`: `if (awaitingHistory && now() - historyAsked < answerDeadlineMs(HISTORY_WAIT_MS, hops())) return` — the press is swallowed for the deadline), `MeshTermDriver.kt:2643-2646` (`answerDeadlineMs(base, hops) = base + hops*2000` → **38 s at 14 hops**), `MeshTerminalSource.kt:784` (`want` = the screen height, so one press asks for a whole page).
+- Finding: at 14 hops a press that lands while an answer is outstanding does nothing at all for up to 38 s, and the only feedback is `scrollNotice = "fetching history"`. The press is neither queued nor counted; further presses are silently dropped.
+- Why it hurts at range: the user's model is "press up again to go further up", and the app's model is "one page in flight, ignore the key". At range the difference is 38 s of an inert key that gives no reason.
+- Proposed fix (NOT applied): show the deadline ("a page is on its way, ~40 s") and count dropped presses so the notice says what it did; or queue one extra press to fire on arrival.
+- Open questions: whether `answerDeadlineMs` is even the right bound for a 3-page answer (it is sized for a single packet round trip).
+- Investigator: paging round · 2026-11-11
+
+### A-326 · paging: history is unreachable on a shell that has not committed a numbered screen · minor ·
+- Evidence: `MeshTerminalSource.kt:781-790` (`top = screen?.let { if (it.firstLine > 0) it.firstLine.toInt() - history.size else 0 } ?: 0`; `if (top <= 0 || ask == null) { scrollNotice = "no history yet on this link" ... return }`), `crates/protocol/src/mesh_term.rs:490-496` (the `WantHistory` doc: the absolute line number comes from `Commit`).
+- Finding: the phone can only ask for history once it knows the host's absolute line number, which arrives in a `Commit`. A shell whose first frame has not been committed — a screen that never painted, a session established but attach not yet answered — reports "no history yet on this link" and cannot ask, even though the keeper holds the rows.
+- Why it hurts at range: "screen never painted" is precisely the at-range failure (A-102/A-108), so the two failures compound: no screen means no history means no way to see anything.
+- Proposed fix (NOT applied): when `firstLine` is unknown, ask with `from = 0` and let the host clamp (it already does — `mesh_bridge.rs:2395-2404`), and let the answer place the page.
+- Open questions: whether the host's clamp makes `from = 0` a full-history request rather than a page.
+- Investigator: paging round · 2026-11-11
+
+### A-327 · paging: going to the list restores the desk grid, so a bounce reflows the shell twice · major ·
+- Evidence: `crates/daemon/src/mesh_bridge.rs:1972-1976` (`Message::Detach` → `release` + `restore_grid`), `:2006-2013` (`restore_grid` resizes the pty back to `attached.original`), `:1471-1480` (attach re-reads `original` and resizes to `remembered`), `MeshTermDriver.kt:1441` (the launcher queues `Detach`) and `:1383` (`open()` re-attaches).
+- Finding: every visit to the launcher is a pty resize down to the desk's size and back up to the phone's. The shell sees two `SIGWINCH`, reflows its whole buffer twice, and the host then re-sends a full screen on the re-attach (A-320).
+- Why it hurts at range: the user bouncing between list and shell to pick another shell pays two reflows and one repaint per bounce, and a full-screen TUI (a log, an editor) redraws completely both times — more output generated by the link's own behaviour.
+- Proposed fix (NOT applied): do not restore the grid until the link has been unattached for a while (a short grace, like `ATTACH_GRACE` in reverse), so a quick bounce is one resize rather than two, and the desk is only given its pane back when the phone has really left.
+- Open questions: whether a desk window legitimately needs its size back immediately (the comment at `:1683-1690` says it does when the user has stopped looking — a grace of a few seconds would still honour that).
+- Investigator: paging round · 2026-11-11
+
+### A-328 · paging: a rotation discards the scroll position, and the rule that protects height does not protect width · minor ·
+- Evidence: `MeshTerminalSource.kt:509-515` — `reflow` is a width change, and `if (reflow) history.toBottom()`; the comment records the height case as fixed ("A width change is a reflow; a height change is not a reason to leave history"), citing ADR-0034. Rotation changes the width, so it parks the view at the bottom.
+- Finding: ADR-0034's rule is implemented for height only. Rotating the phone while reading history throws the reader back to the live screen, and re-scrolling costs a press that (per A-325) may be inert for 38 s.
+- Why it hurts at range: history is the thing a slow link makes expensive to reacquire, and rotation is the most casual accidental gesture on a phone.
+- Proposed fix (NOT applied): keep the offset on a rotation too, and clamp it to what the new width can still place (the rows are re-wrapped by the phone's engine, so the offset is a row count in the new geometry).
+- Open questions: whether a width change truly invalidates the row numbering (it does not — `firstLine` is the host's, and the host did not resize).
+- Investigator: paging round · 2026-11-11
+
+### A-329 · paging: the shells page ceiling is 134 B against a 143 B record, so an unframed list is one record per page · minor ·
+- Evidence: `crates/protocol/src/mesh_term.rs:180` (`MAX_ROWS_BODY: usize = 134`), `:182` (`MAX_MESSAGE = 1 + 2 + MAX_ROWS_BODY`), `crates/daemon/src/mesh_bridge.rs:1421-1465` (`session_pages` packs to `MAX_ROWS_BODY`), `:858-866` (`streamed` gate: framing only at `FRAME_VERSION` 11+).
+- Finding: the page size is chosen so a page never exceeds one message body, and with framing that is irrelevant (the run is concatenated and deflated). For a phone below version 11 the same list is 8 pages = 8 records for 13 shells; the phone in the field is version 14, so this is latent rather than active — but it means the page size is tuned for a path nobody takes.
+- Why it hurts at range: none today; it matters because it makes the *unframed* fallback silently 3× more expensive, and the fallback is what a new/old client gets.
+- Proposed fix (NOT applied): pack pages to the record payload (143) when unframed, or drop the unframed path for `Sessions` entirely once no shipped phone is below 11.
+- Open questions: whether any deployed client is below `FRAME_VERSION`.
+- Investigator: paging round · 2026-11-11
+
+### A-330 · paging: `MAX_SESSIONS = 48` with 8 pages means a big host lists in 3 records and truncates in silence · minor ·
+- Evidence: `crates/protocol/src/mesh_term.rs:206` (`MAX_SESSIONS: usize = 48`), `:1432` (`sessions.iter().take(MAX_SESSIONS)`), `MeshTermDriver.kt:2150` (`pages.distinctBy { it.id }.take(MeshTerm.MAX_SESSIONS)`).
+- Finding: both ends truncate at 48 with no marker. A host with more shells shows 48 rows and says nothing; the phone cannot tell a complete list from a truncated one (compounded by A-324, which has no index at all).
+- Why it hurts at range: this host had 13; the failure mode only appears on a busy machine, and then silently.
+- Proposed fix (NOT applied): a "truncated" bit in the `Sessions` flags, and a row saying so.
+- Open questions: whether 48 is a wire bound or a UI bound.
+- Investigator: paging round · 2026-11-11
