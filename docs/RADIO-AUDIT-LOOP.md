@@ -27,12 +27,12 @@ during this audit** — the only file written is this one.
 
 | # | aspect | state |
 |---|---|---|
-| 1 | physical layer: preset, SF/BW/CR, sensitivity, airtime per record | pending |
-| 2 | MeshCore forwarding: flood limits, scoping, rate limits, advert caps, dedup | pending |
-| 3 | handshake: IK, sizes, timestamps, replay tolerance, pairing lifecycle | pending |
+| 1 | physical layer: preset, SF/BW/CR, sensitivity, airtime per record | done |
+| 2 | MeshCore forwarding: flood limits, scoping, rate limits, advert caps, dedup | done |
+| 3 | handshake: IK, sizes, timestamps, replay tolerance, pairing lifecycle | done |
 | 4 | carrier selection: direct/flood evidence rules, oscillation, cost | pending |
-| 5 | session: ARQ, RTO vs hops, window, fragmentation, ordering | pending |
-| 6 | attach flow: list/profile answer, one-record fit, waits, UI states | pending |
+| 5 | session: ARQ, RTO vs hops, window, fragmentation, ordering | in progress |
+| 6 | attach flow: list/profile answer, one-record fit, waits, UI states | in progress |
 | 7 | batch mode: repaint size, compression, record ceiling | pending |
 | 8 | live mode: keystroke latency, echo, cursor, resync | pending |
 | 9 | paging, grid protocol, multi-shell | pending |
