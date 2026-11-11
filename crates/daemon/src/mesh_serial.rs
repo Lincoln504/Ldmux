@@ -1277,6 +1277,12 @@ fn serve_loop<L: ByteLink>(
     // is bounded by construction (it cannot become the loop that mirroring every send was), and the
     // phone's own rule sends direct immediately after, which re-establishes the cheap path.
     let mut answer_flood_with_flood = false;
+    // **The peer's last record came by flood, so ours go the same way until one arrives direct.**
+    // The one-shot above is consumed by whichever send happens next, and the handshake answer is
+    // sent an iteration later than the record that arrived — an intervening route reply spent it and
+    // the answer went direct. This flag is set by a flooded record and cleared only by a direct one,
+    // which is the peer's own statement that the cheap carrier works again.
+    let mut peer_via_flood = false;
     // The RSSI and SNR the radio measured for the last record **from the peer**, from the receive
     // log frame that carried it (`[0x88][snr×4][rssi][packet]`). The radio's own `GET_STATS` answers
     // "the last packet I heard", which on a busy mesh is whatever a neighbour said most recently.
@@ -1404,8 +1410,11 @@ fn serve_loop<L: ByteLink>(
                 // near field once", not "flood immediately". Only after that attempt has produced
                 // nothing does the expensive carrier get used — and any arriving record resets the
                 // count, so a working neighbour never pays for a flood.
-                let want_flood =
-                    peer_path.is_none() || path_stale || direct_silent || answer_flood_with_flood;
+                let want_flood = peer_path.is_none()
+                    || path_stale
+                    || direct_silent
+                    || answer_flood_with_flood
+                    || peer_via_flood;
                 // **A flood is answered by a flood at once, not on a second attempt.** The phone
                 // re-sends its handshake every few seconds, and each arrival replaces the session and
                 // discards the pending reply — so a rule that waits for one direct attempt to fail
@@ -2196,6 +2205,7 @@ fn serve_loop<L: ByteLink>(
                     }
                     last_peer_record = Some(Instant::now());
                     answer_flood_with_flood = true;
+                    peer_via_flood = true;
                     if let (Some(&snr), Some(&rssi)) = (frame.get(1), frame.get(2)) {
                         peer_signal = Some((snr as i8, rssi as i8));
                     }
@@ -2264,6 +2274,8 @@ fn serve_loop<L: ByteLink>(
                         // later pathless reply starts at zero-hop again instead of flooding, and the
                         // reply to *this* record goes direct.
                         pathless_directs = 0;
+                        // A record arrived direct, so the cheap carrier works: our replies take it.
+                        peer_via_flood = false;
                         // The frame's own reading: SNR in quarters of a dB, then RSSI in dBm.
                         if let (Some(&snr), Some(&rssi)) = (frame.get(1), frame.get(2)) {
                             peer_signal = Some((snr as i8, rssi as i8));
