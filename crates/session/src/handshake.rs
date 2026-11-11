@@ -60,6 +60,13 @@ pub const FILTER_TAG: usize = 16;
 /// problem the Noise spec answers with "fold negotiation data into the prologue".
 const PROLOGUE: &str = concat!("ldmux-mesh-session-v1:", "Noise_IKpsk2_25519_ChaChaPoly_SHA256");
 const FILTER_LABEL: &[u8] = b"ldmux-mesh filter v1";
+/// How far a handshake timestamp may sit **behind** the last accepted one and still be a retry.
+///
+/// A clock correction, an app restart or a re-handshake within the same millisecond all produce this,
+/// and none of them is an attack. The [TIMESTAMP_WINDOW_MS] check against the local clock remains the
+/// bound on how old a handshake may be at all.
+pub const HANDSHAKE_REPLAY_TOLERANCE_MS: u64 = 10 * 60 * 1000;
+
 /// ADR-0020: default replay window for the handshake timestamp, 5 minutes.
 pub const TIMESTAMP_WINDOW_MS: u64 = 5 * 60 * 1000;
 
@@ -307,7 +314,20 @@ impl Responder {
         if now_ms.abs_diff(timestamp_ms) > self.window_ms {
             return Err(HandshakeError::Stale);
         }
-        if timestamp_ms <= entry.last_timestamp_ms {
+        // **A handshake that is slightly older than the last one is a retry, not a replay.**
+        // This used to require strictly increasing timestamps, which locked out honest peers in two
+        // ordinary situations: a phone whose clock stepped back when it rejoined a network and was
+        // corrected by NTP, and a re-handshake whose timestamp equalled the previous one. Because
+        // `last_timestamp_ms` advances only on acceptance, one refusal kept refusing forever, and the
+        // far end saw nothing but an unanswered handshake (measured 2026-11-10: `handshake refused:
+        // replayed or out-of-order timestamp`, then every later attempt refused the same way while the
+        // radio itself was delivering requests at 1 and 16 hops).
+        //
+        // The window above already bounds how old a timestamp may be against the host's own clock,
+        // which is what stops an old handshake being replayed at all. Within it, a backwards step of
+        // up to this tolerance is treated as a retry: replaying msg1 buys an attacker nothing, because
+        // msg2 needs the peer's static key to be usable.
+        if timestamp_ms.saturating_add(HANDSHAKE_REPLAY_TOLERANCE_MS) < entry.last_timestamp_ms {
             return Err(HandshakeError::Replay);
         }
         let remote_static: [u8; 32] = hs

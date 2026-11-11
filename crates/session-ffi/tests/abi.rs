@@ -339,8 +339,13 @@ fn wrong_psk_wrong_size_and_replay_are_distinct_errors() {
         accept(&[1u8; 32], 0, &msg1[..100], &mut out),
         LDMUX_ERR_MALFORMED
     );
-    assert_eq!(accept(&[1u8; 32], NOW, &msg1, &mut out), LDMUX_ERR_REPLAY);
-    assert!(out.is_null(), "no session on failure");
+    // **A repeated msg1 is a retry, not a replay.** A handshake goes out as three identical copies
+    // (three floods, fresh wrapper nonces, one record), so an equal timestamp has to be accepted or
+    // copies two and three are discarded and the handshake dies whenever the first copy is the one
+    // that was lost. The replay guard remains for a timestamp that sits *behind* the last accepted
+    // one by more than `HANDSHAKE_REPLAY_TOLERANCE_MS`, which is unit-tested in the session crate.
+    assert_eq!(accept(&[1u8; 32], NOW, &msg1, &mut out), LDMUX_OK);
+    assert!(!out.is_null(), "a duplicate copy of the same attempt completes");
     let _ = (&mut reply, &mut remote, &mut ts);
 }
 

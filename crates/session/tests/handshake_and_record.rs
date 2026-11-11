@@ -1,6 +1,7 @@
 use ldmux_session::handshake::{
     Established, HandshakeError, Initiator, Keypair, MSG1_LEN, MSG2_LEN, PairingEntry, Responder,
     TIMESTAMP_WINDOW_MS,
+    HANDSHAKE_REPLAY_TOLERANCE_MS,
 };
 use ldmux_session::record::{self, APPLICATION_BYTES, OVERHEAD, RecordError, ReplayWindow};
 
@@ -158,13 +159,31 @@ fn stale_replayed_and_wrong_length_handshakes_are_refused() {
         Some(HandshakeError::Stale)
     );
 
+    // **A repeated timestamp is a retry, not a replay.** A handshake is sent as three identical
+    // copies of msg1 (three floods, fresh wrapper nonces, the same record), so refusing an equal
+    // timestamp discarded copies two and three and lost the handshake whenever the first copy was
+    // the one that got through. What is refused is a timestamp *behind* the last accepted one by
+    // more than the tolerance, which is a clock that has moved backwards past honest retries.
     let (_i, fresh) = Initiator::start(&phone, &gw_pub, &PSK, NOW).unwrap();
     let mut p = pairing();
     let acc = responder.accept(&[p.clone()], NOW, &fresh, 0).unwrap();
     p.last_timestamp_ms = acc.timestamp_ms;
+    assert!(
+        responder.accept(&[p.clone()], NOW, &fresh, 0).is_ok(),
+        "an equal timestamp is a duplicate copy of the same attempt"
+    );
+    let mut behind = p.clone();
+    behind.last_timestamp_ms = NOW + HANDSHAKE_REPLAY_TOLERANCE_MS + 1;
     assert_eq!(
-        responder.accept(&[p], NOW, &fresh, 0).err(),
-        Some(HandshakeError::Replay)
+        responder.accept(&[behind], NOW, &fresh, 0).err(),
+        Some(HandshakeError::Replay),
+        "a clock that stepped back beyond the tolerance is still refused"
+    );
+    let mut slight = pairing();
+    slight.last_timestamp_ms = NOW + HANDSHAKE_REPLAY_TOLERANCE_MS;
+    assert!(
+        responder.accept(&[slight], NOW, &fresh, 0).is_ok(),
+        "a clock correction inside the tolerance is a retry"
     );
 
     assert_eq!(
