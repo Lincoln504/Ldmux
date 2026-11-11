@@ -2905,3 +2905,220 @@ Register's number table and the firmware's forwarding rules.
   host transmits (which would make the second-radio bench cheap), and whether a second host radio is
   available at all.
 - Investigator: measurement round · 2026-11-11
+# Adversarial audit of the audit — `docs/RADIO-AUDIT-LOOP.md`
+
+Scope: the ledger against the code it cites. Each entry quotes the ledger claim, then the code or
+arithmetic that refutes it. Entries whose evidence held up are not listed here; a short "verified
+correct" list closes the file.
+
+Severity column = severity **of the ledger error** (how much work it would cause if acted on as
+written), not of the underlying defect.
+
+---
+
+### A-440 · ledger: A-360's central mechanism is refuted at the request call site · **major**
+
+- `ledger:` A-360 (blocker) says: "`prefer_route` then refuses every non-`dead` candidate for a full
+  `route_stale` window (60 s at 16 hops) — **including the peer's route request**, sent precisely
+  because it cannot hear us. The end being asked for a route is the one that cannot accept it."
+- **Refuted.** The request call site passes `dead = !previous_burst`
+  (`crates/daemon/src/mesh_serial.rs:2013-2024`), and `prefer_route` returns `true` before it ever
+  looks at `proven` (`:418-420`: `if dead || stale { return true }`; `proven` is only consulted at
+  `:427`). The first request of a burst therefore always replaces the path; `REQUEST_BURST_MS`
+  (`:77`, 10 s) is what stops the *later* copies of the same burst doing so, which is the intended
+  convergence, not a lock-out.
+- Corrected statement: `proven` can only block **non-request** candidates — a route reply
+  (`:2246`, passes `false`), and the advert-cache refresh path. The "the end being asked for a route
+  cannot accept it" conclusion does not follow, and the path round's headline ("`prefer_route` then
+  refuses …") overstates a narrower guess-vs-proof rule.
+- What survives from A-360: a flood-derived reversed chain is marked `proven`, which is a real
+  overclaim (the inbound chain is not evidence about the outbound one), and it does suppress
+  shorter *replies* and cache guesses for up to 60 s.
+
+### A-441 · ledger: register row 1 (from A-340) would delete the one escalation the reference also performs · **major**
+
+- `ledger:` Register row 1: "flood only when no path exists; treat stale as 're-ask the path', not
+  'flood the record'". A-340's title: "the reference client floods only when the path is *unknown*;
+  we flood whenever it is *stale*".
+- **Refuted by the same round's own evidence.** The reference floods the **retry**, whatever route
+  the contact holds — `openhop_core/.../base_send.py:1292-1346` (`_build_retry_packet`: "Build a
+  retry attempt as a FLOOD request, whatever route the contact holds … The stored path is only
+  masked, never cleared"), which the ledger's own A-380 cites. Its docstring even names the failure
+  we are trying to avoid: a peer taught a wrong route "answers into a void with no flood reply left
+  to correct it".
+- Corrected statement: the reference floods when the path is unknown **and on every retry**. Our
+  `want_flood` (`mesh_serial.rs:1413-1417`) contains two things the reference does not have —
+  `path_stale` (floods *before* a direct attempt has failed) and `peer_via_flood` (sticky) — and one
+  it does: `direct_silent` (escalate after a direct send produces nothing). The fix is to remove
+  `path_stale` and `peer_via_flood`, not escalation; register row 1 as written would make a lost
+  record never escalate, which is a regression against both the reference and our own ADR-0038.
+
+### A-442 · ledger: A-80's premise contradicts its own evidence, and its fix is inverted · **major**
+
+- `ledger:` A-80 (blocker) Finding: "at range no record ever crosses **direct**, so `proven` is never
+  set by the carrier that matters". Its Proposed fix: "Then `proven` should also be set by 'this route
+  has been carrying records and being acked', not only by a direct arrival."
+- **Refuted twice over.** (1) A-80's own evidence line cites `:2192-2204` — "a flooded record sets
+  `peer_path_proven = true`" — so `proven` *is* set at range, by the only carrier that arrives; the
+  entry cites the line that refutes its premise. (2) The proposed fix says proof is "only set by a
+  direct arrival", which is exactly backwards: the direct branch sets `peer_path_heard` but **not**
+  `peer_path_proven` (`:2266-2280`, verified — only `pathless_directs = 0` and `peer_via_flood =
+  false`), while the flood branch sets it (`:2198-2206`).
+- Corrected statement: the symptom A-80 reports is real and its arithmetic is right (hops=1 ⟹
+  `rto_initial = 6 × 0.490 × 1 = 2.94 s` vs a 16-hop crossing of ~51 s). The mechanism is the
+  opposite of what the entry says: a flood-derived reversed chain is taken as proof of a direction it
+  never travelled, and the direct arrival — the only event that proves the outbound path — marks
+  nothing. Fixing "as written" would add proof-on-ack on top of flood-proof and change nothing.
+
+### A-443 · ledger: register row 2's fix creates a new failure and collides with A-81 · **major**
+
+- `ledger:` Register row 2: "→ time by the maximum hop count seen from the peer, never by a shortened
+  one". A-81 (same round, not in the register) proposes raising the constant instead: "`rto_initial =
+  hops × (hold(score_record) + hold(score_ack))` … Keep MeshCore's `6 × airtime × hops` only as the
+  floor".
+- **Both cannot be right, and the register's version is harmful.** The timer uses the path actually
+  used to send — `hops_now = peer_path … map_or(1, |p| p.hops)`
+  (`crates/daemon/src/mesh_serial.rs:1877-1881`) → `arq.rs:187` `scaled = airtime * 6.0 * hops`.
+  Timing that same send by "the maximum hop count seen" means a genuine 1-hop neighbour whose request
+  once arrived via a 16-hop detour waits `6 × 0.490 × 16 = 47 s` before its first retransmission on a
+  link that echoes in ~3 s — the mirror image of the bug being fixed. Applied together with A-81
+  (6 → ~11 airtimes) the product is 86 s per attempt at 16 hops.
+- Corrected statement: the defect is not "shortest vs longest" but "the *sending* path is a guess
+  derived from inbound traffic". Time the send by the path it is sent on (correct today) and make the
+  path trustworthy (A-370: mark proof on a direct arrival; A-363: repair a dead path in two packets),
+  rather than inflating the constant or the hop count.
+
+### A-444 · ledger: A-81's own arithmetic does not close · **minor**
+
+- `ledger:` A-81: "a real round trip is ≈11 airtimes per hop, not 6. At hops=16 the timer is 47 s
+  against a 63 s round trip — 74 % of the way there".
+- Arithmetic: 16 hops × 0.490 s = 7.84 s per airtime. 11 airtimes ⟹ **86 s**; the stated 63 s is
+  **8** airtimes per hop (8 × 7.84 = 62.7 s). So either the hold factor is 8 (not 11) or the round
+  trip is 86 s — and then 47 s is 54 %, not 74 %.
+- The 86 s figure is the one that agrees with the rest of the ledger (A-41's 2.70 s/hop hold + 0.49 s
+  of own air × 16 ≈ 51 s one way), which makes the 63 s in A-81 the outlier.
+
+### A-445 · ledger: A-60's number and its "reference repeater" are both wrong, and its own field evidence contradicts it · **major**
+
+- `ledger:` A-60 (blocker): "on any mesh configured the way the reference repeater ships, our traffic
+  dies at **5 hops**", citing `mcrs/profiles/defaults.conf:21-22` and `mcrs/CONFIG.md`.
+- **Refuted on the number and on the source.** `mcrs` is a third-party Rust reimplementation, not the
+  firmware that runs on repeaters. The shipped C++ firmware defaults the cap to **0**:
+  `filter-firmware/src/helpers/CommonCLI.h:48` (`uint8_t flood_max_unscoped = 0;`), enforced at
+  `filter-firmware/examples/simple_repeater/MyMesh.cpp:445` via
+  `mesh::isFloodHopLimitExceeded` (`helpers/RoutingPolicy.h:16-23`, `if (… ROUTE_TYPE_FLOOD && hops
+  >= flood_max_unscoped) return true;` — with 0, *every* unscoped flood is refused at the first
+  repeater).
+- And this mesh demonstrably forwards them: the ledger's own field lines show adverts at 5–12 hops and
+  `route request (unscoped) x3` reaching the host at 1–16 hops. So the deployed repeaters are not at
+  the default, which means the entry's premise cannot be the observed cause of anything — it is a
+  portability risk, real but conditional.
+- Corrected statement: unscoped floods are a real hazard with a *worse* worst case than stated (0
+  hops, not 5, on a firmware-default repeater) and a *better* local reality than stated (this mesh
+  forwards them). Severity should stay high but the entry must say "on a repeater at the firmware
+  default" and stop presenting the mcrs number as the reference. An implementer testing against "5"
+  is testing the wrong threshold.
+
+### A-446 · ledger: "eight records per poll" is the L2 credit, not the range figure · **minor→moderate**
+
+- `ledger:` A-102 (blocker at range): "the ARQ may hand over up to eight records per poll"; Register
+  row 6 repeats it: "the credit window hands over eight records at once". A-140 (batch round) says
+  "the credit window of 4 at 16 hops".
+- Code: the ARQ window is `credit = (64.0 / hops).clamp(1.0, 8.0)` (`crates/session/src/arq.rs:227`)
+  — **4 at 16 hops, 2 at 28**. `CREDIT_WINDOW = 8` (`crates/mesh/src/constants.rs:14`) is the L2 cap
+  and only binds at ≤8 hops.
+- Corrected statement: at range a poll can hand over **four** data records at 16 hops, not eight. The
+  entry's conclusion (a burst deafens the sender) is unaffected, but a blocker priced at 2× the range
+  figure invites a window change twice as large as needed.
+
+### A-447 · ledger: two entries, one defect — the `pages` buffer · **minor**
+
+- `ledger:` A-100 ("the list page buffer survives a session death, so runs merge") and A-323 ("the
+  list buffer merges runs and the first page decides what the whole run means") cite the same lines
+  (`MeshTermDriver.kt:471`, `:2145`, `failed()` never clearing `pages` at `:765-806` / `:805`) and
+  propose the same fix (clear `pages` in `failed()`). A-107 covers A-323's second half (a pushed run
+  classified by the first page).
+- Correction: collapse A-100 and A-323 into one entry before the fix pass, or the same five-line
+  change will be scheduled, implemented and reviewed twice.
+
+### A-448 · ledger: A-61's fix names infrastructure that does not exist · **minor**
+
+- `ledger:` A-61 Proposed fix: "the outbox/pending-send structure already exists in `Companion`".
+- Code: `Companion` has no send queue — `crates/companion/src/session.rs:477-481` are
+  `has_pending()` / `next_push()`, both **read**-side (pending pushes from the radio). The outbox is
+  `SessionHost.outbox` (`crates/daemon/src/mesh_session.rs:330`), one layer up, and it is drained by
+  `poll`, not by a timer.
+- Correction: the asynchronous reply needs a new delayed-send slot in the carrier loop (or an
+  `outbox`-style queue in `mesh_serial`), not a reuse of something in `Companion`.
+
+### A-449 · ledger: A-24's supporting "measurement" is a different packet size · **moderate**
+
+- `ledger:` A-24: "a flooded handshake *can* cross 14 hops (measured: host `flooded record 121 B from
+  a 0 hop chain`, and earlier `flooded record 40 B from a 14 hop chain`)".
+- The 121 B handshake observed crossed **0** hops; the record that crossed **14** was **40 B** — a
+  hint. At a ~0 dB-margin link those are not interchangeable evidence: the firmware's own score
+  (`RadioLibWrappers.cpp:319-328`) is `((snr − threshold)/10) × (1 − len/256)`, i.e. 0.075 ×
+  `(1 − 40/256)` = 0.063 for the hint against 0.075 × `(1 − 133/256)` = 0.036 for the handshake — the
+  hint is ~1.75× more likely per attempt, before per-hop holds enter.
+- Correction: A-24's conclusion (the blind ladder should not skip the handshake now that flood exists)
+  may still be right, but it needs a measured 121 B flood hop count, not a 40 B one.
+
+### A-450 · ledger: A-200 is graded `blocker` against the ledger's own definition · **minor**
+
+- `ledger:` A-200 (blocker): "changing the route destroys the radio session".
+- The ledger's own scale says `blocker` = "the link cannot work, or works only by luck". Here the link
+  works; the user pays a full ladder for a UI action. And the code says the rebuild is deliberate:
+  `Config.kt:219-221` ("choosing a route does rebuild the page").
+- Correction: `major`. Kept above cosmetic matters because the *cost* is enormous (≥190 s at a
+  neighbour), but as a blocker it outranks defects that actually break the link, and the ledger is
+  ordered by severity.
+
+### A-451 · ledger: A-41's title conflates a per-repeater bound with a typical crossing · **minor**
+
+- `ledger:` A-41 title: "MeshCore delays **every flood at every repeater** by up to 32 s, so a crossing
+  takes 45–58 s while our rung interval is 8–36 s".
+- Code: `MAX_RX_DELAY_MILLIS 32000` (`filter-firmware/src/Dispatcher.cpp:11`) is a clamp; the delay is
+  `(10^(0.85−score) − 1) × airtime` (`:53`), and at the measured score (~0.03) it is ~2.7–3.5 s/hop,
+  which is where 45–58 s comes from. Fourteen hops at the cap would be **448 s**.
+- Correction: state the bound and the typical separately — "up to 32 s per repeater (a bound never
+  reached at this preset); ~2.7–3.5 s per repeater at the measured score, so 45–58 s over 14 hops".
+  As written the sentence reads as if 32 s × 14 hops ≈ 58 s.
+
+### A-452 · ledger: the "0.66 s at home" anchor is not derivable from any cited reading · **minor**
+
+- `ledger:` Numbers table: "Repeater hold per hop: 0.66 s at home, **2.70 s at the margin** for a 133 B
+  packet — 4.1× worse than the timers we ship".
+- Arithmetic with the firmware's own formulas (`RadioLibWrappers.cpp:319-328` score,
+  `Dispatcher.cpp:53` delay): 0.66 s for a 133 B packet implies `score ≈ 0.48` ⟹ `SNR ≈ +2.5 dB`. The
+  ledger's authoritative readings are −6.75 dB (which gives 2.70 s) and +5.5 dB (which gives 0.33 s).
+  Neither produces 0.66 s.
+- Correction: anchor the home figure to a cited SNR reading (or label it "assumed +2.5 dB"), because
+  the 4.1× ratio is quoted in A-340 and in the shape round's headline as if measured.
+
+### A-453 · ledger: A-304's "the flooded reply is one packet" is true of route replies only · **minor**
+
+- `ledger:` A-304: "the host's flooded reply is one packet, not three, so row 6.228 is closed
+  prematurely".
+- Code: `send_route_reply` builds one packet and calls `send_retrying`
+  (`crates/daemon/src/mesh_serial.rs:290-352`; the single `build_route_reply_flood_in_scope` at `:309`) — one transmission unless the radio refuses. But the
+  **handshake answer** is a control record from `outbox` and, when pathless, goes through the ×3 copy
+  loop (`:1441-1468`, `RECORD_FLOOD_COPIES = 3` at `:513`). A-22, A-34 and A-240 all price it as ×3,
+  correctly.
+- Correction: say "route reply (path return)" explicitly. As worded it invites "fixing" path returns
+  to three copies, which would triple route-discovery air — the single most expensive thing on the
+  link per A-341/A-340's own numbers.
+
+---
+
+## Verified correct (do not re-open)
+
+Checked against the code and left alone: **A-20** (each accepted `msg1` replaces the session and
+advances `next_index`, `mesh_session.rs:280-345` — no dedup), **A-21** (the pending handshake is
+consumed before the `isHandshakeKind` guard, `MeshTermDriver.kt:907-918`), **A-22** (`seq: None`,
+popped once, `on_send_refused` cannot restore it, `:380-405`), **A-30** (`handshakes += 1` per accepted
+message, `:333`), **A-31** (persist with two `sync_all`s before the reply is queued, `:303-331`),
+**A-120** (`peer_via_flood` set at `:2208`, cleared only at `:2278` — a genuine absorbing latch),
+**A-180** (`Event::Status` every 500 ms refreshes `last_carrier`, `mesh.rs:966`, `mesh_serial.rs:1809`),
+**A-220** (`session = None` before any log, `:411-431`), **A-370** (the direct branch sets
+`peer_path_heard`, not `proven`), **A-420** (`resumeShell` only ever assigned `""`), **A-41/A-362**
+(`route_stale = max(60 s, 2 × 603 ms × hops)`, `:166-169`).
