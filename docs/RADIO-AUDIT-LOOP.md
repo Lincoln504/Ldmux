@@ -4,6 +4,35 @@ Started 2026-11-10. Purpose: identify **everything** that makes the radio path f
 airtime at range, with evidence, so an advanced model can act on it later. **No code changes are made
 during this audit** — the only file written is this one.
 
+## Register — blockers, ordered by what the fix buys
+
+Read this first. Each line names the entry, the defect in one clause, and the smallest change that closes it.
+Entries are in the Ledger below with full evidence.
+
+1. **A-340** — we flood when the path is *stale*; MeshCore floods only when it is *unknown*. A flooded record costs ~20× a direct one (65.6 s vs 9.8 s at 16 hops, three copies). → flood only when no path exists; treat stale as "re-ask the path", not "flood the record".
+2. **A-80** — the retransmission timer follows the shortest **inbound** path (1 hop while the chain is 16), so the first retry fires at 4.6 % of the round trip and five attempts are spent in ~12 s. → time by the maximum hop count seen from the peer, never by a shortened one.
+3. **A-20 + A-240** — three identical `msg1` copies create three sessions, and a captured `msg1` replayed is an unauthenticated session-kill that also amplifies transmissions. → idempotent `msg1` cache: identical bytes in, identical cached `msg2` out, no session replacement, no index advance, no outbox clear.
+4. **A-60** — unscoped floods are capped at 5 hops (records) and 3 (adverts) on a default mesh, against a 14–17 hop link. → set and carry a flood scope; verify with one `set` on a repeater.
+5. **A-120** — the two sticky-flood flags latch: each end waits for a direct record the other never sends. That is the mirroring ADR-0038 rejects. → decay on *any* arrival, plus one deliberate cheap direct probe per N records.
+6. **A-102 + A-108** — an attach answer is 18–27 transmissions, the credit window hands over eight records at once, and the ARQ's 41 s timer expires before one crossing completes. → one-record attach answer, window sized to the crossing.
+7. **A-180** — the silence watchdog cannot fire: `Status` is self-generated every 500 ms and refreshes `last_carrier` without touching the radio. → count only successful radio commands.
+8. **A-61** — the host sleeps on the thread that reads the radio while it answers a route request (up to ~17 s), so handshakes arriving then are never read. → enqueue the answer, keep reading.
+9. **A-200** — changing the route persists a config field, tears the radio link down at GATT level and restarts the ladder from rung one. → keep the link alive across route changes, or say plainly that switching costs a full ladder.
+10. **A-220** — a session death sets `session = None` before logging, so "retries exhausted" is emitted nowhere. → log at the point of death.
+11. **A-280** — the UI deletes its only moving evidence at 30 s and stays inert for the remaining 83–85 % of the attempt. → keep the live line and say "still trying, attempt n of m".
+12. **A-160** — in live mode a keystroke is invisible until the host echoes (13 s direct, ~64 s flooded); local echo is wired only to held mode. → drive `echoHeld` from live mode.
+13. **A-140** — the downlink is compressed, the uplink is not: a 1.6 KB paste is 12 records plain against 2 deflated. → a phone→host framed message, gated by a feature bit.
+14. **A-320 + A-327** — every shell switch destroys the mirror and the difference buffer: five shells is 20 records and five round trips, 5–7 minutes at 14 hops. → keep a mirror per shell, or accept one and say so.
+15. **A-260** — five of the six blockers were *untestable as written*: the session loop is private, the carrier policy needs an Android `Context`, and the fake link has no clock. → scripted link with a virtual clock; pure carrier function; test entry point for the supervisor.
+
+## Numbers every later round should reuse
+
+- Airtime (910.525 / 62.5 kHz / SF7 / CR5, preamble 32): 42 B 223.7 ms · 121 B 459.3 ms · 133 B 490.0 ms · 172 B 602.6 ms.
+- Repeater hold per hop: 0.66 s at home, **2.70 s at the margin** for a 133 B packet — 4.1× worse than the timers we ship.
+- Crossing at 16 hops: **9.8 s direct**, **65.6 s flooded** (a flood is deferred at every repeater; a direct packet is not).
+- Throughput optimum ≈50 B PHY payload (85.2 s/kB) versus 143 B (112.1 s/kB): large records cost 24 % more at the margin.
+- Framing (real dictionary, deflate 9): 46×38 screen 1318 B → 10 records unframed, **3 framed**; 38-row history 1458 B → 11 unframed, **2 framed**.
+
 ## Severity
 
 - `blocker` — the link cannot work, or works only by luck.
