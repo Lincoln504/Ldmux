@@ -2620,3 +2620,288 @@ Register's number table and the firmware's forwarding rules.
   `radioPublicKey`/path width today — the contacts dump or `SELF_INFO`? Until that is settled this
   entry stays a `minor` with a measurement attached.
 - Investigator: journey round · 2026-11-11
+### A-460 · measurement: the link's own measured round trip is computed on every ack and then thrown away · major
+
+- Evidence: `crates/session/src/arq.rs:670-683` — on every advancing ack the ARQ takes a sample from the
+  **first-attempt** record (`attempts == 1`) as `now_ms - sent_at` and smooths it 1/8 like TCP
+  (`srtt = (srtt*7 + sample)/8`); the value is used internally at `:724-731` (`fast_retx_floor` =
+  `max(airtime, srtt/2).max(200)`) and `:740` (`rto = rto_initial.max(srtt)`); `:475` exposes it as
+  `smoothed_rtt_ms()`; the only readers in the tree are `crates/session/tests/arq.rs:546` and `:574`.
+  It appears in **no** status field (`crates/daemon/src/mesh_session.rs:42-80` — `SessionSnapshot` and
+  its `to_json` carry handshakes/sent/retransmits/bytes/pending and no time), in **no** log line
+  (`mesh_session.rs` has three `eprintln!` sites, `:235`, `:264`, `:321`, none of them timing), and is
+  **not reachable from the phone** (`crates/session-ffi/src/lib.rs` exposes status/pending/deadline
+  only — `ldmux_session_status:657`, `ldmux_session_pending:680`, `ldmux_session_next_deadline:691` —
+  and `packages/mobile/composeApp/src/androidMain/kotlin/io/ldmux/mobile/mesh/NativeMeshSession.kt:39-40`
+  binds exactly `status` and `pending`).
+- Finding: the single honest end-to-end measurement of this link — a real round trip, taken from the
+  air, including every repeater's hold, automatically preferring the sample that was not retransmitted —
+  exists inside the ARQ, corrects its own timers with it, and is discarded at every boundary. The
+  ledger prices the same quantity by hand in four places (A-41's 2.70 s per hop, A-340's 9.8 s versus
+  65.6 s at 16 hops, A-80's 2.94 s RTO against a 43 s crossing, A-164/A-165's 13 s and ~64 s echo) and
+  every one of those is an estimate that `srtt` would have replaced with a number.
+- Why it hurts at range: the field record of 2026-11-10 was reconstructed from journal lines that say
+  *what* happened and never *how long it took*. A single `srtt` value in the session line would have
+  separated "the mesh is slow" from "our timer is wrong" in one reading; instead A-80 was found by
+  reading `prefer_route` and redoing the airtime arithmetic. Every future range report will be as
+  expensive as that until this number is visible.
+- Proposed fix (NOT applied): carry it out through all three layers, smallest first.
+  (1) `SessionSnapshot.srtt_ms: Option<u64>`, filled from `session.smoothed_rtt_ms()` in
+  `SessionHost::snapshot`, printed by `print_mesh_session` in `crates/daemon/src/bin/ldmux.rs` as
+  `  round trip   12.4 s measured (smoothed over n samples)` — and one journal line on the first
+  sample of a session, because a journal is what survives.
+  (2) `ldmux_session_rtt_ms(*mut LdmuxSession, *mut u64) -> i32` in the C ABI, plus a sample count so a
+  caller can tell "12 s" from "12 s from one sample", and the matching `external` on
+  `NativeMeshSession`.
+  (3) The phone's durable log gets it on the session line (see A-463).
+- Open questions: whether the sample should also be taken from acks that advance over a *retransmitted*
+  record (deliberately excluded today by `attempts == 1`, which is right for the estimator and wrong
+  for "how long did this exchange actually take"); and whether the same number should be published per
+  shell, since a burst on one shell inflates the sample for all of them.
+- Investigator: measurement round · 2026-11-11
+
+### A-461 · measurement: the hop count that sets every timer changes with no record of the change · major
+
+- Evidence: `crates/daemon/src/mesh_session.rs:177-182` — `set_hops` assigns `self.hops` and forwards it
+  to the session, with no log and no history; it is called from `crates/daemon/src/mesh.rs:992` on
+  `Event::Limit { record_max, hops }`, i.e. from whichever path the carrier last adopted. The only
+  visible trace of a change is an unrelated route line (`mesh_serial.rs:2196`,
+  `route from a flooded record hops=N`), which is rate-limited (A-466). On the phone the same quantity
+  is set silently at `packages/mobile/composeApp/src/commonMain/kotlin/io/ldmux/mobile/mesh/MeshTermDriver.kt:917`
+  (`s.setHops(sessionHops)`) and on every `followRoute` (`:885-891`), and `sessionHopsFor`
+  (`:2586`) derives it from `routeHops ?: meshReach`.
+- Finding: the input that decides the first retransmission, the ARQ's per-record chunking, the flood
+  interval and every wait the app sizes over the air is changed in place, silently, from at least three
+  sources on each end. The journal therefore cannot answer "what was the timer told at 22:20:44" — which
+  is exactly the question A-80 (a 1↔16 hop flip in 11 s, settling on 1) had to be answered by reading
+  the code and matching it to a route line.
+- Why it hurts at range: at range the path changes often — that is what a lossy multi-hop route does —
+  so the hop count is not a constant that can be inferred once. A silently moving input to a timer is
+  indistinguishable from a timer bug, and the investigation pays for that difference every time.
+- Proposed fix (NOT applied): one line per change, on both ends, naming the value, the previous value
+  and the source: `ldmuxd: session hops 16 (was 1) from the route` / phone
+  `mesh hops 16 (was 1) from routeHops`. Gate it behind the existing `LDMUX_MESH_TRACE` only if the
+  volume is a problem; at range it fires a handful of times per link, and it is the cheapest possible
+  answer to "what did the timer know".
+- Open questions: whether a *temporarily* longer hop count should also be logged when the session
+  refuses it (`followRoute` skips while `pending > 0`, `:888`), since a refusal is itself a decision
+  worth seeing.
+- Investigator: measurement round · 2026-11-11
+
+### A-462 · measurement: the margin of every arriving record is delivered with it, kept only as "the last one", and never as a distribution · major
+
+- Evidence: the companion prefixes each received packet with SNR (quarter-dB) and RSSI, and the host
+  reads them per record: `crates/daemon/src/mesh_serial.rs:2209-2211` and `:2280-2282` —
+  `peer_signal = Some((snr, rssi))`, a **single** variable, overwritten by every arriving peer record.
+  It is published only on the 20 s stats watch (`STATS_WATCH`, `:70`; publish at `:1781-1802`) into
+  `MeshSnapshot.snr_quarter_db`/`radio_rssi`/`signal_from_peer` (`crates/daemon/src/mesh.rs:970-981`),
+  and printed on demand as one reading (`crates/daemon/src/bin/ldmux.rs:343-372`). The phone does the
+  same on its side, reporting a summary instead of a series (`AndroidRadioLink.kt:1582-1584`,
+  `mesh heard N packet(s) in Ns · last flood … dB … dBm`).
+- Finding: the measurement that decides whether this link can work at all — the SNR of a record that
+  actually arrived, against SF7's −7.5 dB demodulation floor — is available for every packet and is
+  retained as exactly one number: the most recent. There is no minimum, no median, no count below the
+  threshold, and no per-record association, so the ledger's central physical claim (A-40: "the field
+  link runs at about 0 dB margin") is an inference from scattered summary lines rather than a
+  distribution anyone can re-derive.
+- Why it hurts at range: margin is the one quantity that separates "our protocol is wrong" from "this
+  distance is not reachable today", and the two need opposite responses — code versus antenna and
+  height. With only the last reading, a link that spends 90 % of its time at −8 dB and one lucky packet
+  at −4 dB looks healthy at the moment someone asks.
+- Proposed fix (NOT applied): keep per-session extremes and a coarse histogram in the carrier —
+  `snr_min`, `snr_max`, count of peer records, count below the tuple's SNR floor — carried in
+  `MeshSnapshot` and printed in one line when a session ends or on demand:
+  `signal   14 records, SNR −8.5…−4.0 dB (median −6.9), 9 of 14 below the SF7 floor`. The floor per SF is
+  a four-entry table (`-7.5, -10, -12.5, -15` at SF7…SF10, from the firmware's own thresholds) and the
+  tuple is already known from `SELF_INFO`.
+- Open questions: whether the SNR byte on a *flooded* record describes the copy that reached us or the
+  hop before us (the repeater rewrites the header; worth one bench reading before the number is trusted
+  as "the margin of the link").
+- Investigator: measurement round · 2026-11-11
+
+### A-463 · measurement: the phone's durable log has no line at the two events that matter most · major
+
+- Evidence: the mesh path's entire durable vocabulary is twelve `appLog` call sites —
+  `MeshTermDriver.kt` (9: drop `:771`, rejected record `:977`, grid `:1287`, fit `:1319`, `:1334`,
+  profile `:1942`, commit `:2207`, handshake `:700-716`, plus the stale-handshake note),
+  `MeshTerminalScreen.kt:327` and `MeshTerminalSource.kt:422`, `:486`. The **session-established**
+  path (`MeshTermDriver.kt:910-936`, where `session = s`, `sessionHops`, `handshakeTries = 0` and the
+  view moves to `ProfileMissing`) contains no `appLog`. The attach request/answer path carries
+  `attachAskedAt`/`attachAsks` (`:540-541`) and never logs either the ask or the elapsed time to the
+  answer.
+- Finding: the phone writes nothing when a session comes up, nothing when an attach is asked, nothing
+  when it is answered, and nothing with a duration anywhere. The durable log is a list of *events*
+  without *times*, so the field timeline of 2026-11-10 could only be reconstructed from the host
+  journal — and the host cannot see the attach, the grid, the profile or the commit. Neither end
+  alone can say how long the user waited.
+- Why it hurts at range: the operator's report is always "it hung / it counted to 100 / it went back to
+  0", and every one of those maps to a step whose duration this log does not record. Six lines at the
+  right places would turn each report into a number, with no airtime cost — the log is local.
+- Proposed fix (NOT applied): one line per step with elapsed milliseconds from the attempt's start, in
+  the existing `appLog` style: `mesh session up · 41 s · 16 hop(s) · record 143 B`,
+  `mesh list asked · try 2`, `mesh list ${n} shell(s) · 9 s`, `mesh attach ${id} · 7 s`,
+  `mesh first screen · 13 s from tap`. Keep the counters the screen already computes
+  (`attemptsThisLink`, `attachAsks`) so the numbers agree with the UI rather than being a second truth.
+- Open questions: whether the elapsed values should also be surfaced in the route panel (the user can
+  then see "last open 41 s" and stop wondering), which is a UX decision rather than a measurement one.
+- Investigator: measurement round · 2026-11-11
+
+### A-464 · measurement: the radio's own airtime counter is published but never sampled, so per-record airtime is a formula nobody checks · major
+
+- Evidence: `crates/companion/src/codec.rs:1119-1122` — `STATS_RADIO` reports `tx_air_secs` and
+  `rx_air_secs` since boot; `crates/daemon/src/mesh.rs:978-979` stores them; `crates/daemon/src/bin/ldmux.rs:374`
+  prints them on demand (`radio  1234 s transmitted, 5678 s received since the radio booted`). Nothing
+  samples them on a schedule: the 20 s stats watch (`mesh_serial.rs:1781-1802`) republishes the
+  cumulative value, and no site computes a delta. Meanwhile every timer is priced from
+  `airtime_ms`, which is **computed** from the tuple, not measured: `mesh_serial.rs:1110`
+  (`self_info.time_on_air_ms(RECORD_MAX)`) → `crates/companion/src/codec.rs:1054-1084` (the RadioLib
+  formula with a 32-symbol preamble below SF8).
+- Finding: the only ground truth about what this radio actually spends on the air is available every
+  20 s and is never differenced, while the figure the system uses to size every timer and to publish
+  "airtime this hour" is arithmetic that no measurement has ever confirmed. The ledger's own note that
+  "`tx_air_secs` is never read" is **imprecise** — it is read and printed on demand; it is *never
+  sampled*, which is the defect that matters.
+- Why it hurts at range: a formula error of the size the preamble fix corrected (≈50 ms per record at
+  62.5 kHz, `codec.rs:1064-1068`) moves every timer and every budget by 8 %, and the correcting
+  measurement was sitting in `STATS_RADIO` the whole time. At range, an 8 % error in the retransmission
+  budget is an 8 % error in how often the mesh is retried.
+- Proposed fix (NOT applied): on the existing stats watch, keep the previous `(tx_air_secs, records
+  sent)` pair and emit one line per five minutes, or on session end:
+  `airtime  14 records sent, 6.9 s transmitted by the radio, 0.49 s each (formula 0.47 s)`. That single
+  line makes `time_on_air_ms` self-checking in the field and turns the ledger's per-record figures into
+  measurements.
+- Open questions: whether the firmware's counter is wall-clock airtime or rounded seconds (it is `u32`
+  seconds, so a 14-record sample is coarse — the sampling window may need to be minutes, not seconds);
+  and whether `rx_air_secs` counts the radio's own receive-window time (useful) or only decoded packets
+  (not useful).
+- Investigator: measurement round · 2026-11-11
+
+### A-465 · measurement: the frame trace cannot measure anything — no timestamps, no transmit side, no identity · major
+
+- Evidence: `crates/daemon/src/mesh_serial.rs:228-265` — `trace_rx` prints
+  `trace rx route=… type=… hops=… w=… len=… snr=… rssi=…` per packet; it carries **no timestamp**, there
+  is **no `trace_tx`** anywhere in the file, and the line names no record identity (no seq, no hash), so
+  two copies of one record and two different records look alike. It is enabled by `LDMUX_MESH_TRACE`
+  (`:224-226`) and, being `eprintln!`, is timestamped only by the journal's own arrival time.
+- Finding: the one facility that could measure the questions the ledger is reduced to estimating — how
+  long a copy takes to arrive, whether three copies are spaced or queued (A-29), whether a repeater holds
+  for 2.7 s or 0.66 s (A-41), whether a flood's copies arrive at different times (A-382) — prints data
+  that cannot answer any of them. What is missing is not a field but a key and a clock.
+- Why it hurts at range: every airtime figure in the ledger is arithmetic precisely because this path was
+  never measured. A trace that carried a monotonic millisecond prefix and a transmit counterpart would
+  convert the whole "Numbers every later round should reuse" table into observations on the next trip.
+- Proposed fix (NOT applied): in `trace_rx`/a new `trace_tx`, prefix with the monotonic millisecond
+  (`{:>10} ms`) and add the record's first bytes or its sequence so copies correlate; `trace_tx` prints
+  the same fields plus the carrier (`raw_custom`/`flood`) and the outcome. Keep it behind the same env
+  var; it costs no airtime and writes only when asked.
+- Open questions: whether the companion reports *transmit* SNR/RSSI as zeroed bytes (the trace would show
+  it), and whether the firmware's own `SEND_RESULT` arrives before or after the packet leaves the air —
+  which decides whether tx can be timestamped at the start or the end of transmission.
+- Investigator: measurement round · 2026-11-11
+
+### A-466 · measurement: rate-limited logging cannot be counted, and it is used for the events a measurement needs · major
+
+- Evidence: `crates/daemon/src/mesh_serial.rs:217-222` — `route_log_rare` prints only if the *same* `last`
+  slot is older than 60 s, then updates it. It guards the record-send line (`:1496`), the flooded-record
+  and hop lines (`:2046`, `:2173`, `:2196`) and others. Each call site has its own `Option<Instant>`, so
+  the limit is per site, not global.
+- Finding: the lines a measurement would count — how many records went out, on which carrier, over how
+  many hops — are emitted at most once per minute per site regardless of how many events occurred, and
+  the suppression leaves no trace. Any number derived from the journal undercounts by construction, and
+  the undercount is invisible: a link that sent 40 records in a minute writes one line and reads the same
+  as a link that sent one.
+- Why it hurts at range: at range the interesting quantity *is* the rate. The ledger's A-102/A-108
+  conclusion ("an attach costs 18–27 transmissions") had to be derived from code and arithmetic because
+  the journal cannot count transmissions at all; with this rule in place it never could.
+- Proposed fix (NOT applied): keep the rate limit and put the count in the surviving line —
+  `… (37 since 12:04, 12 suppressed)` — which needs one counter per slot and costs nothing else. That
+  makes every rate-limited line a sample *and* a census, which is what an investigation needs from it.
+- Open questions: whether the slots should key on a tuple (site, peer, carrier) rather than a bare
+  `Option<Instant>`, so a change of carrier is never suppressed by a previous carrier's line.
+- Investigator: measurement round · 2026-11-11
+
+### A-467 · measurement: nothing counts how many transmissions one record cost, which is the unit every fix is priced in · major
+
+- Evidence: `crates/session/src/arq.rs:331-341` — `Stats` counts `sent`, `retransmits`,
+  `fast_retransmits`, `delivered_bytes`, `duplicates`, `out_of_window`, `bad_acks`, `budget_stalls`,
+  all **aggregate**; the per-record state (`inflight` entries with `attempts`, `sent_at`, `refused`) is
+  internal and dropped when the record is acknowledged. The daemon publishes the aggregates
+  (`crates/daemon/src/mesh_session.rs:42-80`), and the phone sees none of them (A-460's ABI note).
+- Finding: the cost of one unit of work — "this paste, this screen, this attach, in transmissions" — is
+  not recorded anywhere, although the ARQ knows it exactly for every record it sends (`attempts` per
+  in-flight record) and then forgets it on ack. Every proposed fix in the Register is priced by
+  multiplying records by a formula; none can be checked after the fact.
+- Why it hurts at range: airtime is the scarce resource and "transmissions per record" is its exchange
+  rate. When A-80 makes a record retransmit 15–20 times, the journal shows one "sent" counter rising; it
+  cannot show that a single 143-byte record consumed 20 transmissions, which is the fact that makes the
+  bug expensive rather than merely wrong.
+- Proposed fix (NOT applied): in `Session::poll`'s ack path, when an in-flight record is retired, fold
+  `attempts` into a small histogram in `Stats` (`attempts_1`, `attempts_2_3`, `attempts_4_8`, `attempts_9p`)
+  and keep `max_attempts` and `worst_seq`. That is four `u32`s, published in `SessionSnapshot` and
+  printed as one line: `attempts  118 of 131 records first try, 9 took 2–3, 4 took 9+ (worst 19)`.
+- Open questions: whether the histogram should be per shell (the bridge knows the shell, the ARQ does not
+  carry it in `Outgoing`), which matters when one shell is the busy one.
+- Investigator: measurement round · 2026-11-11
+
+### A-468 · measurement: the phone already owns a measured-RTT adaptive policy that the radio path never feeds · major
+
+- Evidence: `packages/mobile/composeApp/src/commonMain/kotlin/io/ldmux/mobile/FramePacing.kt:43`, `:81`,
+  `:89-108` — a smoothed-RTT estimator with hysteresis (`PREDICT_ON_MS` / `PREDICT_OFF_MS`,
+  `SLOW_ON_MS` / `SLOW_OFF_MS`), a repaint interval derived as `RTT/2`, and a predictive-echo gate; tested
+  at `androidUnitTest/.../FramePacingTest.kt`. It is fed by the tailnet path only:
+  `TerminalController.kt:64` (`private val pacing = FramePacing()`), `:207`
+  (`attach.onRtt = { sample -> … pacing.onRttSample(sample) }`), with the sample measured by an
+  application-level ping inside the same socket the output travels on
+  (`AttachClient.kt:462-470`). Grepping `pacing|FramePacing|predict` under `.../mesh/` yields only
+  `MeshRoute.kt:131`, a comment saying the UI should **not** carry radio knowledge.
+- Finding: the project already built — and tested — exactly the machinery the radio path lacks: a measured
+  round trip, hysteresis so it cannot flap, a cadence derived from it, and a predictive echo switched on
+  *only* when the measurement says the link is slow. None of it is connected to the mesh transport, whose
+  equivalent measurements exist independently (A-460's `srtt`, A-462's per-record SNR) and are discarded.
+- Why it hurts at range: the radio path currently applies flat guesses where this class exists: the
+  verdict fires at 30 s regardless of the link (A-280), echo is never predictive (A-160), and the repaint
+  cadence has no relationship to the measured round trip. At 13–64 s per echo, "predictive echo when the
+  measured RTT crosses a threshold" is not a nicety — it is the difference between a terminal and a
+  screenshot viewer.
+- Proposed fix (NOT applied): make the mesh driver feed the same `FramePacing` — sample from `srtt` on ack
+  (A-460's ABI call) rather than from a ping, since the ARQ's ack *is* the ping and costs no airtime — and
+  let the existing hysteresis decide predictive echo and cadence. Nothing new is designed; one existing,
+  tested class is wired to the second transport.
+- Open questions: whether `FramePacing`'s thresholds (tuned for a WebSocket/Tailscale RTT of tens to
+  hundreds of ms) need a second calibration for a 13 000 ms link, or whether the clamps already compose —
+  worth a unit test with a 13 s sample before trusting it.
+- Investigator: measurement round · 2026-11-11
+
+### A-469 · measurement: what can be settled on a bench, and what still needs a field trip · question
+
+- Evidence: the ledger's number table (`docs/RADIO-AUDIT-LOOP.md`, "Numbers every later round should
+  reuse") is entirely arithmetic from firmware formulas and code paths; the field readings that do exist
+  are summaries (`mesh heard … −121 dBm`, `snr −4.75 dB`) with no series behind them (A-462). The
+  mechanisms to change that are named in A-460…A-465; the hardware available is one host radio and one
+  phone radio (`docs/MESH-RADIO-CONSIDERATIONS.md` §1, §2).
+- Finding: the boundary between "bench" and "range" is sharper than it looks, and nothing in the ledger
+  has drawn it. Setting the two apart decides which of the fifteen Register items can be verified before
+  anyone leaves the house.
+  - **Bench, one radio plus the host:** per-record airtime against `STATS_RADIO` deltas (A-464);
+    `time_on_air_ms`'s preamble and low-data-rate terms; serial resync after a deliberately truncated
+    write (A-400); whether `RESP_CODE_SENT`'s byte 1 carries the route used (A-384); how many copies of a
+    flood record reach a receiver with no repeater in between (A-20's premise).
+  - **Bench, two radios in range of each other (no repeaters):** direct versus flood timing at zero
+    hops — which isolates the receiver's own decode and the firmware's own deferral from any repeater's
+    hold (A-41); whether a flood's copies arrive spaced or queued (A-29); whether the SNR byte describes
+    the last hop or the origin.
+  - **Range only:** link margin at a given distance (A-40); how many repeaters a flood actually crosses
+    here (A-60); whether the local repeaters apply a scope or an unscoped cap; the 2.70 s-per-hop hold,
+    which depends on the city's `txdelay` and tier settings; and every user-facing duration in A-160,
+    A-280, A-420.
+  - **Neither, without code:** transmissions-per-record (A-467), `srtt` in production (A-460), and the
+    83–85 % dead-screen window (A-280), which is a UI decision and can be settled by reading.
+- Why it hurts at range: a field trip is the most expensive measurement instrument this project has, and
+  the ledger's airtime and timing numbers are used to justify every proposed fix. Three of the four
+  bench-able questions above would pin the constants that all of them rest on.
+- Proposed fix (NOT applied): none — this entry exists so the next round does not spend a trip on
+  something a bench answers, and so the Register's fixes can name which verification they need.
+- Open questions: whether the phone's radio can be put in a receive-only, logging configuration while the
+  host transmits (which would make the second-radio bench cheap), and whether a second host radio is
+  available at all.
+- Investigator: measurement round · 2026-11-11
