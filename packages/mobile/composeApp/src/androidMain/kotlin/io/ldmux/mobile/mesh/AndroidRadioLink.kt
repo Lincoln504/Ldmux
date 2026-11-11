@@ -996,34 +996,45 @@ class AndroidRadioLink(
         val floodWanted = !sessionUp && directSilent && floodTokens > 0
         if (floodWanted && s.canSendRaw()) {
             lastFloodAt = floodNow
-            floodTokens--
             val own = radioPublicKey
             val key = hostKey.takeIf { it.size == 32 }
             if (own != null && key != null) {
-                val nonce = ByteArray(4).also { kotlin.random.Random.nextBytes(it) }
-                RadioRoute.recordFlood(
-                    currentPreset().pathHashSize,
-                    key,
-                    own,
-                    scopeKey,
-                    nonce,
-                    record,
-                )?.let { packet ->
+                // **A long packet at the margin needs repeats more than a short one does.** Measured
+                // 2026-11-10: the phone's route request (48 bytes) crossed two repeaters while its
+                // handshake record (133 bytes, about four times the airtime) has never been heard.
+                // Four times the exposure to a fade is four times the chance of a dropped symbol, so
+                // the record goes out as a short burst — a different wrapper nonce each time, because
+                // MeshCore's duplicate filter would swallow an identical repeat at the first repeater.
+                var accepted = false
+                for (copy in 0 until RECORD_FLOOD_COPIES) {
+                    if (floodTokens <= 0) break
+                    if (copy > 0) delay(requestCopyDelayMs(currentPreset()))
+                    val nonce = ByteArray(4).also { kotlin.random.Random.nextBytes(it) }
+                    val packet = RadioRoute.recordFlood(
+                        currentPreset().pathHashSize,
+                        key,
+                        own,
+                        scopeKey,
+                        nonce,
+                        record,
+                    ) ?: break
+                    floodTokens--
                     val answer = CompletableDeferred<RadioSendResult>()
                     val callback = RawSendCallback { ok, errorCode ->
                         answer.complete(if (ok) RadioSendResult.Accepted else errorFor(errorCode))
                     }
                     val queued = runCatching { s.sendRawPacket(0, packet, callback) }.getOrDefault(false)
-                    if (queued) {
-                        val result = withTimeoutOrNull(SEND_TIMEOUT_MS) { answer.await() }
-                        recordAirtime(packet.size + 3)
-                        appLog(
-                            "mesh record by flood: ${result ?: RadioSendResult.Failed} · " +
-                                "${packet.size} B · dest ${packet.getOrNull(2)?.toInt()?.and(0xFF)}",
-                        )
-                        return result ?: RadioSendResult.Failed
-                    }
+                    if (!queued) break
+                    val result = withTimeoutOrNull(SEND_TIMEOUT_MS) { answer.await() }
+                    recordAirtime(packet.size + 3)
+                    appLog(
+                        "mesh record by flood ${copy + 1}/$RECORD_FLOOD_COPIES: " +
+                            "${result ?: RadioSendResult.Failed} · ${packet.size} B · " +
+                            "dest ${packet.getOrNull(2)?.toInt()?.and(0xFF)}",
+                    )
+                    if (result == RadioSendResult.Accepted) accepted = true else break
                 }
+                return if (accepted) RadioSendResult.Accepted else RadioSendResult.Failed
             }
         }
         // One immutable path read for this send, including the packet build.
@@ -1992,6 +2003,16 @@ class AndroidRadioLink(
      * bucket refills at [floodIntervalMs] and no more.
      */
     const val FLOOD_BURST = 4
+
+    /**
+     * Copies of one record sent by flood.
+     *
+     * A handshake record is ~133 bytes and about 500 ms of air; a route request is 48 bytes and a
+     * fifth of that. At the margin the short one crosses and the long one does not, so the long one is
+     * repeated — the airtime is only spent while no session exists, which is exactly when the
+     * alternative is nothing at all.
+     */
+    const val RECORD_FLOOD_COPIES = 3
 
         /**
          * The least time between two adverts sent because there is no route.
