@@ -608,6 +608,9 @@ class MeshTermDriver(
     var rejectedRecords = 0
         private set
 
+    /** Handshake records that arrived with no handshake pending: surplus copies, not faults. */
+    private var staleHandshakeRecords = 0
+
     /** What the radio answered to the last record it was handed. */
     var lastSendOutcome: MeshSendOutcome? = null
         private set
@@ -942,6 +945,22 @@ class MeshTermDriver(
             return@withLock
         }
         val s = session ?: return@withLock
+        // **Not every record on the air is a transport record.** A handshake answer that arrives
+        // after this end has already established one — a surplus copy of `msg2`, or a reply to a
+        // handshake that was abandoned — carries a different kind byte, and feeding it to the session
+        // turned it into a `malformed` rejection on a perfectly healthy link. Measured 2026-11-10:
+        // six such rejections in ten seconds while the session was up and carrying.
+        if (record.isNotEmpty() && isHandshakeKind(record[0])) {
+            // A pending handshake would have been consumed above, so anything here is stale.
+            staleHandshakeRecords++
+            if (staleHandshakeRecords == 1 || staleHandshakeRecords % 8 == 0) {
+                appLog(
+                    "mesh stale handshake record (kind ${record[0]}) ignored, " +
+                        "$staleHandshakeRecords so far",
+                )
+            }
+            return@withLock
+        }
         when (val r = s.receive(clock(), record)) {
             Received.Quiet -> {}
             is Received.Rejected -> {
@@ -2538,6 +2557,20 @@ internal fun rejectReason(code: Int): String = when (code) {
     SessionLib.ERR_TOO_LONG -> "longer than this route's record"
     SessionLib.ERR_MALFORMED -> "malformed"
     else -> "code $code"
+}
+
+/**
+ * The record kind of a sealed transport record (`KIND_TRANSPORT`, `crates/session/src/record.rs`).
+ *
+ * A handshake record carries a different kind. The link sees both because a handshake answer and a
+ * transport record arrive on the same carrier, so the kind byte is what decides which side reads it.
+ */
+internal const val KIND_TRANSPORT: Byte = 0x13
+
+/** The handshake record kinds (`crates/session/src/handshake.rs`): msg1 and msg2. */
+internal fun isHandshakeKind(kind: Byte): Boolean {
+    val k = kind.toInt() and 0xFF
+    return k == 0x11 || k == 0x12
 }
 
 /**

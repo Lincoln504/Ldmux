@@ -262,6 +262,24 @@ class MeshTermDriverTest {
         assertTrue(gw.routeRefreshes > asks, "a route request went out, and a request is a flood")
     }
 
+    /// **A surplus handshake answer is ignored, not counted as a corrupt session.**
+    ///
+    /// The link answers with up to three copies of `msg2`, and a copy that arrives after this end has
+    /// established is a handshake record with a handshake kind — feeding it to the session turned a
+    /// healthy link into `malformed` rejections (six in ten seconds, measured 2026-11-10).
+    @Test
+    fun a_surplus_handshake_answer_is_ignored_not_rejected(): Unit = runBlocking {
+        val d = driver()
+        gw.routeHops = 0
+        d.start()
+        // Complete the handshake the way the wire does: a record whose kind is msg2 opens it.
+        d.onRecord(byteArrayOf(0x12, 0x00, 0x01))
+        val before = d.rejectedRecords
+        // A second copy arrives with no handshake pending: stale, not malformed.
+        d.onRecord(byteArrayOf(0x12, 0x00, 0x02))
+        assertEquals(before, d.rejectedRecords, "a stale handshake copy is not a session rejection")
+    }
+
     /// **A record sent by flood is timed against the mesh, not against one hop.**
     ///
     /// With no route the session was told "one hop", so its first retransmission fired after about
