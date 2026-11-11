@@ -1377,7 +1377,15 @@ fn serve_loop<L: ByteLink>(
                 // count, so a working neighbour never pays for a flood.
                 let want_flood =
                     peer_path.is_none() || path_stale || direct_silent || answer_flood_with_flood;
-                let flood_when_pathless = want_flood && pathless_directs > 0;
+                // **A flood is answered by a flood at once, not on a second attempt.** The phone
+                // re-sends its handshake every few seconds, and each arrival replaces the session and
+                // discards the pending reply — so a rule that waits for one direct attempt to fail
+                // never reaches its second attempt at all. Measured 2026-11-10: the phone's msg1
+                // crossed eight repeaters and arrived, the direct reply died on the way back, and the
+                // next msg1 discarded it before the escalation could fire.
+                let flood_now = answer_flood_with_flood
+                    || (want_flood && pathless_directs > 0);
+                let flood_when_pathless = flood_now;
                 // **Two seconds, not ten.** The firmware acknowledges `SEND_RAW_PACKET` *before* it
                 // transmits (`MyMesh.cpp:2003-2016`), so a 10-second wait bought nothing on a busy
                 // channel and meant one stalled radio held the command queue — and the route
