@@ -2341,3 +2341,282 @@ Recommended next step: the parent appends these to `docs/RADIO-AUDIT-LOOP.md`, t
 - Proposed fix (NOT applied): make the reopen honest — a deliberate line-level reset (DTR/RTS sequence, then a boot delay) so the firmware starts clean, followed by verifying `app_start` and `device_query` before publishing `radio_state: connected`. That turns "sometimes helps" into a defined recovery.
 - Open questions: which of the four survive a line reset (the ROM-side and parser ones should not, which would make a reset a real cure — worth one bench confirmation); whether `_cli_rescue` is reachable from the companion port at all or only from the CLI UART; and whether a reset momentarily removes the tty, which the supervisor would see as a hang-up and treat as a plain reconnect.
 - Investigator: device round · 2026-11-11
+
+## Round: a day in the life of a range user
+
+### The timeline, reconstructed from the field logs
+
+Reconstructed from `journalctl --user -u ldmux` for 2026-11-10 and the phone's own durable log lines
+(quoted in the session record and in the entries below). Times are real; costs are derived from the
+Register's number table and the firmware's forwarding rules.
+
+| time | the person | the code | cost at 14 hops | what they see |
+|---|---|---|---|---|
+| 18:26:22 | opens the app | BLE connect, contacts dump, settle, `DeviceInfo`, `refreshRoute`, `msg1` | 5–8 s bring-up (≤30 s bonded, ≤75 s unbonded) | "starting" |
+| 18:26:22.9 | — | tailnet WebSocket answers first | 0.7 s | shell list, "attached" |
+| 18:26:28 | taps a shell | `Attach` → `Profile` → `Rows`+`Commit` | ≈14 s direct, ≈92 s flooded | "asking host for the shell" |
+| 18:38–18:46 | stands still, waits | ladder rungs at 8 s + 2 s/hop | rung 36 s, budget 372 s | "handshaking · 19 s", then the static verdict |
+| 18:42:26 | switches to look at the phone | tailnet reconnects, attaches | 0.4 s | a live shell — over the tailnet, drawn as a radio link |
+| 19:07–19:09 | walks out | requests adopted at 21 and 30 hops; `ignored for routing: the peer is pinned` | airtime, no session | "handshaking" |
+| 20:45:31 | sits down somewhere new | radio session up at **17 hops** | — | — |
+| 20:45:32 | — | tailnet WebSocket opens; the attach completes in **6 s** | 0.4 s, not 92 s | "attached" — believed to be the radio |
+| 22:13:13 | comes home | advert at 0 hops, −32 dBm | — | — |
+| 22:13:26 | — | `session replaced after 5443s (… replayed or out-of-order timestamp)` | — | "handshaking" |
+| 22:18–22:22 | walks out again, then switches back twice | `handshake 1/3`, `2/3`, then `0/3` after a rebuild; 3 copies of 133 B per rung; `no path (broadcast, one hop)` | ≈1.5 s own air + ≈20 s of repeater air per rung | "handshaking", then the static verdict for the remaining 85 % |
+
+### What each step costs, at 14 hops, with a healthy direct path and no loss
+
+- **One crossing**: `hops × airtime` = 14 × 490 ms ≈ **6.9 s** (a direct packet is processed
+  immediately at each repeater — `filter-firmware/src/Dispatcher.cpp:249-252`).
+- **A flooded crossing**: 14 × (2.77 s hold + 0.49 s air) ≈ **46 s** one way
+  (`Dispatcher.cpp:55-57`, `:243-248`).
+- Cold start to a bound radio: **5–8 s**.
+- Handshake: **≈14 s** (one lost copy: +36 s; a full ladder: 372 s).
+- Shell list: **≈15 s**. Attach + profile: **≈14 s**. First full screen (3 framed records): **≈8 s**.
+- **First usable prompt: ≈56–81 s** direct; **≈5–8 minutes** over floods.
+- One keystroke round trip: **≈14 s** direct, **≈92 s** flooded.
+- One shell switch: **≈36 s** direct. One drop-and-return: **≈40 s** direct.
+
+### The three steps that remain unacceptable after every fix in the Register
+
+1. **Typing.** A 14 s round trip per keystroke is the medium, not a bug: character-at-a-time
+   interaction cannot work, and no item in the Register changes it. See A-426.
+2. **The count of round trips per shell open.** Four sequential exchanges are the floor of the
+   current shape (handshake, list, attach/profile, screen). The Register lowers each one's *risk*;
+   none lowers the *count*. See A-426.
+3. **Recovering from a drop.** At range a drop is routine, and the code that promises to give the
+   person their place back is inert: every rebuild lands on the launcher. See A-420.
+
+### A-420 · journey: the resume selector is never populated, so every drop lands on the launcher · blocker
+
+- Evidence: `packages/mobile/composeApp/src/commonMain/kotlin/io/ldmux/mobile/mesh/MeshTerminalScreen.kt:256`
+  (`var resumeShell by remember(plan) { mutableStateOf("") }`), `:263` (passed to
+  `MeshRadioConnection(link, plan.creds, plan.lib, resumeShell, …)`), `:342` (`resumeShell = ""` before
+  `attempt += 1` on every rebuild), `:914` and `:974` (the other two writes, both clearing),
+  `:1017` (`holding = … && resumeShell.isNotEmpty()`), `:1129` (`key = resumeShell`);
+  `Radio.kt:622-626` (the value becomes the connection's initial `selector`). `rg -n "resumeShell"
+  MeshTerminalScreen.kt` returns seven lines and **not one of them assigns a shell id.**
+- Finding: the "come back to the same shell" mechanism is inert. `resumeShell` is declared empty,
+  cleared on every rebuild, clear on entering the list and on a closed shell, and never set from
+  `attachedId` or the driver's live shell. So the connection is always built with an empty selector,
+  `holding` can never be true, and the `key` is always "". The comments at `:250-256` ("a drop costs
+  the user a pause, not their place") and `:378` describe behaviour that cannot occur, while `:338-344`
+  does the opposite on purpose ("lands on the shell list… `resumeShell = ""`"). Two intents, one dead
+  variable, and the dead one is the one the person was promised.
+- Why it hurts at range: a drop is the normal event at range, not the exception (A-200, A-20, A-80).
+  Each one now costs a list round trip, then an attach, then a profile, then a full screen: ≈40 s
+  direct, several minutes over floods, and the person must find their shell again in a list that may
+  itself be a merged run (A-100). The one recovery path the product advertises is the one that does
+  not exist.
+- Proposed fix (NOT applied): set `resumeShell` wherever a shell becomes the attached one — in the
+  `onOpen`/attach success path and from `driver.attachedShell` when the view goes `Live` — and delete
+  whichever of the two contradictory intentions is wrong at `:342`. If landing on the list is the
+  decision, say so and remove the dead state, the `holding` computation and the `key`.
+- Open questions: whether the tailnet screen has the working equivalent (the mesh one may have lost
+  the assignment in the ADR-0025 port); whether resuming should also restore the scroll position
+  (A-328 says rotation discards it).
+- Investigator: journey round · 2026-11-11
+
+### A-421 · journey: the host adopts a cached path with no age bound, so it times a 14-hop link as one hop · blocker
+
+- Evidence: `crates/daemon/src/mesh_serial.rs:570` (`let age = unix_now().saturating_sub(u64::from(path.received_at))`),
+  `:574-578` (`plausible` = the stamp is within **24 h**; `heard = Instant::now() - age`),
+  `:579-584` (`prefer_route(...)` then `*peer_path = Some(candidate)`), `:595` (`route_log("cache answer hops={} age={age}s")`).
+  Journal 2026-11-10: `22:21:40 route cache answer hops=0 age=506s`, `22:23:40 … age=626s`,
+  `22:20:44 route request … hops=16 (adopted)`, `22:21:20 … hops=1 (adopted)`, `22:21:42 … hops=1 (adopted)`.
+- Finding: the host's route for the phone comes from the radio's advert-path cache, and the only age
+  test is "implausible" (>24 h). An entry heard **8.4 minutes** earlier, at **zero hops**, is adopted
+  as the peer's path. At 22:21:40 the phone was 16 hops away and the host took a 0-hop path for it.
+  That path then sets the session's hop count (`:1877-1881`, ledger A-80) and therefore the
+  retransmission timer, and it is the path direct records are sent down.
+- Why it hurts at range: this manufactures exactly the state the Register blames A-80 and A-340 for
+  — a link that is 14–17 hops being timed and addressed as a neighbour — and it does so with no
+  packet loss involved. The advert that would have corrected it cannot arrive: adverts die past
+  `flood.max.advert` (A-60), so the cache holds the last one it heard, which is the one from home.
+  A range user therefore gets a *shorter and shorter* path the longer they are away.
+- Proposed fix (NOT applied): bound the age of a cache answer by what the route is used for — adopt
+  `hops` from a cached entry only while it is inside `route_stale(hops)` (the same bound used
+  everywhere else), otherwise keep the entry as a *fallback* for a direct attempt but never let it
+  set the session's hop count. The timer must come from traffic (A-80), never from the cache.
+- Open questions: whether `PeerPath::reversed` on a 0-hop entry is even a usable path (it is the
+  broadcast case); whether the host should refuse to answer a route request from a cache entry older
+  than the phone's own advert interval (60 s).
+- Investigator: journey round · 2026-11-11
+
+### A-422 · journey: the two counters the screen promises never reset are reset by every rebuild · major
+
+- Evidence: `MeshTerminalScreen.kt:185-204` (the ladder "keeps climbing and it never stops", give-up
+  after `LINK_GIVE_UP_MS`), `:206` (`LINK_GIVE_UP_MS = 10 * 60_000`), `:326-344` (on the cap:
+  `showList = true; resumeShell = ""; attempt += 1`), `:438` (`attemptNo by conn.driver.attempt`),
+  `:1474` (`WaitingLine(waiting, attemptNo) { conn.driver.linkEffort() }`);
+  `MeshTermDriver.kt:629` (`attemptsThisLink = 0` inside `start()` — a new driver means a new
+  connection, `MeshTerminalScreen.kt:263`), `:418` (`linkEffort()` reads those fields), `:2536`
+  (`linkEffortLine`). Phone log 2026-11-10: `22:18:33.995 mesh handshake 1/3`,
+  `22:18:55.389 mesh handshake 2/3`, then `22:22:13.475 mesh handshake 0/3` — the handshake number
+  and the rung count both went back to their first value after a rebuild.
+- Finding: the screen shows two numbers: the age of the current attempt ("seconds") and the effort
+  that "does not reset" (`tries · route requests, (no) answer from the mesh`). The effort lives in the
+  driver, and a rebuild replaces the driver, so the effort resets exactly when the link has been down
+  long enough for the person to be watching it. The field log shows the handshake counter going from
+  2/3 to 0/3 in the same window in which the person reported "it counts and then goes back to zero".
+  The one number designed to be trustworthy is the one that is not.
+- Why it hurts at range: the person's only evidence of progress is these counters, and at range the
+  rebuild ladder (2 s doubling to 30 s, full jitter — `:315-330`) fires constantly. The screen
+  therefore restarts its story every few seconds while the mesh has, in fact, been answering and not
+  answering in a stable pattern. That is the difference between "the host is not there" and "the host
+  is there and slow", which is the only question worth answering at range.
+- Proposed fix (NOT applied): hold the effort above the connection — hoist `attemptsThisLink`,
+  `blindAsks` and `routeAnsweredThisLink` into a `remember(plan)` holder passed into each new driver,
+  cleared only when the operator asks (`attach`) — and print the rebuild count (`rebuilds`) beside it
+  so a restart of the story is visibly a restart.
+- Open questions: whether the seconds-and-effort line should survive a *route* change (A-200) as well,
+  or reset because the medium changed.
+- Investigator: journey round · 2026-11-11
+
+### A-423 · journey: nothing on either end ever says which transport carried a step · major
+
+- Evidence: host journal 2026-11-10 `20:45:32 remote: connection from 100.120.129.96:40718 (permessage-deflate)`
+  and `20:45:35 … :40730`, while the radio session was up at 17 hops (`route flooded record 40 B from a
+  14 hop chain`, `20:45:41`); phone log `20:45:31.718 sessions parsed=13 attachable=13`,
+  `20:45:34.877 page 212d480f32: connected, attaching (take over)`, `20:45:35.354 page …: attached`;
+  `MeshTermDriver.kt:712` (the only line naming a carrier, and it names it for the *handshake*);
+  `AndroidRadioLink.kt` logs the carrier for flooded sends only (`mesh record by flood N/3`).
+- Finding: an attach that completes in **6 s** cannot be the radio (a list answer alone is ≈15 s direct
+  and minutes flooded), and no line on either end says "this went over the tailnet". The person
+  concluded "it worked over LoRa"; the analyst reading both logs cannot tell either, because the
+  transport names are only printed for *connects*, not for *steps*. There is no transport field in the
+  view state, the notification, the header, or the durable log.
+- Why it hurts at range: every range conclusion drawn from a session is unfalsifiable, and the two
+  transports have costs three orders of magnitude apart. The Register's A-200 says switching routes
+  tears the radio down; this is the mirror case — the tailnet silently taking over while the radio
+  session stays up — and together they mean the person cannot know what they are testing.
+- Proposed fix (NOT applied): one line when a connection is built, naming the chosen transport and why
+  ("mesh transport: radio — no tailnet route" / "mesh transport: tailnet"), tagged onto every durable
+  log line as a one-letter prefix, plus a glyph in the header. The decision is already made in one
+  place (`meshScreenFor`); it only has to be said.
+- Open questions: whether the app prefers the tailnet when both are available (the 20:45 evidence says
+  it does, and that is the right choice, but nothing states it); whether a radio session should be torn
+  down when the tailnet takes over (that is A-200's cost, seen from the other side).
+- Investigator: journey round · 2026-11-11
+
+### A-424 · journey: waiting out of range spends the mesh's airtime for ten minutes, and there is no way to stop it · major
+
+- Evidence: `MeshTerminalScreen.kt:206` (`LINK_GIVE_UP_MS = 10 * 60_000`), `:315-330` (full jitter
+  under `rebuildCapMs`, so a rebuild every 2–30 s), `:296-310` (only `NeedsRadio`/`NeedsPermission`
+  stop the loop), `:926-928` (the notification's Disconnect is the only stop, and it is not on the
+  terminal page). Phone log 2026-11-10, four minutes out of range: `22:18:29.158 mesh route request
+  (unscoped) x3` · `22:18:34.103–35.159 3 × 133 B` · `22:18:51.178 x3` · `22:18:55.498–56.518 3 × 133 B`
+  · `22:22:02.548 x3` · `22:22:13.589–14.609 3 × 133 B` · `22:22:21.641 mesh advert sent (flood)` ·
+  `22:22:23.008 x3`.
+- Finding: the default behaviour when out of range is a ten-minute ladder of rebuilds, each of which
+  reconnects the radio, asks for a route and sends a handshake, and every one of those records is a
+  flood with three copies. Four measured minutes cost the phone ≈7 s of its own transmit time and, by
+  the Register's numbers (14 repeaters × 490 ms per 133 B copy × 3 copies ≈ 20.6 s per rung), roughly
+  **80 s of aggregate repeater airtime** on a shared band — for a link that was never going to form.
+- Why it hurts at range: the person's own device is the least appropriate thing on that band to spend
+  it, and it spends it automatically, for ten minutes, invisibly, every time the phone is out of range
+  with the app open. On a duty-cycled band this is also their own allowance (A-425's neighbour): 36 s
+  an hour in the 868 sub-band.
+- Proposed fix (NOT applied): make the ladder's cost visible and bounded — print the rebuild count and
+  the airtime spent in the waiting line (the meter already exists, `MeshRouteSection.kt:396-403`),
+  stretch the cap after the first two failures (a `rebuildCapMs` that follows the route, not a flat
+  30 s), and put a "stop trying" control on the terminal page that is the same action as the
+  notification's Disconnect.
+- Open questions: whether a rebuild should re-send the handshake at all within the same minute when the
+  previous rung produced no answer (the ladder inside the driver already covers that interval).
+- Investigator: journey round · 2026-11-11
+
+### A-425 · journey: the grid debounce is tuned to the keyboard animation, not to the link · major
+
+- Evidence: `MeshTerminalScreen.kt:132-140` (`GRID_SETTLE_MS = 250`, "long enough to outlast the
+  keyboard animation (≈200 ms on the devices measured)"), `:899-906` and `:1255-1260` (both paths
+  debounce by it); phone log `20:45:34.718 grid 46x38 (asked 46 x 38)` and `20:45:35.423 grid 46x21
+  (asked 46 x 21)` — **705 ms apart**, so both survive the 250 ms debounce.
+- Finding: the debounce exists to coalesce the keyboard's animation, and 250 ms is right for a link
+  where a record is 490 ms of air and an answer is 14 s away it is not: two grid changes 700 ms apart
+  both go out, and each one costs a `Resize` record, a new `Profile` answer and a full screen. The
+  measured pair is exactly the keyboard opening on the first attach — the moment the person is
+  waiting for their first prompt.
+- Why it hurts at range: the first interaction of the session carries ≈2 extra round trips (≈44 s
+  direct, minutes flooded) for a whitespace change the person did not ask for, and the screen shows
+  "asking host for the shell" throughout. It also spends the airtime twice for one layout.
+- Proposed fix (NOT applied): debounce against the link, not the animation — hold a `Resize` until the
+  answer to the in-flight `Attach`/`Resize` has arrived (the driver already knows: `pick`/`profile`
+  pending), and coalesce to the last measured grid at that moment. A single settle of
+  `answerDeadlineMs(GRID_SETTLE_MS, hops)` collapses the pair at 14 hops.
+- Open questions: whether a rotate at range should defer the resize until the next keystroke instead
+  (the pty can stay at the old width for one interaction).
+- Investigator: journey round · 2026-11-11
+
+### A-426 · journey: the floor is four sequential round trips, and no Register item reduces the count · major
+
+- Evidence: `MeshTermDriver.kt:639` (`connect`), `:700-716` (hint, then `msg1`), `:1461-1475` and
+  `:1428-1455` (a list request per launcher visit), `:1298-1320` (`setGrid` → new `Profile`),
+  `Radio.kt:640-660` (attach selector → `Attach`), `:1055-1070` (first paint after `Commit`);
+  Register A-102/A-108 (cost *within* one exchange), A-140 (compression), A-160 (echo), A-320/A-327
+  (per-shell mirror). Numbers from the Register's table: a direct crossing at 14 hops ≈ 6.9 s, a
+  flooded one ≈ 46 s.
+- Finding: opening a shell is four sequential exchanges — handshake, list, attach+profile, first
+  screen — and each one waits for the previous answer. With a healthy direct path that is ≈42 s; over
+  floods it is ≈3 minutes; the measured minimum with bring-up is 56–81 s. Every Register item makes an
+  exchange *cheaper or safer* (fewer transmissions, fewer floods, a working echo, a mirror), and none
+  of them reduces the **number** of exchanges, which is what sets the floor.
+- Why it hurts at range: this is the price of the first useful second, paid on every reconnect
+  (A-200, A-420) and on every shell switch. A product whose happy path is a minute of waiting before
+  the first character is not usable for the thing a terminal is for.
+- Proposed fix (NOT applied): merge the exchanges, in three separable steps: (1) let `Attach` carry
+  the grid and the previous selector so an attach answers with `Profile` **and** the first screen in
+  one reply (the host already has both); (2) remember the last list per session on the phone and show
+  it while one refresh runs in the background, so the launcher is not a round trip; (3) make the
+  handshake's answer optionally carry the shell list, which removes the list exchange entirely on the
+  common path.
+- Open questions: whether (3) is a wire change that fits the `features` gate; how much of the list is
+  worth carrying (8 pages of 806 B is not, but the *names* of five shells is).
+- Investigator: journey round · 2026-11-11
+
+### A-427 · journey: the one line the operator reads at the failing step says the opposite of what the phone does · minor
+
+- Evidence: `MeshTermDriver.kt:707-712` — the per-attempt line ends
+  `gateway.routeHops?.let { "$it hop(s)" } ?: "no path (broadcast, one hop)"`. Phone log
+  2026-11-10: `22:22:13.475 mesh handshake 0/3 on no path (broadcast, one hop)` immediately followed by
+  `22:22:13.589 mesh record by flood 1/3: Accepted · 133 B · dest 97` (and the same pair at
+  `22:18:33.995` / `22:18:34.103`).
+- Finding: with no route the record is not a one-hop broadcast — since the flood carrier (ADR-0037) it
+  rides a flood, and the phone logs that two lines later. The comment above the line justifies the
+  wording with the pre-flood world ("a direct packet … reaches one hop and stops"), and the host's log
+  in the same window proves the flood crossed (`flooded record 121 B from a 6 hop chain`, `18:30:09`).
+- Why it hurts at range: this is the line the operator and the analyst read at exactly the step that
+  fails, and it names the wrong carrier. The person's own durable log therefore argues that the record
+  could not go anywhere, when the record did go — and the reason for the failure (A-421, A-240) is
+  somewhere else entirely.
+- Proposed fix (NOT applied): say what happens — `no route: sending by flood (3 copies)` — and add the
+  distance actually heard (`heard N hops`) to the same line, so the log states the medium instead of
+  the intent.
+- Open questions: whether the same line should say which carrier the *previous* attempt used when it is
+  a re-ask.
+- Investigator: journey round · 2026-11-11
+
+### A-428 · journey: every rebuild pays for a contacts dump the terminal never uses · minor
+
+- Evidence: `packages/mobile/composeApp/src/androidMain/kotlin/io/ldmux/mobile/mesh/AndroidRadioLink.kt:811`
+  (`withTimeoutOrNull(CONTACT_WAIT_MS) { contact.await() }`), `:815` (`withTimeoutOrNull(COMMAND_SETTLE_MS)
+  { while (!s.isIdle()) delay(20) }`), `:818-822` (a still-busy session is closed and reported as "the
+  radio did not finish its contact query"), `:825` (battery request after the settle), `:1948`
+  (`CONTACT_WAIT_MS = 3_000`), `:2063` (`COMMAND_SETTLE_MS = 2_500`);
+  `MeshTerminalScreen.kt:326-344` (a rebuild is a whole new connection).
+- Finding: the link waits up to 5.5 s of serial round trips for a firmware contact dump before it will
+  send the first record, on the stated reason that the raw send must not race the one other command
+  the link issues. Nothing in the terminal path reads a contact; the host is reached by `RAW_CUSTOM`
+  and by the route request. At range, where rebuilds are frequent (A-424), this is paid repeatedly and
+  is indistinguishable from the link being slow.
+- Why it hurts at range: it is the first 5.5 s of every recovery, on top of the handshake, and it is
+  spent on traffic that does not carry a byte of the session. It also inflates the "starting" phase
+  that A-280 leaves unexplained.
+- Proposed fix (NOT applied): one question to answer first (below); the change itself is to skip the
+  contacts query when `setAutoDrain(false)` is set and nothing in the profile consumes contacts, and
+  rely on the session's own idle gate (`isIdle()`) before the first raw send.
+- Open questions: does the firmware require a contacts query before it will accept `CMD_SEND_RAW_DATA`
+  (some companion builds answer raw sends only after the queue has been drained once)? What fills
+  `radioPublicKey`/path width today — the contacts dump or `SELF_INFO`? Until that is settled this
+  entry stays a `minor` with a measurement attached.
+- Investigator: journey round · 2026-11-11
