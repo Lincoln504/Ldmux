@@ -705,7 +705,10 @@ class MeshTermDriver(
         // requests (floods, which cross anything) and not one handshake — and it is invisible from
         // either end without this line. The failure log keeps it.
         appLog(
-            "mesh handshake ${handshakeNo + 1}/$handshakeRetries on " +
+            // **One-based, and never above the limit.** `handshakeNo` counts re-asks and is clamped
+            // to the retry count, so printing `no + 1` produced `4/3` — a counter that reads as
+            // broken while the link is merely failing.
+            "mesh handshake ${handshakeNo.coerceAtMost(handshakeRetries)}/$handshakeRetries on " +
                 (gateway.routeHops?.let { "$it hop(s)" } ?: "no path (broadcast, one hop)"),
         )
         _view.value = MeshTermView.Handshaking

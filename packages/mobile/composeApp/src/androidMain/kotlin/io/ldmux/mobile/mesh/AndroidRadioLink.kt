@@ -973,7 +973,12 @@ class AndroidRadioLink(
         // one per fifteen seconds that is minutes for a repaint. A small token bucket gives a burst
         // (a batch gets four records away at once) and then refills at the paced rate, so a stream
         // of keystrokes still cannot flood the mesh and a burst still completes.
-        refillFloodBudget(floodNow)
+        // **The bucket paces data, never a handshake.** The ladder already decides how often a
+        // handshake is attempted (8, 16, 32 s), and the bucket's refill is derived from the mesh's
+        // measured reach — which at thirty-four hops is forty seconds a token. Measured 2026-11-10:
+        // a handshake sent `1/3` copies and then nothing, because the hint record before it had
+        // spent the bucket. Nothing about that protects the mesh; it only prevents the link forming.
+        if (sessionUp) refillFloodBudget(floodNow) else floodTokens = FLOOD_BURST
         // **Escalate on evidence, decay on evidence — never mirror the carrier.** A first attempt at
         // mirroring ("a record came by flood, so reply by flood") is a loop: each side hears a flood,
         // floods back, and neither ever sends direct again, because the only thing that would clear
@@ -1007,7 +1012,7 @@ class AndroidRadioLink(
                 // MeshCore's duplicate filter would swallow an identical repeat at the first repeater.
                 var accepted = false
                 for (copy in 0 until RECORD_FLOOD_COPIES) {
-                    if (floodTokens <= 0) break
+                    if (sessionUp && floodTokens <= 0) break
                     if (copy > 0) delay(requestCopyDelayMs(currentPreset()))
                     val nonce = ByteArray(4).also { kotlin.random.Random.nextBytes(it) }
                     val packet = RadioRoute.recordFlood(
@@ -1018,7 +1023,7 @@ class AndroidRadioLink(
                         nonce,
                         record,
                     ) ?: break
-                    floodTokens--
+                    if (sessionUp) floodTokens--
                     val answer = CompletableDeferred<RadioSendResult>()
                     val callback = RawSendCallback { ok, errorCode ->
                         answer.complete(if (ok) RadioSendResult.Accepted else errorFor(errorCode))

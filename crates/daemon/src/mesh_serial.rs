@@ -1321,6 +1321,7 @@ fn serve_loop<L: ByteLink>(
     // The last flooded-record route line, so a flood-only link does not write one per record.
     let mut last_flood_route_log: Option<Instant> = None;
     let mut last_flood_record_log: Option<Instant> = None;
+    let mut last_carrier_log: Option<Instant> = None;
     if events
         .blocking_send(Ok(Event::Limit {
             record_max: published_limit,
@@ -1483,6 +1484,15 @@ fn serve_loop<L: ByteLink>(
                     None => send_retrying(|d| companion.send_raw_within(hash_size, path, &record, d))
                         .map(|()| SendOutcome::SentDirect),
                 };
+                route_log_rare(
+                    &mut last_carrier_log,
+                    &format!(
+                        "record {n} B sent by {carrier} over {hops} hop(s)",
+                        n = record.len(),
+                        carrier = if flood_when_pathless { "flood" } else { "direct" },
+                        hops = peer_path.as_ref().map_or(0, |p| p.hops),
+                    ),
+                );
                 let outcome = match attempt {
                     Ok(kind) => {
                         if kind == SendOutcome::SentDirect && want_flood {
