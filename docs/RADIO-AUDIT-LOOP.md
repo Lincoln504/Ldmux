@@ -3220,3 +3220,62 @@ message, `:333`), **A-31** (persist with two `sync_all`s before the reply is que
 - **No lease machinery.** The conflict is a development-side collision, not a product requirement: Meshmore is a phone application that uses one radio at a time, and the desktop side only needs to take turns. Building `mesh.acquire`/`mesh.release` would be machinery around a development inconvenience.
 - **What the audit did establish, and what stands regardless:** the kernel already arbitrates the port (`flock` exclusive at `link.rs:158`, taken at `mesh_serial.rs:1070`), so ownership is defined but not *nameable*; and a SIGTERM can land mid-frame, which the firmware's unbounded length parser (A-400) turns into a wedged radio for the next owner. That is why a stop/start is not a neutral act, and why "wait" is the right answer for a dev collision but "never stop mid-transfer" is worth remembering.
 - **Field-data consequence:** a daemon restart resets `peer_path`/`proven`/`heard` (run-loop locals) so the next link starts on flood, and it re-sets the radio clock, so any measurement spanning a restart is confounded. Two stops were recorded in the same twelve hours as the range tests.
+
+## Bench radio ownership (M-1…M-8)
+
+Findings about the **LoRa bench tools** under `~/Documents/lora`, not about this repo. Recorded here because their symptoms were read as protocol failures.
+
+# Radio ownership: why the desktop work uses the Heltec, and where the conflict really is
+
+Read-only investigation, 2026-11-11. Evidence is `file:line` or a command output.
+
+### M-1 · which radios exist on this host, and which one the daemon owns · fact
+
+- Evidence: `lsusb` → `Bus 001 Device 021: ID 303a:1001 Espressif USB JTAG/serial debug unit` and no Seeed device present. `ls -l /dev/serial/by-id/` → exactly one entry: `usb-Espressif_USB_JTAG_serial_debug_unit_F8:5B:1B:BE:C5:3C-if00 -> ../../ttyACM0`. `fuser -v /dev/ttyACM0` → `ldeem 619161 F.... ldmuxd`.
+- Finding: **one radio is attached, and it is the Heltec** (`HELTEC-BASE`, ESP32-S3, USB VID:PID `303a:1001`). It is at `/dev/ttyACM0` and ldmux's daemon holds it. The Wio Tracker L1 is not plugged in at all (`~/Documents/lora/INVENTORY.md` records it as USB `2886:1667`, nRF52840).
+- Why it matters: there is no second candidate on this desk. Any desktop tool that wants a companion over USB can only have the Heltec.
+
+### M-2 · the two radios cannot each be both USB and BLE · constraint
+
+- Evidence: `mesh-research/clones/filter-firmware/variants/heltec_v4/platformio.ini:182` `[env:heltec_v4_companion_radio_usb]`, `:190 -D ENABLE_USB_INTERFACE`; `:202` `[env:heltec_v4_companion_radio_ble]` with no `ENABLE_USB_INTERFACE`. `variants/wio-tracker-l1/platformio.ini:58` `[env:WioTrackerL1_companion_radio_usb]`, `:72 -D ENABLE_USB_INTERFACE`; `:86` `[env:WioTrackerL1_companion_radio_ble]`, whose `build_src_filter` adds `helpers/nrf52/SerialBLEInterface.cpp` and no USB flag. `examples/companion_radio/main.cpp:67-70` — `ArduinoSerialInterface usb_serial_interface` exists **only** under `#if defined(ENABLE_USB_INTERFACE)`.
+- Finding: **the USB companion and the BLE companion are different builds.** A board flashed for BLE answers nothing on `/dev/ttyACM0`; a board flashed for USB is not reachable by the phone's BLE link.
+- Why it matters: this is the whole answer to "why not use the Wio". The Wio is committed to BLE because the phone uses it through BLE. Reflashing it to `WioTrackerL1_companion_radio_usb` would give the desktop a radio and take the phone's away.
+
+### M-3 · the recorder that wants the port is the LoRa research project, not Meshmore · fact
+
+- Evidence: `~/Documents/lora/tools/mc_listen.sh:7` `PORT="${MC_PORT:-/dev/ttyACM0}"`, `:19` `--advert --advert-every "${MC_ADVERT_EVERY:-60}"`; `~/Documents/lora/tools/mc_recorder.py:239` `ap.add_argument("--port", default="/dev/ttyACM0")`. Meshmore's own device procedure is BLE-only: `~/Documents/meshmore-sns/M6-interop-runbook.md:4` "via a BLE-only capture", `:15` "≥2 Seeed Studio T1000-E flashed with MeshCore companion firmware", `:21-22` "choosing the **Companion Bluetooth** variant, BLE pairing"; `meshmore_sns_app/TOOLING.md:214` "Two MeshCore companions are bonded to this phone… the serial node is /dev/ttyACM0" (a note about the bench, not a test path).
+- Finding: **Meshmore needs no serial port.** Its on-device procedure is BLE to a phone-paired companion. The process that takes `/dev/ttyACM0` is `mc_recorder.py` from `~/Documents/lora`, run out of `~/Documents/lora/.venv`. It appeared to be "Meshmore" because the agent that ran it had its working directory in `meshmore-sns`.
+- Why it matters: no Meshmore design change is needed, and no lease machinery is justified by Meshmore. The conflict belongs to the LoRa bench work.
+
+### M-4 · the recorder opens the port without taking the lock, so two owners can hold it at once · major
+
+- Evidence: `~/Documents/lora/tools/mc_recorder.py:76` `MeshCore.create_serial(port, baud, rts=False, dtr=False, auto_reconnect=True, …)` — the vendored client. `.venv/lib/python3.13/site-packages/meshcore/serial_cx.py:14` `def __init__(self, port, baudrate, cx_dly=0.2, rts=False, dtr=True)` — no `flock` anywhere in the package (`grep -rn flock` over it returns nothing). The repo's own transport *does* lock (`tools/mcproto/transport.py:205-217`, `fcntl.flock(… LOCK_EX|LOCK_NB)`), but the recorder does not use that path.
+- Finding: ldmux takes an **advisory** exclusive lock (`crates/companion/src/link.rs:158` `LockExclusiveNonblock`, taken at `crates/daemon/src/mesh_serial.rs:1070`), and the recorder takes **none**. An advisory lock is only an exclusion if both sides take it, so the two can hold `/dev/ttyACM0` simultaneously and interleave frames on one firmware that handles exactly one command at a time.
+- Why it matters: the visible symptom on both sides is silence, not a refusal. `~/Documents/lora/data/meshcore-rx.log` ends with repeated `no response from base (not a serial companion?); retrying in 3 s` — the recorder's own explanation guesses at the firmware build when the actual cause can be a daemon sharing the port. That line is also *wrong* in a second way: the firmware here demonstrably is a serial companion (ldmux reads its preset and status from it).
+
+### M-5 · stopping the daemon is not required, and the daemon already recovers by itself · finding
+
+- Evidence: `crates/daemon/src/mesh.rs:685-732` — `supervise` retries forever with a backoff that resets to 1 s on every successful open and rises to a 30 s cap; a failed `prepare` becomes `state = "down"` with `last_error` set, and the loop tries again. `crates/daemon/src/mesh_serial.rs:1069-1074` — `SerialLink::open` succeeds first (a tty permits several opens), *then* `lock_exclusive()` fails with `"{device}: another process holds this radio"`.
+- Finding: the daemon does not need to be stopped to free the radio; it backs off and reopens when the port is free. What it cannot do is refuse a client that never asks. Stopping it was a way to get the port *now*, and it cost more than it bought.
+- Why it matters: a stop/start is not neutral. `crates/daemon/src/mesh_serial.rs:1066-1080` shows the open path re-sends the radio's time (`set_time`) and re-reads the device; the run-loop locals (`peer_path`, `proven`, `heard`) begin empty, so the first link after every restart starts on the flood carrier. Any range measurement that spans a restart is measuring a cold link.
+
+### M-6 · the correct target for the desktop capture is a second companion, not this one · recommendation
+
+- Evidence: M-1 (only one radio attached), M-2 (USB and BLE are exclusive builds), M-3 (the recorder is the only consumer), M-4 (the recorder does not lock).
+- Finding: there are three honest options and no fourth.
+  1. **A third board** flashed `companion_radio_usb` (a Heltec V4 or a Wio Tracker L1 that is not the phone's) and left on the bench for captures. Cheapest in the long run: no coupling to ldmux, no restart, and the private test preset can live on it permanently.
+  2. **Let the daemon have the radio and read the capture from ldmux.** Not possible today: ldmux never subscribes to the firmware's receive log (`grep -rn "rx_log\|RX_LOG" crates/companion/src/codec.rs crates/daemon/src/mesh_serial.rs` → no hits), so it has no per-packet record. It would be a small feature, and it is the only option that removes the conflict instead of scheduling it.
+  3. **Take turns, with the recorder locking.** Stop the daemon only for the length of a capture, and make `mc_recorder.py` use `mcproto.transport.SerialTransport` (which locks) instead of `MeshCore.create_serial`, so a mistake is a clear refusal rather than silent frame interleaving.
+- Why it matters: without (1) or (2), every capture is a cold-link restart for ldmux, and the ledger's range measurements inherit that confound.
+
+### M-7 · two documentation errors that made this look like a Meshmore problem · minor
+
+- Evidence: `~/Documents/meshmore-sns/meshmore_sns_app/TOOLING.md:214` states the serial node is `/dev/ttyACM0` as if Meshmore used it; `M6-interop-runbook.md` is BLE-only. `~/Documents/lora/tools/mc_recorder.py:203-212` blames a hung disconnect for holding the port, and `:88` blames "not a serial companion?" — neither names the real competing owner.
+- Finding: the machine-readable record of who wants this port is wrong in both repos, which is why the conflict was diagnosed as "another agent is stopping the daemon" rather than "two clients share one tty".
+- Why it matters: the next person to hit this will reach the same wrong conclusion.
+
+### M-8 · the daemon is currently hearing the public mesh on the Heltec · fact
+
+- Evidence: `ldmux mesh status --json` → `radioPreset [910525, 62500, 7, 5]`, `noiseFloorDbm -90`, `radioRxSecs 299`, `radioTxSecs 0`, `session.state "waiting"`. Journal 07:14-07:19: `route advert heard from eacc4434 hops=8 rssi=-74dBm`, `… 1d15ec92 hops=11 rssi=-76dBm`, `… 2a043f04 hops=13 rssi=-76dBm`.
+- Finding: the Heltec is on the North American public preset (`910.525/62.5/SF7/CR5`) and hears the city mesh at 1-13 hops, −74 to −86 dBm. It has transmitted nothing since the 06:04 start. `~/Documents/lora/docs/06-CURRENT-STATE-AND-NEXT-TEST.md:11-14` still documents the bench at the *private* preset `917.000/125/SF11/CR5`; `meshmore-sns/meshmore-sns-radio-config.md:190-200` documents the current one. The older doc is stale.
+- Why it matters: a LoRa range test at the private preset needs the Heltec retuned, and that is the daemon's radio. Two programs cannot hold this board on two channels, so that test cannot be scheduled around ldmux at all — it needs its own board.
