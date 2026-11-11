@@ -497,6 +497,13 @@ where
     Err(SessionError::Disabled)
 }
 
+/// Copies of one record sent by flood, on both ends.
+///
+/// A handshake record is ~133 bytes and about 500 ms of air. At the margin one attempt is a coin
+/// toss, and the phone sends its route requests three times for exactly that reason — the answer
+/// deserves the same.
+const RECORD_FLOOD_COPIES: u32 = 3;
+
 /// How many times a send is attempted when the radio says "not now".
 const SEND_ROUNDS: u32 = 3;
 
@@ -1418,8 +1425,40 @@ fn serve_loop<L: ByteLink>(
                 // The debt is paid by this send, whatever it turns out to be.
                 answer_flood_with_flood = false;
                 let attempt: Result<SendOutcome, SessionError> = match flooded {
-                    Some(packet) => send_retrying(|d| companion.send_packet_within(&packet, d))
-                        .map(|()| SendOutcome::SentFlood),
+                    // **A flooded record goes as a burst, like the phone's.** The phone sends its
+                    // request three copies per rung and its handshake record three, because at the
+                    // margin one long packet in one attempt is a coin toss. The answer has the same
+                    // problem in the other direction, so it is repeated too — a fresh wrapper nonce
+                    // each time, since an identical repeat is swallowed by the first repeater's
+                    // duplicate filter.
+                    Some(_) => {
+                        let mut last_err = None;
+                        let mut sent_ok = false;
+                        for _ in 0..RECORD_FLOOD_COPIES {
+                            let peer = settings.peer_key.unwrap_or([0u8; 32]);
+                            let own = settings.preset.public_key;
+                            let nonce = route_nonce();
+                            let Ok(packet) = ldmux_companion::build_record_flood_in_scope(
+                                hash_size,
+                                &peer,
+                                &own,
+                                scope.as_ref(),
+                                &nonce,
+                                &record,
+                            ) else {
+                                break;
+                            };
+                            match send_retrying(|d| companion.send_packet_within(&packet, d)) {
+                                Ok(()) => sent_ok = true,
+                                Err(e) => last_err = Some(e),
+                            }
+                        }
+                        match (sent_ok, last_err) {
+                            (true, _) => Ok(SendOutcome::SentFlood),
+                            (false, Some(e)) => Err(e),
+                            (false, None) => Err(SessionError::Disabled),
+                        }
+                    }
                     None => send_retrying(|d| companion.send_raw_within(hash_size, path, &record, d))
                         .map(|()| SendOutcome::SentDirect),
                 };
