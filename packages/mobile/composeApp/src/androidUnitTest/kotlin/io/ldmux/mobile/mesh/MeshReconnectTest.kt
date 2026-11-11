@@ -154,16 +154,26 @@ class MeshSilenceBoundTest {
     fun a_handshake_is_given_the_whole_ladder_it_schedules() {
         for (hops in listOf(1, 5, 14, 26, 28, 63)) {
             val retry = handshakeRetryFor(hops)
-            // Each re-ask waits twice the one before, so four asks are 1, 2, 4 and 8 x the retry.
+            // Each re-ask waits twice the one before — 1x, 2x and 4x — and the last one is then
+            // given a full answer window, because a multi-hop reply can take over a minute
+            // (`openhop_core`, reproducing the firmware's own arithmetic).
+            val ladder = retry * 7
             assertEquals(
-                retry shl HANDSHAKE_RETRIES,
+                ladder + maxOf(retry, HANDSHAKE_ANSWER_WINDOW_MS),
                 handshakeWaitMs(hops),
-                "at $hops hops the wait must be the ladder's own sum",
+                "at $hops hops the wait is the ladder's sum plus one answer window",
             )
-            assertTrue(handshakeWaitMs(hops) > retry * 7, "the last re-ask gets its window")
+            assertTrue(
+                handshakeWaitMs(hops) >= ladder + 120_000L,
+                "at $hops hops the last re-ask gets at least two minutes to be answered",
+            )
         }
-        // And it scales with the route rather than being a fixed minute.
-        assertTrue(handshakeWaitMs(28) > handshakeWaitMs(1) * 5)
+        // And it scales with the route rather than being a fixed minute: at 28 hops the route term
+        // alone (7 x 64 s) is larger than the whole wait at a neighbour, answer window included.
+        assertTrue(
+            handshakeWaitMs(28) > handshakeWaitMs(1) + HANDSHAKE_ANSWER_WINDOW_MS,
+            "the route term still dominates at 28 hops",
+        )
     }
 
     @Test

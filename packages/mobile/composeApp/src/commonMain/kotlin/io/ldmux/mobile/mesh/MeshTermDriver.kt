@@ -2609,8 +2609,26 @@ private const val HANDSHAKE_FIRST_RETRY_MS = 8_000L
  * had the round trip it needs (measured 2026-11-10: handshake, fail, handshake, fail, and not one
  * handshake reaching the host).
  */
-internal fun handshakeWaitMs(hops: Int?): Long =
-    handshakeRetryFor(hops) shl HANDSHAKE_RETRIES
+internal fun handshakeWaitMs(hops: Int?): Long {
+    val rung = handshakeRetryFor(hops)
+    // The ladder's own sum: rungs at 1x, 2x and 4x of the first wait.
+    val ladder = rung * ((1L shl HANDSHAKE_RETRIES) - 1)
+    // **Plus a full answer window after the last re-ask.** The firmware's own direct-send budget
+    // (`calcDirectTimeoutMillisFor`, reproduced by `openhop_core`) is documented there with the
+    // observation that "multi-hop replies can take over a minute" — and our budget used to end one
+    // rung after the last attempt, which at a neighbour is eight seconds. Measured 2026-11-10: the
+    // host logged `SESSION ESTABLISHED` from the phone's last handshake while the phone had already
+    // given up and gone looking for a new route, so the answer arrived with nothing to receive it.
+    return ladder + maxOf(rung, HANDSHAKE_ANSWER_WINDOW_MS)
+}
+
+/**
+ * How long the last handshake attempt is allowed to be answered.
+ *
+ * A multi-hop reply can take over a minute through a busy mesh, and the phone must outlast it: an
+ * established session on the far end is worth more than a faster verdict on this one.
+ */
+internal const val HANDSHAKE_ANSWER_WINDOW_MS = 120_000L
 
 /**
  * How long a request may go unanswered over a route of `hops` repeaters.
