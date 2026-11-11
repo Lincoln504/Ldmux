@@ -232,6 +232,10 @@ class AndroidRadioLink(
     @Volatile
     private var heardByFlood = false
 
+    /** Whether a record has arrived **direct**, which is the only proof the cheap carrier works. */
+    @Volatile
+    private var directWorks = false
+
     /** When a record was last handed up from the radio, by either carrier. */
     @Volatile
     private var lastInboundAt = 0L
@@ -524,6 +528,7 @@ class AndroidRadioLink(
                 // Something the host sent arrived down this path: it works in the direction that
                 // matters, and no shorter candidate may displace it on hops alone.
                 routeProven = true
+                directWorks = true
                 lastInboundAt = System.currentTimeMillis()
                 // A record arrived on the direct carrier, so the cheap path works: the next send
                 // starts at the direct attempt again instead of escalating, and the reply to *this*
@@ -586,6 +591,7 @@ class AndroidRadioLink(
                         val record = RadioRoute.heardRecordFlood(raw, own)
                         if (record != null) {
                             heardByFlood = true
+                            directWorks = false
                             lastInboundAt = System.currentTimeMillis()
                             RadioRoute.heardFloodPath(raw)?.let { path ->
                                 // **A flood always replaces the path**, because the only reason this
@@ -998,7 +1004,13 @@ class AndroidRadioLink(
         // reason. What actually proves a path dead is the session's own retransmission budget running
         // out, and the driver ends the session when that happens — after which a handshake with no
         // session is exactly the case this carrier exists for.
-        val floodWanted = !sessionUp && directSilent && floodTokens > 0
+        // **Flood until a record arrives *direct*.** The handshake completing by flood says the flood
+        // carrier works and the direct chain is unproven; switching to direct the instant a session
+        // exists sent the shell list down a seventeen-hop chain whose first retransmission is sixty
+        // seconds away, against a hundred-second attach wait — so the answer never came and the attach
+        // timed out. `directWorks` is set only by a direct record, which is the peer proving the cheap
+        // carrier end to end.
+        val floodWanted = (!directWorks || directSilent) && floodTokens > 0
         if (floodWanted && s.canSendRaw()) {
             lastFloodAt = floodNow
             val own = radioPublicKey
