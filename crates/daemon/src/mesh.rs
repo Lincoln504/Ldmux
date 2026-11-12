@@ -1524,6 +1524,89 @@ mod tests {
 
 
 
+    /// **Two shells are two slots, and a slot is decided by the message, not by a record.**
+    ///
+    /// Gate `B11` in `docs/RADIO-PLAN.md` §9. The old transport carried the page in a record
+    /// header, so a command could only ever mean "the shell this record came from"; a version-15
+    /// message names its shell, and this is the test that says the map turns that name into a slot
+    /// and that two shells keep two independent screens. Without it, a second shell would be served
+    /// by the first one's attachment — the failure `AR-11` predicted and this pins.
+    #[tokio::test]
+    async fn two_shells_are_two_slots_and_each_command_reaches_the_shell_it_names() {
+        let mut rpc = MeshRpc::new();
+        let mut channels = Channels::default();
+        let mut host = FakeHost {
+            shells: vec!["s1".to_owned(), "s2".to_owned()],
+            screen: Some(ldmux_protocol::mesh_term::Screen::from_keeper(
+                "hello", 80, 24, (0, 0), false, false, 0,
+            )),
+            ..FakeHost::default()
+        };
+        let mut endpoint = endpoint();
+        let mut stats = crate::mesh_bridge::BridgeStats::default();
+        let runtime = runtime();
+
+        for shell in ["s1", "s2"] {
+            let attach = Message::Attach {
+                version: VERSION,
+                selector: shell.to_owned(),
+                cols: 80,
+                rows: 24,
+            };
+            dispatch(
+                &attach.encode().unwrap(),
+                &mut rpc,
+                &mut channels,
+                &mut host,
+                &mut endpoint,
+                &mut stats,
+                &runtime.snapshot,
+                0,
+            )
+            .await;
+        }
+        assert_eq!(channels.get("s1"), Some(0));
+        assert_eq!(channels.get("s2"), Some(1), "the second shell took a second slot");
+
+        // One command for each, named. The second must not land on the first: two commands would
+        // still be two writes, so the assertion is on *which* shell each one reached.
+        for (op_id, shell) in [(1u32, "s1"), (2u32, "s2")] {
+            let send = Message::Send {
+                op_id,
+                chunk_idx: 0,
+                chunk_count: 1,
+                have_snapshot_id: 0,
+                cols: 80,
+                rows: 24,
+                flags: 0,
+                shell: shell.to_owned(),
+                items: vec![ldmux_protocol::mesh_term::SendItem::Text(
+                    shell.as_bytes().to_vec(),
+                )],
+            };
+            dispatch(
+                &send.encode().unwrap(),
+                &mut rpc,
+                &mut channels,
+                &mut host,
+                &mut endpoint,
+                &mut stats,
+                &runtime.snapshot,
+                0,
+            )
+            .await;
+        }
+        assert_eq!(
+            host.typed,
+            vec![
+                ("s1".to_owned(), b"s1".to_vec()),
+                ("s2".to_owned(), b"s2".to_vec())
+            ],
+            "a command reached the wrong shell: {channel:?}",
+            channel = channels.by_id
+        );
+    }
+
     #[test]
     fn the_pairing_keys_are_this_daemons_public_key_and_the_configured_secret() {
         let dir = std::env::temp_dir().join(format!("ldmux-pairing-keys-{}", std::process::id()));
