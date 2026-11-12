@@ -225,9 +225,10 @@ Bump `mesh_term::VERSION` to **15**. Every transaction body is a single self-con
 
 - **`Send` (`T_SEND = 0x0E`) — coalesced batch input + keys + paste**:
   ```text
-  [0x0E][op_id: u32 LE][have_snapshot_id: u32 LE][cols: u8][rows: u8][flags: u8][shell_len: u8 | shell_id][items_bytes...]
+  [0x0E][op_id: u32 LE][chunk_idx: u8][chunk_count: u8][have_snapshot_id: u32 LE][cols: u8][rows: u8][flags: u8][shell_len: u8 | shell_id][items_bytes...]
   ```
   - `op_id`: monotonic per-app-run operation ID (`1..=u32::MAX`).
+  - `chunk_idx` / `chunk_count`: **the message is one chunk of a larger command**, and this is the correction §12.2 (AR-3) records. A command whose item stream does not fit one message is sent as `chunk_count` messages with one `op_id`; the host holds them and **applies the joined bytes once, when `chunk_idx == chunk_count - 1`**, so a partial paste is never written to a pty. `chunk_count = 1` means the whole command, which is the common case and costs two bytes. Chunking is deliberately *not* a second fragmentation inside the transaction layer: transactions already retransmit parts, and two schemes for one job is two things to get wrong.
   - `have_snapshot_id`: the `snapshot_id` of the last complete `Snapshot` painted by the phone for `shell_id` (`0` if none).
   - `cols`, `rows`: the phone's current terminal grid (`1..=200`, `1..=120`), so the host ensures the PTY matches `(cols, rows)` before executing the command.
   - `flags`: bit 0 = `deflated` (when `items_bytes` is raw-deflate compressed against `FRAME_DICTIONARY`, used whenever raw `items` > 96 B and deflate is smaller); bit 1 = `interrupt` (set when the draft contains `C-c` / `\x03`).
@@ -249,10 +250,11 @@ Bump `mesh_term::VERSION` to **15**. Every transaction body is a single self-con
 - **Authenticated `(device_id, op_id)` dedup ring**:
   - Retains the last 64 `AppliedOutcome` entries per paired device.
   - If a duplicate `Send(op_id)` arrives (e.g. after an ACK loss), the host returns the cached `Applied` status + current `Snapshot` **without writing to the PTY a second time**.
-- **Ordered PTY handoff**:
-  - `Text(bytes)`: write via `host.input(&session, &bytes)`.
-  - `Paste(bytes)`: read the pane's live `bracketed_paste` mode from the keeper right before writing; if `true`, strip `ESC (0x1b)` and wrap the entire paste in `\x1b[200~ … \x1b[201~`; if `false`, convert `\n` to `\r` and write in one call.
-  - `Keys(names)`: encode for the pane's live cursor-key and Kitty keyboard flags via `host.keys(&session, &names)`.
+- **Ordered PTY handoff** — `mesh_apply::apply_send` (`crates/daemon/src/mesh_apply.rs`) turns the items into an ordered plan of steps, so the rule lives in one tested place instead of in the middle of the service:
+  - `Text(bytes)`: bytes for the pty. A text run carrying a newline is treated as a paste, which is recoverable where executing it is not; the phone sends the operator's `Enter` as a key, so the normal case never takes that branch.
+  - `Paste(bytes)`: encoded by the same `paste_bytes` rule `Input` already uses — wrapped in `\x1b[200~ … \x1b[201~` with `ESC` stripped where the pane negotiated bracketed paste, `\n` folded to `\r` where it did not.
+  - `Keys(names)`: handed to `host.keys(&session, &names)`, because only the keeper can read the pane's live cursor-key and Kitty keyboard mode.
+  - Adjacent steps of the same kind are merged, so a draft of several runs costs one keeper call; a key splits the write, because the text after it must not land before it. An empty item refuses the whole command, so nothing partial is ever written.
 
 ### 6.3 Single-Burst `3.5 s` Settle-or-Midstate Rule and Atomic `Snapshot` (`T_SNAPSHOT = 0x8E`)
 
@@ -265,10 +267,12 @@ Bump `mesh_term::VERSION` to **15**. Every transaction body is a single self-con
   - At that moment (`0.5 s .. 3.5 s` after `t_apply`), the host captures the screen and emits **EXACTLY ONE downlink transaction** (`T_SNAPSHOT = 0x8E`, carrying `ack_tx_id = send_tx_id` piggybacked in the transaction header!) and **never transmits a second unsolicited wave**:
 - **Atomic `Snapshot` (`T_SNAPSHOT = 0x8E`) wire layout**:
   ```text
-  [0x8E][flags: u8][snapshot_id: u32 LE][base_id: u32 LE][applied_op_id: u32 LE][applied_status: u8]
-  [cols: u8][rows: u8][cursor_x: u8][cursor_y: u8][first_line: u32 LE][shell_len: u8 | shell_id]
-  [body_bytes (raw-deflate compressed with FRAME_DICTIONARY when bit 4 is set)...]
+  [0x8E][flags: u8][chunk_idx: u8][chunk_count: u8][snapshot_id: u32 LE][base_id: u32 LE]
+  [applied_op_id: u32 LE][applied_status: u8][cols: u8][rows: u8][cursor_x: u8][cursor_y: u8]
+  [first_line: u32 LE][shell_len: u8 | shell_id][body_bytes...]
   ```
+  - `chunk_idx` / `chunk_count`: the same envelope as `Send`, for the same reason — a first full paint of a dense screen deflates past what one transaction carries (`16 × 118 = 1,888` bytes, §5.3). The phone reassembles by `snapshot_id` and paints only the joined body, so a chunked snapshot is still atomic: it is one screen, delivered in pieces, never a half-drawn one.
+  - `body_bytes` is raw-deflate compressed against `FRAME_DICTIONARY` when bit 4 is set.
   - `flags`:
     - `bit 0`: `full` (`1` = full screen, `0` = row diff against `base_id`)
     - `bit 1`: `alternate` (`1` = alternate screen active)
@@ -327,7 +331,7 @@ To make the entire application simple, robust, and free of cross-layer drift, th
     - Companion frame parser/encoder (`framing.rs`) and command/push codecs (`codec.rs`: `APP_START`, `DEVICE_QUERY`, `SELF_INFO`, `SEND_RAW_PACKET`, `LOG_RX_DATA`, `GET_ADVERT_PATH`, `LDRQ`, compact `LDRR`, `LDMR`, `ScopeInfo` HMAC-SHA256).
     - Strict 1-command-at-a-time `CompanionFifo` state machine (shared by Host USB serial and Phone BLE).
     - `RouteTable`, `carrier_for(route, attempt)`, Semtech SX126x `airtime_ms`, and SNR-margin burst ranking.
-  - `crates/companion` (`ldmux-companion`): thin Linux host USB serial driver (`termios`, `flock`, non-blocking `not_before: Instant` scheduler) built on `ldmux_mesh::CompanionFifo`.
+  - `crates/companion` (`ldmux-companion`): thin Linux host USB serial driver (`termios`, `flock`, non-blocking `not_before: Instant` scheduler) built on `ldmux_mesh::CompanionFifo`. The **answer table is an input, not a derivation**: the FIFO is shared, but which response opcodes settle which command is host- or phone-specific, so each side supplies its own (the host's is `crates/companion/src/window.rs`) and the client engine in S4 supplies the phone's.
   - `crates/protocol` (`ldmux-protocol`):
     - Default `host-ipc` feature gates `socket.rs` and `paths.rs` (`tokio` + `nix` Unix sockets).
     - With `default-features = false` (used by `ldmux-session-ffi`), depends only on `serde`, `serde_json`, `uuid`, and `flate2` (`zlib-rs`, pure Rust, no C) — exposing `mesh_term.rs` (Protocol v15 `Send`, `Fetch`, atomic `Snapshot`, `FRAME_DICTIONARY`, `ScreenMirror`), `pairing.rs`, and `utf8.rs`.
@@ -439,7 +443,7 @@ tree or a command that was run; nothing is a plan.
 | **S0** | **Done** | `ldmux-protocol` has a `host-ipc` feature (default on) owning `tokio` + `nix`; `cargo tree -p ldmux-protocol --no-default-features` is `serde`, `serde_json`, `uuid`, `flate2` and nothing else. `crates/mesh/src/sim/` is the `VirtualMesh` harness (173-byte receive ceiling, `SHA256(payload_type‖payload)` 160-entry dedup, the origin's own first-hop echo, half-duplex deafness, per-hop forward delay, path accumulation and consumption, flood hop caps, scoping) with `airtime.rs` beside it, pinned against the companion's own time-on-air by `crates/companion/tests/airtime_agreement.rs`. `native-freshness.test.ts` now checks both `libldmux_terminal.so` and `libldmux_session.so` for staleness and for their `Java_io_ldmux_*` symbols (6/6). |
 | **S1** | **Done** | `crates/mesh/src/budget.rs` (`172 − path` direct, `161 − path − scope` flood, 93 guaranteed and 125 near, all derived and compile-time pinned). `crates/mesh/src/route.rs` (`Candidate`, `ProofWitness` as the only route to `Proven`, SNR-margin ranking, `carrier_for`). `crates/session/src/direction.rs` (the six kinds, one definition, re-exported by `handshake.rs` and `record.rs`). `crates/mesh/src/companion/fifo.rs` plus the host's answer contract in `crates/companion/src/window.rs`: one command in flight, settled only by its own answer, a foreign answer reported rather than consumed. |
 | **S2** | **Done** | `crates/session/src/bootstrap.rs`: `Initiator` holds one ephemeral across every rung, `msg1` direct 123 B or two fragments 67/66 B with a per-transmit `tx_nonce`, `msg2` 52 B, `KIND_NEED_HANDSHAKE` 25 B, `Responder` with a 64-entry ±5 min cache that re-emits its cached answer without rebuilding the session, and a 5 s answer rate limit. `crates/session/src/transaction.rs`: 10-byte header, parts of 118 B so any part halves onto the narrow carrier, selective `ack_mask` retransmission, ack suppression to the burst tail, clean supersession, and a timeout that leaves the session intact. `crates/session/src/endpoint.rs`: one state machine for both ends — role, bootstrap, per-attempt carriage, post-authentication route updates, transaction dispatch, deadlines and a `Stats` that names every rejection. `crates/session/tests/endpoint.rs` runs two real endpoints over one `VirtualMesh`; the six-repeater, 15 %-loss gate delivers a request and its answer with the route proven by a direct arrival. |
-| **S3** | **Not started** | Entry points, in order: `crates/protocol/src/mesh_term.rs` (bump `VERSION` to 15, add `T_SEND`/`T_FETCH`/`T_SNAPSHOT` with the `(device_id, op_id)` ring), then `crates/daemon/src/mesh_bridge.rs` replaced by a single-task `MeshRpcService` that drives `RadioEndpoint` and settles through `PaneStream`, then delete `mesh_session.rs`, `mesh_serial.rs`'s loop and the `Exchange` ring. |
+| **S3** | **Wire half and handoff done, service not started** | Done: the three version-15 messages are in the wire contract and pinned by the shared fixture on both sides — `T_SEND = 0x0E` (coalesced items, `op_id`, `have_snapshot_id`, grid, flags), `T_FETCH = 0x0F`, and `T_SNAPSHOT = 0x8E` (flags, `snapshot_id`/`base_id`, the applied answer, grid, cursor, `first_line`, a patch stream deflated against the frame dictionary), with `TRANSACTION_VERSION = 15`, `send_flag`/`snapshot_flag`/`applied` on both ends. Done: `mesh_apply::apply_send` turns a `Send`'s items into the ordered plan of keeper steps the host performs (§6.2), so the new vocabulary has a consumer and its order and newline rules are pinned by tests rather than left to the service. **`VERSION` deliberately stays at 14**, because a version is what a build can *answer* and no host serves a `Send` until the next step. Next, in order: replace `crates/daemon/src/mesh_bridge.rs` with a single-task `MeshRpcService` driving `RadioEndpoint` (S2), settling through `PaneStream`, calling `apply_send`, and keeping the `(device_id, op_id)` at-most-once ring; then bump `VERSION` to 15 on both ends in the same commit; then delete `mesh_session.rs`, `mesh_serial.rs`'s loop and the `Exchange` ring. The chunk envelope (§12.2) is on the wire on both ends with its assemblers, so the service can send an answer larger than one transaction without a second design. |
 | **S4** | **Not started** | `crates/session-ffi` gains the shared client engine (companion FIFO, `RadioEndpoint`, `mesh_term` client) behind the pull-only C ABI in §8.1, so the phone stops reimplementing the protocol in Kotlin. |
 | **S5** | **Partly done** | Landed: the claim wedge (`CLAIM_RELEASE_MS` gone, `resumeShell` assigned by one rule, `MeshResumeTest`), the blank/clipped screen (grid sent only after the IME gate, cursor-aware `GridPlacement`), multiline paste as one paste operation on both routes, the provisional draft drawn with `⏎`/`⇥` and windowed by display width (`term/DisplayWidth.kt`), and the flood token bucket now actually metered (`sessionUp(true)` is called). 725 JVM tests pass. Open: the unified pager and per-shell state across `AppContent` and `MeshTerminalScreen`, the `Send`/`Refresh` controls, dictation into the draft, batch coalescing (which needs v15 — separately sending `Hold(false)`, `Input` and `Key` cannot be fixed inside the old protocol), and deleting `vendor/libmeshcore`. |
 
@@ -451,3 +455,179 @@ Each was found by building the thing and is now reflected in the sections above:
 - **`msg2` carries the session index sealed inside the Noise message** (`MSG2_LEN` is 50: `[kind][noise 49]`), not as a clear byte; the total with the nonce is still 52.
 - **The session wrapper is 24 bytes**, not 22 (`6 clear + 2 inner + 16 tag`), so a 171-byte record carries 137 payload bytes, and parts are cut to 118.
 - **Two defects the end-to-end gate found in the new code, both fixed**: an acknowledgement piggybacked on a data record was decoded and then dropped (`transaction.rs` applied it only in the pure-ack branch), so every delivered message still timed out; and the endpoint learned a route only from handshake traffic, so a candidate expired 120 s after the bootstrap and direct was never used again.
+- **A `Send` and a `Snapshot` both state their uncompressed length in the clear** (`items_len`, `patch_len`), because a decoder has no other way to size an inflate: the first form of both omitted it and the decoder could only guess, which `Frame` had already solved the same way. A `Snapshot`'s patch stream is the *only* part that is ever deflated, and a body over `MAX_BODY` is refused rather than split, which is what makes `Err(TooLong)` the signal to send a smaller diff.
+- **`VERSION` was not bumped, and that is a deliberate correction to this document's §10.** A version byte is what a build can answer; these messages exist and are pinned, but nothing serves one until the daemon's receive path is the transaction service, so a phone that attached as 15 would wait for an answer nothing sends. §10 `S3` now says `TRANSACTION_VERSION` first and the `VERSION` bump with the host half, in one commit.
+
+---
+
+## 12. Critical audit of the planned architecture (2026-11-11)
+
+Written after S0–S2 landed and S3 began, against the code as it exists rather than as this page
+imagines it. Each finding names the evidence, states whether the plan, the code or both are wrong,
+and gives a disposition. Nothing here is a preference; anything that changes the design is scoped
+against the rest of the system, and the sections above are amended where the finding changes them.
+
+### 12.1 What is actually wired, and what is only tested
+
+| Component | Tests | Production path | Verdict |
+|---|---|---|---|
+| `ldmux_mesh` (budget, route, sim, airtime, `CompanionFifo`) | 47 tests | only `budget`/`route`/`sim` used by `ldmux-session`; `CompanionFifo` used by nothing | **inert** |
+| `ldmux_session` (bootstrap, transaction, endpoint, direction) | 87 tests | `handshake`/`record`/`session`/`arq` used by the daemon; `bootstrap`, `transaction`, `endpoint`, `direction` used by nothing | **inert** |
+| `ldmux_protocol` v15 (`Send`, `Fetch`, `Snapshot`) | 119 + 725 tests | the daemon still speaks version 14 and never constructs a v15 message | **inert** |
+| `crates/daemon/src/mesh_apply.rs` | unit tests | nothing calls `apply_send` | **inert** |
+| `crates/daemon/src/mesh_bridge.rs` (6,305 lines), `mesh.rs`, `mesh_serial.rs`, `mesh_session.rs` | the whole e2e suite | **this is what runs** | live |
+
+**AR-1 — the tree is green while the deployed path is unchanged, and that is the most dangerous
+state this work can be in.** Every test that proves the new design passes, and the code the phone
+actually talks to is untouched. A reader can easily take `scripts/test-parallel.py` passing as
+evidence that the radio works; it is evidence that two disjoint stacks each work. The plan's gates
+(B1–B8) do not distinguish them, because the gates test the new stack and the e2e tests test the old
+one.
+
+*Disposition:* S3b is the stage that removes the ambiguity, and it must **delete** the old modules
+rather than leave them beside the new ones — a fallback path that nobody chose is how two designs
+survive a year. Until it lands, §11's status table is the only truthful statement of what is live,
+and this table belongs beside it.
+
+### 12.2 A message cannot always fit the transport that must carry it
+
+The plan's §6 makes every request and every answer **one message**, and §5.3 makes one message **one
+transaction** of at most 16 parts. The arithmetic, as implemented:
+
+- a part carries **118 bytes** (`transaction.rs`, `MAX_PARTS = 16`),
+- so one message carries at most **1,888 bytes**,
+- while the codec allows a `T_SEND` body of **600** bytes (`MAX_BODY`) and a `T_SNAPSHOT` body that
+  inflates to **2,048** (`MAX_SNAPSHOT_INFLATED`).
+
+Three separate ceilings with no ordering between them. Two concrete failures follow.
+
+**AR-2 — a snapshot between 1,888 and 2,048 bytes is accepted by the codec and rejected by the
+transport.** `T_SNAPSHOT` checks `stream.len() > MAX_SNAPSHOT_INFLATED` (`mesh_term.rs:1120`) and the
+transaction layer then refuses a message it cannot part. The host would build an answer, fail to
+send it, and the phone would wait out its ladder.
+
+*Disposition (done 2026-11-11):* the ordering is now **proved** rather than assumed.
+`crates/session/tests/payload_fits.rs` asserts that a body of `MAX_BODY` plus its two framing bytes
+fits one transaction at the **worst** legal record sizes (171 direct, 93 flooded, so the proof holds
+at every hop count and path width), that a command at `MAX_COMMAND_TOTAL` and a screen at
+`MAX_SNAPSHOT_TOTAL` each need no more chunks than the field can number, and that a chunk still
+holds one whole item. It lives in a test because the wire and the transport deliberately cannot see
+each other: `ldmux-protocol` must not learn the session and `ldmux-session` must not learn the
+terminal protocol, so `ldmux-protocol` is a **dev-dependency** of `ldmux-session` and nothing more.
+
+**AR-3 — a paste larger than about 550 bytes cannot be sent at all, which is a regression against
+the protocol this replaces.** Today `Input` carries 137 bytes and the app sends as many as it needs,
+so a 2 kB paste worked (at a ruinous airtime cost). Under v15 the whole draft is one `Send`, whose
+body is capped at `MAX_BODY = 600`; deflate helps text but not code or base64, and the transport cap
+of 1,888 would bite next. A terminal that refuses a 40-line paste is not a terminal.
+
+*Disposition — a scoped wire change, made now because version 15 has never been deployed:* both
+`T_SEND` and `T_SNAPSHOT` gain **`chunk_idx: u8` and `chunk_count: u8`**, and the receiver
+reassembles by `(peer, op_id)` / `(peer, snapshot_id)` before acting. This keeps the plan's two
+invariants — one command is applied at most once, and a command is applied whole or not at all —
+while removing the size ceiling. It is deliberately *not* a change to the transaction layer:
+transactions already retransmit parts, and a second fragmentation scheme inside them would be a
+second thing to get wrong. The host holds chunks until `chunk_idx == chunk_count - 1`, applies the
+joined bytes once, and answers with a `Snapshot`; a partial paste is never written to a pty, so the
+failure mode is a retry rather than half a command running.
+
+*Implemented 2026-11-11, on both ends, with the fixture as the cross-language proof:* the field is
+on `Message::Send` and `Message::Snapshot` in `crates/protocol/src/mesh_term.rs` (headers 14 and 25
+bytes), on `TermMessage.Send` and `TermMessage.Snapshot` in the app's `MeshTerm.kt`, and the
+regenerated fixture carries a three-chunk `Send` and a two-chunk `Snapshot` whose `chunkIdx` is not
+zero — a codec that reads the header in the wrong order fails there rather than in the field.
+`SendAssembly` (host) and `SnapshotAssembly` (phone) are the only way to consume chunks, and they
+enforce the three rules that make the envelope safe: nothing is handed on until the last chunk, a
+duplicated chunk is a repair rather than a fault, and a chunk of another command or another screen
+is refused **without** touching the assembly in progress, so the caller decides which one died.
+Both are bounded (`MAX_COMMAND_TOTAL` 16 KiB, `MAX_SNAPSHOT_TOTAL` 32 KiB) and both have tests,
+including a 16 KiB command assembled from chunks and re-encoded, and a refused chunk that leaves
+the first command intact. `MAX_SEND_ITEM` stays 400, so a long paste is several adjacent `Paste`
+items: `apply_send` now joins adjacent items **of the same kind** as raw bytes *before* the
+bracketed-paste rule runs, so a 2 kB paste is one wrapped region rather than five, while typed text
+and a paste stay separate runs because they mean different things (a test pins both).
+
+### 12.3 The gates do not run the configuration that ships
+
+**AR-4 — `crates/session/tests/endpoint.rs` builds its endpoints with `max_rungs(12)`,
+`max_attempts(6)` and `rto_ms(2_000)`, while the shipped defaults are 3, 5 and a value derived from
+airtime.** The gate therefore proves a design that retries four times as often as the real one. A
+gate is only as good as the difference between its configuration and production's, and here that
+difference is exactly the parameter the field failures were about (how long the phone keeps asking).
+
+*Disposition (done 2026-11-11):* `Run::shipped` builds the same link with **no** tuning applied —
+the stress values are now applied only when a test asks for them, so `shipped` is the default
+configuration rather than a restatement of it that could drift. `a_link_comes_up_at_the_retry_ladder
+_that_ships` connects, sends and receives one repeater away at those defaults, and `Run::new` says
+in its doc comment that it stresses the ladder and why. The `rto_ms` in the harness is no longer a
+fixed 2 s either: it is `retransmission_timeout_ms(repeaters)`, derived from the route.
+
+### 12.4 Version negotiation is half-migrated
+
+**AR-5 — `VERSION` is 14 and `TRANSACTION_VERSION` is 15.** The reasoning (nothing serves `Send`
+until the host half lands, so a phone that attaches as 15 would wait for an answer that no code
+sends) is correct, and the constant split makes the dependency explicit. The risk is that the split
+outlives its reason: an app that can encode v15, negotiates v14, and is tested against v15 fixtures
+looks finished and is not. *Disposition:* keep the split, but make it a **compile-time coupling**
+in the host half: the service that serves `Send` sets `mesh_term::VERSION` to 15 in the same change
+that gives it a receive path, and the plan's S3b is the only place that may do it. Record it in §11
+(already done) and in the release audit when the daemon changes.
+
+### 12.5 Route proof is one-sided by construction
+
+**AR-6 — only the end that sent a direct packet can mark a path proven, because `prove()` needs
+`last_direct_path`** (`endpoint.rs`). The six-hop gate shows the asymmetry exactly: the host proves,
+the phone does not. This is not a defect — a receiver of a direct packet has had its path consumed
+and genuinely knows nothing about it — but it means `routes_proven` is a measure of *sending*
+direct, not of holding a good route, and a UI or a log that reads it as route quality is wrong.
+*Disposition:* keep the rule, document what the counter means where it is surfaced, and let the
+phone's candidate rank direct traffic without proof (it already does).
+
+### 12.6 Dependency and boundary decisions the plan implied but did not record
+
+**AR-7 — `sha2` was added to `ldmux-mesh`** for the simulator's duplicate hash, and `ldmux-mesh` is
+linked into the Android `.so`. `AGENTS.md` requires an ADR line for a new dependency. It is pure
+Rust and already in the tree through `ldmux-session`, so the decision is small, but an unrecorded
+exception becomes the precedent for the next one. *Disposition:* one line in ADR-0039 naming the
+crate, why the simulator must hash exactly as the firmware does, and why nothing C-backed is
+acceptable there.
+
+**AR-8 — the companion command table lives in `ldmux-companion` while the queue lives in
+`ldmux-mesh`.** That split is right — the FIFO is shared, the host's answer set is host-specific —
+but the phone's half of the client (S4) must supply its own table, and the plan never said so.
+*Disposition:* §8.1 names the table as an input to the client engine rather than something the
+engine derives.
+
+### 12.7 What the audit does **not** find overscoped
+
+The question was whether the plan asked for more than the problem needs. On the evidence, no:
+
+- **`SUB_A`/`SUB_B` narrow-carrier halves** are not speculative: the flood budget is 59 payload
+  bytes and a direct part is 118, so any direct part retried on a flood needs exactly this split.
+  Removing it would mean re-cutting a part, which is the defect `RC-7` recorded.
+- **The per-transmit `tx_nonce`** is not decoration: without it a retried record is byte-identical
+  and `wasSeen` drops it at the first repeater, measured in the harness as 292 drops in one run.
+- **`KIND_NEED_HANDSHAKE`** is the only mechanism that lets a phone recover in seconds after a
+  daemon restart; the alternative is every phone waiting out its ladder, which was `RC-5`.
+- **`CompanionFifo`** is the whole of `RC-2`; it is 582 lines including its tests and has no
+  alternative that is smaller.
+- **The `VirtualMesh` harness** paid for itself twice inside one stage: it found the dropped
+  piggybacked ack and the route that was never re-learned, neither of which any unit test of the
+  parts would have caught.
+
+The one place the plan is **underscoped** is chunking (§12.2, AR-3): it assumed every command fits
+one message, and a paste does not. That is being corrected before version 15 ships, which is the
+cheapest moment it will ever be.
+
+### 12.8 Findings index
+
+| Id | Finding | Severity | Disposition |
+|---|---|---|---|
+| AR-1 | the new stack is inert while the old one runs | **risk** | S3b deletes the old modules; §11 states what is live |
+| AR-2 | codec accepted a body the transport cannot carry | **defect** | **fixed:** `crates/session/tests/payload_fits.rs` proves the ordering at the worst legal record sizes |
+| AR-3 | a paste over ~550 bytes could not be sent | **defect (regression)** | **fixed:** `chunk_idx`/`chunk_count` on `T_SEND` and `T_SNAPSHOT`, with `SendAssembly`/`SnapshotAssembly` and a non-zero-chunk fixture case |
+| AR-4 | gates ran non-production retry configuration | **gate weakness** | **fixed:** `Run::shipped` plus `a_link_comes_up_at_the_retry_ladder_that_ships` |
+| AR-5 | version negotiation half-migrated | **risk** | coupling stated; S3b owns the bump |
+| AR-6 | route proof is one-sided | **by design** | document what the counter means |
+| AR-7 | `sha2` in `ldmux-mesh` without an ADR line | **process** | **fixed:** ADR-0039 gained a Dependencies section naming the crate and why the simulator must hash as the firmware does |
+| AR-8 | the client's command table is an input, not a derivation | **doc** | **fixed:** §8.1 says each side supplies its own answer table, so the S4 client engine gets the phone's rather than inheriting the host's |

@@ -211,6 +211,113 @@ object MeshTerm {
     internal const val T_ROWS = 0x82
     internal const val T_COMMIT = 0x83
     internal const val T_CLOSED = 0x84
+
+    /**
+     * Phone to host: **everything the operator composed, as one command** (version 15).
+     *
+     * One message, not three. `Hold(false)`, then one `Input` per text run, then one `Key` per
+     * enter was three transactions, three records and three chances to lose part of a keystroke and
+     * enter, in any order. One [TermMessage.Send] is one transaction: it applies whole or not at
+     * all, and its items keep the order they were composed in.
+     */
+    internal const val T_SEND = 0x0e
+
+    /** Phone to host: the screen again at this grid, spending no draft (version 15). */
+    internal const val T_FETCH = 0x0f
+
+    /** Host to phone: **one atomic screen**, geometry and answer included (version 15). */
+    internal const val T_SNAPSHOT = 0x8e
+
+    /**
+     * The first version that speaks [TermMessage.Send], [TermMessage.Fetch] and
+     * [TermMessage.Snapshot].
+     *
+     * **A version is what a build can answer, not what it can encode.** These messages exist and
+     * are pinned by the shared fixture, but no host serves one until the daemon's receive path is
+     * the transaction service, so [VERSION] stays below this until it is: a phone that attached as
+     * 15 would be told `Send` exists and would then wait for an answer nothing sends.
+     */
+    const val TRANSACTION_VERSION = 15
+
+    /** The item tags inside a [TermMessage.Send]. */
+    internal const val SEND_TEXT = 0x01
+    internal const val SEND_PASTE = 0x02
+    internal const val SEND_KEYS = 0x03
+
+    /** Most items one [TermMessage.Send] may carry. */
+    const val MAX_SEND_ITEMS = 16
+
+    /** Most content bytes one item of a [TermMessage.Send] may carry. */
+    const val MAX_SEND_ITEM = 400
+
+    /** The largest a [TermMessage.Snapshot] patch stream may inflate to. */
+    const val MAX_SNAPSHOT_INFLATED = 2_048
+
+    /**
+     * Most chunks one [TermMessage.Send] or [TermMessage.Snapshot] may be split into.
+     *
+     * A message is one transaction of at most `MAX_PARTS x 118 = 1,888` bytes, so one message cannot
+     * carry a paste; splitting on item and patch boundaries keeps every chunk a valid message, and
+     * the receiver applies nothing until the last one arrives. 255 is the field's width, not a
+     * policy: [MAX_COMMAND_TOTAL] and [MAX_SNAPSHOT_TOTAL] are the real bounds.
+     */
+    const val MAX_CHUNKS = 255
+
+    /** Most item bytes one command may carry across all of its chunks (`MAX_BUFFER`, the tailnet's). */
+    const val MAX_COMMAND_TOTAL = MAX_BUFFER
+
+    /** Most patch bytes one snapshot may carry across all of its chunks: 200 x 120 cells, rounded up. */
+    const val MAX_SNAPSHOT_TOTAL = 32_768
+
+    /** The flag bits a [TermMessage.Send] carries. */
+    object SendFlag {
+        /** The item stream is raw-deflated against [MeshFrameDictionary]. */
+        const val DEFLATED = 1 shl 0
+
+        /** The draft contains an interrupt, so the host may stop what is running first. */
+        const val INTERRUPT = 1 shl 1
+    }
+
+    /** The flag bits a [TermMessage.Snapshot] carries. */
+    object SnapshotFlag {
+        /** The patches are a whole screen rather than a diff against `baseId`. */
+        const val FULL = 1 shl 0
+        const val ALTERNATE = 1 shl 1
+        const val DEAD = 1 shl 2
+
+        /** The pane had settled when this was captured; clear means it was still changing. */
+        const val SETTLED = 1 shl 3
+
+        /** The patch stream is raw-deflated against [MeshFrameDictionary]. */
+        const val DEFLATED = 1 shl 4
+
+        /** `appliedOpId` and `appliedStatus` are present. */
+        const val HAS_APPLIED = 1 shl 5
+    }
+
+    /** What the host did with a [TermMessage.Send], as one byte in a [TermMessage.Snapshot]. */
+    object Applied {
+        /** Not stated: the snapshot answers a `Fetch`, not a `Send`. */
+        const val NONE = 0
+
+        /** The bytes reached the pty. */
+        const val WRITTEN = 1
+
+        /** This `op_id` was already applied, so nothing was written twice. */
+        const val DUPLICATE = 2
+
+        /** No shell is attached, or the shell is not the one named. */
+        const val NO_SHELL = 3
+
+        /** Another client holds the shell, so nothing was written. */
+        const val HELD = 4
+
+        /** The host refused the bytes as longer than a pane may take. */
+        const val TOO_LONG = 5
+
+        /** The keeper refused the write. */
+        const val FAILED = 6
+    }
 }
 
 /**
@@ -438,6 +545,91 @@ sealed interface TermMessage {
 
     /** Host: the shell `Create` just made, so the phone attaches to that one and not to a guess. */
     data class Created(val id: String) : TermMessage
+
+    /**
+     * Phone to host: **everything the operator composed, as one command** (version 15).
+     *
+     * [opId] makes the execution at-most-once: a phone that never saw the answer re-sends the same
+     * id and the host reports what it did the first time instead of writing the bytes twice.
+     * [haveSnapshotId] is what the host diffs its answer against, so a command costs one screen and
+     * not a repaint. [cols]/[rows] fit the pty **before** the command runs.
+     */
+    class Send(
+        val opId: Int,
+        /** Which chunk of this command this message is; 0 of 1 for the common whole-command case. */
+        val chunkIdx: Int,
+        val chunkCount: Int,
+        val haveSnapshotId: Int,
+        val cols: Int,
+        val rows: Int,
+        val flags: Int,
+        val shell: String,
+        val items: List<SendItem>,
+    ) : TermMessage {
+        override fun equals(other: Any?) = other is Send && other.opId == opId &&
+            other.chunkIdx == chunkIdx && other.chunkCount == chunkCount &&
+            other.haveSnapshotId == haveSnapshotId && other.cols == cols && other.rows == rows &&
+            other.flags == flags && other.shell == shell && other.items == items
+
+        override fun hashCode() =
+            listOf(opId, chunkIdx, chunkCount, haveSnapshotId, cols, rows, flags, shell, items).hashCode()
+
+        override fun toString() = "Send(op $opId, ${items.size} items)"
+    }
+
+    /** Phone to host: the screen again at this grid, spending no draft (version 15). */
+    data class Fetch(
+        val haveSnapshotId: Int,
+        val cols: Int,
+        val rows: Int,
+        val shell: String,
+    ) : TermMessage
+
+    /**
+     * Host to phone: **one atomic screen** (version 15).
+     *
+     * Geometry, cursor, rows, the absolute top line and the answer to the command that caused it,
+     * in one message, so no field can arrive without the rows it belongs to. It replaces
+     * `Profile` + `Rows` + `Commit` on the radio route, where three messages were three chances to
+     * lose a third of a screen.
+     */
+    data class Snapshot(
+        val flags: Int,
+        /** Which chunk of this screen this message is; 0 of 1 for a whole screen. */
+        val chunkIdx: Int,
+        val chunkCount: Int,
+        val snapshotId: Int,
+        val baseId: Int,
+        val appliedOpId: Int,
+        val appliedStatus: Int,
+        val cols: Int,
+        val rows: Int,
+        val cursorX: Int,
+        val cursorY: Int,
+        val firstLine: Int,
+        val shell: String,
+        val patches: List<TermPatch>,
+    ) : TermMessage
+}
+
+/** One piece of a [TermMessage.Send], in the order the operator composed it. */
+sealed interface SendItem {
+    /** Literal text, exactly as typed. */
+    class Text(val bytes: ByteArray) : SendItem {
+        override fun equals(other: Any?) = other is Text && bytes.contentEquals(other.bytes)
+        override fun hashCode() = bytes.contentHashCode()
+        override fun toString() = "Text(${bytes.size} bytes)"
+    }
+
+    /** Text pasted at once: the host wraps it for the pane's bracketed-paste mode. */
+    class Paste(val bytes: ByteArray) : SendItem {
+        override fun equals(other: Any?) = other is Paste && bytes.contentEquals(other.bytes)
+        override fun hashCode() = bytes.contentHashCode()
+        override fun toString() = "Paste(${bytes.size} bytes)"
+    }
+
+    /** Named keys, in order (`Enter`, `C-c`, `Up`). */
+    data class Keys(val names: List<String>) : SendItem
 }
 
 /** A field is over its limit, or an `Input` is empty. Nothing is truncated: the caller decides. */
@@ -459,6 +651,15 @@ private fun putLen(out: ArrayList<Byte>, n0: Int) {
 /** Printable ASCII with no space: the space is the separator and nothing else is a key name. */
 internal fun validKeyName(name: String): Boolean =
     name.isNotEmpty() && name.all { it.code in 0x21..0x7e }
+
+/** Whether a chunk pair describes a real position inside a real message. */
+internal fun chunkIsSane(idx: Int, count: Int): Boolean =
+    count in 1..MeshTerm.MAX_CHUNKS && idx in 0 until count
+
+/** [chunkIsSane] as an encode refusal, so this build cannot build a message a host rejects. */
+private fun checkChunk(idx: Int, count: Int) {
+    if (!chunkIsSane(idx, count)) throw TermEncodeException("chunk $idx of $count")
+}
 
 private fun u8(v: Int, what: String): Byte {
     if (v !in 0..255) throw TermEncodeException("$what does not fit one byte")
@@ -605,6 +806,92 @@ fun TermMessage.encode(): ByteArray {
             sel.forEach { body.add(it) }
             MeshTerm.T_MAKE_LIVE
         }
+        is TermMessage.Send -> {
+            if (items.isEmpty()) throw TermEncodeException("a command with nothing in it")
+            if (items.size > MeshTerm.MAX_SEND_ITEMS) throw TermEncodeException("too many items")
+            val shellBytes = shell.encodeToByteArray()
+            if (shellBytes.size > MeshTerm.MAX_SELECTOR) throw TermEncodeException("selector too long")
+            checkChunk(chunkIdx, chunkCount)
+            body.addAll(u32(opId, "opId"))
+            body.add(chunkIdx.toByte()); body.add(chunkCount.toByte())
+            body.addAll(u32(haveSnapshotId, "haveSnapshotId"))
+            body.add(u8(cols, "cols")); body.add(u8(rows, "rows")); body.add(u8(flags, "flags"))
+            body.add(shellBytes.size.toByte()); shellBytes.forEach { body.add(it) }
+            val stream = ArrayList<Byte>()
+            for (item in items) {
+                when (item) {
+                    is SendItem.Text, is SendItem.Paste -> {
+                        val bytes = if (item is SendItem.Text) item.bytes else (item as SendItem.Paste).bytes
+                        if (bytes.isEmpty()) throw TermEncodeException("an empty item")
+                        if (bytes.size > MeshTerm.MAX_SEND_ITEM) throw TermEncodeException("item too long")
+                        stream.add((if (item is SendItem.Text) MeshTerm.SEND_TEXT else MeshTerm.SEND_PASTE).toByte())
+                        stream.addAll(u16(bytes.size, "item length")); bytes.forEach { stream.add(it) }
+                    }
+                    is SendItem.Keys -> {
+                        if (item.names.isEmpty()) throw TermEncodeException("no keys")
+                        if (item.names.size > MeshTerm.MAX_KEYS) throw TermEncodeException("too many keys")
+                        if (item.names.any { !validKeyName(it) }) throw TermEncodeException("bad key names")
+                        stream.add(MeshTerm.SEND_KEYS.toByte())
+                        stream.add(item.names.size.toByte())
+                        for (name in item.names) {
+                            stream.add(name.length.toByte())
+                            name.encodeToByteArray().forEach { stream.add(it) }
+                        }
+                    }
+                }
+            }
+            if (stream.size > MeshTerm.MAX_BODY) throw TermEncodeException("items too long")
+            // The uncompressed length is stated in both forms: a decoder has no other way to size
+            // an inflate, exactly as a frame states its own.
+            body.addAll(u16(stream.size, "items length"))
+            if (flags and MeshTerm.SendFlag.DEFLATED != 0) {
+                // **This build never sets that bit**: there is no deflate in shared code, and a
+                // command or paste is a few hundred bytes that the transaction layer already
+                // splits. A host that receives one from a later phone still reads it.
+                throw TermEncodeException("this build cannot deflate a command")
+            }
+            body.addAll(stream)
+            if (body.size > MeshTerm.MAX_BODY) throw TermEncodeException("send too long")
+            MeshTerm.T_SEND
+        }
+        is TermMessage.Fetch -> {
+            val shellBytes = shell.encodeToByteArray()
+            if (shellBytes.size > MeshTerm.MAX_SELECTOR) throw TermEncodeException("selector too long")
+            body.addAll(u32(haveSnapshotId, "haveSnapshotId"))
+            body.add(u8(cols, "cols")); body.add(u8(rows, "rows"))
+            body.add(shellBytes.size.toByte()); shellBytes.forEach { body.add(it) }
+            MeshTerm.T_FETCH
+        }
+        is TermMessage.Snapshot -> {
+            val shellBytes = shell.encodeToByteArray()
+            if (shellBytes.size > MeshTerm.MAX_SELECTOR) throw TermEncodeException("selector too long")
+            checkChunk(chunkIdx, chunkCount)
+            body.add(u8(flags, "flags"))
+            body.add(chunkIdx.toByte()); body.add(chunkCount.toByte())
+            body.addAll(u32(snapshotId, "snapshotId"))
+            body.addAll(u32(baseId, "baseId"))
+            body.addAll(u32(appliedOpId, "appliedOpId"))
+            body.add(u8(appliedStatus, "appliedStatus"))
+            body.add(u8(cols, "cols")); body.add(u8(rows, "rows"))
+            body.add(u8(cursorX, "cursorX")); body.add(u8(cursorY, "cursorY"))
+            body.addAll(u32(firstLine, "firstLine"))
+            body.add(shellBytes.size.toByte()); shellBytes.forEach { body.add(it) }
+            val stream = ArrayList<Byte>()
+            for (p in patches) {
+                val text = p.text.encodeToByteArray()
+                if (text.size > MeshTerm.MAX_SEGMENT) throw TermEncodeException("patch too long")
+                stream.add(p.y.toByte()); stream.add((if (p.append) 1 else 0).toByte())
+                stream.add(text.size.toByte()); text.forEach { stream.add(it) }
+            }
+            if (stream.size > MeshTerm.MAX_SNAPSHOT_INFLATED) throw TermEncodeException("snapshot too big")
+            body.addAll(u16(stream.size, "patches length"))
+            if (flags and MeshTerm.SnapshotFlag.DEFLATED != 0) {
+                throw TermEncodeException("this build cannot deflate a snapshot")
+            }
+            body.addAll(stream)
+            if (body.size > MeshTerm.MAX_BODY) throw TermEncodeException("snapshot too long")
+            MeshTerm.T_SNAPSHOT
+        }
         is TermMessage.Created -> {
             val i = id.encodeToByteArray()
             if (i.size > MeshTerm.MAX_SELECTOR) throw TermEncodeException("id too long")
@@ -670,6 +957,95 @@ class TermStreamException(val kind: Kind) : Exception("mesh terminal stream: $ki
 }
 
 /** Reassembles messages from an arbitrarily chunked byte stream. */
+/** Why a chunk was refused. Mirrors `ldmux_protocol::mesh_term::ChunkError`. */
+enum class ChunkRefusal {
+    /** A chunk addressed a different screen (`snapshotId`), or a screen that never began. */
+    WrongCommand,
+
+    /** The chunk's `chunkCount` disagrees with the first chunk's, so no position is well defined. */
+    WrongCount,
+
+    /** The joined screen would exceed [MeshTerm.MAX_SNAPSHOT_TOTAL]. */
+    TooLarge,
+}
+
+/** What one chunk did to a [SnapshotAssembly]. */
+sealed interface Joined {
+    /** More chunks are needed; nothing may be painted yet. */
+    data object Pending : Joined
+
+    /** The last chunk arrived: this is the whole screen, as one message. */
+    data class Ready(val screen: TermMessage.Snapshot) : Joined
+
+    /** The chunk was refused, and the assembly is exactly as it was before. */
+    data class Refused(val reason: ChunkRefusal) : Joined
+}
+
+/**
+ * Join the chunks of one [TermMessage.Snapshot] back into the screen it describes.
+ *
+ * A first full paint of a wide grid deflates past what one transaction carries (`MAX_PARTS x 118`
+ * bytes), so the host may split a screen across several `Snapshot` messages sharing a
+ * `snapshotId`. The screen is handed to the painter **only when the last chunk has arrived**, which
+ * is what keeps a chunked snapshot atomic: the phone paints one screen, never a half-drawn one.
+ *
+ * The header is repeated in every chunk, so the last chunk's geometry, cursor, answer and flags are
+ * the ones kept — those are the values the host held when it finished the screen. A duplicated
+ * chunk is ignored, because the transaction layer retransmits one whose acknowledgement was lost.
+ */
+class SnapshotAssembly {
+    private class Open(
+        val snapshotId: Int,
+        val chunkCount: Int,
+        val patches: Array<MutableList<TermPatch>?>,
+        var filled: Int = 0,
+        var bytes: Int = 0,
+        var head: TermMessage.Snapshot? = null,
+    )
+
+    private var open: Open? = null
+
+    /** Whether a screen is part-way through. A new `snapshotId` means the host gave up on it. */
+    val isOpen: Boolean get() = open != null
+
+    /** Forget a part-way screen, because the host superseded it or the session ended. */
+    fun clear() {
+        open = null
+    }
+
+    /** Feed one chunk and learn whether the screen is complete. */
+    fun accept(m: TermMessage.Snapshot): Joined {
+        val current = open ?: run {
+            // A screen must start at its first chunk: without chunk 0 there is no patch order.
+            if (m.chunkIdx != 0) return Joined.Refused(ChunkRefusal.WrongCommand)
+            Open(m.snapshotId, m.chunkCount, arrayOfNulls(m.chunkCount)).also { open = it }
+        }
+        if (current.snapshotId != m.snapshotId) return Joined.Refused(ChunkRefusal.WrongCommand)
+        if (current.chunkCount != m.chunkCount) return Joined.Refused(ChunkRefusal.WrongCount)
+        if (m.chunkIdx >= current.patches.size) return Joined.Refused(ChunkRefusal.WrongCount)
+        if (current.patches[m.chunkIdx] != null) return Joined.Pending
+        val bytes = m.patches.sumOf { 3 + it.text.encodeToByteArray().size }
+        if (current.bytes + bytes > MeshTerm.MAX_SNAPSHOT_TOTAL) {
+            return Joined.Refused(ChunkRefusal.TooLarge)
+        }
+        current.patches[m.chunkIdx] = ArrayList(m.patches)
+        current.bytes += bytes
+        current.filled += 1
+        current.head = m
+        if (current.filled < current.patches.size) return Joined.Pending
+        open = null
+        val head = current.head ?: return Joined.Refused(ChunkRefusal.WrongCommand)
+        val joined = ArrayList<TermPatch>()
+        for (part in current.patches) joined.addAll(part ?: emptyList())
+        return Joined.Ready(
+            TermMessage.Snapshot(
+                head.flags, 0, 1, head.snapshotId, head.baseId, head.appliedOpId, head.appliedStatus,
+                head.cols, head.rows, head.cursorX, head.cursorY, head.firstLine, head.shell, joined,
+            ),
+        )
+    }
+}
+
 class TermDecoder {
     private var buf = ByteArray(0)
 
@@ -825,6 +1201,115 @@ class TermDecoder {
                     if (bad || (flags and 3.inv()) != 0) Parsed.Bad
                     else ok(TermMessage.HistoryPage(from, last, older, lines))
                 }
+            }
+            MeshTerm.T_SEND -> {
+                if (body.size < 14) return Parsed.Bad
+                val opId = le32(body, 0)
+                val chunkIdx = b(body, 4)
+                val chunkCount = b(body, 5)
+                if (!chunkIsSane(chunkIdx, chunkCount)) return Parsed.Bad
+                val haveSnapshotId = le32(body, 6)
+                val cols = b(body, 10)
+                val rows = b(body, 11)
+                val flags = b(body, 12)
+                val shellLen = b(body, 13)
+                if (shellLen > MeshTerm.MAX_SELECTOR || body.size < 14 + shellLen) return Parsed.Bad
+                val shell = utf8(body.copyOfRange(14, 14 + shellLen)) ?: return Parsed.Bad
+                val tail = body.size - (14 + shellLen)
+                if (tail < 2) return Parsed.Bad
+                val plain = le16(body, 14 + shellLen)
+                if (plain == 0 || plain > MeshTerm.MAX_BODY) return Parsed.Bad
+                val stream: ByteArray = if (flags and MeshTerm.SendFlag.DEFLATED != 0) {
+                    inflateFrame(body.copyOfRange(14 + shellLen + 2, body.size), plain, true)
+                        ?: return Parsed.Bad
+                } else {
+                    if (tail != 2 + plain) return Parsed.Bad
+                    body.copyOfRange(14 + shellLen + 2, body.size)
+                }
+                val items = ArrayList<SendItem>()
+                var at = 0
+                while (at < stream.size) {
+                    when (stream[at].toInt() and 0xff) {
+                        MeshTerm.SEND_TEXT, MeshTerm.SEND_PASTE -> {
+                            if (stream.size - at < 3) return Parsed.Bad
+                            val n = (stream[at + 1].toInt() and 0xff) or ((stream[at + 2].toInt() and 0xff) shl 8)
+                            if (n == 0 || n > MeshTerm.MAX_SEND_ITEM || stream.size - (at + 3) < n) return Parsed.Bad
+                            val bytes = stream.copyOfRange(at + 3, at + 3 + n)
+                            items.add(
+                                if ((stream[at].toInt() and 0xff) == MeshTerm.SEND_TEXT) SendItem.Text(bytes)
+                                else SendItem.Paste(bytes),
+                            )
+                            at += 3 + n
+                        }
+                        MeshTerm.SEND_KEYS -> {
+                            if (stream.size - at < 2) return Parsed.Bad
+                            val count = stream[at + 1].toInt() and 0xff
+                            if (count == 0 || count > MeshTerm.MAX_KEYS) return Parsed.Bad
+                            var p = at + 2
+                            val names = ArrayList<String>(count)
+                            repeat(count) {
+                                if (p >= stream.size) return Parsed.Bad
+                                val n = stream[p].toInt() and 0xff
+                                if (stream.size - (p + 1) < n) return Parsed.Bad
+                                val name = utf8(stream.copyOfRange(p + 1, p + 1 + n)) ?: return Parsed.Bad
+                                if (!validKeyName(name)) return Parsed.Bad
+                                names.add(name)
+                                p += 1 + n
+                            }
+                            items.add(SendItem.Keys(names))
+                            at = p
+                        }
+                        else -> return Parsed.Bad
+                    }
+                    if (items.size > MeshTerm.MAX_SEND_ITEMS) return Parsed.Bad
+                }
+                if (items.isEmpty()) Parsed.Bad
+                else ok(TermMessage.Send(opId, chunkIdx, chunkCount, haveSnapshotId, cols, rows, flags, shell, items))
+            }
+            MeshTerm.T_FETCH -> {
+                if (body.size < 7) return Parsed.Bad
+                val haveSnapshotId = le32(body, 0)
+                val shellLen = b(body, 6)
+                if (shellLen > MeshTerm.MAX_SELECTOR || body.size != 7 + shellLen) return Parsed.Bad
+                val shell = utf8(body.copyOfRange(7, body.size)) ?: return Parsed.Bad
+                ok(TermMessage.Fetch(haveSnapshotId, b(body, 4), b(body, 5), shell))
+            }
+            MeshTerm.T_SNAPSHOT -> {
+                if (body.size < 25) return Parsed.Bad
+                val flags = b(body, 0)
+                val chunkIdx = b(body, 1)
+                val chunkCount = b(body, 2)
+                if (!chunkIsSane(chunkIdx, chunkCount)) return Parsed.Bad
+                val shellLen = b(body, 24)
+                if (shellLen > MeshTerm.MAX_SELECTOR || body.size < 27 + shellLen) return Parsed.Bad
+                val shell = utf8(body.copyOfRange(25, 25 + shellLen)) ?: return Parsed.Bad
+                val plainAt = 25 + shellLen
+                val plain = le16(body, plainAt)
+                if (plain > MeshTerm.MAX_SNAPSHOT_INFLATED) return Parsed.Bad
+                val stream: ByteArray = if (flags and MeshTerm.SnapshotFlag.DEFLATED != 0) {
+                    inflateFrame(body.copyOfRange(plainAt + 2, body.size), plain, true)
+                        ?: return Parsed.Bad
+                } else {
+                    if (body.size - (plainAt + 2) != plain) return Parsed.Bad
+                    body.copyOfRange(plainAt + 2, body.size)
+                }
+                val patches = ArrayList<TermPatch>()
+                var p = 0
+                while (p < stream.size) {
+                    if (stream.size - p < 3) return Parsed.Bad
+                    val n = stream[p + 2].toInt() and 0xff
+                    if (n > MeshTerm.MAX_SEGMENT || stream.size - (p + 3) < n) return Parsed.Bad
+                    val text = utf8(stream.copyOfRange(p + 3, p + 3 + n)) ?: return Parsed.Bad
+                    patches.add(TermPatch(stream[p].toInt() and 0xff, stream[p + 1].toInt() and 1 == 1, text))
+                    p += 3 + n
+                }
+                ok(
+                    TermMessage.Snapshot(
+                        flags, chunkIdx, chunkCount,
+                        le32(body, 3), le32(body, 7), le32(body, 11), b(body, 15),
+                        b(body, 16), b(body, 17), b(body, 18), b(body, 19), le32(body, 20), shell, patches,
+                    ),
+                )
             }
             MeshTerm.T_DETACH -> if (body.isEmpty()) ok(TermMessage.Detach) else Parsed.Bad
             // Version 1 is exactly five bytes and is never an error; a longer body is version 2 and

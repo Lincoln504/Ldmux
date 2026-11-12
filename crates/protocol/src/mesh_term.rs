@@ -42,9 +42,14 @@
 //! | 0x84 | host→phone | `Closed` | `reason u8` |
 //! | 0x86 | host→phone | `Created` | `id_len u8 \| id`: the shell `Create` just made (version 7) |
 //! | 0x85 | host→phone | `Sessions` | `flags u8` (bit 0 = last page, bit 1 = entries carry a `cwd`, bit 2 = `created_by`, bit 3 = the current holder), then entries `id_len u8 \| id \| label_len u8 \| label`, and after each: `cwd`, `origin`, `owner` when their bits are set |
+//! | 0x0e | phone→host | `Send` | `op_id u32 LE`, `chunk_idx u8`, `chunk_count u8`, `have_snapshot_id u32 LE`, `cols u8`, `rows u8`, `flags u8` (bit 0 = deflated, bit 1 = interrupt), `shell_len u8 \| shell`, `items_len u16 LE`, then the item stream (version 15) |
+//! | 0x0f | phone→host | `Fetch` | `have_snapshot_id u32 LE`, `cols u8`, `rows u8`, `shell_len u8 \| shell` (version 15) |
+//! | 0x8e | host→phone | `Snapshot` | `flags u8`, `chunk_idx u8`, `chunk_count u8`, `snapshot_id u32 LE`, `base_id u32 LE`, `applied_op_id u32 LE`, `applied_status u8`, `cols u8`, `rows u8`, `cursor_x u8`, `cursor_y u8`, `first_line u32 LE`, `shell_len u8 \| shell`, `patch_len u16 LE`, then the patch stream (version 15) |
 //!
 //! A patch is `y u8 | flags u8 (bit 0 = append) | n u8 | n bytes of UTF-8`. A row longer than
-//! [`MAX_SEGMENT`] bytes is sent as a first segment (replace) and further segments (append).
+//! [`MAX_SEGMENT`] bytes is sent as a first segment (replace) and further segments (append). An
+//! item of a `Send` is `0x01` (text) or `0x02` (paste) with `len u16 LE | bytes`, or `0x03` (keys)
+//! with `count u8` and then `name_len u8 | ascii name` per key.
 //!
 //! # What this is not
 //!
@@ -189,6 +194,46 @@ pub const RECORD_PAYLOAD: usize = 143;
 /// leaves. A 200-character command was three records where two will do; a thousand-character paste
 /// is two or three fewer.
 pub const MAX_INPUT: usize = 137;
+/// Most items one [`Message::Send`] may carry. A draft is a few runs of text and a few keys, so
+/// sixteen is well past any real one while a hostile body stays bounded.
+pub const MAX_SEND_ITEMS: usize = 16;
+/// Most content bytes one item of a [`Message::Send`] may carry: a command line, a paste, or a
+/// run of typed text.
+pub const MAX_SEND_ITEM: usize = 400;
+/// The largest a [`Message::Snapshot`] patch stream may inflate to. A whole 46x19 screen is about
+/// 900 bytes of rows; this bounds a corrupt or hostile length so an explosion cannot exhaust the
+/// phone, exactly as [`FRAME_MAX_INFLATED`] does for a frame.
+pub const MAX_SNAPSHOT_INFLATED: usize = 2_048;
+/// Most chunks one `Send` or `Snapshot` may be split into.
+///
+/// **Chunking is what removes the size ceiling from a command.** The plan made every request and
+/// every answer one message, which is right for at-most-once execution and for an atomic screen,
+/// but a message is one transaction of at most `MAX_PARTS x 118 = 1,888` bytes — so one message
+/// cannot carry a 2 kB paste, and the protocol this replaces could (at a ruinous airtime cost).
+/// Splitting on item and patch boundaries keeps every chunk a valid message on its own, so a
+/// receiver never parses half an item and never runs half a paste.
+///
+/// 255 is the field's own width, not a considered policy: the real bound is
+/// [`MAX_COMMAND_TOTAL`] and [`MAX_SNAPSHOT_TOTAL`], which the assemblers enforce.
+pub const MAX_CHUNKS: usize = 255;
+
+/// Most item bytes one command may carry **across all of its chunks**.
+///
+/// [`MAX_BUFFER`], the tailnet route's own cap: one client message means the same thing on both
+/// routes, so a paste the WebSocket accepts is not refused by the radio, and the operator does not
+/// have to learn which transport can hold their clipboard. At the public preset 16 KiB is about
+/// ninety records — the operator's choice to paste that much, but a refusal is not a better answer
+/// than a slow one.
+pub const MAX_COMMAND_TOTAL: usize = MAX_BUFFER;
+
+/// Most patch bytes one snapshot may carry **across all of its chunks**.
+///
+/// Derived from the largest legal screen rather than chosen: the wire's own ceiling is
+/// [`MAX_PANE_COLS`](crate::MAX_PANE_COLS) x [`MAX_PANE_ROWS`](crate::MAX_PANE_ROWS) = 200 x 120
+/// cells, and a row of 200 bytes is sent as two segments of at most `MAX_SEGMENT` 120, so the worst
+/// full paint is about `120 x (2 + 204)` = 24.7 kB. Thirty-two kilobytes is that, rounded up to
+/// leave room for row overhead a later patch kind might add.
+pub const MAX_SNAPSHOT_TOTAL: usize = 32_768;
 /// Most bytes of a shell label in a `Sessions` entry (cut at a character boundary by the host).
 pub const MAX_LABEL: usize = 24;
 /// Most bytes of a shell's working directory in a `Sessions` entry (cut at a character boundary
@@ -311,6 +356,15 @@ pub struct Patch {
     pub text: String,
 }
 
+impl Patch {
+    /// Bytes this patch costs on the wire (`y`, flags, `n`, text), so [`SnapshotAssembly`] can
+    /// bound a joined screen without re-encoding it.
+    #[must_use]
+    pub fn wire_len(&self) -> usize {
+        3 + self.text.len()
+    }
+}
+
 /// One running shell in a `Sessions` reply: its id (usable as an `Attach` selector), a label, and
 /// the directory it is in.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -332,8 +386,97 @@ pub struct SessionEntry {
     pub shell: String,
 }
 
+/// One piece of a [`Message::Send`], in the order the operator composed it.
+///
+/// **The kinds are separate because the host treats them differently**, and the difference is the
+/// whole point of sending them as typed pieces rather than as one byte run: text is written as it
+/// is, a paste is wrapped for the pane's bracketed-paste mode so its newlines never run, and a key
+/// is encoded for the pane's own cursor-key and keyboard mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendItem {
+    /// Literal text, exactly as typed.
+    Text(Vec<u8>),
+    /// Text pasted at once.
+    Paste(Vec<u8>),
+    /// Named keys, in order (`Enter`, `C-c`, `Up`).
+    Keys(Vec<String>),
+}
+
+impl SendItem {
+    /// Bytes this item costs on the wire, so [`SendAssembly`] can bound a joined command without
+    /// re-encoding it.
+    #[must_use]
+    pub fn wire_len(&self) -> usize {
+        match self {
+            // tag + `len u16 LE` + bytes
+            Self::Text(b) | Self::Paste(b) => 3 + b.len(),
+            // tag + count, then `name_len u8` + name per key
+            Self::Keys(names) => 2 + names.iter().map(|n| 1 + n.len()).sum::<usize>(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
+    /// Phone → host: **everything the operator composed, as one command** (version 15).
+    ///
+    /// `op_id` makes the execution at-most-once: a phone that never saw the answer re-sends the
+    /// same id and the host reports what it did the first time instead of writing the bytes twice.
+    /// `have_snapshot_id` is what the host diffs its answer against, so a `Send` costs one screen
+    /// and not a repaint. `cols`/`rows` are the phone's grid, so the pty is fitted **before** the
+    /// command runs rather than after it has printed at the desk's width.
+    Send {
+        op_id: u32,
+        /// Which chunk of this command this message is, and how many there are.
+        ///
+        /// The common case is `chunk_idx = 0`, `chunk_count = 1`: the whole command in one message.
+        /// A command too large for one message is sent as `chunk_count` messages sharing an
+        /// `op_id`, and the host **applies the joined items once, when `chunk_idx == chunk_count -
+        /// 1`** — so a partial command is never written to a pty and a paste is either inserted
+        /// whole or not at all. See [`SendAssembly`].
+        chunk_idx: u8,
+        chunk_count: u8,
+        have_snapshot_id: u32,
+        cols: u8,
+        rows: u8,
+        flags: u8,
+        shell: String,
+        items: Vec<SendItem>,
+    },
+    /// Phone → host: the screen again, at this grid, spending no draft (version 15).
+    Fetch {
+        have_snapshot_id: u32,
+        cols: u8,
+        rows: u8,
+        shell: String,
+    },
+    /// Host → phone: geometry, cursor, rows and the answer to a `Send`, as one message (version 15).
+    ///
+    /// Every field of the three old messages the radio route depended on is here, so no field can
+    /// arrive without the rows it belongs to. `base_id` names the snapshot the patches diff
+    /// against, and `FULL` in `flags` says they are a whole screen instead.
+    Snapshot {
+        flags: u8,
+        /// Which chunk of this screen this message is, and how many there are.
+        ///
+        /// The same envelope as [`Message::Send`], for the same reason: a first full paint of a
+        /// wide screen deflates past one transaction. The phone reassembles by `snapshot_id` and
+        /// paints only the joined patch stream, so a chunked snapshot is still atomic — one screen,
+        /// delivered in pieces, never a half-drawn one. See [`SnapshotAssembly`].
+        chunk_idx: u8,
+        chunk_count: u8,
+        snapshot_id: u32,
+        base_id: u32,
+        applied_op_id: u32,
+        applied_status: u8,
+        cols: u8,
+        rows: u8,
+        cursor_x: u8,
+        cursor_y: u8,
+        first_line: u32,
+        shell: String,
+        patches: Vec<Patch>,
+    },
     Attach {
         version: u8,
         selector: String,
@@ -564,6 +707,86 @@ const T_HISTORY_PAGE: u8 = 0x8C;
 const T_FRAME: u8 = 0x8A;
 /// The same frame, deflated against [`FRAME_DICTIONARY`] (version 12). Host to phone only.
 const T_FRAME_DICT: u8 = 0x8B;
+/// Phone → host: **one coalesced command**, every item of the draft in composition order (version
+/// 15).
+///
+/// **One message, not three.** The phone used to send `Hold(false)`, then one `Input` per text run,
+/// then one `Key` per enter, and on the radio route each of those was its own transaction, its own
+/// record and its own chance to be lost — so typing `ls` and pressing enter cost three crossings
+/// that could arrive in any order (`docs/RADIO-AUDIT-REVIEW.md` `RC-8`). One `Send` is one
+/// transaction: it applies whole or not at all, and the item order is the order the user composed.
+const T_SEND: u8 = 0x0E;
+/// Phone → host: give me the screen again at this grid (version 15).
+///
+/// **`Refresh` never touches the draft.** `Send` spends the draft and `Fetch` costs one downlink
+/// screen and nothing else, so looking at a shell can never run what happens to be typed in it.
+const T_FETCH: u8 = 0x0F;
+/// Host → phone: **one atomic screen** (version 15).
+///
+/// Geometry, cursor, rows, the absolute top line and the answer to the `Send` that caused it, in
+/// one message. It replaces `Profile` + `Rows` + `Commit` on the radio route, where three messages
+/// were three chances to lose a third of a screen: a `Profile` whose `Rows` never arrived cleared
+/// the phone's mirror and left a blank screen (`RC-11`).
+const T_SNAPSHOT: u8 = 0x8E;
+/// The first version that speaks the transaction messages ([`Message::Send`], [`Message::Fetch`],
+/// [`Message::Snapshot`]).
+///
+/// **A version is what a build can *answer*, not what it can encode**, which is why this is a
+/// constant of its own rather than a bump of [`VERSION`]: the messages exist and are pinned by the
+/// fixture, but no host can serve one until the daemon's receive path is the transaction service
+/// (`docs/RADIO-PLAN.md` §10 `S3`). Bumping [`VERSION`] first would tell a phone that `Send` is
+/// available and leave it waiting for an answer nothing sends.
+pub const TRANSACTION_VERSION: u8 = 15;
+/// The item tags inside a [`Message::Send`].
+const SEND_TEXT: u8 = 0x01;
+const SEND_PASTE: u8 = 0x02;
+const SEND_KEYS: u8 = 0x03;
+
+/// The flag bits a [`Message::Send`] carries.
+pub mod send_flag {
+    /// The item stream is raw-deflated against [`super::FRAME_DICTIONARY`].
+    pub const DEFLATED: u8 = 1 << 0;
+    /// The draft contains an interrupt (`C-c`), so the host may stop what is running first.
+    pub const INTERRUPT: u8 = 1 << 1;
+}
+
+/// The flag bits a [`Message::Snapshot`] carries.
+pub mod snapshot_flag {
+    /// The patches are a whole screen rather than a diff against `base_id`.
+    pub const FULL: u8 = 1 << 0;
+    /// The alternate screen is active.
+    pub const ALTERNATE: u8 = 1 << 1;
+    /// The shell's process exited.
+    pub const DEAD: u8 = 1 << 2;
+    /// The pane had settled when this was captured; clear means it was still changing.
+    pub const SETTLED: u8 = 1 << 3;
+    /// The patch stream is raw-deflated against [`super::FRAME_DICTIONARY`].
+    pub const DEFLATED: u8 = 1 << 4;
+    /// `applied_op_id` and `applied_status` are present.
+    pub const HAS_APPLIED: u8 = 1 << 5;
+}
+
+/// What the host did with a `Send`, as one byte in a [`Message::Snapshot`].
+///
+/// **It is the answer to the message, not a message of its own.** A separate `Applied` would be a
+/// second downlink burst racing the screen it describes through the same repeaters, so the status
+/// rides the one snapshot the command produced.
+pub mod applied {
+    /// Not stated: the snapshot answers a `Fetch`, not a `Send`.
+    pub const NONE: u8 = 0;
+    /// The bytes reached the pty.
+    pub const WRITTEN: u8 = 1;
+    /// This `op_id` was already applied, so nothing was written a second time.
+    pub const DUPLICATE: u8 = 2;
+    /// No shell is attached, or the shell is not the one named.
+    pub const NO_SHELL: u8 = 3;
+    /// Another client holds the shell, so nothing was written.
+    pub const HELD: u8 = 4;
+    /// The host refused the bytes as longer than a pane may take.
+    pub const TOO_LONG: u8 = 5;
+    /// The keeper refused the write.
+    pub const FAILED: u8 = 6;
+}
 /// The first version whose phone can read [`Frame`].
 pub const FRAME_VERSION: u8 = 11;
 /// The first version whose phone carries [`FRAME_DICTIONARY`] and can read [`FrameDict`].
@@ -664,10 +887,15 @@ pub const FRAME_MAX_INFLATED: usize = 8_192;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EncodeError {
-    /// A field is over its limit (selector, input, a patch segment, a `Rows` body).
+    /// A field is over its limit (selector, input, a patch segment, a `Rows` body, a `Send` item).
     TooLong,
-    /// An empty `Input`.
+    /// An empty `Input`, or an item of a `Send` with nothing in it: a message that would say
+    /// nothing is refused rather than sent as an empty record.
     Empty,
+    /// `chunk_count` is 0 or past [`MAX_CHUNKS`], or `chunk_idx` is at or past `chunk_count`.
+    /// A sender that got this wrong has a chunk nobody can place, and guessing would either drop
+    /// part of a command or apply one twice.
+    BadChunk,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -680,10 +908,420 @@ pub enum DecodeError {
     Malformed(u8),
 }
 
+/// Why a chunk was refused, or why a joined message could not be produced.
+///
+/// Separate from [`DecodeError`] because none of these is a wire fault: every chunk here decoded
+/// perfectly, and what failed is the *sequence* of them — which is the only thing a transport that
+/// retransmits, reorders within a burst or drops a copy can get wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkError {
+    /// A chunk addressed a different command (`op_id`) or a different screen (`snapshot_id`).
+    ///
+    /// Refused rather than swallowed, because both policies are wrong to choose here: joining it
+    /// would mix two commands into one pty write, and abandoning the first would silently drop a
+    /// paste the operator sent. The caller releases its assembly and starts a new one when it
+    /// decides the older command is dead.
+    WrongCommand,
+    /// The chunk's `chunk_count` disagrees with the first chunk's, so no position in the command
+    /// is well defined.
+    WrongCount,
+    /// The joined message would exceed [`MAX_COMMAND_TOTAL`] or [`MAX_SNAPSHOT_TOTAL`]: a sender
+    /// chose a length past what either route accepts, so it is refused with a reason rather than
+    /// assembled into something the host would have to truncate.
+    TooLarge,
+}
+
+/// Join the chunks of one [`Message::Send`] back into the command the operator composed.
+///
+/// **This is what makes a large paste possible without giving up at-most-once execution.** A chunk
+/// is a whole number of items, so joining is concatenation and no item is ever half-parsed; the
+/// command is handed over only when the last chunk has arrived, so the host's `(device_id, op_id)`
+/// ring and its pty write only ever see a complete command. A duplicate chunk — a retransmission —
+/// is ignored, which is what the transaction layer's selective repeat produces on purpose.
+///
+/// Start from `SendAssembly::default()`; it is empty and accepts a command's first chunk.
+#[derive(Debug, Default)]
+pub struct SendAssembly {
+    open: Option<OpenSend>,
+}
+
+#[derive(Debug)]
+struct OpenSend {
+    op_id: u32,
+    chunk_count: u8,
+    items: Vec<Option<Vec<SendItem>>>,
+    filled: usize,
+    bytes: usize,
+}
+
+impl SendAssembly {
+    /// Feed one chunk. `Ok(None)` means more are needed; `Ok(Some(items))` is the whole command, in
+    /// the order the operator composed it, and the assembly is empty again and ready for the next.
+    ///
+    /// # Errors
+    ///
+    /// [`ChunkError::WrongCommand`], [`ChunkError::WrongCount`] or [`ChunkError::TooLarge`]. The
+    /// assembly is left untouched in every case, so a caller that decides to keep waiting still
+    /// holds exactly what it held before.
+    pub fn accept(&mut self, message: &Message) -> Result<Option<Vec<SendItem>>, ChunkError> {
+        let Message::Send {
+            op_id,
+            chunk_idx,
+            chunk_count,
+            items,
+            ..
+        } = message
+        else {
+            return Ok(None);
+        };
+        let open = match &mut self.open {
+            Some(open) => open,
+            None => {
+                // A command must start at its first chunk: without chunk 0 there is no item order
+                // to place the rest into, and a command that began before the session did cannot
+                // be executed anyway.
+                if *chunk_idx != 0 {
+                    return Err(ChunkError::WrongCommand);
+                }
+                self.open.insert(OpenSend {
+                    op_id: *op_id,
+                    chunk_count: *chunk_count,
+                    items: vec![None; usize::from(*chunk_count)],
+                    filled: 0,
+                    bytes: 0,
+                })
+            }
+        };
+        if open.op_id != *op_id {
+            return Err(ChunkError::WrongCommand);
+        }
+        if open.chunk_count != *chunk_count {
+            return Err(ChunkError::WrongCount);
+        }
+        let slot = usize::from(*chunk_idx);
+        if open.items.get(slot).is_some_and(Option::is_some) {
+            // A retransmitted chunk carries the same items; the transaction layer asked for it
+            // because the first copy's answer was lost, so this is a repair, not a fault.
+            return Ok(None);
+        }
+        let bytes: usize = items.iter().map(SendItem::wire_len).sum();
+        if open.bytes.saturating_add(bytes) > MAX_COMMAND_TOTAL {
+            return Err(ChunkError::TooLarge);
+        }
+        open.items[slot] = Some(items.clone());
+        open.bytes += bytes;
+        open.filled += 1;
+        if open.filled < open.items.len() {
+            return Ok(None);
+        }
+        let open = self.open.take().expect("filled is only advanced above");
+        Ok(Some(
+            open.items
+                .into_iter()
+                .flatten()
+                .flatten()
+                .collect::<Vec<SendItem>>(),
+        ))
+    }
+
+    /// Whether a command is part-way through. A caller that sees this on a new session has a
+    /// command it will never complete and should drop the assembly.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        self.open.is_some()
+    }
+
+    /// Forget a part-way command, because its session ended or the operator abandoned it.
+    pub fn clear(&mut self) {
+        self.open = None;
+    }
+}
+
+/// Join the chunks of one [`Message::Snapshot`] back into the screen it describes.
+///
+/// The header is repeated in every chunk, so the **last chunk's** geometry, cursor, answer and
+/// flags are the ones kept: they are the values the sender held when it finished the screen, and a
+/// screen whose cursor came from an earlier chunk would be a cursor the sender had already moved
+/// past. Only the patch stream is joined, and a duplicate chunk is ignored.
+#[derive(Debug, Default)]
+pub struct SnapshotAssembly {
+    open: Option<OpenSnapshot>,
+}
+
+#[derive(Debug)]
+struct OpenSnapshot {
+    snapshot_id: u32,
+    chunk_count: u8,
+    patches: Vec<Option<Vec<Patch>>>,
+    filled: usize,
+    bytes: usize,
+    /// The last chunk seen, which carries the header the joined snapshot keeps.
+    head: Option<Message>,
+}
+
+impl SnapshotAssembly {
+    /// Feed one chunk. `Ok(None)` means more are needed; `Ok(Some(snapshot))` is the whole screen as
+    /// a single `Snapshot` message whose `chunk_idx`/`chunk_count` say `0`/`1` — the assembled
+    /// form, which encodes back to a legal one-message snapshot of the same screen.
+    ///
+    /// # Errors
+    ///
+    /// As [`SendAssembly::accept`].
+    pub fn accept(&mut self, message: &Message) -> Result<Option<Message>, ChunkError> {
+        let Message::Snapshot {
+            chunk_idx,
+            chunk_count,
+            snapshot_id,
+            patches,
+            ..
+        } = message
+        else {
+            return Ok(None);
+        };
+        let open = match &mut self.open {
+            Some(open) => open,
+            None => {
+                if *chunk_idx != 0 {
+                    return Err(ChunkError::WrongCommand);
+                }
+                self.open.insert(OpenSnapshot {
+                    snapshot_id: *snapshot_id,
+                    chunk_count: *chunk_count,
+                    patches: vec![None; usize::from(*chunk_count)],
+                    filled: 0,
+                    bytes: 0,
+                    head: None,
+                })
+            }
+        };
+        if open.snapshot_id != *snapshot_id {
+            return Err(ChunkError::WrongCommand);
+        }
+        if open.chunk_count != *chunk_count {
+            return Err(ChunkError::WrongCount);
+        }
+        let slot = usize::from(*chunk_idx);
+        if open.patches.get(slot).is_some_and(Option::is_some) {
+            return Ok(None);
+        }
+        let bytes: usize = patches.iter().map(Patch::wire_len).sum();
+        if open.bytes.saturating_add(bytes) > MAX_SNAPSHOT_TOTAL {
+            return Err(ChunkError::TooLarge);
+        }
+        open.patches[slot] = Some(patches.clone());
+        open.bytes += bytes;
+        open.filled += 1;
+        open.head = Some(message.clone());
+        if open.filled < open.patches.len() {
+            return Ok(None);
+        }
+        let open = self.open.take().expect("filled is only advanced above");
+        let joined: Vec<Patch> = open.patches.into_iter().flatten().flatten().collect();
+        let Some(Message::Snapshot {
+            flags,
+            snapshot_id,
+            base_id,
+            applied_op_id,
+            applied_status,
+            cols,
+            rows,
+            cursor_x,
+            cursor_y,
+            first_line,
+            shell,
+            ..
+        }) = open.head
+        else {
+            return Err(ChunkError::WrongCommand);
+        };
+        Ok(Some(Message::Snapshot {
+            flags,
+            chunk_idx: 0,
+            chunk_count: 1,
+            snapshot_id,
+            base_id,
+            applied_op_id,
+            applied_status,
+            cols,
+            rows,
+            cursor_x,
+            cursor_y,
+            first_line,
+            shell,
+            patches: joined,
+        }))
+    }
+
+    /// Whether a screen is part-way through. A new `snapshot_id` arriving while this is true is the
+    /// sender superseding a screen it gave up on, so the caller clears rather than waits.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        self.open.is_some()
+    }
+
+    /// Forget a part-way screen.
+    pub fn clear(&mut self) {
+        self.open = None;
+    }
+}
+
+/// Whether a chunk pair describes a real position inside a real command.
+#[must_use]
+fn chunk_is_sane(idx: u8, count: u8) -> bool {
+    count >= 1 && usize::from(count) <= MAX_CHUNKS && idx < count
+}
+
+/// [`chunk_is_sane`] as an encode error, so a sender cannot build a message no receiver accepts.
+fn check_chunk(idx: u8, count: u8) -> Result<(), EncodeError> {
+    if chunk_is_sane(idx, count) {
+        Ok(())
+    } else {
+        Err(EncodeError::BadChunk)
+    }
+}
+
 /// A key name is printable ASCII with no space: the space is the separator, and anything else
 /// is not a name the host's key table could know.
 fn valid_key_name(name: &str) -> bool {
     !name.is_empty() && name.bytes().all(|b| (0x21..=0x7e).contains(&b))
+}
+
+/// One item of a [`Message::Send`], written as `tag | payload`.
+fn encode_send_item(out: &mut Vec<u8>, item: &SendItem) -> Result<(), EncodeError> {
+    match item {
+        SendItem::Text(bytes) | SendItem::Paste(bytes) => {
+            if bytes.is_empty() {
+                return Err(EncodeError::Empty);
+            }
+            if bytes.len() > MAX_SEND_ITEM {
+                return Err(EncodeError::TooLong);
+            }
+            out.push(if matches!(item, SendItem::Text(_)) {
+                SEND_TEXT
+            } else {
+                SEND_PASTE
+            });
+            out.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
+            out.extend_from_slice(bytes);
+        }
+        SendItem::Keys(names) => {
+            if names.is_empty() || names.len() > MAX_KEYS {
+                return Err(EncodeError::Empty);
+            }
+            out.push(SEND_KEYS);
+            out.push(names.len() as u8);
+            for name in names {
+                if !valid_key_name(name) || name.len() > u8::MAX as usize {
+                    return Err(EncodeError::TooLong);
+                }
+                out.push(name.len() as u8);
+                out.extend_from_slice(name.as_bytes());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A run of row patches, exactly as [`Message::Rows`] writes them, without its epoch.
+fn encode_patches(out: &mut Vec<u8>, patches: &[Patch]) -> Result<(), EncodeError> {
+    for p in patches {
+        if p.text.len() > MAX_SEGMENT {
+            return Err(EncodeError::TooLong);
+        }
+        out.push(p.y);
+        out.push(u8::from(p.append));
+        out.push(p.text.len() as u8);
+        out.extend_from_slice(p.text.as_bytes());
+    }
+    Ok(())
+}
+
+/// Every item of a [`Message::Send`], consuming the stream as far as it goes.
+fn decode_send_items(
+    rest: &mut &[u8],
+    bad: DecodeError,
+) -> Result<Vec<SendItem>, DecodeError> {
+    let mut items = Vec::new();
+    while let Some((&tag, tail)) = rest.split_first() {
+        match tag {
+            SEND_TEXT | SEND_PASTE => {
+                if tail.len() < 2 {
+                    return Err(bad);
+                }
+                let n = usize::from(u16::from_le_bytes([tail[0], tail[1]]));
+                if n == 0 || n > MAX_SEND_ITEM || tail.len() < 2 + n {
+                    return Err(bad);
+                }
+                let bytes = tail[2..2 + n].to_vec();
+                items.push(if tag == SEND_TEXT {
+                    SendItem::Text(bytes)
+                } else {
+                    SendItem::Paste(bytes)
+                });
+                *rest = &tail[2 + n..];
+            }
+            SEND_KEYS => {
+                let Some((&count, mut tail)) = tail.split_first() else {
+                    return Err(bad);
+                };
+                let count = usize::from(count);
+                if count == 0 || count > MAX_KEYS {
+                    return Err(bad);
+                }
+                let mut names = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let Some((&n, after)) = tail.split_first() else {
+                        return Err(bad);
+                    };
+                    let n = usize::from(n);
+                    if after.len() < n {
+                        return Err(bad);
+                    }
+                    let name = std::str::from_utf8(&after[..n]).map_err(|_| bad.clone())?;
+                    if !valid_key_name(name) {
+                        return Err(bad);
+                    }
+                    names.push(name.to_owned());
+                    tail = &after[n..];
+                }
+                items.push(SendItem::Keys(names));
+                *rest = tail;
+            }
+            _ => return Err(bad),
+        }
+        if items.len() > MAX_SEND_ITEMS {
+            return Err(bad);
+        }
+    }
+    if items.is_empty() {
+        return Err(bad);
+    }
+    Ok(items)
+}
+
+/// The inverse of [`encode_patches`]; every byte of `body` is consumed, so a trailing fragment is
+/// malformed rather than silently dropped.
+fn decode_patches(body: &[u8], tag: u8) -> Result<Vec<Patch>, DecodeError> {
+    let bad = || DecodeError::Malformed(tag);
+    let mut patches = Vec::new();
+    let mut rest = body;
+    while let [y, append, n, tail @ ..] = rest {
+        let n = usize::from(*n);
+        if tail.len() < n {
+            return Err(bad());
+        }
+        let text = std::str::from_utf8(&tail[..n]).map_err(|_| bad())?.to_owned();
+        patches.push(Patch {
+            y: *y,
+            append: *append != 0,
+            text,
+        });
+        rest = &tail[n..];
+    }
+    if !rest.is_empty() {
+        return Err(bad());
+    }
+    Ok(patches)
 }
 
 fn put_len(out: &mut Vec<u8>, mut n: usize) {
@@ -736,6 +1374,120 @@ impl Message {
             Self::Hold { on } => {
                 body.push(u8::from(*on));
                 T_HOLD
+            }
+            Self::Send {
+                op_id,
+                chunk_idx,
+                chunk_count,
+                have_snapshot_id,
+                cols,
+                rows,
+                flags,
+                shell,
+                items,
+            } => {
+                if items.is_empty() {
+                    return Err(EncodeError::Empty);
+                }
+                if shell.len() > MAX_SELECTOR || items.len() > MAX_SEND_ITEMS {
+                    return Err(EncodeError::TooLong);
+                }
+                check_chunk(*chunk_idx, *chunk_count)?;
+                body.extend_from_slice(&op_id.to_le_bytes());
+                body.extend_from_slice(&[*chunk_idx, *chunk_count]);
+                body.extend_from_slice(&have_snapshot_id.to_le_bytes());
+                body.extend_from_slice(&[*cols, *rows, *flags]);
+                body.push(shell.len() as u8);
+                body.extend_from_slice(shell.as_bytes());
+                let mut stream = Vec::new();
+                for item in items {
+                    encode_send_item(&mut stream, item)?;
+                }
+                if stream.len() > MAX_BODY {
+                    return Err(EncodeError::TooLong);
+                }
+                // The item stream's uncompressed length is stated **in both forms**, because a
+                // decoder has no other way to size an inflate: a deflated stream has no length of
+                // its own, and `Frame` solves the same problem with its own two bytes.
+                body.extend_from_slice(&(stream.len() as u16).to_le_bytes());
+                let stream = if flags & send_flag::DEFLATED != 0 {
+                    // The flag is an instruction, so the whole stream goes through the compressor
+                    // or the message is not built: a decoder that reads the flag would otherwise
+                    // try to inflate plain items.
+                    deflate_frame(&stream, true).ok_or(EncodeError::TooLong)?
+                } else {
+                    stream
+                };
+                body.extend_from_slice(&stream);
+                if body.len() > MAX_BODY {
+                    return Err(EncodeError::TooLong);
+                }
+                T_SEND
+            }
+            Self::Fetch {
+                have_snapshot_id,
+                cols,
+                rows,
+                shell,
+            } => {
+                if shell.len() > MAX_SELECTOR {
+                    return Err(EncodeError::TooLong);
+                }
+                body.extend_from_slice(&have_snapshot_id.to_le_bytes());
+                body.extend_from_slice(&[*cols, *rows]);
+                body.push(shell.len() as u8);
+                body.extend_from_slice(shell.as_bytes());
+                T_FETCH
+            }
+            Self::Snapshot {
+                flags,
+                chunk_idx,
+                chunk_count,
+                snapshot_id,
+                base_id,
+                applied_op_id,
+                applied_status,
+                cols,
+                rows,
+                cursor_x,
+                cursor_y,
+                first_line,
+                shell,
+                patches,
+            } => {
+                if shell.len() > MAX_SELECTOR {
+                    return Err(EncodeError::TooLong);
+                }
+                check_chunk(*chunk_idx, *chunk_count)?;
+                body.extend_from_slice(&[*flags, *chunk_idx, *chunk_count]);
+                body.extend_from_slice(&snapshot_id.to_le_bytes());
+                body.extend_from_slice(&base_id.to_le_bytes());
+                body.extend_from_slice(&applied_op_id.to_le_bytes());
+                body.push(*applied_status);
+                body.extend_from_slice(&[*cols, *rows, *cursor_x, *cursor_y]);
+                body.extend_from_slice(&first_line.to_le_bytes());
+                body.push(shell.len() as u8);
+                body.extend_from_slice(shell.as_bytes());
+                let mut stream = Vec::new();
+                encode_patches(&mut stream, patches)?;
+                if stream.len() > MAX_SNAPSHOT_INFLATED {
+                    return Err(EncodeError::TooLong);
+                }
+                // The length is the **uncompressed** one, which is what the decoder inflates to:
+                // without it a deflated patch stream has no bound and a corrupt length would be an
+                // allocation the sender chose.
+                let plain = stream.len();
+                let stream = if flags & snapshot_flag::DEFLATED != 0 {
+                    deflate_frame(&stream, true).ok_or(EncodeError::TooLong)?
+                } else {
+                    stream
+                };
+                body.extend_from_slice(&(plain as u16).to_le_bytes());
+                body.extend_from_slice(&stream);
+                if body.len() > MAX_BODY {
+                    return Err(EncodeError::TooLong);
+                }
+                T_SNAPSHOT
             }
             Self::Detach => T_DETACH,
             Self::Profile {
@@ -1006,6 +1758,149 @@ impl Message {
             }
             T_RESYNC if body.is_empty() => Self::Resync,
             T_HOLD if body.len() == 1 && body[0] <= 1 => Self::Hold { on: body[0] == 1 },
+            T_SEND => {
+                // op_id, chunk_idx, chunk_count, have_snapshot_id, cols, rows, flags, shell_len:
+                // fourteen bytes before the shell and the items.
+                if body.len() < 14 {
+                    return Err(bad);
+                }
+                let op_id = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
+                let chunk_idx = body[4];
+                let chunk_count = body[5];
+                if !chunk_is_sane(chunk_idx, chunk_count) {
+                    return Err(bad);
+                }
+                let have_snapshot_id = u32::from_le_bytes([body[6], body[7], body[8], body[9]]);
+                let cols = body[10];
+                let rows = body[11];
+                let flags = body[12];
+                let shell_len = usize::from(body[13]);
+                if shell_len > MAX_SELECTOR || body.len() < 14 + shell_len {
+                    return Err(bad);
+                }
+                let shell = std::str::from_utf8(&body[14..14 + shell_len])
+                    .map_err(|_| bad.clone())?
+                    .to_owned();
+                let tail = &body[14 + shell_len..];
+                if tail.len() < 2 {
+                    return Err(bad);
+                }
+                // The plain length is the decoder's only bound: a lying one is refused before an
+                // inflate is attempted, so a corrupt sender cannot choose an allocation.
+                let plain = usize::from(u16::from_le_bytes([tail[0], tail[1]]));
+                if plain == 0 || plain > MAX_BODY {
+                    return Err(bad);
+                }
+                let stream: Vec<u8> = if flags & send_flag::DEFLATED != 0 {
+                    inflate_frame(&tail[2..], plain, true).ok_or_else(|| bad.clone())?
+                } else {
+                    if tail.len() != 2 + plain {
+                        return Err(bad);
+                    }
+                    tail[2..].to_vec()
+                };
+                let mut rest = stream.as_slice();
+                let items = decode_send_items(&mut rest, bad.clone())?;
+                if !rest.is_empty() {
+                    return Err(bad);
+                }
+                Self::Send {
+                    op_id,
+                    chunk_idx,
+                    chunk_count,
+                    have_snapshot_id,
+                    cols,
+                    rows,
+                    flags,
+                    shell,
+                    items,
+                }
+            }
+            T_FETCH => {
+                if body.len() < 7 {
+                    return Err(bad);
+                }
+                let have_snapshot_id = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
+                let shell_len = usize::from(body[6]);
+                if shell_len > MAX_SELECTOR || body.len() < 7 + shell_len {
+                    return Err(bad);
+                }
+                if body.len() != 7 + shell_len {
+                    return Err(bad);
+                }
+                let shell = std::str::from_utf8(&body[7..])
+                    .map_err(|_| bad.clone())?
+                    .to_owned();
+                Self::Fetch {
+                    have_snapshot_id,
+                    cols: body[4],
+                    rows: body[5],
+                    shell,
+                }
+            }
+            T_SNAPSHOT => {
+                // The fixed header is flags, the chunk pair, four u32s, four grid and cursor bytes
+                // and first_line, then the shell length: twenty-five bytes.
+                if body.len() < 25 {
+                    return Err(bad);
+                }
+                let flags = body[0];
+                let chunk_idx = body[1];
+                let chunk_count = body[2];
+                if !chunk_is_sane(chunk_idx, chunk_count) {
+                    return Err(bad);
+                }
+                let snapshot_id = u32::from_le_bytes([body[3], body[4], body[5], body[6]]);
+                let base_id = u32::from_le_bytes([body[7], body[8], body[9], body[10]]);
+                let applied_op_id = u32::from_le_bytes([body[11], body[12], body[13], body[14]]);
+                let applied_status = body[15];
+                let cols = body[16];
+                let rows = body[17];
+                let cursor_x = body[18];
+                let cursor_y = body[19];
+                let first_line = u32::from_le_bytes([body[20], body[21], body[22], body[23]]);
+                let shell_len = usize::from(body[24]);
+                if shell_len > MAX_SELECTOR || body.len() < 27 + shell_len {
+                    return Err(bad);
+                }
+                let shell = std::str::from_utf8(&body[25..25 + shell_len])
+                    .map_err(|_| bad.clone())?
+                    .to_owned();
+                let tail = &body[25 + shell_len..];
+                if tail.len() < 2 {
+                    return Err(bad);
+                }
+                let plain = usize::from(u16::from_le_bytes([tail[0], tail[1]]));
+                if plain > MAX_SNAPSHOT_INFLATED {
+                    return Err(bad);
+                }
+                let stream = &tail[2..];
+                let stream = if flags & snapshot_flag::DEFLATED != 0 {
+                    inflate_frame(stream, plain, true).ok_or_else(|| bad.clone())?
+                } else {
+                    if stream.len() != plain {
+                        return Err(bad);
+                    }
+                    stream.to_vec()
+                };
+                let patches = decode_patches(&stream, T_SNAPSHOT)?;
+                Self::Snapshot {
+                    flags,
+                    chunk_idx,
+                    chunk_count,
+                    snapshot_id,
+                    base_id,
+                    applied_op_id,
+                    applied_status,
+                    cols,
+                    rows,
+                    cursor_x,
+                    cursor_y,
+                    first_line,
+                    shell,
+                    patches,
+                }
+            }
             T_DETACH if body.is_empty() => Self::Detach,
             // Version 1 is exactly five bytes. A longer body is a version-2 body and must carry its
             // shell id: an old five-byte `Profile` is never an error.
@@ -3381,6 +4276,323 @@ mod tests {
         }
     }
 
+    // ── version 15: one command in, one screen out ────────────────────────
+
+    /// Decode exactly one message, and fail if the bytes are not exactly one.
+    fn one(bytes: &[u8]) -> Message {
+        let mut d = Decoder::new();
+        let items = d.push(bytes).expect("a usable stream");
+        assert_eq!(items.len(), 1, "one message, not {}: {items:?}", items.len());
+        items.into_iter().next().unwrap().expect("a parseable message")
+    }
+
+    fn command(items: Vec<SendItem>) -> Message {
+        Message::Send {
+            op_id: 7,
+            chunk_idx: 0,
+            chunk_count: 1,
+            have_snapshot_id: 0x0bad_c0de,
+            cols: 46,
+            rows: 19,
+            flags: 0,
+            shell: "ab12cd34".into(),
+            items,
+        }
+    }
+
+    /// **A command is one message, and one message fits one record.**
+    ///
+    /// The phone used to send `Hold(false)`, then `Input("ls")`, then `Key(["Enter"])`: three
+    /// transactions, three records, three chances to lose a piece of one keystroke-and-enter on the
+    /// radio route (`docs/RADIO-AUDIT-REVIEW.md` `RC-8`). One `Send` carries the whole draft in the
+    /// order it was composed, and `ls -la` plus enter is under a record's payload, so it is one
+    /// record and one crossing.
+    #[test]
+    fn a_coalesced_command_is_one_message_that_fits_one_record() {
+        let m = command(vec![
+            SendItem::Text(b"ls -la".to_vec()),
+            SendItem::Keys(vec!["Enter".into()]),
+        ]);
+        let bytes = m.encode().unwrap();
+        assert_eq!(bytes[0], T_SEND, "the tag is the send tag");
+        assert!(
+            bytes.len() <= RECORD_PAYLOAD,
+            "a command with one key is {} bytes, over the {RECORD_PAYLOAD}-byte payload",
+            bytes.len()
+        );
+        assert_eq!(one(&bytes), m);
+    }
+
+    /// The items arrive in the order they were composed, and the kinds stay distinct: a paste is
+    /// not text and a key is not a byte, so the host can wrap the one and encode the other.
+    #[test]
+    fn the_items_keep_their_kinds_and_their_order() {
+        let m = command(vec![
+            SendItem::Text(b"cd /tmp".to_vec()),
+            SendItem::Keys(vec!["Tab".into(), "Enter".into()]),
+            SendItem::Paste(b"one\ntwo\nthree".to_vec()),
+        ]);
+        let bytes = m.encode().unwrap();
+        match one(&bytes) {
+            Message::Send { items, .. } => {
+                assert_eq!(items.len(), 3);
+                assert!(matches!(&items[0], SendItem::Text(t) if t == b"cd /tmp"));
+                assert!(matches!(&items[1], SendItem::Keys(k) if k == &["Tab", "Enter"]));
+                assert!(matches!(&items[2], SendItem::Paste(p) if p == b"one\ntwo\nthree"));
+            }
+            other => panic!("not a send: {other:?}"),
+        }
+    }
+
+    /// A deflated item stream says so, decodes back to the same items, and is smaller than the
+    /// plain one: the flag is an instruction to the encoder, so a message that carries it is
+    /// always compressed.
+    #[test]
+    fn a_deflated_command_round_trips_and_says_it_was_deflated() {
+        let long = "journalctl --user -u ldmux | tail -n 40\n".repeat(6);
+        let plain = command(vec![SendItem::Paste(long.clone().into_bytes())]).encode().unwrap();
+        let deflated = match command(vec![SendItem::Paste(long.into_bytes())]) {
+            Message::Send {
+                op_id,
+                chunk_idx,
+                chunk_count,
+                have_snapshot_id,
+                cols,
+                rows,
+                shell,
+                items,
+                ..
+            } => Message::Send {
+                op_id,
+                chunk_idx,
+                chunk_count,
+                have_snapshot_id,
+                cols,
+                rows,
+                shell,
+                items,
+                flags: send_flag::DEFLATED,
+            },
+            other => other,
+        };
+        let packed = deflated.encode().unwrap();
+        assert!(
+            packed.len() < plain.len(),
+            "deflate made it bigger: {} against {}",
+            packed.len(),
+            plain.len()
+        );
+        match one(&packed) {
+            Message::Send { flags, items, .. } => {
+                assert_eq!(flags & send_flag::DEFLATED, send_flag::DEFLATED);
+                assert!(matches!(&items[0], SendItem::Paste(p) if p.len() == 240));
+            }
+            other => panic!("not a send: {other:?}"),
+        }
+    }
+
+    /// A message that would say nothing, or would say too much, is refused rather than sent as an
+    /// empty or truncated record.
+    #[test]
+    fn a_send_with_no_item_or_an_oversized_one_is_refused() {
+        assert_eq!(command(vec![]).encode(), Err(EncodeError::Empty));
+        assert_eq!(
+            command(vec![SendItem::Text(Vec::new())]).encode(),
+            Err(EncodeError::Empty)
+        );
+        assert_eq!(
+            command(vec![SendItem::Text(vec![b'x'; MAX_SEND_ITEM + 1])]).encode(),
+            Err(EncodeError::TooLong)
+        );
+        let many = vec![SendItem::Text(b"x".to_vec()); MAX_SEND_ITEMS + 1];
+        assert_eq!(command(many).encode(), Err(EncodeError::TooLong));
+        assert_eq!(
+            command(vec![SendItem::Keys(vec!["has a space".into()])]).encode(),
+            Err(EncodeError::TooLong)
+        );
+    }
+
+    /// An item stream the host cannot read costs **that message only**: the stream continues, so a
+    /// header read after it still arrives. An unknown item tag is the case a later version's new
+    /// item kind would be, and it must never be guessed at.
+    #[test]
+    fn an_unreadable_item_stream_costs_one_message_and_no_more() {
+        let mut stream = Message::Detach.encode().unwrap();
+        let mut bad = command(vec![
+            SendItem::Text(b"ls".to_vec()),
+            SendItem::Keys(vec!["Enter".into()]),
+        ])
+        .encode()
+        .unwrap();
+        // The item stream starts after the tag and length framing (two bytes), the fourteen fixed
+        // bytes of a `Send` body, and the shell and its length byte. Its first tag is the one to
+        // corrupt.
+        let items_at = 2 + 14 + "ab12cd34".len();
+        bad[items_at] = 0x09; // an item tag nothing defines
+        stream.extend_from_slice(&bad);
+        stream.extend_from_slice(&Message::Detach.encode().unwrap());
+        let mut d = Decoder::new();
+        let items = d.push(&stream).unwrap();
+        assert_eq!(items.len(), 3, "three messages, one of them unreadable");
+        assert!(items[0].is_ok());
+        assert_eq!(items[1], Err(DecodeError::Malformed(T_SEND)));
+        assert!(items[2].is_ok(), "the stream after a bad item still parses");
+    }
+
+    /// A flag bit this build does not know is kept and ignored, so a later version can add one
+    /// without a flag day — the same rule the `Commit` flags already follow.
+    #[test]
+    fn an_unknown_send_flag_is_carried_rather_than_refused() {
+        let m = match command(vec![SendItem::Text(b"top".to_vec())]) {
+            Message::Send {
+                op_id,
+                chunk_idx,
+                chunk_count,
+                have_snapshot_id,
+                cols,
+                rows,
+                shell,
+                items,
+                ..
+            } => Message::Send {
+                op_id,
+                chunk_idx,
+                chunk_count,
+                have_snapshot_id,
+                cols,
+                rows,
+                shell,
+                items,
+                flags: 0x80,
+            },
+            other => other,
+        };
+        match one(&m.encode().unwrap()) {
+            Message::Send { flags, .. } => assert_eq!(flags, 0x80),
+            other => panic!("not a send: {other:?}"),
+        }
+    }
+
+    fn snapshot(flags: u8, patches: Vec<Patch>) -> Message {
+        Message::Snapshot {
+            flags,
+            chunk_idx: 0,
+            chunk_count: 1,
+            snapshot_id: 0x0000_002a,
+            base_id: 0x0000_0019,
+            applied_op_id: 7,
+            applied_status: applied::WRITTEN,
+            cols: 46,
+            rows: 19,
+            cursor_x: 2,
+            cursor_y: 17,
+            first_line: 1_204,
+            shell: "ab12cd34".into(),
+            patches,
+        }
+    }
+
+    /// **The screen, its geometry, its cursor and the answer to the command travel as one thing.**
+    ///
+    /// Three messages used to carry this, so a `Profile` could arrive without the `Rows` it
+    /// described and paint a blank screen (`RC-11`), and the answer to a `Send` could be lost while
+    /// the screen it belonged to arrived. One `Snapshot` cannot be half true.
+    #[test]
+    fn an_atomic_snapshot_carries_the_screen_and_the_answer_together() {
+        let m = snapshot(
+            snapshot_flag::FULL | snapshot_flag::SETTLED | snapshot_flag::HAS_APPLIED,
+            vec![
+                Patch {
+                    y: 0,
+                    append: false,
+                    text: "$ ls -la".into(),
+                },
+                Patch {
+                    y: 18,
+                    append: false,
+                    text: "total 4".into(),
+                },
+            ],
+        );
+        let bytes = m.encode().unwrap();
+        assert_eq!(bytes[0], T_SNAPSHOT);
+        assert_eq!(one(&bytes), m, "every field survives the round trip");
+    }
+
+    /// A deflated snapshot inflates to exactly the patches it carried, and a stream that claims
+    /// more than the ceiling, or ends mid-patch, is malformed rather than an allocation or a guess.
+    #[test]
+    fn a_deflated_snapshot_inflates_to_its_patches_and_a_bad_length_is_refused() {
+        let same = |y: u8| Patch {
+            y,
+            append: false,
+            text: "crates/session/src/endpoint.rs  ok".into(),
+        };
+        let patches: Vec<Patch> = (0..18).map(same).collect();
+        // A whole screen does not fit one body plain — which is why the deflated form exists at
+        // all — and does fit it deflated.
+        assert_eq!(
+            snapshot(snapshot_flag::FULL, patches.clone()).encode(),
+            Err(EncodeError::TooLong),
+            "a full screen of 18 rows fits a body uncompressed, so the deflated form is untested"
+        );
+        let packed = snapshot(snapshot_flag::FULL | snapshot_flag::DEFLATED, patches)
+            .encode()
+            .unwrap();
+        assert!(
+            packed.len() <= MAX_BODY + 3,
+            "the deflated screen is still {} bytes",
+            packed.len()
+        );
+        match one(&packed) {
+            Message::Snapshot { flags, patches, .. } => {
+                assert_eq!(flags & snapshot_flag::DEFLATED, snapshot_flag::DEFLATED);
+                assert_eq!(patches.len(), 18);
+                assert_eq!(patches[17].y, 17);
+            }
+            other => panic!("not a snapshot: {other:?}"),
+        }
+
+        // The declared length is the decoder's only bound, so a lying one is refused before an
+        // inflate is attempted.
+        let mut lying = packed.clone();
+        let len_at = 2 + 23 + "ab12cd34".len(); // the tag and length byte, the header, the shell
+        lying[len_at] = 0xff;
+        lying[len_at + 1] = 0xff;
+        let mut d = Decoder::new();
+        let items = d.push(&lying).unwrap();
+        assert_eq!(items.len(), 1);
+        assert!(
+            matches!(items[0], Err(DecodeError::Malformed(T_SNAPSHOT))),
+            "a patch length past the ceiling was accepted: {:?}",
+            items[0]
+        );
+    }
+
+    /// `Fetch` is its own tag with no items in it: the second control, which costs one screen and
+    /// cannot spend a draft.
+    #[test]
+    fn a_fetch_asks_for_the_screen_and_carries_no_draft() {
+        let m = Message::Fetch {
+            have_snapshot_id: 0x0000_002a,
+            cols: 46,
+            rows: 19,
+            shell: "ab12cd34".into(),
+        };
+        let bytes = m.encode().unwrap();
+        assert_eq!(bytes[0], T_FETCH);
+        assert_ne!(bytes[0], T_SEND);
+        assert_eq!(one(&bytes), m);
+        // The shortest legal body is the header plus an empty shell, and it decodes.
+        let empty = Message::Fetch {
+            have_snapshot_id: 1,
+            cols: 0,
+            rows: 0,
+            shell: String::new(),
+        };
+        assert_eq!(one(&empty.encode().unwrap()), empty);
+    }
+
     // ── the shared fixture ─────────────────────────────────────────────────
     //
     // The Kotlin port in the mobile app reads `test/fixtures/mesh-term-vectors.json`. It is
@@ -3409,6 +4621,53 @@ mod tests {
             Message::FrameDict { inner } => {
                 json!({"kind":"frameDict","uncompressed":inner.len(),"inner":hex(inner)})
             }
+            Message::Send {
+                op_id,
+                chunk_idx,
+                chunk_count,
+                have_snapshot_id,
+                cols,
+                rows,
+                flags,
+                shell,
+                items,
+            } => json!({
+                "kind":"send","opId":op_id,"chunkIdx":chunk_idx,"chunkCount":chunk_count,
+                "haveSnapshotId":have_snapshot_id,"cols":cols,
+                "rows":rows,"flags":flags,"shell":shell,
+                "items":items.iter().map(|i| match i {
+                    SendItem::Text(b) => json!({"kind":"text","bytes":hex(b)}),
+                    SendItem::Paste(b) => json!({"kind":"paste","bytes":hex(b)}),
+                    SendItem::Keys(n) => json!({"kind":"keys","names":n}),
+                }).collect::<Vec<_>>()}),
+            Message::Fetch {
+                have_snapshot_id,
+                cols,
+                rows,
+                shell,
+            } => json!({
+                "kind":"fetch","haveSnapshotId":have_snapshot_id,"cols":cols,"rows":rows,"shell":shell}),
+            Message::Snapshot {
+                flags,
+                chunk_idx,
+                chunk_count,
+                snapshot_id,
+                base_id,
+                applied_op_id,
+                applied_status,
+                cols,
+                rows,
+                cursor_x,
+                cursor_y,
+                first_line,
+                shell,
+                patches,
+            } => json!({
+                "kind":"snapshot","flags":flags,"chunkIdx":chunk_idx,"chunkCount":chunk_count,
+                "snapshotId":snapshot_id,"baseId":base_id,
+                "appliedOpId":applied_op_id,"appliedStatus":applied_status,"cols":cols,"rows":rows,
+                "cursorX":cursor_x,"cursorY":cursor_y,"firstLine":first_line,"shell":shell,
+                "patches":patches.iter().map(|p| json!({"y":p.y,"append":p.append,"text":p.text})).collect::<Vec<_>>()}),
             Message::Input(b) => json!({"kind":"input","bytes":hex(b)}),
             Message::Resync => json!({"kind":"resync"}),
             Message::Hold { on } => json!({"kind":"hold","on":on}),
@@ -3465,6 +4724,358 @@ mod tests {
     }
 
     /// One of every message, for the fixture and for the decoder fuzz.
+    /// The three version-15 messages, as the fixture's cases: a command with two item kinds, a
+    /// refresh, and a settled screen that answers the command. The deflated forms are deliberately
+    /// absent — deflate bytes are not a cross-language contract (any encoder produces different
+    /// bytes for the same input), so they are checked in Rust and by decoding on the phone, exactly
+    /// as `frame`/`frameDict` already are.
+    fn transaction_messages() -> Vec<Message> {
+        vec![
+            command(vec![
+                SendItem::Text(b"ls -la".to_vec()),
+                SendItem::Keys(vec!["Enter".into()]),
+            ]),
+            Message::Fetch {
+                have_snapshot_id: 0x0000_002a,
+                cols: 46,
+                rows: 19,
+                shell: "ab12cd34".into(),
+            },
+            // A command split across three chunks: the shape a 2 kB paste produces, and the one a
+            // selective-repeat acknowledgement can ask for the middle of. Chunk 2 carries the last
+            // item, which is a key: the operator's `Enter` is in the final chunk, so a host that
+            // ran the chunks as they arrived would execute a paste line by line.
+            Message::Send {
+                op_id: 8,
+                chunk_idx: 0,
+                chunk_count: 3,
+                have_snapshot_id: 0,
+                cols: 46,
+                rows: 19,
+                flags: 0,
+                shell: "ab12cd34".into(),
+                items: vec![SendItem::Paste(b"line one\nline two\n".to_vec())],
+            },
+            Message::Send {
+                op_id: 8,
+                chunk_idx: 2,
+                chunk_count: 3,
+                have_snapshot_id: 0,
+                cols: 46,
+                rows: 19,
+                flags: 0,
+                shell: "ab12cd34".into(),
+                items: vec![SendItem::Keys(vec!["Enter".into()])],
+            },
+            // A screen split in two: a first full paint of a wide grid. `chunkIdx` is 1, so a codec
+            // that reads the header in the wrong order fails here rather than in the field.
+            Message::Snapshot {
+                flags: snapshot_flag::FULL | snapshot_flag::SETTLED,
+                chunk_idx: 1,
+                chunk_count: 2,
+                snapshot_id: 0x0000_0040,
+                base_id: 0,
+                applied_op_id: 0,
+                applied_status: applied::NONE,
+                cols: 120,
+                rows: 40,
+                cursor_x: 0,
+                cursor_y: 39,
+                first_line: 0,
+                shell: "ab12cd34".into(),
+                patches: vec![Patch {
+                    y: 39,
+                    append: false,
+                    text: "tail half".into(),
+                }],
+            },
+            snapshot(
+                snapshot_flag::FULL | snapshot_flag::SETTLED | snapshot_flag::HAS_APPLIED,
+                vec![
+                    Patch {
+                        y: 0,
+                        append: false,
+                        text: "$ ls -la".into(),
+                    },
+                    Patch {
+                        y: 1,
+                        append: false,
+                        text: "total 4".into(),
+                    },
+                ],
+            ),
+        ]
+    }
+
+    // ── chunks: the envelope that removes the size ceiling ──────────────────────
+    //
+    // `docs/RADIO-PLAN.md` §12.2 (AR-3): the plan made every command and every answer one message,
+    // which is right for at-most-once execution and for an atomic screen, but a message is one
+    // transaction of at most 1,888 bytes — so one message cannot carry a paste, and the protocol
+    // this replaces could. These tests pin the property that makes chunking safe: **nothing is
+    // applied until the last chunk**, so a partial paste is never written to a pty.
+
+    fn chunked_send(op_id: u32, idx: u8, count: u8, items: Vec<SendItem>) -> Message {
+        Message::Send {
+            op_id,
+            chunk_idx: idx,
+            chunk_count: count,
+            have_snapshot_id: 0,
+            cols: 46,
+            rows: 19,
+            flags: 0,
+            shell: "ab12cd34".into(),
+            items,
+        }
+    }
+
+    fn chunked_snapshot(idx: u8, count: u8, snapshot_id: u32, patches: Vec<Patch>) -> Message {
+        Message::Snapshot {
+            flags: snapshot_flag::FULL | snapshot_flag::SETTLED,
+            chunk_idx: idx,
+            chunk_count: count,
+            snapshot_id,
+            base_id: 0,
+            applied_op_id: 0,
+            applied_status: applied::NONE,
+            cols: 46,
+            rows: 19,
+            cursor_x: 0,
+            cursor_y: 18,
+            first_line: 0,
+            shell: "ab12cd34".into(),
+            patches,
+        }
+    }
+
+    fn patch(y: u8, text: &str) -> Patch {
+        Patch {
+            y,
+            append: false,
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn a_command_split_across_chunks_joins_in_the_order_it_was_composed() {
+        let mut assembly = SendAssembly::default();
+        let first = chunked_send(
+            9,
+            0,
+            3,
+            vec![
+                SendItem::Paste(b"one\n".to_vec()),
+                SendItem::Text(b"two".to_vec()),
+            ],
+        );
+        assert!(
+            assembly.accept(&first).unwrap().is_none(),
+            "a first chunk finished the command"
+        );
+        assert!(assembly.is_open());
+        let middle = chunked_send(9, 1, 3, vec![SendItem::Keys(vec!["Tab".into()])]);
+        assert!(assembly.accept(&middle).unwrap().is_none());
+        let last = chunked_send(9, 2, 3, vec![SendItem::Keys(vec!["Enter".into()])]);
+        let joined = assembly
+            .accept(&last)
+            .unwrap()
+            .expect("the last chunk completed the command");
+        assert_eq!(
+            joined,
+            vec![
+                SendItem::Paste(b"one\n".to_vec()),
+                SendItem::Text(b"two".to_vec()),
+                SendItem::Keys(vec!["Tab".into()]),
+                SendItem::Keys(vec!["Enter".into()]),
+            ],
+            "the joined command is not the one the operator composed"
+        );
+        assert!(!assembly.is_open(), "the assembly did not reset");
+    }
+
+    #[test]
+    fn chunks_out_of_order_still_join_in_index_order() {
+        // The transaction layer acknowledges parts selectively, so the last chunk can arrive first
+        // within a burst. Reflexive `None` is a chunk with `idx` 1 but one chunk, not a fault, and
+        // it is never applied -- so the assembly must be fed chunk 0 first anywhere it exists, and
+        // the rest in any order after.
+        let mut assembly = SendAssembly::default();
+        assert!(
+            assembly
+                .accept(&chunked_send(1, 1, 2, vec![SendItem::Text(b"b".to_vec())]))
+                .is_err(),
+            "a command that never began was accepted mid-way"
+        );
+        assert!(assembly
+            .accept(&chunked_send(1, 0, 2, vec![SendItem::Text(b"a".to_vec())]))
+            .unwrap()
+            .is_none());
+        let joined = assembly
+            .accept(&chunked_send(1, 1, 2, vec![SendItem::Text(b"b".to_vec())]))
+            .unwrap()
+            .expect("complete");
+        assert_eq!(
+            joined,
+            vec![SendItem::Text(b"a".to_vec()), SendItem::Text(b"b".to_vec())]
+        );
+    }
+
+    #[test]
+    fn a_retransmitted_chunk_is_a_repair_and_changes_nothing() {
+        let mut assembly = SendAssembly::default();
+        let zero = chunked_send(2, 0, 2, vec![SendItem::Text(b"a".to_vec())]);
+        assembly.accept(&zero).unwrap();
+        // The answer to chunk 0 was lost, so the sender repeats it byte for byte.
+        assert!(
+            assembly.accept(&zero).unwrap().is_none(),
+            "a repeated chunk completed the command twice"
+        );
+        let joined = assembly
+            .accept(&chunked_send(2, 1, 2, vec![SendItem::Keys(vec!["Enter".into()])]))
+            .unwrap()
+            .expect("complete");
+        assert_eq!(joined.len(), 2, "the repeat was joined as a second item: {joined:?}");
+    }
+
+    #[test]
+    fn a_chunk_of_another_command_is_refused_and_the_first_is_kept() {
+        // The caller decides which command died; the assembly must not guess, because joining
+        // would mix two commands into one pty write and abandoning would drop a paste.
+        let mut assembly = SendAssembly::default();
+        assembly
+            .accept(&chunked_send(3, 0, 2, vec![SendItem::Text(b"a".to_vec())]))
+            .unwrap();
+        assert_eq!(
+            assembly.accept(&chunked_send(4, 1, 2, vec![SendItem::Text(b"z".to_vec())])),
+            Err(ChunkError::WrongCommand)
+        );
+        assert!(assembly.is_open(), "the refusal lost the first command");
+        let joined = assembly
+            .accept(&chunked_send(3, 1, 2, vec![SendItem::Text(b"b".to_vec())]))
+            .unwrap()
+            .expect("complete");
+        assert_eq!(
+            joined,
+            vec![SendItem::Text(b"a".to_vec()), SendItem::Text(b"b".to_vec())]
+        );
+    }
+
+    #[test]
+    fn a_chunk_count_that_disagrees_with_the_first_chunk_is_refused() {
+        let mut assembly = SendAssembly::default();
+        assembly
+            .accept(&chunked_send(5, 0, 2, vec![SendItem::Text(b"a".to_vec())]))
+            .unwrap();
+        assert_eq!(
+            assembly.accept(&chunked_send(5, 1, 3, vec![SendItem::Text(b"b".to_vec())])),
+            Err(ChunkError::WrongCount),
+            "two lengths for one command was accepted"
+        );
+    }
+
+    #[test]
+    fn a_joined_command_past_the_total_is_refused_rather_than_truncated() {
+        let mut assembly = SendAssembly::default();
+        // Exactly the cap once the item's own three-byte framing is counted, so the one byte that
+        // follows is the first that cannot fit.
+        let huge = vec![b'x'; MAX_COMMAND_TOTAL - 3];
+        assembly
+            .accept(&chunked_send(6, 0, 2, vec![SendItem::Text(huge)]))
+            .unwrap();
+        assert_eq!(
+            assembly.accept(&chunked_send(6, 1, 2, vec![SendItem::Text(b"y".to_vec())])),
+            Err(ChunkError::TooLarge),
+            "a command past the route's own cap was assembled"
+        );
+    }
+
+    #[test]
+    fn a_chunked_snapshot_paints_as_one_screen_and_re_encodes() {
+        let mut assembly = SnapshotAssembly::default();
+        assert!(
+            assembly
+                .accept(&chunked_snapshot(0, 2, 7, vec![patch(0, "one")]))
+                .unwrap()
+                .is_none(),
+            "half a screen was painted"
+        );
+        // The last chunk's header wins, so the cursor is the one the sender held when it finished.
+        let mut last = chunked_snapshot(1, 2, 7, vec![patch(1, "two")]);
+        if let Message::Snapshot { cursor_y, .. } = &mut last {
+            *cursor_y = 1;
+        }
+        let joined = assembly.accept(&last).unwrap().expect("complete");
+        match &joined {
+            Message::Snapshot {
+                chunk_idx,
+                chunk_count,
+                patches,
+                cursor_y,
+                snapshot_id,
+                ..
+            } => {
+                assert_eq!((*chunk_idx, *chunk_count), (0, 1), "the joined form is one message");
+                assert_eq!(*snapshot_id, 7);
+                assert_eq!(patches.len(), 2, "the screen lost a chunk: {patches:?}");
+                assert_eq!(*cursor_y, 1, "the header came from the first chunk");
+            }
+            other => panic!("not a snapshot: {other:?}"),
+        }
+        // The assembled form is a legal message on its own: same screen, one chunk.
+        let round = one(&joined.encode().unwrap());
+        match round {
+            Message::Snapshot { chunk_count, patches, .. } => {
+                assert_eq!(chunk_count, 1);
+                assert_eq!(patches.len(), 2);
+            }
+            other => panic!("not a snapshot: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_snapshot_chunk_of_a_different_screen_is_refused() {
+        let mut assembly = SnapshotAssembly::default();
+        assembly
+            .accept(&chunked_snapshot(0, 2, 7, vec![patch(0, "one")]))
+            .unwrap();
+        assert_eq!(
+            assembly.accept(&chunked_snapshot(1, 2, 8, vec![patch(1, "two")])),
+            Err(ChunkError::WrongCommand),
+            "two screens were joined into one"
+        );
+    }
+
+    #[test]
+    fn an_encoder_refuses_a_chunk_pair_no_receiver_can_place() {
+        // `chunk_idx >= chunk_count`, and a count of zero: both would leave a chunk with no
+        // position, so the sender is refused rather than sending something a phone must guess at.
+        for (idx, count) in [(1u8, 1u8), (0, 0), (5, 3)] {
+            assert_eq!(
+                chunked_send(1, idx, count, vec![SendItem::Text(b"a".to_vec())]).encode(),
+                Err(EncodeError::BadChunk),
+                "{idx} of {count} was encoded"
+            );
+        }
+    }
+
+    #[test]
+    fn a_decoder_refuses_a_chunk_pair_no_sender_could_mean() {
+        // The bytes a hand-built message would carry: `Send` with `chunk_idx` 3 of 2.
+        let mut body = vec![0u8; 14];
+        body[4] = 3;
+        body[5] = 2;
+        body.extend_from_slice(&[0x01, 0x00, 0x00]); // len 0
+        let mut framed = vec![T_SEND];
+        framed.push(body.len() as u8);
+        framed.extend_from_slice(&body);
+        let mut decoder = Decoder::new();
+        let parsed = decoder.push(&framed).expect("a usable stream");
+        assert!(
+            parsed.iter().all(|m| m.is_err()),
+            "a chunk past the end of its own command was decoded: {parsed:?}"
+        );
+    }
+
     fn sample_messages() -> Vec<Message> {
         vec![
             Message::Attach {
@@ -3688,6 +5299,10 @@ mod tests {
             .iter()
             .map(|m| json!({"message": message_json(m), "hex": hex(&m.encode().unwrap())}))
             .collect();
+        let messages: Vec<Message> = messages
+            .into_iter()
+            .chain(transaction_messages())
+            .collect();
         let msg_cases: Vec<_> = messages
             .iter()
             .map(|m| json!({"message": message_json(m), "hex": hex(&m.encode().unwrap())}))
@@ -3745,8 +5360,24 @@ mod tests {
         let oversize = [0x82, (over & 0x7f) as u8 | 0x80, (over >> 7) as u8];
         let mut d = Decoder::new();
         let oversize_out = d.push(&oversize);
+        // A **deflated snapshot**, as the host will send a full screen: the bytes are not a
+        // cross-language contract, so this case exists for the phone's decoder to inflate, and it
+        // is the only place its inflate path for a snapshot is exercised.
+        let screen_rows: Vec<Patch> = (0..18)
+            .map(|y| Patch {
+                y,
+                append: false,
+                text: format!("crates/session/src/endpoint.rs  ok {y}"),
+            })
+            .collect();
+        let deflated_snapshot = snapshot(
+            snapshot_flag::FULL | snapshot_flag::DEFLATED,
+            screen_rows.clone(),
+        );
+        let deflated_bytes = deflated_snapshot.encode().unwrap();
         let streams = json!({
             "unknownTagSkipped": {"hex": hex(&unknown), "messages": unknown_out.iter().map(|r| message_json(r.as_ref().unwrap())).collect::<Vec<_>>()},
+            "deflatedSnapshot": {"hex": hex(&deflated_bytes), "messages": [message_json(&deflated_snapshot)]},
             "malformedBodyCostsOneMessage": {"hex": hex(&malformed),
                 "results": malformed_out.iter().map(|r| match r {
                     Ok(m) => message_json(m),
@@ -3762,6 +5393,12 @@ mod tests {
                        "version":VERSION,"minVersion":MIN_VERSION,"cwdVersion":CWD_VERSION,"keyVersion":KEY_VERSION,
                        "resizeVersion":RESIZE_VERSION,"streamVersion":STREAM_VERSION,"lineVersion":STREAM_LINE_VERSION,
                        "originVersion":ORIGIN_VERSION,"ownerVersion":OWNER_VERSION,"shellVersion":SHELL_VERSION,
+                       "transactionVersion":TRANSACTION_VERSION,"maxSendItems":MAX_SEND_ITEMS,
+                       "maxSendItem":MAX_SEND_ITEM,"maxSnapshotInflated":MAX_SNAPSHOT_INFLATED,
+                       "maxChunks":MAX_CHUNKS,"maxCommandTotal":MAX_COMMAND_TOTAL,
+                       "maxSnapshotTotal":MAX_SNAPSHOT_TOTAL,
+                       "appliedWritten":applied::WRITTEN,"appliedDuplicate":applied::DUPLICATE,
+                       "sendInterrupt":send_flag::INTERRUPT,"snapshotSettled":snapshot_flag::SETTLED,
                        "maxKeys":MAX_KEYS,"unsupportedAllV1":unsupported::ALL_V1,
                        "recordFloor":ldmux_mesh::constants::RECORD_FLOOR,"recordMax":ldmux_mesh::constants::RECORD_MAX,"recordReceivedMax":ldmux_mesh::constants::RECORD_RECEIVED_MAX,"creditWindow":ldmux_mesh::constants::CREDIT_WINDOW},
             "messages": msg_cases,

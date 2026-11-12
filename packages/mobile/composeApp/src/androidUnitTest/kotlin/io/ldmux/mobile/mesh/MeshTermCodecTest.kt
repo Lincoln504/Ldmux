@@ -77,6 +77,54 @@ class MeshTermCodecTest {
                     )
                 },
             )
+            "send" -> TermMessage.Send(
+                i("opId"),
+                i("chunkIdx"),
+                i("chunkCount"),
+                i("haveSnapshotId"),
+                i("cols"),
+                i("rows"),
+                i("flags"),
+                o["shell"]!!.jsonPrimitive.content,
+                o["items"]!!.jsonArray.map {
+                    val it2 = it.jsonObject
+                    when (val k = it2["kind"]!!.jsonPrimitive.content) {
+                        "text" -> SendItem.Text(unhex(it2["bytes"]!!.jsonPrimitive.content))
+                        "paste" -> SendItem.Paste(unhex(it2["bytes"]!!.jsonPrimitive.content))
+                        "keys" -> SendItem.Keys(it2["names"]!!.jsonArray.map { n -> n.jsonPrimitive.content })
+                        else -> error("unknown send item $k")
+                    }
+                },
+            )
+            "fetch" -> TermMessage.Fetch(
+                i("haveSnapshotId"),
+                i("cols"),
+                i("rows"),
+                o["shell"]!!.jsonPrimitive.content,
+            )
+            "snapshot" -> TermMessage.Snapshot(
+                i("flags"),
+                i("chunkIdx"),
+                i("chunkCount"),
+                i("snapshotId"),
+                i("baseId"),
+                i("appliedOpId"),
+                i("appliedStatus"),
+                i("cols"),
+                i("rows"),
+                i("cursorX"),
+                i("cursorY"),
+                i("firstLine"),
+                o["shell"]!!.jsonPrimitive.content,
+                o["patches"]!!.jsonArray.map {
+                    val p = it.jsonObject
+                    TermPatch(
+                        p["y"]!!.jsonPrimitive.int,
+                        p["append"]!!.jsonPrimitive.boolean,
+                        p["text"]!!.jsonPrimitive.content,
+                    )
+                },
+            )
             "commit" -> TermMessage.Commit(i("epoch"), i("cursorX"), i("cursorY"), i("flags"))
             "closed" -> TermMessage.Closed(i("reason"))
             "list" -> TermMessage.ListRequest
@@ -132,6 +180,16 @@ class MeshTermCodecTest {
         assertEquals(n("shellVersion"), MeshTerm.SHELL_VERSION)
         assertEquals(n("ownerVersion"), MeshTerm.OWNER_VERSION)
         assertEquals(n("maxKeys"), MeshTerm.MAX_KEYS)
+        // Version 15's messages are pinned before either end can send one: the agreement is what
+        // makes the later wiring a mechanical change rather than a negotiation.
+        assertEquals(n("transactionVersion"), MeshTerm.TRANSACTION_VERSION)
+        assertEquals(n("maxSendItems"), MeshTerm.MAX_SEND_ITEMS)
+        assertEquals(n("maxSendItem"), MeshTerm.MAX_SEND_ITEM)
+        assertEquals(n("maxSnapshotInflated"), MeshTerm.MAX_SNAPSHOT_INFLATED)
+        assertEquals(n("appliedWritten"), MeshTerm.Applied.WRITTEN)
+        assertEquals(n("appliedDuplicate"), MeshTerm.Applied.DUPLICATE)
+        assertEquals(n("sendInterrupt"), MeshTerm.SendFlag.INTERRUPT)
+        assertEquals(n("snapshotSettled"), MeshTerm.SnapshotFlag.SETTLED)
         val all = with(MeshTerm.Unsupported) { SCROLLBACK or STYLE or HYPERLINKS or MOUSE or IMAGES or RESIZE or CLIPBOARD }
         assertEquals(n("unsupportedAllV1"), all)
         // The radio's own record limits are mirrored from `ldmux_mesh::constants` and were the
@@ -358,6 +416,13 @@ class MeshTermCodecTest {
         assertEquals<List<TermItem>>(
             unknown["messages"]!!.jsonArray.map { TermItem.Message(message(it)) },
             decodeAll(unhex(unknown["hex"]!!.jsonPrimitive.content)),
+        )
+        // A deflated snapshot is the only case that exercises the phone's inflate path for one,
+        // and a full screen is exactly what the host will send through it.
+        val compressed = s["deflatedSnapshot"]!!.jsonObject
+        assertEquals<List<TermItem>>(
+            compressed["messages"]!!.jsonArray.map { TermItem.Message(message(it)) },
+            decodeAll(unhex(compressed["hex"]!!.jsonPrimitive.content)),
         )
         val bad = s["malformedBodyCostsOneMessage"]!!.jsonObject
         val got = decodeAll(unhex(bad["hex"]!!.jsonPrimitive.content))

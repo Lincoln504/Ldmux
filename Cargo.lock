@@ -402,6 +402,7 @@ version = "0.1.0"
 dependencies = [
  "hmac",
  "ldmux-mesh",
+ "ldmux-protocol",
  "serde_json",
  "sha2",
  "snow",

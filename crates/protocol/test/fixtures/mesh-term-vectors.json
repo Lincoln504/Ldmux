@@ -5,12 +5,16 @@
     "hex": "242023203e2025207e202d202d2d203a202f202e205f20282029205b205d207b207d202220272060207c2026202a203d202b2021203f2040202f686f6d652f6c6465656e2f446f63756d656e74732f202f686f6d652f6c6465656e2f206372617465732f207372632f2074657374732f207461726765742f2064656275672f2072656c656173652f20646f63732f20636172676f206275696c6420746573742072756e20636c69707079207275737463206e706d206e6f646520707974686f6e2067697420636f6d6d697420707573682070756c6c2061646420737461747573206c6f672064696666206c646d7578206d6573682073657373696f6e206b6565706572206461656d6f6e20726164696f207072657365742073636f706520636170616369747920726f757465207369676e616c2061697274696d65207265636f7264732073656e742072657472616e736d69747465642064726f707065642070656e64696e672072656365697665642062797465732065737461626c69736865642072656164792077616974696e67206c696e6b20636f6e6e6563746564207374617465206572726f72207761726e696e67206e6f746520696e666f206661696c6564206f6b20646f6e652072756e6e696e672069646c65206275737920726566757365642074696d656f757420436f6d70696c696e672046696e69736865642070726f66696c65206f7074696d697a65642074617267657428732920696e20666e20696d706c20707562206c6574206d75742072657475726e2073747275637420656e756d207472616974206d617463682073656c662053656c66204f6b2045727220536f6d65204e6f6e6520747275652066616c7365206e756c6c206e696c207573697a6520753820753136207533322075363420537472696e6720566563204f7074696f6e20526573756c7420426f7820417263204d7574657820636f6e737420737461746963206173796e63206177616974206d6f7665207265662064796e20776865726520757365206d6f64206372617465207375706572206572726f723a207761726e696e673a2068656c703a206e6f74653a202d2d3e203d206e6f7465203d2068656c70206b75626563746c20646f636b65722073797374656d63746c206a6f75726e616c63746c207365727669636520756e697420656e61626c65207374617274207265737461727420202020202020090d0a207c20203d3e20202d3e203a3a28295b5d7b7d242023200a24207468652020616e642020746f20206f662020696e2020697320206120"
   },
   "limits": {
+    "appliedDuplicate": 2,
+    "appliedWritten": 1,
     "creditWindow": 8,
     "cwdVersion": 6,
     "keyVersion": 2,
     "lineVersion": 5,
     "maxBody": 600,
     "maxBuffer": 16384,
+    "maxChunks": 255,
+    "maxCommandTotal": 16384,
     "maxCwd": 60,
     "maxInput": 137,
     "maxKeys": 16,
@@ -19,7 +23,11 @@
     "maxRowsBody": 134,
     "maxSegment": 120,
     "maxSelector": 40,
+    "maxSendItem": 400,
+    "maxSendItems": 16,
     "maxSessions": 48,
+    "maxSnapshotInflated": 2048,
+    "maxSnapshotTotal": 32768,
     "minVersion": 1,
     "originVersion": 7,
     "ownerVersion": 8,
@@ -28,8 +36,11 @@
     "recordPayload": 143,
     "recordReceivedMax": 171,
     "resizeVersion": 3,
+    "sendInterrupt": 2,
     "shellVersion": 10,
+    "snapshotSettled": 8,
     "streamVersion": 4,
+    "transactionVersion": 15,
     "unsupportedAllV1": 127,
     "version": 14
   },
@@ -350,6 +361,141 @@
         "origin": false,
         "owner": false,
         "shell": false
+      }
+    },
+    {
+      "hex": "0e29070000000001dec0ad0b2e130008616231326364333411000106006c73202d6c61030105456e746572",
+      "message": {
+        "chunkCount": 1,
+        "chunkIdx": 0,
+        "cols": 46,
+        "flags": 0,
+        "haveSnapshotId": 195936478,
+        "items": [
+          {
+            "bytes": "6c73202d6c61",
+            "kind": "text"
+          },
+          {
+            "kind": "keys",
+            "names": [
+              "Enter"
+            ]
+          }
+        ],
+        "kind": "send",
+        "opId": 7,
+        "rows": 19,
+        "shell": "ab12cd34"
+      }
+    },
+    {
+      "hex": "0f0f2a0000002e13086162313263643334",
+      "message": {
+        "cols": 46,
+        "haveSnapshotId": 42,
+        "kind": "fetch",
+        "rows": 19,
+        "shell": "ab12cd34"
+      }
+    },
+    {
+      "hex": "0e2d080000000003000000002e130008616231326364333415000212006c696e65206f6e650a6c696e652074776f0a",
+      "message": {
+        "chunkCount": 3,
+        "chunkIdx": 0,
+        "cols": 46,
+        "flags": 0,
+        "haveSnapshotId": 0,
+        "items": [
+          {
+            "bytes": "6c696e65206f6e650a6c696e652074776f0a",
+            "kind": "paste"
+          }
+        ],
+        "kind": "send",
+        "opId": 8,
+        "rows": 19,
+        "shell": "ab12cd34"
+      }
+    },
+    {
+      "hex": "0e20080000000203000000002e13000861623132636433340800030105456e746572",
+      "message": {
+        "chunkCount": 3,
+        "chunkIdx": 2,
+        "cols": 46,
+        "flags": 0,
+        "haveSnapshotId": 0,
+        "items": [
+          {
+            "kind": "keys",
+            "names": [
+              "Enter"
+            ]
+          }
+        ],
+        "kind": "send",
+        "opId": 8,
+        "rows": 19,
+        "shell": "ab12cd34"
+      }
+    },
+    {
+      "hex": "8e2f0901024000000000000000000000000078280027000000000861623132636433340c002700097461696c2068616c66",
+      "message": {
+        "appliedOpId": 0,
+        "appliedStatus": 0,
+        "baseId": 0,
+        "chunkCount": 2,
+        "chunkIdx": 1,
+        "cols": 120,
+        "cursorX": 0,
+        "cursorY": 39,
+        "firstLine": 0,
+        "flags": 9,
+        "kind": "snapshot",
+        "patches": [
+          {
+            "append": false,
+            "text": "tail half",
+            "y": 39
+          }
+        ],
+        "rows": 40,
+        "shell": "ab12cd34",
+        "snapshotId": 64
+      }
+    },
+    {
+      "hex": "8e382900012a0000001900000007000000012e130211b4040000086162313263643334150000000824206c73202d6c61010007746f74616c2034",
+      "message": {
+        "appliedOpId": 7,
+        "appliedStatus": 1,
+        "baseId": 25,
+        "chunkCount": 1,
+        "chunkIdx": 0,
+        "cols": 46,
+        "cursorX": 2,
+        "cursorY": 17,
+        "firstLine": 1204,
+        "flags": 41,
+        "kind": "snapshot",
+        "patches": [
+          {
+            "append": false,
+            "text": "$ ls -la",
+            "y": 0
+          },
+          {
+            "append": false,
+            "text": "total 4",
+            "y": 1
+          }
+        ],
+        "rows": 19,
+        "shell": "ab12cd34",
+        "snapshotId": 42
       }
     }
   ],
@@ -925,6 +1071,119 @@
     ]
   },
   "streams": {
+    "deflatedSnapshot": {
+      "hex": "8e86011100012a0000001900000007000000012e130211b4040000086162313263643334c6028dd3b70d80400004c1c77bd703a4f0065b12092044ffe2912860f3894e7b42b4ffadfe8a87ef5d36b3ebdc8fa7bf2db23d480731e522a63dc48c8fd81820368588cd11624b8cd89a20b6a5a223f3ca8c399533a70be64cc9dc583137d5cccd0d73cb0b",
+      "messages": [
+        {
+          "appliedOpId": 7,
+          "appliedStatus": 1,
+          "baseId": 25,
+          "chunkCount": 1,
+          "chunkIdx": 0,
+          "cols": 46,
+          "cursorX": 2,
+          "cursorY": 17,
+          "firstLine": 1204,
+          "flags": 17,
+          "kind": "snapshot",
+          "patches": [
+            {
+              "append": false,
+              "text": "crates/session/src/endpoint.rs  ok 0",
+              "y": 0
+            },
+            {
+              "append": false,
+              "text": "crates/session/src/endpoint.rs  ok 1",
+              "y": 1
+            },
+            {
+              "append": false,
+              "text": "crates/session/src/endpoint.rs  ok 2",
+              "y": 2
+            },
+            {
+              "append": false,
+              "text": "crates/session/src/endpoint.rs  ok 3",
+              "y": 3
+            },
+            {
+              "append": false,
+              "text": "crates/session/src/endpoint.rs  ok 4",
+              "y": 4
+            },
+            {
+              "append": false,
+              "text": "crates/session/src/endpoint.rs  ok 5",
+              "y": 5
+            },
+            {
+              "append": false,
+              "text": "crates/session/src/endpoint.rs  ok 6",
+              "y": 6
+            },
+            {
+              "append": false,
+              "text": "crates/session/src/endpoint.rs  ok 7",
+              "y": 7
+            },
+            {
+              "append": false,
+              "text": "crates/session/src/endpoint.rs  ok 8",
+              "y": 8
+            },
+            {
+              "append": false,
+              "text": "crates/session/src/endpoint.rs  ok 9",
+              "y": 9
+            },
+            {
+              "append": false,
+              "text": "crates/session/src/endpoint.rs  ok 10",
+              "y": 10
+            },
+            {
+              "append": false,
+              "text": "crates/session/src/endpoint.rs  ok 11",
+              "y": 11
+            },
+            {
+              "append": false,
+              "text": "crates/session/src/endpoint.rs  ok 12",
+              "y": 12
+            },
+            {
+              "append": false,
+              "text": "crates/session/src/endpoint.rs  ok 13",
+              "y": 13
+            },
+            {
+              "append": false,
+              "text": "crates/session/src/endpoint.rs  ok 14",
+              "y": 14
+            },
+            {
+              "append": false,
+              "text": "crates/session/src/endpoint.rs  ok 15",
+              "y": 15
+            },
+            {
+              "append": false,
+              "text": "crates/session/src/endpoint.rs  ok 16",
+              "y": 16
+            },
+            {
+              "append": false,
+              "text": "crates/session/src/endpoint.rs  ok 17",
+              "y": 17
+            }
+          ],
+          "rows": 19,
+          "shell": "ab12cd34",
+          "snapshotId": 42
+        }
+      ]
+    },
     "malformedBodyCostsOneMessage": {
       "hex": "8301000400",
       "results": [

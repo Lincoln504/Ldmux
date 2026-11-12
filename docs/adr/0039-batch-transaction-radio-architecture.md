@@ -26,6 +26,10 @@ Execute five architectural transformations (`A1`–`A5` in `docs/RADIO-PLAN.md`)
 4. **A4 · Message-Oriented Reliable Transaction Layer over persistent `StatelessTransportState`**: Replace byte-stream `Arq` + `TermDecoder` with `(tx_id, part_idx, part_count, ack_tx_id, ack_mask)`, holding receiver `Ack`s until `part_idx == part_count - 1`, sub-splitting `> 63 B` direct parts into `SUB_A`/`SUB_B` on flood retry, superseding stale snapshots cleanly, and keeping `StatelessTransportState` alive across transaction timeouts (using PSK-authenticated `KIND_NEED_HANDSHAKE = 0x15` when a restarted host has no session).
 5. **A5 · Unified Mobile Pager, Viewport Fidelity & Cryptographic Device Identity**: Unify `AppContent.kt` and `MeshTerminalScreen.kt` onto one 5-shell pager with per-shell `MeshPageController` state, non-scrolling `⏎` provisional draft echo, keyboard-up grid gating, cursor-aware `GridPlacement`, and unified `device.id = hex(phone_static_pub[..8])` ownership across Tailnet and Radio.
 
+## Dependencies
+
+- **`sha2` in `ldmux-mesh`** (2026-11-11): the `VirtualMesh` simulator must suppress duplicates exactly as the firmware does — `SHA256(payload_type || payload)` into a 160-entry ring — because a simulator that hashed differently would prove the wrong thing about `RC-5` and `RC-3`. `sha2` is pure Rust and already in the tree through `ldmux-session` (ADR-0023), and it is the only dependency `ldmux-mesh` carries besides nothing, which keeps the crate linkable into the Android `.so`.
+
 ## Consequences
 
 - Deletes ~15,165 lines (~90%) of duplicated Java/Kotlin/bridge radio code (`RADIO-PLAN.md` §8.5).

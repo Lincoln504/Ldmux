@@ -35,6 +35,7 @@ pub mod desktop_inventory;
 pub mod exec;
 pub mod keeper_supervisor;
 pub mod mesh;
+pub mod mesh_apply;
 pub mod mesh_bridge;
 pub mod mesh_serial;
 pub mod mesh_session;

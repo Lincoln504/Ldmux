@@ -153,8 +153,21 @@ struct Run {
 }
 
 impl Run {
-    /// A phone and a host joined by `repeaters` repeaters, `loss` per transmission.
+    /// A phone and a host joined by `repeaters` repeaters, `loss` per transmission, with the retry
+    /// ladder **stressed** so a lossy run finishes inside a test.
     fn new(seed: u64, repeaters: usize, loss: f64, path_width: u8) -> Self {
+        Self::tuned(seed, repeaters, loss, path_width, true)
+    }
+
+    /// The same link with the retry ladder at the values that **ship** — `EndpointConfig`'s own
+    /// defaults, unmodified. `docs/RADIO-PLAN.md` §12.3 (AR-4): a gate whose configuration differs
+    /// from production's proves a design nobody deploys, and the ladder is exactly the parameter
+    /// the field failures were about (how long the phone keeps asking).
+    fn shipped(seed: u64, repeaters: usize, loss: f64, path_width: u8) -> Self {
+        Self::tuned(seed, repeaters, loss, path_width, false)
+    }
+
+    fn tuned(seed: u64, repeaters: usize, loss: f64, path_width: u8, stress: bool) -> Self {
         let host_key = Keypair::generate().expect("a keypair");
         let host_parts = (host_key.private, host_key.public);
         let phone_key = Keypair::generate().expect("a keypair");
@@ -181,9 +194,14 @@ impl Run {
         .with_path_width(path_width)
         .with_airtime_ms(AIRTIME_MS)
         .with_rto_ms(retransmission_timeout_ms(repeaters))
-        .with_max_attempts(6)
-        .with_max_rungs(12)
         .with_flood_reach_hops(u8::try_from(repeaters.max(1)).unwrap_or(1) + 2);
+        // The stress values are applied only when asked for, so `shipped` really is the default
+        // configuration rather than a restatement of it that could drift.
+        let phone_config = if stress {
+            phone_config.with_max_attempts(6).with_max_rungs(12)
+        } else {
+            phone_config
+        };
         let host_config = EndpointConfig::new(
             ldmux_session::endpoint::Role::Host,
             phone_key.public,
@@ -192,13 +210,17 @@ impl Run {
         .with_path_width(path_width)
         .with_airtime_ms(AIRTIME_MS)
         .with_rto_ms(retransmission_timeout_ms(repeaters))
-        .with_max_attempts(6)
         .with_flood_reach_hops(u8::try_from(repeaters.max(1)).unwrap_or(1) + 2)
         .with_pairings(vec![PairingEntry {
             psk,
             pinned: Some(phone_key.public),
             last_timestamp_ms: 0,
         }]);
+        let host_config = if stress {
+            host_config.with_max_attempts(6)
+        } else {
+            host_config
+        };
 
         Self {
             mesh,
@@ -415,6 +437,35 @@ fn delivered(report: &[Outbound], want: SentKind) -> bool {
 // ---------------------------------------------------------------------------------------------
 // The gate: a link with no route at all, six repeaters away, fifteen percent loss.
 // ---------------------------------------------------------------------------------------------
+
+#[test]
+fn a_link_comes_up_at_the_retry_ladder_that_ships() {
+    // AR-4. Every other gate here stresses the ladder so a lossy run finishes quickly; this one
+    // runs `EndpointConfig`'s own defaults, so a change to what ships is caught here rather than at
+    // range. One repeater and no loss, because what is under test is the ladder, not the mesh.
+    let mut run = Run::shipped(11, 1, 0.0, 1);
+    run.phone
+        .connect(run.now, run.wall())
+        .expect("the phone can start an attempt");
+    let request = message(0x10, &[0x5A; 40]);
+    run.phone
+        .submit(&request, run.now)
+        .expect("a 41-byte message is one part");
+    run.run_until(120_000, 250, |run| {
+        run.host.established() && run.host.stats().messages_delivered >= 1
+    });
+    assert!(
+        run.host.established(),
+        "the shipped ladder never established a link one repeater away: phone {:?} host {:?}",
+        run.phone.stats(),
+        run.host.stats()
+    );
+    assert_eq!(
+        run.delivered_to_host().pop().as_deref(),
+        Some(request.as_slice()),
+        "the message did not arrive at the shipped ladder"
+    );
+}
 
 #[test]
 fn a_route_from_nothing_carries_a_message_and_its_answer_six_repeaters_away() {
