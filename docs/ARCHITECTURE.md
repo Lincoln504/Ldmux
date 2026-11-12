@@ -14,7 +14,7 @@ decodes the wire, and decides the pane size.
 | desk window | `crates/attach`, `ldmuxd attach` | a terminal window on the machine's own screen, attached over the daemon's local attach socket, no tailnet involved |
 | phone | `packages/mobile` | Kotlin Multiplatform and Compose, its own VT emulator over libghostty-vt behind JNI, the wire clients for both routes |
 | serial carrier | `crates/companion` | owns the host's USB radio and speaks the MeshCore companion protocol |
-| mesh link | `crates/mesh`, `crates/session`, `crates/session-ffi` | L2 frame, L3 Noise session with ARQ, and the same session as a C ABI for the phone |
+| mesh link | `crates/mesh`, `crates/session`, `crates/session-ffi` | L2 carrier seam and route table, L3 Noise session with message transactions, and the same session as a C ABI for the phone (`ldmux_client_*`) |
 | terminal protocol | `crates/protocol/src/mesh_term.rs`, `packages/mobile/.../mesh/MeshTerm.kt` | the screen protocol the phone and the host speak over the L3 session |
 
 The keeper is the source of truth. The daemon's registry is a small JSON cache of
@@ -96,13 +96,20 @@ a window's processes are not charged to the daemon's cgroup and are gone with it
   `crates/daemon/src/mesh_serial.rs`); the phone owns its own radio over Bluetooth LE.
   `crates/mesh` is the vocabulary both sides of the session loop share — the carrier
   seam, the record limits and the radio state — and holds no radio knowledge.
-- L3, the session. A Noise session with an ARQ, one record in flight at a time,
-  acknowledgements, retransmission and a replay window. `crates/session`.
-- L4, the terminal. `MeshTerm`: profiles, rows, commits, keys, resizes, and the shell
-  control messages.
-- Above that, the bridge. `crates/daemon/src/mesh_bridge.rs` turns the keeper's
-  screen into rows and the phone's input into keystrokes, and it is the only place
-  that decides what a phone is allowed to do to a shell.
+- L3, the session. A Noise session whose unit of transfer is a **whole message**, not a
+  byte stream: `crates/session/src/transaction.rs` cuts a message into parts, retransmits
+  the lost ones by `ack_mask`, and reassembles before anything above can see a partial
+  command; `bootstrap.rs` gets a session up in one round trip with a retry ladder;
+  `endpoint.rs` is the one state machine both ends run. `crates/session/src/client.rs` is
+  the phone's engine, behind `ldmux_client_*`.
+- L4, the terminal. `MeshTerm`: `Attach`, `Send` (one command, chunked by the envelope),
+  `Fetch`, `Snapshot`, the shell control messages and the mark table.
+- Above that, the service. `crates/daemon/src/mesh_rpc.rs` decides what a phone may do to
+  a shell — it assembles the chunks, applies a command at most once, settles the pane and
+  answers with a diff — and `crates/daemon/src/mesh.rs` is the loop: poll the endpoint,
+  send what it owes, deliver what arrived. **Nothing in the daemon retries, times out or
+  lays out a byte**; a second copy of any of those is how the old stack came to have two
+  answers to every question.
 
 The tailnet route has the same shape without the radios: JSON RPC on the control
 socket, a WebSocket per viewed session, binary output frames, and snapshots.
@@ -121,7 +128,8 @@ The tailnet route:
 - JSON control messages and binary output frames, `permessage-deflate` when offered
 - one attach per connection, ownership checked before any write
 
-Mesh terminal protocol, version 9:
+Mesh terminal protocol, version 15 (the previous frame-loop protocol and its `Rows`/`Commit`
+downlink are deleted; `RADIO-PLAN.md` §5–§7 has the full definition and the reasons):
 
 | tag | direction | message |
 |---|---|---|
@@ -145,12 +153,18 @@ Mesh terminal protocol, version 9:
 | 0x87 | host to phone | `Marks` shell id and kind, paged to fit a message |
 
 Version 7 added shell control. Version 8 added the holder and the takeover. Version 9 added the
-mark table: one entry per marked shell, paged because a message's body is capped at 134 bytes and a
-dozen marks overflow one, and sent with the `Sessions` answer and with an `Attach` rather than
-pushed, because the radio cannot reach a phone that is not connected. Version 10 added the **shell** to each `Sessions` entry
-(`bash`), behind the same kind of flag: the launcher draws the folder and the shell on a row's
-second line, because a row's name is the conversation and the line under it has to say where the
-shell is and what it is.
+mark table: one entry per marked shell, and sent with the `Sessions` answer and with an `Attach`
+rather than pushed, because the radio cannot reach a phone that is not connected. Version 10 added
+the **shell** to each `Sessions` entry (`bash`), so the launcher can draw the folder and the shell on
+a row's second line, because a row's name is the conversation and the line under it has to say where
+the shell is and what it is.
+
+**Version 15 replaced the downlink.** `Profile`/`Rows`/`Commit` and the frame loop that produced
+them are deleted: a phone sends one `Send` (a whole command, chunked if it must be) and reads one
+`Snapshot` (a full screen or a diff against the last one it acknowledged), and the page byte those
+messages carried is gone because a version-15 message names its shell instead. The version table
+above is the order the *upstream* protocol grew in; the split into two directions is this project's
+own, and `RADIO-PLAN.md` §5 explains why a message is the unit rather than a record.
 
 **The channel is the tuple and the path width; power is the third register.** `ldmux mesh preset
 <MHz> <kHz> <SF> <CR> [--path N] [--power dBm]` tunes the host's own radio, `--path` sets the path
@@ -455,7 +469,7 @@ by the host radio, by the app before it retunes, and by every budget below.
 | macOS daemon | not supported yet |
 | Windows | not supported, not planned |
 | Android client | done, verified on a device |
-| iOS client | planned (needs a macOS host for the xcframework; under [`RADIO-PLAN.md`](RADIO-PLAN.md) §1 `A2`, the companion, routing, and `mesh_term` client move into shared Rust behind `crates/session-ffi`, removing the Java `libmeshcore` blocker) |
+| iOS client | planned (needs a macOS host for the xcframework). The blocker is gone: the companion, routing and `mesh_term` client are shared Rust behind `crates/session-ffi`, the Java `libmeshcore` is deleted, and `crates/session-ffi` is the C ABI an iOS binding would wrap ([`RADIO-PLAN.md`](RADIO-PLAN.md) §1 `A2`) |
 | LoRa route, Android plus host | built and run on real radios; multi-hop public-mesh redesign (`A1`–`A5`) specified in [`RADIO-PLAN.md`](RADIO-PLAN.md) and [`RADIO-AUDIT-REVIEW.md`](RADIO-AUDIT-REVIEW.md) |
 
 
