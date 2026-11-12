@@ -41,7 +41,6 @@ pub mod mesh_bridge;
 pub mod mesh_rpc;
 pub mod mesh_serial;
 pub mod mesh_identity;
-pub mod mesh_session;
 pub mod ownership;
 pub mod pairing;
 pub mod proc;

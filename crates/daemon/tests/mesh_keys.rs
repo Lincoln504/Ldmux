@@ -1,66 +1,25 @@
-//! A `Key` message over the mesh bridge reaches a REAL pane as the bytes **that pane's mode**
-//! asks for (ADR-0025, version 2).
+//! A key name over the radio route reaches a REAL pane as the bytes **that pane's mode** asks for
+//! (ADR-0025).
 //!
 //! The mesh terminal used to send raw bytes built on the phone, which cannot know the pane's
 //! cursor-key mode. Now the phone sends a name and the daemon's one key table encodes it. The
 //! program here is `cat -v` in raw mode, so what it prints is exactly what the daemon wrote.
 //! Two panes, same key: with application cursor keys on (`ESC [ ? 1 h`, which vim, less and
-//! htop set) `Up` must be `ESC O A`, without it `ESC [ A`. A bridge that ignored the mode would
+//! htop set) `Up` must be `ESC O A`, without it `ESC [ A`. A host that ignored the mode would
 //! send the same bytes to both and fail one of these.
+//!
+//! **Driven through the version-15 service, not the frame loop.** The loop is gone
+//! (`docs/RADIO-PLAN.md` §10a); a `Send` carrying `SendItem::Keys` is what a phone sends now, and
+//! `MeshRpc` is what turns it into the daemon's `send` with `keys`.
 
 mod common;
 
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::rig::Rig;
-use ldmux_daemon::mesh_bridge::{Bridge, DaemonHost, Link};
-use ldmux_protocol::mesh_term::{Decoder, Message};
-
-/// The version these tests exercise the **frame loop** with.
-///
-/// `VERSION` is 15 and a version-15 phone is served by the request/answer service
-/// (`crates/daemon/src/mesh_rpc.rs`), which builds no `Rows`/`Commit` at all. Everything here
-/// asserts on frames, holds, echoes or a real pane's repaint — the version-14 path, which is what
-/// the shipped app still uses — so these attach as 14.
-const FRAME_LOOP_VERSION: u8 = 14;
-
-
-#[derive(Default)]
-struct Wire {
-    inbound: Vec<(u8, Vec<u8>)>,
-    sent: Vec<(u8, Vec<u8>)>,
-}
-
-#[derive(Clone, Default)]
-struct FakeLink(Arc<Mutex<Wire>>);
-
-impl Link for FakeLink {
-    fn established(&self) -> bool {
-        true
-    }
-    fn generation(&self) -> u32 {
-        1
-    }
-    fn pending(&self) -> usize {
-        0
-    }
-    fn send(&self, shell: u8, bytes: &[u8]) -> Result<(), String> {
-        self.0.lock().unwrap().sent.push((shell, bytes.to_vec()));
-        Ok(())
-    }
-    fn take_inbound(&self) -> Vec<(u8, Vec<u8>)> {
-        std::mem::take(&mut self.0.lock().unwrap().inbound)
-    }
-}
-
-fn phone_says(link: &FakeLink, m: &Message) {
-    link.0
-        .lock()
-        .unwrap()
-        .inbound
-        .push((1, m.encode().unwrap()));
-}
+use ldmux_daemon::mesh_bridge::DaemonHost;
+use ldmux_daemon::mesh_rpc::{MeshRpc, PEER_LINK};
+use ldmux_protocol::mesh_term::{Message, SendItem, VERSION};
 
 /// Start a program in the rig's pane that echoes what it reads, in the mode asked for, and wait
 /// until the keeper's emulator really is in that mode: the daemon reads the mode from there.
@@ -96,41 +55,55 @@ async fn pane_in_mode(rig: &Rig, app_cursor: bool) -> common::wsraw::RawWs {
     panic!("the pane never reached application cursor mode {app_cursor}");
 }
 
-async fn press_up_through_the_bridge(rig: &Rig) -> (Bridge<DaemonHost, FakeLink>, FakeLink) {
-    let link = FakeLink::default();
-    let mut bridge = Bridge::new(DaemonHost(rig.arc.clone()), link.clone());
-    // **The rig's own WebSocket client holds this shell**, so a plain attach is refused with
-    // `HELD` (version 8) — by design: a phone does not steal a shell another device is watching.
-    // Taking it over is what the phone does when the user answers `take it back`.
-    phone_says(
-        &link,
-        &Message::Attach {
-            version: FRAME_LOOP_VERSION,
-            selector: rig.session.clone(),
-            cols: 0,
-            rows: 0,
-        },
+/// Attach to the rig's shell through the service, taking it over, and press `Up`.
+///
+/// **The rig's own WebSocket client holds this shell**, so a plain attach is refused with `HELD` —
+/// by design: a phone does not steal a shell another device is watching. Taking it over is what the
+/// phone does when the user answers `take it back`.
+async fn press_up(rig: &Rig) -> MeshRpc {
+    let mut rpc = MeshRpc::new();
+    let mut host = DaemonHost(rig.arc.clone());
+    let attach = Message::Attach {
+        version: VERSION,
+        selector: rig.session.clone(),
+        cols: 0,
+        rows: 0,
+    };
+    rpc.on_message(0, PEER_LINK, &attach, &mut host, std::time::Instant::now())
+        .await
+        .expect("an attach is not refused");
+    let takeover = Message::Takeover {
+        selector: rig.session.clone(),
+    };
+    rpc.on_message(0, PEER_LINK, &takeover, &mut host, std::time::Instant::now())
+        .await
+        .expect("a takeover is not refused");
+    assert_eq!(
+        rpc.attached_to(0),
+        Some(rig.session.as_str()),
+        "the service attached the rig's shell"
     );
-    bridge.tick().await;
-    phone_says(
-        &link,
-        &Message::Takeover {
-            selector: rig.session.clone(),
-        },
-    );
-    bridge.tick().await;
-    assert!(bridge.attached(1), "the bridge attached the rig's shell");
-    phone_says(&link, &Message::Key(vec!["Up".into()]));
-    bridge.tick().await;
-    (bridge, link)
+    let send = Message::Send {
+        op_id: 1,
+        chunk_idx: 0,
+        chunk_count: 1,
+        have_snapshot_id: 0,
+        cols: 0,
+        rows: 0,
+        flags: 0,
+        shell: rig.session.clone(),
+        items: vec![SendItem::Keys(vec!["Up".to_owned()])],
+    };
+    rpc.on_message(0, PEER_LINK, &send, &mut host, std::time::Instant::now())
+        .await
+        .expect("a key is not refused");
+    rpc
 }
 
 /// Wait until the **pane** shows [want], by asking the daemon what the keeper's emulator has.
 ///
-/// The viewer's own stream is not the thing to read here. The bridge takes the shell over, and a
-/// takeover tells the displaced viewer to stop (`notify_displaced`), so its stream can end at any
-/// moment — the first version of these two tests read it and failed under the test pool with
-/// "never saw ...; tail \"\"" whenever the takeover won a race it is allowed to win. The pane's
+/// The viewer's own stream is not the thing to read here. The service takes the shell over, and a
+/// takeover tells the displaced viewer to stop, so its stream can end at any moment. The pane's
 /// content is what the tests are about: which bytes the daemon wrote.
 async fn pane_shows(rig: &Rig, want: &str) {
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
@@ -158,8 +131,7 @@ async fn pane_shows(rig: &Rig, want: &str) {
 async fn up_is_ss3_when_the_pane_asked_for_application_cursor_keys() {
     let rig = Rig::start().await;
     let _ws = pane_in_mode(&rig, true).await;
-    let (bridge, _link) = press_up_through_the_bridge(&rig).await;
-    assert_eq!(bridge.stats.keys, 1);
+    let _rpc = press_up(&rig).await;
     // `cat -v` renders ESC as `^[`: `ESC O A` is `^[OA`.
     pane_shows(&rig, "^[OA").await;
     // ...and the normal-mode form is not what the pane got.
@@ -181,73 +153,58 @@ async fn up_is_ss3_when_the_pane_asked_for_application_cursor_keys() {
 async fn up_is_csi_in_a_pane_that_did_not() {
     let rig = Rig::start().await;
     let _ws = pane_in_mode(&rig, false).await;
-    let (_bridge, _link) = press_up_through_the_bridge(&rig).await;
+    let _rpc = press_up(&rig).await;
     pane_shows(&rig, "^[[A").await;
 }
 
+/// **An empty selector with one shell running attaches to it, and the answer names it.** The phone
+/// learns which shell it got from the `Snapshot`, not by guessing from a list another client may
+/// have changed in between.
 #[tokio::test]
-async fn the_profile_names_the_shell_the_host_chose() {
+async fn an_empty_selector_attaches_to_the_only_shell_and_the_answer_names_it() {
     let rig = Rig::start().await;
-    let link = FakeLink::default();
-    let mut bridge = Bridge::new(DaemonHost(rig.arc.clone()), link.clone());
-    // An empty selector with exactly one shell running: the host picks it and says which.
-    phone_says(
-        &link,
-        &Message::Attach {
-            version: FRAME_LOOP_VERSION,
-            selector: String::new(),
-            cols: 0,
-            rows: 0,
-        },
+    let mut rpc = MeshRpc::new();
+    let mut host = DaemonHost(rig.arc.clone());
+    let attach = Message::Attach {
+        version: VERSION,
+        selector: String::new(),
+        cols: 0,
+        rows: 0,
+    };
+    let outcome = rpc
+        .on_message(0, PEER_LINK, &attach, &mut host, std::time::Instant::now())
+        .await
+        .expect("an attach is not refused");
+    let ldmux_daemon::mesh_rpc::Outcome::Answer(messages) = outcome else {
+        panic!("an attach is answered with a screen");
+    };
+    let named = messages.iter().find_map(|m| match m {
+        Message::Snapshot { shell, .. } => Some(shell.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        named.as_deref(),
+        Some(rig.session.as_str()),
+        "the answer did not name the shell the host chose: {messages:?}"
     );
-    bridge.tick().await;
-    // **An attach holds its first frame briefly** so the phone's own grid can arrive before the pane
-    // is drawn at whatever geometry a desk window left behind (`ATTACH_GRACE`). This rig is real
-    // time, so the wait is real: without it the attach is answered and the screen is not yet due.
-    tokio::time::sleep(std::time::Duration::from_millis(1_600)).await;
-    bridge.tick().await;
-    let sent = link.0.lock().unwrap().sent.clone();
-    // The profile, not "the first record": a version-9 phone is also sent the mark table, and that
-    // page is a record of its own.
-    let profile = sent
-        .iter()
-        .flat_map(|(_, bytes)| Decoder::new().push(bytes).unwrap())
-        .find_map(|m| match m {
-            Ok(p @ Message::Profile { .. }) => Some(p),
-            _ => None,
-        })
-        .expect("the host answered with a profile");
-    match profile {
-        Message::Profile { version, shell, .. } => {
-            assert_eq!(version, FRAME_LOOP_VERSION);
-            assert_eq!(shell, rig.session);
-        }
-        _ => unreachable!(),
-    }
 }
 
-/// Version 3: a `Resize` reaches the REAL keeper, so the pane's own grid changes (the thing a
-/// tailnet client's resize does), and the next screen the phone gets carries a `Profile` with
-/// exactly that grid. A bridge that only reset its differ would answer with the old 80 columns.
+/// **A grid stated with the attach reaches the REAL keeper**, so the pane's own size changes — the
+/// thing a tailnet client's resize does — and the answer carries that grid.
 #[tokio::test]
-async fn a_resize_changes_the_real_pane_and_the_next_profile_says_so() {
+async fn a_stated_grid_changes_the_real_pane() {
     let rig = Rig::start().await;
-    let link = FakeLink::default();
-    let mut bridge = Bridge::new(DaemonHost(rig.arc.clone()), link.clone());
-    phone_says(
-        &link,
-        &Message::Attach {
-            version: FRAME_LOOP_VERSION,
-            selector: rig.session.clone(),
-            cols: 0,
-            rows: 0,
-        },
-    );
-    bridge.tick().await;
-    link.0.lock().unwrap().sent.clear();
-    phone_says(&link, &Message::Resize { cols: 41, rows: 17 });
-    bridge.tick().await;
-    assert_eq!(bridge.stats.resizes, 1);
+    let mut rpc = MeshRpc::new();
+    let mut host = DaemonHost(rig.arc.clone());
+    let attach = Message::Attach {
+        version: VERSION,
+        selector: rig.session.clone(),
+        cols: 41,
+        rows: 17,
+    };
+    rpc.on_message(0, PEER_LINK, &attach, &mut host, std::time::Instant::now())
+        .await
+        .expect("an attach is not refused");
     let snap = rig
         .arc
         .lock()
@@ -257,22 +214,7 @@ async fn a_resize_changes_the_real_pane_and_the_next_profile_says_so() {
         .unwrap();
     assert_eq!(
         (snap["cols"].as_u64(), snap["rows"].as_u64()),
-        (Some(41), Some(17))
-    );
-    let mut d = Decoder::new();
-    let mut messages = Vec::new();
-    for (_, bytes) in link.0.lock().unwrap().sent.iter() {
-        messages.extend(d.push(bytes).unwrap().into_iter().map(Result::unwrap));
-    }
-    assert!(
-        matches!(
-            messages.first(),
-            Some(Message::Profile {
-                cols: 41,
-                rows: 17,
-                ..
-            })
-        ),
-        "the first message after a resize is a Profile with the new grid: {messages:?}"
+        (Some(41), Some(17)),
+        "the pane was not fitted to the grid the phone stated"
     );
 }

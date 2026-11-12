@@ -522,6 +522,13 @@ pub struct RadioEndpoint {
     queue: VecDeque<Pending>,
     /// Messages handed up, waiting for [`RadioEndpoint::take_inbound`].
     inbound: Vec<Vec<u8>>,
+    /// The pairing an accepted initiation produced, waiting for the owner of the pairing file.
+    ///
+    /// The handshake computes it and the endpoint cannot persist it: the file, its permissions and
+    /// its replay timestamp belong to the daemon. Surfacing it here is the whole of the seam, and
+    /// without it a host would accept a phone and never pin it — the pairing would be re-negotiable
+    /// by anyone holding the PSK.
+    pending_pin: Option<([u8; 32], u64)>,
     /// The path our last direct record travelled out, which is the witness a zero-hop direct arrival
     /// speaks for.
     last_direct_path: Vec<u8>,
@@ -599,6 +606,7 @@ impl RadioEndpoint {
             need_hs: NeedHandshakeSender::new(),
             queue: VecDeque::new(),
             inbound: Vec::new(),
+            pending_pin: None,
             last_direct_path: Vec::new(),
             records_left: CREDIT_WINDOW,
             nonce: ENDPOINT_NONCE_BASE,
@@ -649,6 +657,12 @@ impl RadioEndpoint {
     /// Messages handed up since the last call, oldest first.
     pub fn take_inbound(&mut self) -> Vec<Vec<u8>> {
         core::mem::take(&mut self.inbound)
+    }
+
+    /// The pairing to persist after an accepted initiation: the phone key to pin and the timestamp
+    /// to remember against a replay. Taken once, by whoever owns the pairing file.
+    pub fn take_pin(&mut self) -> Option<([u8; 32], u64)> {
+        self.pending_pin.take()
     }
 
     /// Whether a session exists, so records can be sealed and opened.
@@ -1081,8 +1095,11 @@ impl RadioEndpoint {
             Ok(Answered::Fresh {
                 reply,
                 established,
+                remote_static,
+                timestamp_ms,
                 ..
             }) => {
+                self.pending_pin = Some((remote_static, timestamp_ms));
                 self.session = Some(*established);
                 self.replay = ReplayWindow::default();
                 self.counter = 0;

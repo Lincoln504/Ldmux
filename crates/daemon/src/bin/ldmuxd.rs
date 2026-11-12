@@ -241,19 +241,14 @@ fn main() {
                     session.public_key_hex()
                 );
             }
-            let session_on = mesh_session.is_some();
-            let runtime = ldmux_daemon::mesh::MeshRuntime::start_with_session(cfg, mesh_session);
+            // **The link task owns the service.** A version-15 message names its shell, so the
+            // transport and the dispatch are one loop: the endpoint decides what goes on the air,
+            // the service decides what an arriving message means, and the daemon answers through
+            // `DaemonHost`. There is no second task and no queue between them.
+            let host = ldmux_daemon::mesh_bridge::DaemonHost(daemon_ref.clone());
+            let runtime =
+                ldmux_daemon::mesh::MeshRuntime::start_with_session(cfg, mesh_session, host);
             runtime.clone().install();
-            // The shell bridge (ADR-0025): the phone attaches to a shell through the session
-            // and gets plain-text rows. It only exists when there is a session to carry it.
-            if session_on {
-                let host = ldmux_daemon::mesh_bridge::DaemonHost(daemon_ref.clone());
-                let bridge = ldmux_daemon::mesh_bridge::Bridge::new(host, runtime.clone());
-                tokio::spawn(ldmux_daemon::mesh_bridge::run_publishing(
-                    bridge,
-                    move |stats| runtime.publish_bridge(stats),
-                ));
-            }
         }
         // The handlers go in **before** `start`: a SIGTERM that arrives while
         // the daemon is starting is held by the stream and acted on as soon as

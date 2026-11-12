@@ -197,6 +197,15 @@ pub enum Outcome {
     Answer(Vec<Message>),
 }
 
+/// The peer a version-15 command came from.
+///
+/// **One radio link carries one phone at a time**, because a session is established with one static
+/// key and a second phone cannot share it. So the peer is the link, and the at-most-once ring keys
+/// every command to the same device. The field exists rather than being left out because the ring's
+/// identity is what makes a duplicate safe, and a multiplexed link would key it per peer without
+/// touching the service.
+pub const PEER_LINK: u32 = 0;
+
 /// The holder string this link's own claims are recorded under.
 ///
 /// The daemon's claim table spells the radio link `"mesh"` (`mesh_bridge.rs::Host::holder`, and the
@@ -843,6 +852,27 @@ impl MeshRpc {
                 // the command still runs, and the screen that comes back is the pane's real grid.
                 let _ = host.resize(id, cols, rows).await;
             }
+            // **A paste reads the mode now, not at attach.** bash sets `CSI ? 2004 h` with its
+            // first prompt, so a mode captured at attach is the mode before the shell existed, and
+            // a paste that beat the next paint ran every line (measured 2026-11-12: `echo ONE`
+            // and `echo TWO` executed instead of being inserted). A typed run cannot carry a
+            // newline -- the phone sends one as a key -- so only a paste needs the fresh read, and
+            // pastes are rare enough that one screen costs nothing.
+            let pane = if items
+                .iter()
+                .any(|item| matches!(item, ldmux_protocol::mesh_term::SendItem::Paste(_)))
+            {
+                match host.screen(id).await {
+                    Ok(read) => PaneModes {
+                        bracketed_paste: read.bracketed_paste,
+                    },
+                    // A pane that cannot be read is a pane that cannot be checked; the attach-time
+                    // mode is what we know, and writing nothing is worse than writing unquoted.
+                    Err(_) => pane,
+                }
+            } else {
+                pane
+            };
             let written = match apply_send(&items, pane) {
                 Ok(steps) => {
                     let mut ok = true;

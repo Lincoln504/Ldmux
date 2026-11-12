@@ -1,5 +1,5 @@
 //! A multi-line paste, end to end, on the radio route's own wiring: a real keeper, a real shell,
-//! and the bridge the phone talks to.
+//! and the version-15 service the phone talks to.
 //!
 //! **The report this exists for** (2026-11-07): copying several lines on the phone and pasting them
 //! ran the first line as a command, and the rest went to whatever that command started. The phone
@@ -9,88 +9,83 @@
 //!
 //! So the assertion is the operator's own: paste two `echo` lines into a shell that asked for
 //! bracketed paste, and neither of them runs.
+//!
+//! **Driven through the service, not the frame loop.** A `Send` carrying `SendItem::Paste` is what a
+//! phone sends now; `MeshRpc` reads the pane's paste mode from the screen it attached with and
+//! `mesh_apply` encodes the bytes.
 
 mod common;
 
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::rig::Rig;
-use ldmux_daemon::mesh_bridge::{Bridge, DaemonHost, Link};
-use ldmux_protocol::mesh_term::Message;
+use ldmux_daemon::mesh_bridge::DaemonHost;
+use ldmux_daemon::mesh_rpc::{MeshRpc, PEER_LINK};
+use ldmux_protocol::mesh_term::{Message, SendItem, VERSION};
 
-/// The version these tests exercise the **frame loop** with.
-///
-/// `VERSION` is 15 and a version-15 phone is served by the request/answer service
-/// (`crates/daemon/src/mesh_rpc.rs`), which builds no `Rows`/`Commit` at all. Everything here
-/// asserts on frames, holds, echoes or a real pane's repaint — the version-14 path, which is what
-/// the shipped app still uses — so these attach as 14.
-const FRAME_LOOP_VERSION: u8 = 14;
-
-
-#[derive(Default)]
-struct Wire {
-    inbound: Vec<(u8, Vec<u8>)>,
-    sent: Vec<(u8, Vec<u8>)>,
+/// Attach to the rig's shell through the service, taking it over if the rig's own viewer holds it.
+async fn attach(rig: &Rig) -> (MeshRpc, DaemonHost) {
+    let mut rpc = MeshRpc::new();
+    let mut host = DaemonHost(rig.arc.clone());
+    let message = Message::Attach {
+        version: VERSION,
+        selector: rig.session.clone(),
+        cols: 0,
+        rows: 0,
+    };
+    rpc.on_message(0, PEER_LINK, &message, &mut host, std::time::Instant::now())
+        .await
+        .expect("an attach is not refused");
+    if rpc.attached_to(0).is_none() {
+        let takeover = Message::Takeover {
+            selector: rig.session.clone(),
+        };
+        rpc.on_message(0, PEER_LINK, &takeover, &mut host, std::time::Instant::now())
+            .await
+            .expect("a takeover is not refused");
+    }
+    assert_eq!(
+        rpc.attached_to(0),
+        Some(rig.session.as_str()),
+        "the service attached the rig's shell"
+    );
+    (rpc, host)
 }
 
-#[derive(Clone, Default)]
-struct FakeLink(Arc<Mutex<Wire>>);
-
-impl Link for FakeLink {
-    fn established(&self) -> bool {
-        true
-    }
-    fn generation(&self) -> u32 {
-        1
-    }
-    fn pending(&self) -> usize {
-        0
-    }
-    fn send(&self, shell: u8, bytes: &[u8]) -> Result<(), String> {
-        self.0.lock().unwrap().sent.push((shell, bytes.to_vec()));
-        Ok(())
-    }
-    fn take_inbound(&self) -> Vec<(u8, Vec<u8>)> {
-        std::mem::take(&mut self.0.lock().unwrap().inbound)
-    }
+/// Send one item to the attached shell.
+async fn send(rpc: &mut MeshRpc, host: &mut DaemonHost, rig: &Rig, item: SendItem) {
+    let message = Message::Send {
+        op_id: 1,
+        chunk_idx: 0,
+        chunk_count: 1,
+        have_snapshot_id: 0,
+        cols: 0,
+        rows: 0,
+        flags: 0,
+        shell: rig.session.clone(),
+        items: vec![item],
+    };
+    rpc.on_message(0, PEER_LINK, &message, host, std::time::Instant::now())
+        .await
+        .expect("a send is not refused");
 }
 
-impl FakeLink {
-    fn phone_says(&self, m: &Message) {
-        let bytes = m.encode().expect("encode");
-        self.0.lock().unwrap().inbound.push((1, bytes));
-    }
-}
-
-/// Let the pane and the bridge work, then read the pane as the host sees it.
+/// Let the pane work, then read it as the host sees it.
 ///
 /// **A fixed wait is a bug in a test.** Half a second was enough on an idle machine and not enough
 /// on a loaded one — measured 2026-11-09 at load 29, where `bash` had not drawn a prompt and the
 /// test read a blank pane — so the loop keeps going while the pane is entirely empty, with a
 /// deadline that only a broken shell can reach.
-async fn settle(bridge: &mut Bridge<DaemonHost, FakeLink>, rig: &Rig) -> Vec<String> {
+async fn settle(rig: &Rig) -> Vec<String> {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
-        for _ in 0..4 {
-            bridge.tick().await;
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        if all_empty(&read_pane(rig).await) {
-            if std::time::Instant::now() < deadline {
-                continue;
-            }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if !all_empty(&read_pane(rig).await) {
             break;
         }
-        break;
-    }
-    // **One more pass after the prompt is visible.** The bridge records the pane's paste mode from
-    // the screen a pass reads, and the snapshot can show the prompt one pass before the tick that
-    // sees it: the paste then travelled as ordinary text and both lines ran. Two passes make the
-    // flag and the picture agree.
-    for _ in 0..2 {
-        bridge.tick().await;
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
     }
     read_pane(rig).await
 }
@@ -119,33 +114,23 @@ async fn a_pasted_pair_of_commands_is_inserted_and_does_not_run() {
     // SAFETY: this test binary runs one test, and the keeper it starts inherits the value.
     unsafe { std::env::set_var("SHELL", "/bin/bash") };
     let rig = Rig::start().await;
-    let link = FakeLink::default();
-    let mut bridge = Bridge::new(DaemonHost(rig.arc.clone()), link.clone());
-    link.phone_says(&Message::Attach {
-        version: FRAME_LOOP_VERSION,
-        selector: rig.session.clone(),
-        cols: 0,
-        rows: 0,
-    });
-    bridge.tick().await;
-    if !bridge.attached(1) {
-        link.phone_says(&Message::Takeover {
-            selector: rig.session.clone(),
-        });
-        bridge.tick().await;
-    }
-    assert!(bridge.attached(1), "the bridge attached the rig's shell");
+    let (mut rpc, mut host) = attach(&rig).await;
 
     // The prompt, and with it bash's `CSI ? 2004 h`: the mode this whole thing turns on.
-    let before = settle(&mut bridge, &rig).await;
+    let before = settle(&rig).await;
     assert!(
         before.iter().any(|l| l.contains('$') || l.contains('#')),
         "bash drew a prompt, so its paste mode is set: {before:?}"
     );
 
-    link.phone_says(&Message::Input(b"echo ONE\necho TWO\n".to_vec()));
-    let after = settle(&mut bridge, &rig).await;
-    let _ = &before;
+    send(
+        &mut rpc,
+        &mut host,
+        &rig,
+        SendItem::Paste(b"echo ONE\necho TWO\n".to_vec()),
+    )
+    .await;
+    let after = settle(&rig).await;
 
     // Neither line ran. If either had, its output would be a line of its own.
     assert!(
@@ -172,26 +157,17 @@ async fn the_same_text_with_carriage_returns_runs_each_line() {
     // SAFETY: this test binary's keeper inherits the value; see the test above.
     unsafe { std::env::set_var("SHELL", "/bin/bash") };
     let rig = Rig::start().await;
-    let link = FakeLink::default();
-    let mut bridge = Bridge::new(DaemonHost(rig.arc.clone()), link.clone());
-    link.phone_says(&Message::Attach {
-        version: FRAME_LOOP_VERSION,
-        selector: rig.session.clone(),
-        cols: 0,
-        rows: 0,
-    });
-    bridge.tick().await;
-    if !bridge.attached(1) {
-        link.phone_says(&Message::Takeover {
-            selector: rig.session.clone(),
-        });
-        bridge.tick().await;
-    }
-    assert!(bridge.attached(1), "the bridge attached the rig's shell");
-    settle(&mut bridge, &rig).await;
+    let (mut rpc, mut host) = attach(&rig).await;
+    settle(&rig).await;
 
-    link.phone_says(&Message::Input(b"echo ONE\recho TWO\r".to_vec()));
-    let after = settle(&mut bridge, &rig).await;
+    send(
+        &mut rpc,
+        &mut host,
+        &rig,
+        SendItem::Text(b"echo ONE\recho TWO\r".to_vec()),
+    )
+    .await;
+    let after = settle(&rig).await;
     assert!(
         after.iter().any(|l| l == "ONE"),
         "a carriage return is Enter, so that line runs: {after:?}"

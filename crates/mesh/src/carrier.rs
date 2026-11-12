@@ -15,12 +15,31 @@ use crate::error::MeshError;
 use crate::messages::{ScopeInfo, SendResult, Status};
 
 /// What a carrier reports upward.
-#[derive(Clone, PartialEq, Eq, Debug)]
+///
+/// `PartialEq` and not `Eq`: an arrival carries the SNR the radio measured, and a float has no total
+/// order. Nothing compares two events for identity — a test compares one against a literal.
+#[derive(Clone, PartialEq, Debug)]
 pub enum Event {
     /// A status report: radio state, signal, battery, airtime and the budget left.
     Status(Status),
-    /// One downlink record. Opaque: the session layer decides what it means.
-    Recv(Vec<u8>),
+    /// One downlink record, and how it arrived.
+    ///
+    /// **The arrival is part of the record's meaning, not a separate event.** A route is learned
+    /// from the path a record crossed, and the transit test needs the hop count; a carrier that
+    /// reported the bytes alone would leave the session unable to tell a record that finished its
+    /// path from one still travelling, or to reverse a flood's chain into a way back. Emitting the
+    /// two as separate events would make the pairing an ordering assumption.
+    Recv {
+        /// The sealed record.
+        record: Vec<u8>,
+        /// The path as received: hashes still to travel for a direct packet (empty when it
+        /// arrived), the chain it crossed for a flood.
+        path: Vec<u8>,
+        /// Whether it arrived as a flood.
+        flood: bool,
+        /// The SNR of the last link, in dB.
+        snr_db: f32,
+    },
     /// The answer to one [`Carrier::send_record`], naming the sequence it carried.
     SendResult(SendResult),
     /// The **largest record this link can carry now**, after the path it is using.
@@ -192,8 +211,21 @@ mod tests {
     fn an_event_can_name_a_received_record_and_a_send_result() {
         // The two values the loop routes on, built the way a carrier builds them, so
         // a change to either type shows up here rather than in the loop.
-        let recv = Event::Recv(vec![1, 2, 3]);
-        assert_eq!(recv, Event::Recv(vec![1, 2, 3]));
+        let recv = Event::Recv {
+            record: vec![1, 2, 3],
+            path: Vec::new(),
+            flood: false,
+            snr_db: 6.0,
+        };
+        assert_eq!(
+            recv,
+            Event::Recv {
+                record: vec![1, 2, 3],
+                path: Vec::new(),
+                flood: false,
+                snr_db: 6.0,
+            }
+        );
         let result = Event::SendResult(SendResult {
             seq: 7,
             outcome: SendOutcome::SentDirect,

@@ -22,6 +22,7 @@
 //! blocking API and a serial read inside a tokio task would block a worker for the duration of a
 //! radio timeout.
 
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::Duration;
 
@@ -30,7 +31,10 @@ use ldmux_companion::codec::{
 };
 use ldmux_companion::{ByteLink, Companion, FloodScope, SessionError};
 use ldmux_mesh::carrier::{Bound, Budget, Carrier, Event, Signal};
-use ldmux_mesh::constants::{RECORD_MAX, RECORD_RECEIVED_MAX, RadioState, SendOutcome};
+use ldmux_mesh::constants::{
+    RECORD_MAX, RECORD_RECEIVED_MAX, RadioState, SendOutcome, UNKNOWN_BATTERY, UNKNOWN_RSSI,
+};
+use ldmux_mesh::messages::Status;
 use ldmux_mesh::error::MeshError;
 use ldmux_mesh::messages::SendResult;
 use ldmux_mesh::route::Carriage;
@@ -115,7 +119,10 @@ pub fn build_packet(
 /// either a `RAW_CUSTOM` packet's payload or the tail of an `LDMR` flood after its six bytes of
 /// `[dest][source][magic][nonce]`.
 #[must_use]
-pub fn classify_push(frame: &[u8], settings: &CarrierSettings) -> Option<(Vec<u8>, Vec<Event>)> {
+pub fn classify_push(
+    frame: &[u8],
+    settings: &CarrierSettings,
+) -> Option<(Vec<u8>, Vec<Event>, Option<u8>)> {
     let (snr_quarter, rssi) = match frame {
         [0x88, snr, rssi, ..] => (*snr, *rssi),
         _ => return None,
@@ -127,9 +134,15 @@ pub fn classify_push(frame: &[u8], settings: &CarrierSettings) -> Option<(Vec<u8
     // flood-routes `REQ` and never `RAW_CUSTOM`). Reading only the payload type would therefore
     // ignore every flood — which is exactly the class of silent loss this module exists to end.
     let body = view.payload;
-    let record: &[u8] = match body.get(2..6) {
-        Some(magic) if magic == ldmux_companion::codec::RECORD_FLOOD_MAGIC => body.get(10..)?,
-        _ if view.payload_type == PAYLOAD_RAW_CUSTOM => body,
+    // **A flood names its sender, and that is the only way a host learns the phone's radio key.**
+    // The wrapper is `[dest][source][magic][nonce][record]`, one byte of each key, so the second
+    // byte is the sender's hash. Without it a host with no route floods to hash zero and the phone
+    // ignores the answer — the asymmetric-link case the teaching flood exists for.
+    let (record, sender): (&[u8], Option<u8>) = match body.get(2..6) {
+        Some(magic) if magic == ldmux_companion::codec::RECORD_FLOOD_MAGIC => {
+            (body.get(10..)?, body.get(1).copied())
+        }
+        _ if view.payload_type == PAYLOAD_RAW_CUSTOM => (body, None),
         _ => return None,
     };
     if record.is_empty() {
@@ -137,7 +150,12 @@ pub fn classify_push(frame: &[u8], settings: &CarrierSettings) -> Option<(Vec<u8
     }
     let hops = view.path.hops;
     let events = vec![
-        Event::Recv(record.to_vec()),
+        Event::Recv {
+            record: record.to_vec(),
+            path: view.path.bytes.clone(),
+            flood: view.is_flood(),
+            snr_db: f32::from(snr_quarter) / 4.0,
+        },
         Event::Signal(Signal {
             noise_floor_dbm: 0,
             rssi_dbm: Some(rssi as i8),
@@ -152,7 +170,7 @@ pub fn classify_push(frame: &[u8], settings: &CarrierSettings) -> Option<(Vec<u8
             hops,
         },
     ];
-    Some((record.to_vec(), events))
+    Some((record.to_vec(), events, sender))
 }
 
 /// The largest record this arrival's path allows, from the one budget the whole tree uses.
@@ -170,6 +188,62 @@ fn record_ceiling(settings: &CarrierSettings, path: AdvertPath) -> u8 {
 }
 
 /// The radio, driven by an endpoint that names each record's carriage.
+/// What the radio itself is set to, and what this hour has cost.
+///
+/// The carrier is the accountant: it counts what it actually transmitted, retransmissions and acks
+/// included, and publishes the remainder. A second count anywhere else charges the same record
+/// twice, which is the stall of 2026-11-06 in reverse.
+struct Radio {
+    settings: CarrierSettings,
+    /// The firmware's client-repeat flag, carried into every preset write.
+    ///
+    /// `CMD_SET_RADIO_PARAMS`'s sixth byte is persisted as `setRepeatEn(repeat != 0)`, so a frame
+    /// that stops at the coding rate silently clears an operator's repeat setting. `None` leaves the
+    /// stored value alone rather than guessing.
+    repeat_enabled: Option<bool>,
+    /// The tuple, kept so a retune can recompute the airtime estimate and the allowance.
+    freq_mhz: f64,
+    bw_khz: f64,
+    sf: u8,
+    cr: u8,
+    tx_power_dbm: i8,
+    /// Records this hour's allowance permits, and how many have gone.
+    budget: Option<u32>,
+    sent: u32,
+    /// The hour the count belongs to, and where it is remembered across a restart.
+    window_start: u64,
+    window_record: Option<PathBuf>,
+    /// Where the peer's radio key is remembered.
+    peer_record: Option<PathBuf>,
+}
+
+impl Radio {
+    /// The status this radio actually knows: no RSSI or battery reading, and a budget computed from
+    /// its own preset rather than reported by a gateway.
+    fn status(&self) -> Status {
+        let left = self
+            .budget
+            .map(|b| u8::try_from(b.saturating_sub(self.sent)).unwrap_or(u8::MAX));
+        let tenths = (f64::from(self.sent) * self.settings.airtime_ms.unwrap_or(0.0) / 100.0).round();
+        Status {
+            radio_state: RadioState::Connected,
+            rssi: UNKNOWN_RSSI,
+            battery_percent: UNKNOWN_BATTERY,
+            tx_airtime_tenths_this_hour: u16::try_from(tenths as u64).unwrap_or(u16::MAX),
+            ops_left_this_hour: left,
+        }
+    }
+
+    /// Charge one transmitted record, and remember the hour's spend.
+    fn charge(&mut self) {
+        self.sent = self.sent.saturating_add(1);
+        if let Some(path) = self.window_record.as_deref() {
+            save_window(path, self.window_start, self.sent);
+        }
+    }
+}
+
+/// The radio, driven by an endpoint that names each record's carriage.
 pub struct RadioCarrier {
     commands: Sender<Command>,
     events: async_mpsc::Receiver<Result<Event, MeshError>>,
@@ -181,13 +255,31 @@ pub struct RadioCarrier {
     next_carriage: Option<Carriage>,
 }
 
-/// The one thing the loop can be told to do besides send.
+/// What the loop can be told to do besides send.
 enum Command {
     /// Transmit this record on this carriage.
     Send {
         seq: u8,
         record: Vec<u8>,
         carriage: Carriage,
+    },
+    /// Tune the radio, and answer on this channel when the firmware has.
+    SetPreset {
+        freq_khz: u32,
+        bw_hz: u32,
+        sf: u8,
+        cr: u8,
+        reply: std::sync::mpsc::Sender<Result<(), String>>,
+    },
+    /// Set the path hash width in bytes (1..=3), answered the same way.
+    SetPathWidth {
+        bytes: u8,
+        reply: std::sync::mpsc::Sender<Result<(), String>>,
+    },
+    /// Set transmit power in dBm, answered the same way.
+    SetPower {
+        dbm: i8,
+        reply: std::sync::mpsc::Sender<Result<(), String>>,
     },
 }
 
@@ -201,6 +293,7 @@ impl RadioCarrier {
     pub fn spawn<L: ByteLink + Send + 'static>(
         companion: Companion<L>,
         settings: CarrierSettings,
+        radio: RadioSettings,
     ) -> (Self, Bound) {
         let bound = Bound {
             uplink_record_max: u8::try_from(RECORD_MAX).unwrap_or(171),
@@ -210,9 +303,23 @@ impl RadioCarrier {
         };
         let (command_tx, command_rx) = channel();
         let (event_tx, event_rx) = async_mpsc::channel(64);
+        let state = Radio {
+            settings,
+            repeat_enabled: radio.repeat_enabled,
+            freq_mhz: radio.freq_mhz,
+            bw_khz: radio.bw_khz,
+            sf: radio.sf,
+            cr: radio.cr,
+            tx_power_dbm: radio.tx_power_dbm,
+            budget: budget_per_hour(radio.airtime_ms, radio.freq_mhz),
+            sent: 0,
+            window_start: 0,
+            window_record: radio.window_record,
+            peer_record: radio.peer_record,
+        };
         std::thread::Builder::new()
             .name("ldmux-mesh-carrier".to_owned())
-            .spawn(move || serve(companion, settings, command_rx, event_tx))
+            .spawn(move || serve(companion, state, command_rx, event_tx))
             .expect("a radio thread can be spawned");
         (
             Self {
@@ -223,6 +330,25 @@ impl RadioCarrier {
             bound,
         )
     }
+}
+
+/// What the radio reported about itself at open, beyond the carrier's own settings.
+pub struct RadioSettings {
+    /// The firmware's client-repeat flag, carried into every preset write.
+    pub repeat_enabled: Option<bool>,
+    /// The tuple the radio is on, for the airtime estimate and the allowance.
+    pub freq_mhz: f64,
+    pub bw_khz: f64,
+    pub sf: u8,
+    pub cr: u8,
+    pub tx_power_dbm: i8,
+    /// One full record's airtime at that tuple.
+    pub airtime_ms: f64,
+    /// Where the hour's spend is remembered, so a restart resumes the same hour.
+    pub window_record: Option<PathBuf>,
+    /// Where the peer's radio key is remembered, so a restart can address a flood to it before the
+    /// phone has spoken.
+    pub peer_record: Option<PathBuf>,
 }
 
 impl Carrier for RadioCarrier {
@@ -249,6 +375,58 @@ impl Carrier for RadioCarrier {
             .map_err(|_| MeshError::Closed)
     }
 
+    async fn set_preset(
+        &mut self,
+        freq_khz: u32,
+        bw_hz: u32,
+        sf: u8,
+        cr: u8,
+    ) -> Result<(), MeshError> {
+        let (reply, answer) = channel();
+        self.commands
+            .send(Command::SetPreset {
+                freq_khz,
+                bw_hz,
+                sf,
+                cr,
+                reply,
+            })
+            .map_err(|_| MeshError::Closed)?;
+        match answer.recv_timeout(Duration::from_secs(10)) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(MeshError::Unsupported(format!("the radio refused the tuple: {e}"))),
+            Err(_) => Err(MeshError::Timeout("the radio did not answer the retune")),
+        }
+    }
+
+    async fn set_path_width(&mut self, bytes: u8) -> Result<(), MeshError> {
+        let (reply, answer) = channel();
+        self.commands
+            .send(Command::SetPathWidth { bytes, reply })
+            .map_err(|_| MeshError::Closed)?;
+        match answer.recv_timeout(Duration::from_secs(10)) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(MeshError::Unsupported(format!(
+                "the radio refused the path width: {e}"
+            ))),
+            Err(_) => Err(MeshError::Timeout("the radio did not answer the path width")),
+        }
+    }
+
+    async fn set_tx_power(&mut self, dbm: i8) -> Result<(), MeshError> {
+        let (reply, answer) = channel();
+        self.commands
+            .send(Command::SetPower { dbm, reply })
+            .map_err(|_| MeshError::Closed)?;
+        match answer.recv_timeout(Duration::from_secs(10)) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(MeshError::Unsupported(format!(
+                "the radio refused the power: {e}"
+            ))),
+            Err(_) => Err(MeshError::Timeout("the radio did not answer the power change")),
+        }
+    }
+
     async fn recv(&mut self) -> Result<Event, MeshError> {
         match self.events.recv().await {
             Some(result) => result,
@@ -267,15 +445,35 @@ impl CarriageSink for RadioCarrier {
 /// The radio thread: harvest the air, then serve one command, for ever.
 fn serve<L: ByteLink>(
     mut companion: Companion<L>,
-    settings: CarrierSettings,
+    mut radio: Radio,
     commands: Receiver<Command>,
     events: async_mpsc::Sender<Result<Event, MeshError>>,
 ) {
+    // The hour's spend survives a restart, or the allowance is per process rather than per hour.
+    if let Some(path) = radio.window_record.as_deref()
+        && let Some((start, sent)) = load_window(path)
+    {
+        let now = unix_now();
+        if now.saturating_sub(start) < 3600 {
+            radio.window_start = start;
+            radio.sent = sent;
+        } else {
+            radio.window_start = now;
+        }
+    } else {
+        radio.window_start = unix_now();
+    }
+    if events
+        .blocking_send(Ok(Event::Status(radio.status())))
+        .is_err()
+    {
+        return;
+    }
     loop {
         // **The air first.** A received frame already queued on the port would otherwise wait
         // behind this thread's own send, which is the defect that made a stats poll cost a packet.
         // A closed event channel means every caller has gone: the port is done with.
-        if harvest(&mut companion, &settings, &events).is_err() {
+        if harvest(&mut companion, &mut radio, &events).is_err() {
             return;
         }
         match commands.recv_timeout(COMMAND_WAIT) {
@@ -284,13 +482,79 @@ fn serve<L: ByteLink>(
                 record,
                 carriage,
             }) => {
-                let outcome = transmit(&mut companion, &settings, &carriage, &record);
+                let outcome = transmit(&mut companion, &radio.settings, &carriage, &record);
+                radio.charge();
                 if events
                     .blocking_send(Ok(Event::SendResult(SendResult { seq, outcome })))
                     .is_err()
                 {
                     return;
                 }
+                if events
+                    .blocking_send(Ok(Event::Status(radio.status())))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Ok(Command::SetPreset {
+                freq_khz,
+                bw_hz,
+                sf,
+                cr,
+                reply,
+            }) => {
+                // The firmware validates the tuple and answers OK or an error, so a refusal is
+                // reported rather than leaving the radio silently where it was.
+                let result = companion
+                    .set_radio_params_keeping(freq_khz, bw_hz, sf, cr, radio.repeat_enabled)
+                    .map_err(|e| format!("{e:?}"));
+                if result.is_ok() {
+                    radio.freq_mhz = f64::from(freq_khz) / 1000.0;
+                    radio.bw_khz = f64::from(bw_hz) / 1000.0;
+                    radio.sf = sf;
+                    radio.cr = cr;
+                    // The airtime estimate follows the new tuple, or the budget keeps measuring the
+                    // radio that is no longer in use.
+                    radio.settings.airtime_ms = Some(ldmux_companion::codec::time_on_air_ms(
+                        radio.bw_khz,
+                        sf,
+                        cr,
+                        RECORD_MAX,
+                    ));
+                    radio.budget = budget_per_hour(
+                        radio.settings.airtime_ms.unwrap_or(0.0),
+                        radio.freq_mhz,
+                    );
+                }
+                let _ = reply.send(result);
+                let _ = events.blocking_send(Ok(Event::Status(radio.status())));
+            }
+            Ok(Command::SetPathWidth { bytes, reply }) => {
+                // The firmware's mode is zero-based (`0..2` for one to three bytes). The wire and
+                // the CLI speak bytes, because that is the unit a person compares against a
+                // neighbour's radio.
+                let bytes = bytes.clamp(1, 3);
+                let result = match companion.set_path_hash_mode(bytes - 1) {
+                    Ok(()) => {
+                        radio.settings.hash_size = bytes;
+                        Ok(())
+                    }
+                    Err(e) => Err(format!("{e:?}")),
+                };
+                let _ = reply.send(result);
+                let _ = events.blocking_send(Ok(Event::Status(radio.status())));
+            }
+            Ok(Command::SetPower { dbm, reply }) => {
+                let result = match companion.set_tx_power(dbm) {
+                    Ok(()) => {
+                        radio.tx_power_dbm = dbm;
+                        Ok(())
+                    }
+                    Err(e) => Err(format!("{e:?}")),
+                };
+                let _ = reply.send(result);
+                let _ = events.blocking_send(Ok(Event::Status(radio.status())));
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
@@ -301,7 +565,7 @@ fn serve<L: ByteLink>(
 /// Read everything the radio has pushed, and hand it on.
 fn harvest<L: ByteLink>(
     companion: &mut Companion<L>,
-    settings: &CarrierSettings,
+    radio: &mut Radio,
     events: &async_mpsc::Sender<Result<Event, MeshError>>,
 ) -> Result<(), ()> {
     loop {
@@ -315,9 +579,27 @@ fn harvest<L: ByteLink>(
                 return Ok(());
             }
         };
-        let Some((_record, classified)) = classify_push(&pushed, settings) else {
+        let Some((_record, classified, sender)) = classify_push(&pushed, &radio.settings) else {
             continue;
         };
+        // **A flood names its sender, and that is how a host with no route learns the phone's radio
+        // key.** The wrapper carries one byte of each key, so the second byte is the sender's hash;
+        // without it the answer flood goes to hash zero and the phone ignores it — the asymmetric
+        // case the teaching flood exists for.
+        if let Some(hash) = sender
+            && radio.settings.peer_key[0] != hash
+        {
+            radio.settings.peer_key[0] = hash;
+            // **One byte is the whole of what a flood needs.** The wrapper names its destination by
+            // the peer's first key byte, so that is what is remembered: a restart can address a
+            // flood before the phone has spoken, and the rest of the record stays zero because
+            // nothing else reads it.
+            if let Some(path) = radio.peer_record.as_deref() {
+                let mut key = [0u8; 32];
+                key[0] = hash;
+                let _ = std::fs::write(path, hex_key(&key));
+            }
+        }
         for event in classified {
             if events.blocking_send(Ok(event)).is_err() {
                 return Err(());
@@ -366,6 +648,80 @@ fn fresh_nonce() -> [u8; 4] {
     out[..4].copy_from_slice(&now.to_le_bytes());
     out[0] ^= pid as u8;
     out
+}
+
+/// The airtime allowance this daemon holds itself to, in milliseconds per hour: the law, or nothing.
+///
+/// **The allowance is the law, or nothing at all.** Inside a European sub-band with a duty cycle the
+/// meter is on and the figure is that band's own limit — for 869.4-869.65, a tenth of its 10 %
+/// because that band is shared with alarms and ldmux would rather be a quiet neighbour than a
+/// compliant one. Outside every such window there is no limit to enforce, so there is **no
+/// allowance at all**: the record counter is kept as a measurement and nothing is refused.
+fn airtime_budget_ms(freq_mhz: f64) -> Option<f64> {
+    match freq_mhz {
+        // 868.0-868.6 MHz: 1 % by law (ERC/REC 70-03 Annex 1, h1.3.1).
+        f if (868.0..=868.6).contains(&f) => Some(ONE_PERCENT_MS),
+        // 869.4-869.65: the law allows 10 %, and ldmux holds itself to a tenth of it.
+        f if (869.4..=869.65).contains(&f) => Some(AIRTIME_BUDGET_MS),
+        // 868.7-869.2: a tenth of one percent — the alarm band, 3.6 s an hour.
+        f if (868.7..=869.2).contains(&f) => Some(TENTH_PERCENT_MS),
+        _ => None,
+    }
+}
+
+/// The allowance inside 869.4-869.65 MHz: one percent of an hour, a tenth of the ten the band
+/// allows. Also the figure the app meters with while the phone owns the radio, and a test on the
+/// phone's side reads this literal to keep the two languages in step.
+const AIRTIME_BUDGET_MS: f64 = 36_000.0;
+
+/// The allowance inside 868.0-868.6 MHz: one percent, which is the law there rather than a policy.
+const ONE_PERCENT_MS: f64 = 36_000.0;
+
+/// The allowance inside 868.7-869.2 MHz: a tenth of one percent, which is the law there.
+const TENTH_PERCENT_MS: f64 = 3_600.0;
+
+/// How many full records fit the allowance in one hour.
+fn budget_per_hour(airtime_ms: f64, freq_mhz: f64) -> Option<u32> {
+    let allowance = airtime_budget_ms(freq_mhz)?;
+    if airtime_ms <= 0.0 {
+        return None;
+    }
+    let n = (allowance / airtime_ms).floor();
+    Some(u32::try_from(n as u64).unwrap_or(u32::MAX).max(1))
+}
+
+pub(crate) fn hex_key(key: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in key {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// The hour's spend as `unix_start sent`, or `None` when absent, unreadable or malformed.
+fn load_window(path: &std::path::Path) -> Option<(u64, u32)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut it = text.split_whitespace();
+    let start = it.next()?.parse::<u64>().ok()?;
+    let sent = it.next()?.parse::<u32>().ok()?;
+    Some((start, sent))
+}
+
+/// Record the hour's spend. Best effort: a state directory that cannot be written must not stop the
+/// radio from working, it only means the next restart forgets again.
+///
+/// **Written per record, deliberately.** A 20-byte file costs about 5 us and the page cache absorbs
+/// it, and the alternative — a counter flushed on the status beat — loses up to half a second of
+/// spend if the process dies, which is the one case this file exists for.
+fn save_window(path: &std::path::Path, start_unix: u64, sent: u32) {
+    let _ = std::fs::write(path, format!("{start_unix} {sent}"));
 }
 
 #[cfg(test)]
@@ -451,10 +807,10 @@ mod tests {
         // `[0x88][snr x4][rssi][packet]`, SNR as -3.25 dB and RSSI as -101 dBm.
         let mut frame = vec![0x88, 0xF3, 0x9B];
         frame.extend_from_slice(&inner);
-        let (parsed, events) = classify_push(&frame, &settings()).expect("a session record");
+        let (parsed, events, _sender) = classify_push(&frame, &settings()).expect("a session record");
         assert_eq!(parsed, record);
         assert!(
-            matches!(&events[0], Event::Recv(r) if r == record),
+            matches!(&events[0], Event::Recv { record: r, .. } if r == record),
             "the record is not the first event: {events:?}"
         );
         assert!(
@@ -476,8 +832,16 @@ mod tests {
             .expect("a flood fits");
         let mut frame = vec![0x88, 0x10, 0x9C];
         frame.extend_from_slice(&inner);
-        let (parsed, _events) = classify_push(&frame, &settings()).expect("a flooded record");
+        let (parsed, _events, sender) = classify_push(&frame, &settings()).expect("a flooded record");
         assert_eq!(parsed, record);
+        // The fixture builds the packet this end would send, so the wrapper's second byte is *our*
+        // key: `[dest][source][magic][nonce]`. An arriving flood carries the peer's there, which is
+        // what the host learns.
+        assert_eq!(
+            sender,
+            Some(0x11),
+            "a flood names its sender, which is how a host learns the phone's radio key"
+        );
     }
 
     /// A packet that is not a session record is ignored rather than mistaken for one: an advert or a
