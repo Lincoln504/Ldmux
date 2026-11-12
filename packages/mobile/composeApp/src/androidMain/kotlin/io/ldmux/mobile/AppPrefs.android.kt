@@ -26,6 +26,17 @@ import io.ldmux.mobile.mesh.meshRouteFromStored
 @SuppressLint("StaticFieldLeak")
 object AndroidApp {
     lateinit var context: Context
+
+    /**
+     * [context] if it has been set, else null.
+     *
+     * A `lateinit` is right for code that cannot run before `MainActivity.onCreate`, and wrong for a
+     * unit test that builds an engine with its own transport: reading it there threw
+     * `UninitializedPropertyAccessException` from five tests at once. This is the check that lets
+     * both be true, and it reports null rather than pretending.
+     */
+    val maybeContext: Context?
+        get() = if (this::context.isInitialized) context else null
 }
 
 /**

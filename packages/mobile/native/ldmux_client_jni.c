@@ -350,9 +350,17 @@ JNIEXPORT jint JNICALL JNI(radio)(JNIEnv *env, jclass cls, jlong handle, jintArr
   put_i32(env, out, 3, (jint)r.snr_quarter_db);
   put_i32(env, out, 4, (jint)r.has_battery);
   put_i32(env, out, 5, (jint)r.battery_mv);
-  /* Airtime is seconds since boot and can pass 2^31 on a long-lived radio. */
-  put_i64(env, out, 6, (jlong)r.tx_air_secs);
-  put_i64(env, out, 7, (jlong)r.rx_air_secs);
+  /* **Every field of this array is an `int`, including the airtime.** The counters are seconds
+   * since boot, which the firmware keeps in 32 bits, so an `int` holds any value a radio can
+   * report -- and writing them as `long` into an `int[]` aborted the VM at the first settings
+   * page (`JNI DETECTED ERROR: incompatible array type int[] expected long[]`, measured
+   * 2026-11-12). Kotlin reads index 6 and 7 as `Int` (`RadioStatus.from`).
+   *
+   * `u32` can exceed `i32::MAX` in principle, so the cast is clamped rather than wrapped: a
+   * wrapped airtime would read as a *smaller* number, which is the direction that under-reports
+   * the band's duty cycle. */
+  put_i32(env, out, 6, (jint)(r.tx_air_secs > 0x7FFFFFFFull ? 0x7FFFFFFF : r.tx_air_secs));
+  put_i32(env, out, 7, (jint)(r.rx_air_secs > 0x7FFFFFFFull ? 0x7FFFFFFF : r.rx_air_secs));
   put_i32(env, out, 8, (jint)r.ops_left);
   put_i32(env, out, 9, (jint)r.has_preset);
   put_i32(env, out, 10, (jint)r.freq_khz);

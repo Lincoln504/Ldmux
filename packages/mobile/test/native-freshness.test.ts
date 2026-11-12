@@ -356,6 +356,77 @@ test("every native method the radio client declares is defined in libldmux_sessi
   }
 });
 
+test("every out-array in the shim is written with the element kind Kotlin declares", () => {
+  // **The compiler cannot catch this one, and the VM does not survive it.** In JNI's C headers
+  // `jintArray`, `jlongArray` and `jbyteArray` are all `_jobject*`, so passing an `intArray` where
+  // a `longArray` is declared is not even a warning — and `SetLongArrayRegion` on it is a hard
+  // abort, not an exception. Measured 2026-11-12: `JNI(radio)` wrote two `u64` airtime fields with
+  // `put_i64` into the `IntArray` Kotlin declares, and opening the radio settings closed the whole
+  // app with `JNI DETECTED ERROR: incompatible array type int[] expected long[]`.
+  //
+  // So the check is static, on the two sources, the way the symbol check above is: for each native
+  // method, the element kind of each array parameter that Kotlin declares must not disagree with
+  // the `put_i32`/`put_i64` the shim writes through it. `ByteArray` is written with
+  // `SetByteArrayRegion` and is not part of the rule.
+  const shim = readFileSync(join(NATIVE, "ldmux_client_jni.c"), "utf8");
+  const kotlin = readFileSync(RADIO_KT, "utf8");
+
+  /** Parameter type by name, from `external fun <name>(...)`. */
+  const declared = new Map<string, string[]>();
+  for (const m of kotlin.matchAll(/external\s+fun\s+(\w+)\s*\(([^)]*)\)/g)) {
+    const kinds = m[2]
+      .split(",")
+      .map((p) => p.split(":").at(-1)?.trim() ?? "")
+      .filter((k) => k.endsWith("Array"));
+    declared.set(m[1], kinds);
+  }
+
+  /** The body of `JNI(<name>)`, braces balanced from its opening brace. */
+  const body = (name: string): string | null => {
+    const at = shim.indexOf(`JNI(${name})(`);
+    if (at < 0) return null;
+    const open = shim.indexOf("{", shim.indexOf(")", at));
+    if (open < 0) return null;
+    let depth = 0;
+    for (let i = open; i < shim.length; i += 1) {
+      if (shim[i] === "{") depth += 1;
+      else if (shim[i] === "}") {
+        depth -= 1;
+        if (depth === 0) return shim.slice(open, i + 1);
+      }
+    }
+    return null;
+  };
+
+  const checked: string[] = [];
+  for (const [name, kinds] of declared) {
+    const fn = body(name);
+    if (fn === null || kinds.length === 0) continue;
+    const hasInt = kinds.includes("IntArray");
+    const hasLong = kinds.includes("LongArray");
+    if (hasInt) {
+      assert.ok(
+        !/put_i64\s*\(/.test(fn),
+        `JNI(${name}) writes a \`long\` into an \`IntArray\`, which aborts the VM at the first ` +
+          "call: use put_i32, or declare the parameter as LongArray in NativeRadioClient.kt",
+      );
+    }
+    if (hasLong && !hasInt) {
+      assert.ok(
+        !/put_i32\s*\(/.test(fn),
+        `JNI(${name}) writes an \`int\` into a \`LongArray\`: use put_i64, or declare the ` +
+          "parameter as IntArray in NativeRadioClient.kt",
+      );
+    }
+    checked.push(name);
+  }
+  assert.ok(
+    checked.length >= 4,
+    `the check found only ${checked.length} out-struct methods (${checked.join(", ")}), so the ` +
+      "parse is looking at the wrong file rather than at a clean shim",
+  );
+});
+
 test("the radio shim exports the name the Kotlin object asks for", () => {
   // The artefact test above can only fail once somebody rebuilds. This one reads the shim source,
   // so a rename in either place is caught on the next `npm test` rather than on the next build —

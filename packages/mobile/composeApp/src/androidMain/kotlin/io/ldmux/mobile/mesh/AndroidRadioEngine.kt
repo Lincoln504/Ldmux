@@ -140,6 +140,13 @@ class AndroidRadioEngine(
     private val queue = Channel<Work>(Channel.UNLIMITED)
 
     private val pipe = AndroidBlePipe(
+        // **The context the pipe needs to open a GATT connection.** `MainActivity` sets
+        // `AndroidApp.context` to the application context before the first frame, and the engine is
+        // built from a screen, so it is always set by then. Without it the pipe refuses to build and
+        // the throw lands inside composition: opening Settings closed the whole app (measured
+        // 2026-11-12, `IllegalArgumentException: a pipe with no transport needs a Context`), and the
+        // terminal would have gone the same way the first time it opened a radio page.
+        context = io.ldmux.mobile.AndroidApp.maybeContext,
         onFrame = { frame -> onNotification(frame) },
         onLink = { up ->
             _linkUp.value = up
