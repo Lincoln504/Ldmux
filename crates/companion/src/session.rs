@@ -3,9 +3,17 @@
 //!
 //! The protocol is strictly **one command at a time**. It has no command ids on
 //! the wire, so a second command sent while the first is unanswered leaves the
-//! client unable to tell which reply is which. This session therefore serialises
-//! by construction: every [`Companion::request`] sends, waits, and returns before
-//! the next call can send.
+//! client unable to tell which reply is which. That rule is not restated here: it
+//! is [`ldmux_mesh::companion::CompanionFifo`], which owns the window, and every
+//! command in this file goes through one [`Companion::execute`] that takes it,
+//! writes, waits, and gives it back.
+//!
+//! The rule used to be "serialise by construction" — each public method wrote a
+//! frame and read for its own answer, which is one command at a time only as long
+//! as nobody adds a second caller. `RC-2` is what that assumption cost: a contact
+//! lookup answered `ERR_CODE_NOT_FOUND` while a raw send was in flight, the error
+//! settled the send, and the daemon tore down a working session over a radio fault
+//! that did not exist.
 //!
 //! The other rule is about the radio's boot. Opening the port can reset an
 //! ESP32-S3, so a command written in the first second may be swallowed by the
@@ -24,6 +32,8 @@ use crate::codec::{
 };
 use crate::framing::{FrameError, FrameReader, encode};
 use crate::link::ByteLink;
+use crate::window::HOST_COMMANDS;
+use ldmux_mesh::companion::{Answer, CompanionFifo, Enqueue};
 
 /// How long to wait before re-sending a command the radio has not acknowledged.
 pub const RESEND_INTERVAL: Duration = Duration::from_millis(600);
@@ -56,6 +66,13 @@ pub enum SessionError {
     Disabled,
     /// A reply that should have carried the fields it was asked for did not.
     Malformed(&'static str),
+    /// A command already owns the radio's one answer window.
+    ///
+    /// Unreachable through the public API and that is the point: [`Companion::execute`] gives the
+    /// window back before it returns, on every path, so a caller can never find it taken. It is
+    /// reported rather than waited on because a caller that queued behind an outstanding command
+    /// would be waiting for an answer nobody promised it.
+    Busy,
 }
 
 impl std::fmt::Display for SessionError {
@@ -74,6 +91,7 @@ impl std::fmt::Display for SessionError {
             }
             SessionError::Unexpected { got } => write!(f, "unexpected reply 0x{got:02x}"),
             SessionError::Disabled => write!(f, "the radio is in another state and cannot answer now"),
+            SessionError::Busy => write!(f, "another command still owns the radio's answer window"),
             SessionError::Malformed(what) => write!(f, "malformed reply: {what}"),
         }
     }
@@ -118,6 +136,11 @@ pub struct Companion<L: ByteLink> {
     reader: FrameReader,
     /// Frames that arrived while a request was waiting for its own reply.
     pending: VecDeque<Vec<u8>>,
+    /// The radio's one answer window, and the only place the one-at-a-time rule lives.
+    fifo: CompanionFifo,
+    /// Where [`Companion::now_ms`] counts from. The FIFO has no clock of its own, deliberately, so
+    /// the crate that owns a link supplies one.
+    started: Instant,
     pub self_info: Option<SelfInfo>,
     pub device_info: Option<DeviceInfo>,
     /// The timeout the firmware suggested for the last raw send, when it said one.
@@ -130,9 +153,79 @@ impl<L: ByteLink> Companion<L> {
             link,
             reader: FrameReader::new(),
             pending: VecDeque::new(),
+            fifo: CompanionFifo::default(),
+            started: Instant::now(),
             self_info: None,
             device_info: None,
             last_suggested_timeout: None,
+        }
+    }
+
+    /// The window's clock, in whole milliseconds since this session opened.
+    ///
+    /// Monotonic and process-local, which is all a deadline needs. Whole milliseconds because the
+    /// window is compared against deadlines a caller chose in `Duration`s.
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// Throw away answers left over from a command that already returned.
+    ///
+    /// The window stops two commands being written at once, and the drain window after a deadline
+    /// stops a late answer settling the next one for a quarter second. This is the third case: a
+    /// frame that was already **decoded** and set aside while a previous command was waiting is not
+    /// an answer to a command that has not been written yet, so it goes.
+    ///
+    /// Pushes stay, because they answer nothing.
+    fn drop_stale_answers(&mut self) {
+        let mut keep = VecDeque::with_capacity(self.pending.len());
+        for frame in self.pending.drain(..) {
+            match frame.first().copied() {
+                Some(code) if code < 0x80 => {}
+                _ => keep.push_back(frame),
+            }
+        }
+        self.pending = keep;
+    }
+
+    /// Write one frame, giving the window back if the transport has failed.
+    ///
+    /// A failed write means the frame did not reach the radio, so no answer is coming and the slot
+    /// must not stay taken: every later command would be refused [`SessionError::Busy`] for a port
+    /// that is already gone. [`CompanionFifo::abandon`] is exactly this case.
+    fn write_frame(&mut self, framed: &[u8]) -> Result<(), SessionError> {
+        match self.link.write_all(framed) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.fifo.abandon();
+                Err(SessionError::Io(e))
+            }
+        }
+    }
+
+    /// One poll window of reading, with the same rule: a dead port must not keep the window.
+    fn pump_in_window(&mut self) -> Result<bool, SessionError> {
+        match self.pump(POLL_TIMEOUT_MS) {
+            Ok(heard) => Ok(heard),
+            Err(e) => {
+                self.fifo.abandon();
+                Err(e)
+            }
+        }
+    }
+
+    /// What a settling frame means to its caller.
+    fn answer(frame: Vec<u8>) -> Result<Vec<u8>, SessionError> {
+        match frame.first().copied() {
+            Some(codes::ERROR) => {
+                let code = frame.get(1).copied().unwrap_or(0);
+                Err(SessionError::Rejected {
+                    code,
+                    meaning: error_meaning(code),
+                })
+            }
+            Some(codes::DISABLED) => Err(SessionError::Disabled),
+            _ => Ok(frame),
         }
     }
 
@@ -150,7 +243,7 @@ impl<L: ByteLink> Companion<L> {
         payload.push(commands::APP_START);
         payload.extend_from_slice(&[0u8; 7]);
         payload.extend_from_slice(app_name.as_bytes());
-        let reply = self.request(&payload, codes::SELF_INFO, Duration::from_secs(5))?;
+        let reply = self.execute(&payload, Duration::from_secs(5))?;
         let info = parse_self_info(&reply)?;
         self.self_info = Some(info.clone());
         Ok(info)
@@ -161,9 +254,8 @@ impl<L: ByteLink> Companion<L> {
     /// The version is not decoration: the firmware stores it and gates its V3
     /// message frames on it, and those are the frames that carry SNR.
     pub fn device_query(&mut self) -> Result<DeviceInfo, SessionError> {
-        let reply = self.request(
+        let reply = self.execute(
             &[commands::DEVICE_QUERY, APP_TARGET_VERSION],
-            codes::DEVICE_INFO,
             Duration::from_secs(5),
         )?;
         let info = parse_device_info(&reply).ok_or(SessionError::Malformed("device info"))?;
@@ -178,9 +270,8 @@ impl<L: ByteLink> Companion<L> {
     /// reaching" is answered by the radio instead of guessed from the application's records, and the
     /// daemon's own meter has something to be checked against. One serial command, no airtime.
     pub fn radio_stats(&mut self) -> Result<RadioStats, SessionError> {
-        let reply = self.request(
+        let reply = self.execute(
             &[commands::GET_STATS, codes::STATS_TYPE_RADIO],
-            codes::STATS,
             Duration::from_millis(1_500),
         )?;
         parse_radio_stats(&reply).map_err(|_| SessionError::Malformed("radio stats"))
@@ -188,9 +279,8 @@ impl<L: ByteLink> Companion<L> {
 
     /// The radio's battery, uptime, error flags and outbound queue depth.
     pub fn core_stats(&mut self) -> Result<CoreStats, SessionError> {
-        let reply = self.request(
+        let reply = self.execute(
             &[commands::GET_STATS, codes::STATS_TYPE_CORE],
-            codes::STATS,
             Duration::from_millis(1_500),
         )?;
         parse_core_stats(&reply).map_err(|_| SessionError::Malformed("core stats"))
@@ -216,7 +306,7 @@ impl<L: ByteLink> Companion<L> {
         timeout: Duration,
     ) -> Result<(), SessionError> {
         let mode = u8::from(flood);
-        self.request(&[commands::SEND_SELF_ADVERT, mode], codes::OK, timeout)?;
+        self.execute(&[commands::SEND_SELF_ADVERT, mode], timeout)?;
         Ok(())
     }
 
@@ -242,7 +332,7 @@ impl<L: ByteLink> Companion<L> {
         // operator feels as "typing stalls" — and the wedged radio it guarded against is also the
         // case where the caller repeats the read on its own cadence. A late answer is not lost: it
         // is left in `pending` and taken by `next_push`.
-        let reply = self.request(&payload, codes::ADVERT_PATH, ROUTE_READ_TIMEOUT)?;
+        let reply = self.execute(&payload, ROUTE_READ_TIMEOUT)?;
         parse_advert_path(&reply).ok_or(SessionError::Malformed("advert path"))
     }
 
@@ -303,7 +393,7 @@ impl<L: ByteLink> Companion<L> {
         // flag, a tag and the firmware's own suggested timeout. A client that waits only for `OK`
         // works until the radio is updated and then fails every send with "unexpected response",
         // which reads as a broken link rather than a protocol the client does not know.
-        let reply = self.request_any(&payload, &[codes::OK, codes::SENT], timeout)?;
+        let reply = self.execute(&payload, timeout)?;
         // **The firmware's own idea of how long the send takes beats our arithmetic.** It knows the
         // packet's airtime and the route length; we estimate both. Recorded so the session's first
         // retransmission can use it.
@@ -341,7 +431,7 @@ impl<L: ByteLink> Companion<L> {
         let mut payload = Vec::with_capacity(5);
         payload.push(commands::SET_DEVICE_TIME);
         payload.extend_from_slice(&unix_seconds.to_le_bytes());
-        self.request(&payload, codes::OK, Duration::from_secs(5))?;
+        self.execute(&payload, Duration::from_secs(5))?;
         Ok(())
     }
 
@@ -352,9 +442,8 @@ impl<L: ByteLink> Companion<L> {
     /// (`$…`) region's key can be known: a public one is derivable from the name, a private one is
     /// not.
     pub fn get_default_flood_scope(&mut self) -> Result<Option<FloodScope>, SessionError> {
-        let reply = self.request(
+        let reply = self.execute(
             &[commands::GET_DEFAULT_FLOOD_SCOPE],
-            codes::DEFAULT_FLOOD_SCOPE,
             ROUTE_READ_TIMEOUT,
         )?;
         parse_default_flood_scope(&reply).ok_or(SessionError::Malformed("default flood scope"))
@@ -368,7 +457,7 @@ impl<L: ByteLink> Companion<L> {
     /// unscoped on a mesh that drops unscoped floods.
     pub fn set_default_flood_scope(&mut self, scope: Option<&FloodScope>) -> Result<(), SessionError> {
         let frame = build_default_flood_scope(scope)?;
-        self.request(&frame, codes::OK, Duration::from_secs(5))?;
+        self.execute(&frame, Duration::from_secs(5))?;
         Ok(())
     }
 
@@ -379,7 +468,7 @@ impl<L: ByteLink> Companion<L> {
     /// width arrives either way.
     pub fn set_path_hash_mode(&mut self, mode: u8) -> Result<(), SessionError> {
         let payload = vec![commands::SET_PATH_HASH_MODE, 0, mode];
-        self.request(&payload, codes::OK, Duration::from_secs(5))?;
+        self.execute(&payload, Duration::from_secs(5))?;
         Ok(())
     }
 
@@ -390,9 +479,8 @@ impl<L: ByteLink> Companion<L> {
     /// `ILLEGAL_ARG`. It is a global, persisted setting of the radio, like the tuple, so a phone
     /// that sets it and a host that sets it are writing the same register — last writer wins.
     pub fn set_tx_power(&mut self, dbm: i8) -> Result<(), SessionError> {
-        self.request(
+        self.execute(
             &[commands::SET_RADIO_TX_POWER, dbm as u8],
-            codes::OK,
             Duration::from_secs(5),
         )?;
         Ok(())
@@ -438,7 +526,7 @@ impl<L: ByteLink> Companion<L> {
         if let Some(repeat) = repeat {
             payload.push(u8::from(repeat));
         }
-        self.request(&payload, codes::OK, Duration::from_secs(10))?;
+        self.execute(&payload, Duration::from_secs(10))?;
         Ok(())
     }
 
@@ -479,174 +567,128 @@ impl<L: ByteLink> Companion<L> {
     }
 
     pub fn next_push(&mut self, timeout: Duration) -> Result<Option<Vec<u8>>, SessionError> {
-        if let Some(frame) = self.pending.pop_front() {
-            return Ok(Some(frame));
-        }
         let deadline = Instant::now() + timeout;
         loop {
-            self.pump(POLL_TIMEOUT_MS)?;
             if let Some(frame) = self.pending.pop_front() {
+                // A push is anything the firmware volunteers (`0x80` and up). Anything below that is
+                // an answer, and an answer beside an open command window is not something a caller
+                // can use: offer it to the window, which discards it inside a drain window and lets
+                // it through otherwise.
+                if let Some(code) = frame.first().copied()
+                    && code < 0x80
+                {
+                    match self.fifo.answering(&HOST_COMMANDS, code, self.now_ms()) {
+                        Answer::Settled(_) | Answer::Discarded { .. } => continue,
+                        Answer::Unexpected { .. } => return Ok(Some(frame)),
+                    }
+                }
                 return Ok(Some(frame));
             }
             if Instant::now() >= deadline {
                 return Ok(None);
             }
+            self.pump(POLL_TIMEOUT_MS)?;
         }
     }
 
-    /// Send one command and wait for the reply with `expect` as its first byte.
-    /// One command, answered by any of `expect`.
+    /// Send one command and wait for **its own** answer, holding the radio's one window while it
+    /// does.
     ///
-    /// A transport has to speak the firmware's protocol at more than one version: the same command
-    /// is answered by different codes across releases, and refusing the newer one turns a working
-    /// radio into an unreachable one.
-    fn request_any(
-        &mut self,
-        payload: &[u8],
-        expect: &[u8],
-        timeout: Duration,
-    ) -> Result<Vec<u8>, SessionError> {
+    /// The window is [`CompanionFifo`]'s, not this function's: it records which command is
+    /// outstanding, which codes complete that command ([`HOST_COMMANDS`]), and when its deadline
+    /// falls. Everything here is the transport part — writing the frame, keeping pushes aside,
+    /// re-sending while the port is silent, and reporting a deadline once.
+    ///
+    /// Three rules, each of them a defect that used to exist:
+    ///
+    /// * **An answer that is not this command's settles nothing.** A known reply for some other
+    ///   command is set aside for [`Self::next_push`] and the wait continues, because the firmware's
+    ///   answers are not ordered against ours.
+    /// * **A code this crate cannot read at all is a framing fault**, and aborts: waiting out the
+    ///   deadline for a frame that means nothing only delays the diagnosis.
+    /// * **A deadline frees the window once.** The frame that was already on its way may still
+    ///   arrive, so the window stays closed for a drain window afterwards, and the answer is
+    ///   dropped rather than handed to whoever asks next.
+    fn execute(&mut self, payload: &[u8], timeout: Duration) -> Result<Vec<u8>, SessionError> {
+        let command = payload
+            .first()
+            .copied()
+            .ok_or(SessionError::Malformed("empty command"))?;
+        // **Encoded before the window is taken.** A frame that cannot be built must not leave the
+        // radio's one window occupied, and it cannot: nothing was written, so nothing will answer.
         let framed = encode(payload)?;
-        let start = Instant::now();
-        let deadline = start + timeout;
-        let mut last_send = start;
-        let mut heard_anything = false;
-        self.link.write_all(&framed)?;
+        self.drop_stale_answers();
+
+        let timeout_ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
         loop {
-            if self.pump(POLL_TIMEOUT_MS)? {
-                heard_anything = true;
-            }
-            let mut pushes: Vec<Vec<u8>> = Vec::new();
-            let mut outcome: Option<Result<Vec<u8>, SessionError>> = None;
-            while let Some(frame) = self.pending.pop_front() {
-                match frame.first().copied() {
-                    Some(code) if expect.contains(&code) => {
-                        outcome = Some(Ok(frame));
-                        break;
-                    }
-                    Some(codes::DISABLED) => {
-                        outcome = Some(Err(SessionError::Disabled));
-                        break;
-                    }
-                    Some(codes::ERROR) => {
-                        let code = frame.get(1).copied().unwrap_or(0);
-                        outcome = Some(Err(SessionError::Rejected {
-                            code,
-                            meaning: error_meaning(code),
-                        }));
-                        break;
-                    }
-                    Some(code) if code >= 0x80 => {
-                        pushes.push(frame);
-                        heard_anything = true;
-                    }
-                    Some(got) if Self::is_known_response(got) => pushes.push(frame),
-                    Some(got) => {
-                        outcome = Some(Err(SessionError::Unexpected { got }));
-                        break;
-                    }
-                    None => {}
+            match self.fifo.enqueue_within(command, timeout_ms, self.now_ms()) {
+                Enqueue::Accepted(_) => break,
+                Enqueue::Busy(_) => return Err(SessionError::Busy),
+                // A drain window is a quarter of a second after a command that already gave up.
+                // Waiting it out is the caller paying once for the previous command's lateness,
+                // where returning an error would make a caller-visible fault out of bookkeeping.
+                Enqueue::Draining { until_ms } => {
+                    let wait = until_ms.saturating_sub(self.now_ms()).max(1);
+                    std::thread::sleep(Duration::from_millis(wait));
                 }
             }
-            for push in pushes {
+        }
+
+        self.write_frame(&framed)?;
+        let mut last_send = Instant::now();
+        let mut heard_anything = false;
+        let mut pushes: Vec<Vec<u8>> = Vec::new();
+        let mut outcome: Option<Result<Vec<u8>, SessionError>> = None;
+        loop {
+            // Any byte from the radio — a frame, a boot banner, `Saving prefs…` — is the radio being
+            // alive, and the resend below keys on silence.
+            if self.pump_in_window()? {
+                heard_anything = true;
+            }
+            while let Some(frame) = self.pending.pop_front() {
+                let Some(code) = frame.first().copied() else {
+                    continue;
+                };
+                if code >= 0x80 {
+                    heard_anything = true;
+                    pushes.push(frame);
+                    continue;
+                }
+                match self.fifo.answering(&HOST_COMMANDS, code, self.now_ms()) {
+                    Answer::Settled(_) => {
+                        outcome = Some(Self::answer(frame));
+                        break;
+                    }
+                    Answer::Discarded { .. } => {}
+                    Answer::Unexpected { .. } => {
+                        if Self::is_known_response(code) {
+                            // A late or foreign answer: a fact about the radio, kept for the
+                            // caller, but not this command's.
+                            pushes.push(frame);
+                        } else {
+                            self.fifo.abandon();
+                            outcome = Some(Err(SessionError::Unexpected { got: code }));
+                            break;
+                        }
+                    }
+                }
+            }
+            for push in pushes.drain(..) {
                 self.pending.push_back(push);
             }
             if let Some(result) = outcome {
                 return result;
             }
-            if Instant::now() >= deadline {
+            if self.fifo.expire(self.now_ms()).is_some() {
                 return Err(SessionError::Timeout {
-                    expected: expect.first().copied().unwrap_or(0),
+                    expected: command,
                     waited: timeout,
                 });
             }
             if !heard_anything && last_send.elapsed() >= RESEND_INTERVAL {
-                self.link.write_all(&framed)?;
-                last_send = Instant::now();
-            }
-        }
-    }
-
-    fn request(
-        &mut self,
-        payload: &[u8],
-        expect: u8,
-        timeout: Duration,
-    ) -> Result<Vec<u8>, SessionError> {
-        let framed = encode(payload)?;
-        let start = Instant::now();
-        let deadline = start + timeout;
-        let mut last_send = start;
-        let mut heard_anything = false;
-        self.link.write_all(&framed)?;
-        loop {
-            // Any byte from the radio — a frame, a boot banner, `Saving prefs…` — is the radio
-            // being alive, and the resend below keys on silence.
-            if self.pump(POLL_TIMEOUT_MS)? {
-                heard_anything = true;
-            }
-            // Pushes that arrive while we wait for the reply are set aside rather
-            // than pushed back into the queue: re-queueing them inside the loop
-            // would pop and re-push the same frame forever.
-            let mut pushes: Vec<Vec<u8>> = Vec::new();
-            let mut outcome: Option<Result<Vec<u8>, SessionError>> = None;
-            while let Some(frame) = self.pending.pop_front() {
-                match frame.first().copied() {
-                    Some(code) if code == expect => {
-                        outcome = Some(Ok(frame));
-                        break;
-                    }
-                    Some(codes::DISABLED) => {
-                        // **A state, not a fault.** The firmware answers this when it is mid-retune or
-                        // its store is busy (`RESP_CODE_DISABLED`, MyMesh.cpp:86), and the same
-                        // command is worth sending again — where `Unexpected` made it a framing bug
-                        // that aborted the whole ladder.
-                        outcome = Some(Err(SessionError::Disabled));
-                        break;
-                    }
-                    Some(codes::ERROR) => {
-                        let code = frame.get(1).copied().unwrap_or(0);
-                        outcome = Some(Err(SessionError::Rejected {
-                            code,
-                            meaning: error_meaning(code),
-                        }));
-                        break;
-                    }
-                    Some(code) if code >= 0x80 => {
-                        // An asynchronous push, not the reply. Keep it for the
-                        // caller and keep waiting.
-                        pushes.push(frame);
-                        heard_anything = true;
-                    }
-                    // **A late reply belongs to a command that already gave up, and it must not
-                    // abort this one.** The advert-path read has a 1.5 s deadline; a radio that
-                    // answers at 1.6 s used to make the *next* command (a record send) fail with
-                    // "unexpected response", which cost an ARQ attempt and its airtime for a frame
-                    // nobody was waiting for any more. A code this crate reads is kept for
-                    // `next_push`; only a code nothing here understands is still a framing fault.
-                    Some(got) if Self::is_known_response(got) => {
-                        pushes.push(frame);
-                    }
-                    Some(got) => {
-                        outcome = Some(Err(SessionError::Unexpected { got }));
-                        break;
-                    }
-                    None => {}
-                }
-            }
-            for push in pushes {
-                self.pending.push_back(push);
-            }
-            if let Some(result) = outcome {
-                return result;
-            }
-            if Instant::now() >= deadline {
-                return Err(SessionError::Timeout { expected: expect, waited: timeout });
-            }
-            if !heard_anything && last_send.elapsed() >= RESEND_INTERVAL {
-                // Only while the radio is completely silent: a re-sent command
-                // that mutates state is a second operation.
-                self.link.write_all(&framed)?;
+                // Only while the radio is completely silent: a re-sent command that mutates state is
+                // a second operation.
+                self.write_frame(&framed)?;
                 last_send = Instant::now();
             }
         }
@@ -655,7 +697,7 @@ impl<L: ByteLink> Companion<L> {
     /// Read whatever the port has, decode whole frames into `pending`.
     ///
     /// Returns whether any bytes arrived at all, **including console text**. A boot banner or
-    /// `Saving prefs…` is the radio being alive, and the resend rule in [`Self::request`] keys on
+    /// `Saving prefs…` is the radio being alive, and the resend rule in [`Self::execute`] keys on
     /// silence; counting only push *frames* made the client re-send a mutating command every
     /// 600 ms while the firmware was still printing its banner.
     fn pump(&mut self, poll_timeout_ms: u16) -> Result<bool, SessionError> {
@@ -672,7 +714,7 @@ impl<L: ByteLink> Companion<L> {
                     self.pending.push_back(frame);
                 }
             }
-            if n == 0 || started.elapsed() >= Duration::from_millis(poll_timeout_ms as u64) {
+            if n == 0 || started.elapsed() >= Duration::from_millis(u64::from(poll_timeout_ms)) {
                 return Ok(heard);
             }
         }
@@ -793,11 +835,7 @@ mod tests {
         let mut companion = Companion::new(link);
         let frame = encode(&[commands::APP_START]).unwrap();
         // Longer than `RESEND_INTERVAL`: a silent port would be written twice.
-        let _ = companion.request(
-            &[commands::APP_START],
-            codes::SELF_INFO,
-            Duration::from_millis(900),
-        );
+        let _ = companion.execute(&[commands::APP_START], Duration::from_millis(900));
         assert_eq!(
             companion.link_mut().written,
             frame,

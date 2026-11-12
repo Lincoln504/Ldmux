@@ -273,6 +273,16 @@ impl CompanionFifo {
     /// `now_ms` is the caller's clock. The returned [`Enqueue::Accepted`] means the command may be
     /// written **now**; a caller that writes before calling this is the defect this type exists for.
     pub fn enqueue(&mut self, spec: &CommandSpec, command: u8, now_ms: u64) -> Enqueue {
+        self.enqueue_within(command, spec.timeout_ms(command), now_ms)
+    }
+
+    /// The same, with the caller's deadline instead of the table's.
+    ///
+    /// A caller that knows better than the table says so here rather than editing the table: the
+    /// host waits five seconds for `APP_START` because the radio may still be booting, and a route
+    /// read waits a tenth of that because it sits on the thread that serves typed records. Both are
+    /// facts about a call site, not about a command.
+    pub fn enqueue_within(&mut self, command: u8, timeout_ms: u32, now_ms: u64) -> Enqueue {
         if let Some(id) = self.in_flight() {
             return Enqueue::Busy(id);
         }
@@ -287,9 +297,20 @@ impl CompanionFifo {
         self.in_flight = Some(InFlight {
             id,
             command,
-            deadline_ms: now_ms.saturating_add(u64::from(spec.timeout_ms(command))),
+            deadline_ms: now_ms.saturating_add(u64::from(timeout_ms)),
         });
         Enqueue::Accepted(id)
+    }
+
+    /// Frees the window at once, with no drain window.
+    ///
+    /// For a transport that has already failed: the link errored, so the answer it was waiting for
+    /// is lost with it and the drain window would only wedge every later command behind a port that
+    /// is gone. Never call this after a deadline — that is what [`Self::expire`] is for, and the
+    /// drain is the whole reason a late answer cannot settle the next command.
+    pub fn abandon(&mut self) {
+        self.in_flight = None;
+        self.drain_until_ms = None;
     }
 
     /// Offers a frame's answer to the window.

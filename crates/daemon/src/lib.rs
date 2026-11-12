@@ -36,6 +36,7 @@ pub mod exec;
 pub mod keeper_supervisor;
 pub mod mesh;
 pub mod mesh_apply;
+pub mod mesh_carrier;
 pub mod mesh_bridge;
 pub mod mesh_rpc;
 pub mod mesh_serial;
