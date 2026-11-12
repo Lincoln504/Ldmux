@@ -875,10 +875,13 @@ None of these are defects. Each is a decision that changes what ships.
 
 ## Appendix C: known unfinished
 
-- A desk window displaced by a mesh claim is not covered by a test. The daemon sends the notice
-  and the same message is proven for a WebSocket claim, but the mesh variant has no test.
-- A shell created from a phone is recorded with `createdBy` set to `phone`, and rows keep their
-  actions across an app restart because of it. There is no test that asserts that round trip.
+- **Done 2026-11-12:** a desk window displaced by a mesh claim is told `owned` naming the mesh
+  owner, its reclaim makes the phone's next `Send` answer `Closed { HELD }` with nothing typed into
+  the pty, and a later takeover succeeds. `crates/daemon/tests/mesh_full_stack.rs`.
+- **Done 2026-11-12:** a shell created from a phone comes back with `origin == "phone"` when listed
+  through a service with no state, which is what an app restart leaves, and a daemon-created shell
+  reports a different origin so the assertion discriminates rather than passing for every row.
+  `crates/daemon/tests/mesh_full_stack.rs`.
 - Dictation depends on the device's speech recogniser, which may be cloud-based. The app says
   so, and nothing here can change it.
 - Multi-hop is implemented in both directions and tested against a simulated mesh, and has never run

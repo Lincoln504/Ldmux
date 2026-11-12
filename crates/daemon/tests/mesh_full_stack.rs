@@ -15,17 +15,21 @@
 //! millisecond counter, and every assertion is a condition reached by stepping, not a sleep that
 //! happened to be long enough.
 
+mod common;
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use common::rig::Rig;
 use ldmux_daemon::daemon::LdmuxDaemon;
 use ldmux_daemon::mesh::{LinkLoop, MeshConfig, MeshSnapshot, SessionSetup};
 use ldmux_daemon::mesh_bridge::DaemonHost;
+use ldmux_daemon::mesh_rpc::{MeshRpc, Outcome, PEER_LINK};
 use ldmux_mesh::carrier::{Bound, Budget};
 use ldmux_mesh::constants::RadioState;
 use ldmux_mesh::route::Carriage;
 use ldmux_mesh::sim::{NodeId, VirtualMesh};
-use ldmux_protocol::mesh_term::SendItem;
+use ldmux_protocol::mesh_term::{Message, SendItem, VERSION, closed};
 use ldmux_radio_harness::{
     AIRTIME_MS, FakeRadio, SharedPort, WALL_BASE_MS, chain, info_of_width,
 };
@@ -355,6 +359,21 @@ impl Stack {
             "the daemon never painted {shell}: {:?}",
             self.client.stats()
         );
+    }
+
+    /// How many settled answers have arrived for `shell`, so a second one is visible.
+    fn settles(&self, shell: &str) -> usize {
+        self.events
+            .iter()
+            .filter(|e| matches!(e, ClientEvent::Settled { shell: s, .. } if s == shell))
+            .count()
+    }
+
+    /// Whether the host has told the phone that another device holds the shell it wrote to.
+    fn was_held(&self) -> bool {
+        self.events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::Closed { reason } if *reason == closed::HELD))
     }
 
     /// The status of the last settled answer for `shell`, if one arrived.
@@ -827,5 +846,218 @@ async fn a_restarted_host_is_recovered_without_a_new_pairing() {
     assert!(
         stack.client.established(),
         "the phone is not established after the restart"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The two behaviours `docs/RELEASE-AUDIT.md` Appendix C listed as having no test.
+// ---------------------------------------------------------------------------------------------
+
+/// **A desk window displaced by a mesh claim is told, and the phone's next command is refused.**
+///
+/// `RELEASE-AUDIT.md` Appendix C: "the daemon sends the notice and the same message is proven for a
+/// WebSocket claim, but the mesh variant has no test." A mesh claim does not pass through
+/// `remote.rs`'s attach handler, so the notice comes from `displace_viewers` on the claim tick —
+/// a path that had no test at all.
+///
+/// The second half is the rule `RADIO-PLAN.md` §2 states for a claim: it is "immediately
+/// displaceable by local desktop typing or `ldmux attach`, answering `Closed { reason: HELD }` on
+/// the phone's next `Send`/`Fetch`". So the desk takes the shell back, the phone's command must be
+/// refused **without the pty being written**, and the phone's takeover must still work afterwards —
+/// the way back is never closed.
+#[tokio::test]
+async fn a_desk_window_displaced_by_a_mesh_claim_is_told_and_the_phones_write_is_refused() {
+    let rig = Rig::start().await;
+    let shell = rig.session.clone();
+    let setup = SessionSetup::new(&rig.dir, [0x5au8; 32]).expect("a session setup");
+
+    // The desk window holds the shell, as a desktop: the kind is what the notice names, and what
+    // tells the phone's own claim apart from somebody else's.
+    let mut desk = rig.connect(None).await;
+    desk.send_json(&serde_json::json!({
+        "type": "hello",
+        "device": { "id": "desk-1", "name": "Desk", "kind": "desktop" },
+    }))
+    .await;
+    desk.send_json(&serde_json::json!({
+        "type": "attach", "sessionId": shell, "cols": 80, "rows": 24,
+    }))
+    .await;
+    let _ = desk.until_type("snapshot", &mut Vec::new()).await;
+
+    let host = DaemonHost(Arc::clone(&rig.arc));
+    let mut stack = Stack::new(21, 1, 0.0, &setup, host);
+    stack.connect().await;
+
+    // **The phone takes it over the radio** — the "take it back" press, from the phone's side.
+    let now = stack.now;
+    stack
+        .client
+        .takeover(&shell, now)
+        .expect("a takeover is legal");
+    stack
+        .run_until(300_000, 250, |s| {
+            s.client.mirror(&shell).is_some_and(PageMirror::painted)
+        })
+        .await;
+    assert!(
+        stack.client.mirror(&shell).is_some_and(PageMirror::painted),
+        "the phone's takeover never painted: {:?}",
+        stack.client.stats()
+    );
+
+    // **The desk is told it lost the shell, and to whom.** The claim was made over the radio, so
+    // this notice comes from the claim sweep; waiting for it is waiting on the message, not on a
+    // clock.
+    let owned = desk.until_type("owned", &mut Vec::new()).await;
+    assert_eq!(owned["sessionId"], shell.as_str());
+    assert_eq!(
+        owned["owner"]["kind"], "mesh",
+        "the desk was told it lost the shell without being told who has it: {owned}"
+    );
+
+    // The desk takes it back — the "press r" path, an attach with a takeover.
+    desk.send_json(&serde_json::json!({
+        "type": "attach", "sessionId": shell, "cols": 80, "rows": 24, "takeover": true,
+    }))
+    .await;
+    let _ = desk.until_type("snapshot", &mut Vec::new()).await;
+
+    // The reclaim is what makes the refusal meaningful, so the phone must not be holding it yet:
+    // a `HELD` that was already in the log would prove nothing about this command.
+    assert!(
+        !stack.was_held(),
+        "the phone had already been refused before the desk took the shell back"
+    );
+
+    // **The phone's next command is refused, and nothing is typed.**
+    let now = stack.now;
+    stack
+        .client
+        .send(
+            &shell,
+            &[
+                SendItem::Text(b"echo hi".to_vec()),
+                SendItem::Keys(vec!["Enter".to_owned()]),
+            ],
+            COLS,
+            ROWS,
+            now,
+        )
+        .expect("the command is legal to ask");
+    stack
+        .run_until(300_000, 250, Stack::was_held)
+        .await;
+    assert!(
+        stack.was_held(),
+        "the phone's command was not refused while the desk held the shell: {:?}",
+        stack.client.stats()
+    );
+    let pane = rig
+        .arc
+        .lock()
+        .await
+        .handle("snapshot", serde_json::json!({ "id": shell }))
+        .await
+        .expect("the pane reads");
+    let text = pane["text"].as_str().unwrap_or_default();
+    assert!(
+        !text.contains("echo hi"),
+        "a refused command was typed into the pty anyway: {text:?}"
+    );
+    // And it did not run either: a command that reached the shell would print its own line.
+    assert!(
+        !text.lines().any(|l| l.trim() == "hi"),
+        "a refused command ran in the pty: {text:?}"
+    );
+
+    // **And the way back is open.** The refusal detached the phone; a takeover attaches it again.
+    let before = stack.settles(&shell);
+    let now = stack.now;
+    stack
+        .client
+        .takeover(&shell, now)
+        .expect("a takeover is legal");
+    stack
+        .run_until(300_000, 250, |s| s.settles(&shell) > before)
+        .await;
+    assert!(
+        stack.settles(&shell) > before,
+        "the phone could not take the shell back after being displaced: {:?}",
+        stack.client.stats()
+    );
+}
+
+/// **A shell created from a phone comes back with its phone origin, after an app restart.**
+///
+/// `RELEASE-AUDIT.md` Appendix C: "A shell created from a phone is recorded with `createdBy` set to
+/// `phone`, and rows keep their actions across an app restart because of it. There is no test that
+/// asserts that round trip."
+///
+/// The daemon writes `createdBy: "phone"` (`mesh_bridge.rs`, `DaemonHost::create`) and the launcher
+/// keys a row's actions off the origin `List` reports, so the round trip is the thing to pin: ask
+/// for a shell, then ask again **through a service with no state**, which is exactly what an app
+/// restart leaves behind. A `MeshRpc` that remembered nothing is the honest stand-in for a
+/// restarted app, because the record is the daemon's and nothing about it is the phone's to keep.
+#[tokio::test]
+async fn a_shell_created_from_a_phone_keeps_its_phone_origin_across_an_restart() {
+    let dir = Scratch::dir("ldmux-b8-origin");
+    let (arc, _fk, local) = daemon_with_shell(&dir).await;
+    let mut host = DaemonHost(Arc::clone(&arc));
+
+    let mut rpc = MeshRpc::new();
+    let create = Message::Create {
+        version: VERSION,
+        cwd: "/tmp".to_owned(),
+    };
+    let Outcome::Answer(reply) = rpc
+        .on_message(0, PEER_LINK, &create, &mut host, Instant::now())
+        .await
+        .expect("a create is not refused")
+    else {
+        panic!("a create is answered");
+    };
+    let id = reply
+        .iter()
+        .find_map(|m| match m {
+            Message::Created { id } => Some(id.clone()),
+            _ => None,
+        })
+        .expect("the host named the shell it made");
+
+    // **The app restarts.** No attachment, no ring, no page — only the daemon's record survives.
+    let mut restarted = MeshRpc::new();
+    let Outcome::Answer(listing) = restarted
+        .on_message(0, PEER_LINK, &Message::List, &mut host, Instant::now())
+        .await
+        .expect("a list is not refused")
+    else {
+        panic!("a list is answered");
+    };
+    let mut rows = Vec::new();
+    for message in listing {
+        if let Message::Sessions { entries, .. } = message {
+            rows.extend(entries);
+        }
+    }
+    let row = |id: &str| {
+        rows.iter()
+            .find(|r| r.id == id)
+            .unwrap_or_else(|| panic!("{id} is not in the list: {rows:?}"))
+            .origin
+            .clone()
+    };
+    assert_eq!(
+        row(&id),
+        "phone",
+        "the phone's own shell came back as somebody else's, so its actions would be drawn for the \
+         wrong route: {rows:?}"
+    );
+    // **The field discriminates**, or the assertion above would pass for every shell on the host:
+    // the one the rig started through the daemon's own handle has a different origin.
+    assert_ne!(
+        row(&local.id),
+        "phone",
+        "every shell reports the phone's origin, so the assertion above proves nothing: {rows:?}"
     );
 }
