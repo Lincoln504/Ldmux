@@ -881,15 +881,21 @@ None of these are defects. Each is a decision that changes what ships.
   actions across an app restart because of it. There is no test that asserts that round trip.
 - Dictation depends on the device's speech recogniser, which may be cloud-based. The app says
   so, and nothing here can change it.
-- Multi-hop is implemented in both directions and unit-tested, and has never run on air. The phone
-  reads the host's advert path, the host reads the phone's after a 36-byte route hint, and each
-  replies along the reverse. `ARCHITECTURE.md` section 11 says what is proven and what is not: the
-  first on-air run with a repeater between two radios out of earshot is what would prove it.
+- Multi-hop is implemented in both directions and tested against a simulated mesh, and has never run
+  on air. A route is learned from the path a flooded record arrived on, after it authenticates
+  (`crates/session/src/endpoint.rs`), and `carrier_for` starts using it once it is fresh; the
+  `LDRQ`/`LDRR` path query that preceded this is deleted. The `B8` gate
+  (`crates/daemon/tests/mesh_full_stack.rs`) now proves the whole stack over two repeaters with
+  two-byte hashes and 15 % loss, which is not the same as two radios out of earshot:
+  `ARCHITECTURE.md` section 11 says so, and a first on-air run with a repeater between them is what
+  would prove it.
 - **Airtime: the host enforces 1 % itself, with the firmware's own limiter as the backstop.** The
-  serial carrier computes the hour's allowance from the tuple (`budget_per_hour`,
-  `mesh_serial.rs:714`) and publishes it as `Status.ops_left_this_hour`; the mesh loop takes that
-  upward only (`mesh.rs:821`) and hands it to `Arq::poll` as `records_left`, which caps **new data**
-  and never gates an ack, a retransmission or a close (`arq.rs` "4. The close, last, once"). The
+  serial carrier computes the hour's allowance from the tuple (`crates/daemon/src/mesh_carrier.rs`,
+  `AIRTIME_BUDGET_MS`) and publishes it as `Status.ops_left_this_hour`; the mesh loop takes that
+  upward only (`crates/daemon/src/mesh.rs`, `Event::Status`) and hands it to
+  `RadioEndpoint::set_records_left`, which caps **a new part** and never gates an ack, a
+  retransmission or a close (`crates/session/src/transaction.rs`: the ack is readied before the
+  allowance is consulted). Pinned by `no_allowance_means_no_record_starts`. The
   firmware's limiter is real but is not the 1 % a European band requires: `Dispatcher` refills a
   duty-cycle budget of `1/(1 + getAirtimeBudgetFactor())` and `getAirtimeBudgetFactor()` returns 1.0
   (`Dispatcher.cpp:26,34-36`), which is a **50 %** duty cycle. So the host's own meter is the one that
