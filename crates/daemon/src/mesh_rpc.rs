@@ -35,7 +35,8 @@ use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
 use ldmux_protocol::mesh_term::{
-    ChunkError, Message, Patch, Screen, SendAssembly, SessionSummary, VERSION, applied, clamp_row,
+    ChunkError, MAX_SEGMENT, Message, Patch, Screen, SendAssembly, SessionSummary, VERSION, applied,
+    clamp_row,
     closed, marks_pages, session_pages, snapshot_flag,
 };
 
@@ -1238,25 +1239,57 @@ fn elapsed(now: Instant, from: Instant) -> u64 {
     u64::try_from(now.saturating_duration_since(from).as_millis()).unwrap_or(u64::MAX)
 }
 
+/// One row as the patches that carry it, splitting it if it is longer than a segment.
+///
+/// **A row is not one patch.** `MAX_SEGMENT` is 120 **bytes** and the encoder refuses a longer
+/// segment, which fails the *whole* `Snapshot` — so a single wide row used to stop the screen
+/// updating entirely, silently, because the daemon reported the failure only in its stats. That is
+/// easy to reach and not an edge case: a box-drawing glyph is three bytes, so forty-one of them are
+/// over the limit, and a 46-column pane has room for forty-six.
+///
+/// The first segment replaces the row and the rest append, which is what `Patch::append` is for and
+/// what the phone already applies (`crates/session/src/client.rs`, `PageMirror::paint`).
+fn row_patches(y: u8, text: &str) -> Vec<Patch> {
+    let mut out = Vec::new();
+    let mut append = false;
+    let mut rest = text;
+    loop {
+        let mut cut = rest.len().min(MAX_SEGMENT);
+        // **Bytes, never mid-character.** A cut inside a glyph would produce invalid UTF-8 that the
+        // encoder refuses, which is the failure this function exists to prevent.
+        while cut > 0 && !rest.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        if cut == 0 {
+            break;
+        }
+        out.push(Patch {
+            y,
+            append,
+            text: rest[..cut].to_owned(),
+        });
+        rest = &rest[cut..];
+        append = true;
+        if rest.is_empty() {
+            break;
+        }
+    }
+    out
+}
+
 /// Every row, for a first paint.
 fn full_rows(screen: &Screen) -> Vec<Patch> {
-    screen
-        .lines
-        .iter()
-        .enumerate()
-        .filter_map(|(y, text)| {
-            // A blank row needs no patch when the whole screen is being replaced: the phone clears
-            // every row first, so an empty patch would cost three bytes to say nothing.
-            if text.is_empty() {
-                return None;
-            }
-            Some(Patch {
-                y: u8::try_from(y).ok()?,
-                append: false,
-                text: text.clone(),
-            })
-        })
-        .collect()
+    let mut out = Vec::new();
+    for (y, text) in screen.lines.iter().enumerate() {
+        // A blank row needs no patch when the whole screen is being replaced: the phone clears
+        // every row first, so an empty patch would cost three bytes to say nothing.
+        if text.is_empty() {
+            continue;
+        }
+        let Ok(y) = u8::try_from(y) else { continue };
+        out.extend(row_patches(y, text));
+    }
+    out
 }
 
 /// Only the rows that differ, for a diff against the screen the phone holds.
@@ -1265,22 +1298,26 @@ fn full_rows(screen: &Screen) -> Vec<Patch> {
 /// replaces the row rather than editing it, so an unchanged prefix with a shorter tail needs the
 /// patch to become shorter at all.
 fn diff_rows(before: &Screen, after: &Screen) -> Vec<Patch> {
-    after
-        .lines
-        .iter()
-        .enumerate()
-        .filter_map(|(y, text)| {
-            let old = before.lines.get(y).map_or("", String::as_str);
-            if old == text {
-                return None;
-            }
-            Some(Patch {
-                y: u8::try_from(y).ok()?,
+    let mut out = Vec::new();
+    for (y, text) in after.lines.iter().enumerate() {
+        let old = before.lines.get(y).map_or("", String::as_str);
+        if old == text {
+            continue;
+        }
+        let Ok(y) = u8::try_from(y) else { continue };
+        // A row that emptied is still a patch: the phone replaces the row rather than editing it,
+        // so "now blank" has to be said.
+        if text.is_empty() {
+            out.push(Patch {
+                y,
                 append: false,
-                text: text.clone(),
-            })
-        })
-        .collect()
+                text: String::new(),
+            });
+            continue;
+        }
+        out.extend(row_patches(y, text));
+    }
+    out
 }
 
 /// Split a patch stream into pieces that each fit one message comfortably.
@@ -1434,6 +1471,73 @@ mod tests {
     /// A screen at the given grid, built the way the keeper's text becomes one.
     fn screen(lines: &[&str], cols: u8, rows: u8) -> Screen {
         Screen::from_keeper(&lines.join("\n"), u64::from(cols), u64::from(rows), (0, 0), false, false, 0)
+    }
+
+    /// **A row longer than a segment is split, so the screen still encodes.**
+    ///
+    /// `MAX_SEGMENT` is 120 **bytes** and the encoder refuses a longer one, which fails the whole
+    /// `Snapshot` rather than one row. So before this, a single wide row stopped the screen
+    /// updating entirely and said so only in the daemon's stats — and it is not an edge case: a
+    /// box-drawing glyph is three bytes, so forty-one of them are over the limit on a 46-column
+    /// pane. Measured 2026-11-12 while auditing `RELEASE-AUDIT.md` 6.136.
+    #[test]
+    fn a_row_wider_than_a_segment_is_split_and_the_snapshot_still_encodes() {
+        // Three bytes a glyph, so this is 150 bytes: over the limit by a wide margin and by the
+        // route a real pane takes to get there.
+        let wide = "─".repeat(50);
+        assert!(wide.len() > MAX_SEGMENT, "the fixture must exceed one segment");
+        let patches = full_rows(&screen(&[&wide], 46, 2));
+        assert_eq!(patches.len(), 2, "one row became two segments: {patches:?}");
+        assert!(!patches[0].append, "the first segment replaces the row");
+        assert!(patches[1].append, "the second appends to it");
+        assert_eq!(
+            patches.iter().map(|p| p.text.clone()).collect::<String>(),
+            wide,
+            "the segments are the row, in order, with nothing lost"
+        );
+        for patch in &patches {
+            assert!(patch.text.len() <= MAX_SEGMENT);
+        }
+        // The whole point: the message these patches go into can be encoded at all.
+        let snapshot = Message::Snapshot {
+            flags: 0,
+            chunk_idx: 0,
+            chunk_count: 1,
+            snapshot_id: 1,
+            base_id: 0,
+            applied_op_id: 0,
+            applied_status: 0,
+            cols: 46,
+            rows: 2,
+            cursor_x: 0,
+            cursor_y: 0,
+            first_line: 0,
+            shell: "s1".to_owned(),
+            patches,
+        };
+        assert!(
+            snapshot.encode().is_ok(),
+            "a wide row still fails the frame: {:?}",
+            snapshot.encode().err()
+        );
+    }
+
+    /// A segment never ends inside a character.
+    ///
+    /// A cut mid-glyph produces invalid UTF-8, which the encoder refuses — the same failure the
+    /// split exists to prevent, reached another way.
+    #[test]
+    fn a_segment_cut_never_splits_a_character() {
+        // Two-byte and three-byte characters arranged so a naive 120-byte cut lands mid-glyph.
+        let row = format!("{}{}", "─".repeat(39), "é".repeat(20));
+        let patches = row_patches(0, &row);
+        for patch in &patches {
+            assert!(patch.text.len() <= MAX_SEGMENT, "a segment is over the limit");
+        }
+        assert_eq!(
+            patches.iter().map(|p| p.text.clone()).collect::<String>(),
+            row
+        );
     }
 
     fn pane() -> PaneModes {
