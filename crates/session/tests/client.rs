@@ -19,7 +19,7 @@ use ldmux_session::client::{Applied, Client, ClientConfig, ClientError, ClientEv
 use ldmux_session::endpoint::{ArrivalInfo, EndpointConfig, RadioEndpoint, Role};
 use ldmux_session::handshake::{Keypair, PairingEntry};
 use ldmux_session::{MAX_OPEN_PAGES, PageMirror};
-use support::{AIRTIME_MS, Port, WALL_BASE_MS, block_on, chain, info_of};
+use support::{AIRTIME_MS, FakeRadio, Port, WALL_BASE_MS, block_on, chain, info_of};
 
 const PSK: [u8; 32] = [0x42; 32];
 const COLS: u8 = 40;
@@ -325,7 +325,7 @@ struct Link {
     host_node: NodeId,
     client: Client,
     host: Host,
-    client_port: Port,
+    radio: FakeRadio,
     now: u64,
     cursor: usize,
     /// Every event the client produced, in order, so a test can look for one.
@@ -348,7 +348,7 @@ impl Link {
             host_node,
             client: Client::new(config, phone_key),
             host,
-            client_port: Port::new(),
+            radio: FakeRadio::new(),
             now: 0,
             cursor: 0,
             events: Vec::new(),
@@ -360,8 +360,7 @@ impl Link {
     }
 
     fn step(&mut self, ms: u64) {
-        block_on(self.client.poll(self.now, &mut self.client_port))
-            .expect("the client's carrier never fails");
+        block_on(self.client.poll(self.now)).expect("the client's carrier never fails");
         block_on(self.host.endpoint.poll(self.now, &mut self.host.port))
             .expect("the host's carrier never fails");
         self.events.extend(self.client.take_events());
@@ -373,9 +372,24 @@ impl Link {
     }
 
     fn pump(&mut self) {
-        let out: Vec<Vec<u8>> = self.client_port.out.drain(..).collect();
-        let carriage = self.client_port.carriage.clone();
-        for bytes in out {
+        // **The phone's engine owes frames, not records.** Each one is a companion command: the fake
+        // radio answers it, and a send's answer carries the packet the harness puts on the air. That
+        // is the whole point of the window — one command at a time, so no answer can settle another.
+        let now = self.now;
+        let wall = self.wall();
+        let mut produced = 0;
+        while let Some(frame) = self.client.take_frame() {
+            for answer in self.radio.answer(&frame) {
+                self.client.on_frame(&answer, now, wall);
+            }
+            produced += 1;
+            assert!(
+                produced < 256,
+                "the engine never stopped producing frames; the window is not advancing"
+            );
+        }
+        let out: Vec<(Carriage, Vec<u8>)> = self.radio.transmissions.drain(..).collect();
+        for (carriage, bytes) in out {
             self.transmit(self.phone, &carriage, &bytes);
         }
         let out: Vec<Vec<u8>> = self.host.port.out.drain(..).collect();

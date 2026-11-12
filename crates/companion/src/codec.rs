@@ -13,127 +13,17 @@
 //! those bytes as given, which is why the header constants live here and not in
 //! the caller.
 
-/// Response and push codes this crate interprets.
-pub mod codes {
-    pub const OK: u8 = 0x00;
-    /// `RESP_CODE_SENT` — the answer to a raw send on firmware that confirms sends.
-    ///
-    /// Ten bytes on the v1.18 protocol: the route flag, the tag, and **the firmware's own suggested
-    /// timeout** for that send. A client that only knows `OK` sees this as a framing fault, so the
-    /// same command works on one firmware and fails on the next with no configuration change.
-    pub const SENT: u8 = 0x06;
-    pub const ERROR: u8 = 0x01;
-    pub const SELF_INFO: u8 = 0x05;
-    pub const CONTACT_START: u8 = 0x02;
-    pub const DEVICE_INFO: u8 = 0x0D;
-    pub const NO_MORE_MESSAGES: u8 = 0x0A;
-    pub const CHANNEL_MSG_RECV: u8 = 0x08;
-    pub const CHANNEL_MSG_RECV_V3: u8 = 0x11;
-    pub const LOG_RX_DATA: u8 = 0x88;
-    /// The reply to [`commands::GET_ADVERT_PATH`]: `received u32`, `path byte`, path bytes.
-    pub const ADVERT_PATH: u8 = 0x16;
-    /// The reply to [`commands::GET_DEFAULT_FLOOD_SCOPE`]: `name 31`, `key 16`, or the code alone
-    /// when the radio has no default scope (`MyMesh.cpp:1964-1972`).
-    pub const DEFAULT_FLOOD_SCOPE: u8 = 0x1C;
-    /// `RESP_CODE_DISABLED`: the firmware is in another state and cannot serve the command now
-    /// (`MyMesh.cpp:86`). A retry a moment later is the right response, not a reparse.
-    pub const DISABLED: u8 = 0x0F;
-    /// The reply to [`commands::GET_STATS`]: `type u8`, then that type's fields.
-    pub const STATS: u8 = 0x18;
-    /// The stats sub-types, sent as the request's and the reply's second byte.
-    pub const STATS_TYPE_CORE: u8 = 0;
-    pub const STATS_TYPE_RADIO: u8 = 1;
-    /// The firmware's "no reading" RSSI. A radio that has heard nothing reports this rather than a
-    /// plausible number, so a link is never credited with a reading it does not have.
-    pub const UNKNOWN_RSSI: i8 = i8::MIN;
-}
-
-/// Command codes this crate sends.
-pub mod commands {
-    pub const APP_START: u8 = 0x01;
-    /// Tune the radio: `freq u32 LE` (kHz), `bw u32 LE` (Hz), `sf u8`, `cr u8`. The firmware
-    /// validates every one of them and answers `OK` or `ERR_CODE_ILLEGAL_ARG`
-    /// (`MyMesh.cpp:1386-1420`), then saves the prefs and retunes the driver.
-    ///
-    /// The host owns a radio of its own, and until this existed nothing in ldmux could tell it
-    /// what to tune to: the user had to configure it with a different tool while the phone
-    /// configured its own from the app. There is no reason for that asymmetry.
-    pub const SET_RADIO_PARAMS: u8 = 0x0B;
-    /// Set transmit power: **one signed byte of dBm** (`MyMesh.cpp:1386`), window -9..max.
-    ///
-    /// Separate from the tuple because it is a separate register, and global to the radio like the
-    /// tuple: whichever app writes it last is what the radio transmits at.
-    pub const SET_RADIO_TX_POWER: u8 = 0x0C;
-    pub const SYNC_NEXT_MESSAGE: u8 = 0x0A;
-    pub const DEVICE_QUERY: u8 = 0x16;
-    /// Send a complete packet we built: `priority u8`, then the packet bytes.
-    ///
-    /// This is `CMD_SEND_RAW_PACKET`, the command that takes a whole `[header][path][payload]`
-    /// frame (`examples/companion_radio/MyMesh.cpp`, `tryParsePacket`), so the route type and the
-    /// path encoding are ours to write correctly. Its older sibling `CMD_SEND_RAW_DATA` (0x19)
-    /// takes a path-length byte that the firmware reads both as a byte count and as an encoded
-    /// value, which agrees only at a one-byte hash.
-    pub const SEND_RAW_PACKET: u8 = 0x41;
-    /// Set the radio's clock: `unix seconds u32` little-endian.
-    ///
-    /// **The radio's clock is what stamps an advert**, and ldmux reads those stamps back as route
-    /// ages (`CMD_GET_ADVERT_PATH` returns `recv_timestamp`). A companion has no network, so its
-    /// clock starts at zero at boot: without this every advert looks as old as the epoch, and the
-    /// "is this route still true" question has no answer. The firmware accepts a time only if it is
-    /// not in the past (`MyMesh.cpp:1247-1256`), which a wall clock always is.
-    pub const SET_DEVICE_TIME: u8 = 0x06;
-
-    /// `CMD_GET_STATS`, whose second byte selects what to ask for (firmware v8+).
-    ///
-    /// **The radio's own counters are the only ground truth about the air.** `STATS_RADIO` reports
-    /// the noise floor, the RSSI and SNR of the last packet *it heard*, and its own transmit and
-    /// receive airtime — so a link can be judged on what the radio measured rather than on what the
-    /// application hoped, and the daemon's own meter has something to be checked against.
-    pub const GET_STATS: u8 = 0x38;
-    /// Read the radio's **default flood scope**: no argument, and the answer is
-    /// [`codes::DEFAULT_FLOOD_SCOPE`] with the name and the 16-byte key, or the code alone when the
-    /// radio has none (`MyMesh.cpp:1964-1972`).
-    ///
-    /// **The radio is the source of truth for the scope**, because the operator's own MeshCore app
-    /// sets it there (`region default`, the app's Experimental Settings from v1.43.0) and a regional
-    /// firmware build can ship one (`DEFAULT_FLOOD_SCOPE_NAME`). ldmux reads it rather than asking
-    /// for the same fact twice in two places.
-    pub const GET_DEFAULT_FLOOD_SCOPE: u8 = 0x40;
-    /// Write the radio's default flood scope: `name 31` then `key 16`; a frame of the code alone
-    /// clears it (`MyMesh.cpp:1947-1963`). Used only when ldmux *learned* a scope from the air and
-    /// the radio had none, so the operator's device and this daemon agree.
-    pub const SET_DEFAULT_FLOOD_SCOPE: u8 = 0x3F;
-    /// Emit this node's advert: `mode u8`, where 1 floods it and 0 sends it zero-hop
-    /// (`MyMesh.cpp:1257-1272`).
-    ///
-    /// **This is how the peer learns a path to us.** A flooded advert is forwarded by repeaters and
-    /// carries the accumulated path, so the receiving companion stores it as a contact with an
-    /// out-path — a route that survives the radio being out of direct range. Nothing else in
-    /// MeshCore tells a peer how to reach a node it has never heard.
-    pub const SEND_SELF_ADVERT: u8 = 0x07;
-    /// Read the path a recently heard advert took: `reserved u8`, then the originator's **full
-    /// 32-byte** public key (`MyMesh.cpp:1851`, guard `len >= PUB_KEY_SIZE + 2`). The cache is keyed
-    /// by the first seven bytes of it, but the request must carry all 32.
-    ///
-    /// **This is the only route a companion can learn on stock firmware.** A flooded request
-    /// (`CMD_SEND_PATH_DISCOVERY_REQ`) is answered with a path return only when the destination
-    /// produces a reply, which needs a contact entry and a telemetry permission that defaults to
-    /// deny; the advert-path cache needs neither.
-    pub const GET_ADVERT_PATH: u8 = 0x2A;
-    /// Set the width of the path hashes **this radio's own packets** carry:
-    /// `reserved u8`, then the mode (`MyMesh.cpp:1466-1473`). Mode 0 is one byte (the firmware's
-    /// factory default), 1 is two, 2 is three; 3 or more is `ERR_CODE_ILLEGAL_ARG`.
-    ///
-    /// **It does not change what the radio forwards.** A repeater appends at the width the packet
-    /// arrives with, whatever its own mode says, so this decides adverts only — and ldmux's adverts
-    /// are the only way a peer learns a route here.
-    pub const SET_PATH_HASH_MODE: u8 = 0x3D;
-}
-
-/// The protocol version this client claims. The firmware latches it from
-/// `DEVICE_QUERY` and gates its V3 message frames on `>= 3`
-/// (`MyMesh.cpp:1028-1031`, `:435`, `:548`).
-pub const APP_TARGET_VERSION: u8 = 3;
+/// The companion's identity: opcodes, the reports the radio answers, and the phone's answer
+/// table.
+///
+/// **Re-exported from `ldmux-mesh`**, which owns them because the phone asks the same questions
+/// over BLE and cannot link a host crate (`docs/RADIO-PLAN.md` §8.1). Every caller in this crate
+/// and in the daemon keeps the path it had, so the move changed no code above it.
+pub use ldmux_mesh::companion::command::{
+    APP_TARGET_VERSION, BatteryAndStorage, CommandError, DeviceInfo, PHONE_COMMANDS, RadioStats,
+    SelfInfo, codes, commands, get_battery_and_storage, get_radio_stats, parse_battery_and_storage,
+    parse_device_info, parse_radio_stats, parse_self_info, time_on_air_ms,
+};
 
 /// The shared packet builders, from `ldmux-mesh`.
 ///
@@ -982,101 +872,16 @@ impl std::fmt::Display for CodecError {
     }
 }
 
+impl From<CommandError> for CodecError {
+    fn from(e: CommandError) -> Self {
+        match e {
+            CommandError::WrongAnswer { want, got } => CodecError::WrongResponse { want, got },
+            CommandError::Truncated => CodecError::Truncated,
+        }
+    }
+}
+
 impl std::error::Error for CodecError {}
-
-/// What the radio says it is and how it is tuned (`RESP_SELF_INFO`).
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct SelfInfo {
-    pub adv_type: u8,
-    pub tx_power: u8,
-    pub max_tx_power: u8,
-    pub public_key: [u8; 32],
-    pub adv_lat: f64,
-    pub adv_lon: f64,
-    pub adv_loc_policy: u8,
-    pub radio_freq_mhz: f64,
-    pub radio_bw_khz: f64,
-    pub radio_sf: u8,
-    pub radio_cr: u8,
-    pub name: String,
-}
-
-/// Time on air for a payload, in milliseconds, from a tuple.
-///
-/// The firmware's own formula, with the 32-symbol preamble used below SF8. **One copy**, because
-/// two callers need it: the radio reporting its own tuple, and a retune computing what the new
-/// tuple will cost before the radio has been asked. A budget computed from a constant rather than
-/// from this is a budget for a radio nobody has.
-pub fn time_on_air_ms(bw_khz: f64, sf: u8, cr: u8, payload_len: usize) -> f64 {
-    let bw_hz = bw_khz * 1000.0;
-    if bw_hz <= 0.0 || sf == 0 {
-        return 0.0;
-    }
-    let sf_f = f64::from(sf);
-    // The firmware's coding rate is the denominator index RadioLib reads it as: 5 is 4/5, and the
-    // symbol multiplier is that number, which is the datasheet's `CR + 4` with CR counted from 1.
-    let cr_f = f64::from(cr).clamp(5.0, 8.0);
-    let symbol_ms = (2f64.powf(sf_f)) / bw_hz * 1000.0;
-    // **32 preamble symbols at SF8 and below**, 16 above: `preambleLengthForSF` in the
-    // firmware (`src/helpers/radiolib/RadioLibWrappers.h:56`). It was 8 here, which understated a
-    // record by ≈50 ms at 62.5 kHz — an 8 % error in the hour's allowance, and the phone's own
-    // arithmetic already used 32, so the two ends disagreed about what an hour buys.
-    let preamble = if sf <= 8 { 32.0 } else { 16.0 };
-    // Low-data-rate optimization is automatic in RadioLib: it is on once a symbol is 16 ms or
-    // longer (`SX126x::setModulationParams`, `SX126x_commands.cpp:220-228`), and it halves the
-    // denominator in the payload-symbol count.
-    let de = if symbol_ms >= 16.0 { 1.0 } else { 0.0 };
-    // Explicit header, CRC on, 20 header symbols folded into the +28 (the firmware's own
-    // `sfCoeff2 + N_symbol_header`, `SX126x.cpp:755-759`).
-    let numerator = 8.0 * payload_len as f64 - 4.0 * sf_f + 28.0 + 16.0;
-    let denominator = 4.0 * (sf_f - 2.0 * de);
-    let payload_symbols = 8.0 + (numerator / denominator).ceil().max(0.0) * cr_f;
-    (preamble + 4.25 + payload_symbols) * symbol_ms
-}
-
-impl SelfInfo {
-    /// Time on air for a payload under the tuple this radio reports.
-    pub fn time_on_air_ms(&self, payload_len: usize) -> f64 {
-        time_on_air_ms(self.radio_bw_khz, self.radio_sf, self.radio_cr, payload_len)
-    }
-}
-
-/// What the firmware says it can do (`RESP_DEVICE_INFO`).
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct DeviceInfo {
-    /// The **firmware's** version code (`FIRMWARE_VER_CODE`), which is the gate for the trailing
-    /// fields below.
-    ///
-    /// **Not the app protocol version.** That one is `APP_TARGET_VERSION`, which this client sends
-    /// in `DEVICE_QUERY` and the firmware latches to choose its frame shapes (`MyMesh.cpp:1028-1031`).
-    /// The two axes were both called `protocol_version`, which made the next reader check the wrong
-    /// one against the wrong feature gate.
-    pub firmware_version_code: u8,
-    pub max_contacts: Option<u16>,
-    pub max_channels: Option<u8>,
-    pub ble_pin: Option<u32>,
-    pub firmware_build: String,
-    pub manufacturer: String,
-    pub firmware_version: String,
-    pub repeat_enabled: Option<bool>,
-    pub path_hash_mode: Option<u8>,
-}
-
-/// What the radio measured on the air, and what it spent there.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RadioStats {
-    /// The receiver's noise floor, in dBm. A negative number, and the floor a link must clear.
-    pub noise_floor_dbm: i16,
-    /// RSSI of the last packet the radio heard, in dBm. [`codes::UNKNOWN_RSSI`] when none yet.
-    pub last_rssi: i8,
-    /// SNR of that packet in **quarters of a dB**, which is the firmware's own scale: an integer
-    /// keeps the reading comparable, and a quarter of a dB is finer than the measurement is.
-    pub last_snr_quarter_db: i8,
-    /// The radio's own transmit airtime since boot.
-    pub tx_air_secs: u32,
-    /// The radio's own receive airtime since boot.
-    pub rx_air_secs: u32,
-}
 
 /// The radio's battery, uptime, error flags and outbound queue depth.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1088,48 +893,12 @@ pub struct CoreStats {
 }
 
 
-impl RadioStats {
-    /// Whether the radio has heard anything since it booted.
-    pub fn has_signal(&self) -> bool {
-        self.last_rssi != codes::UNKNOWN_RSSI
-    }
-
-    /// The SNR in dB, for display.
-    pub fn last_snr_db(&self) -> f32 {
-        f32::from(self.last_snr_quarter_db) / 4.0
-    }
-}
-
-/// Parse `RESP_STATS` for `STATS_TYPE_RADIO`.
-pub fn parse_radio_stats(payload: &[u8]) -> Result<RadioStats, CodecError> {
-    match payload.first() {
-        Some(&codes::STATS) => {}
-        Some(&got) => {
-            return Err(CodecError::WrongResponse {
-                want: codes::STATS,
-                got,
-            });
-        }
-        None => return Err(CodecError::Truncated),
-    }
-    if payload.get(1) != Some(&codes::STATS_TYPE_RADIO) {
-        return Err(CodecError::WrongResponse {
-            want: codes::STATS_TYPE_RADIO,
-            got: payload.get(1).copied().unwrap_or(0),
-        });
-    }
-    let noise = payload.get(2..4).ok_or(CodecError::Truncated)?;
-    let rssi = *payload.get(4).ok_or(CodecError::Truncated)?;
-    let snr = *payload.get(5).ok_or(CodecError::Truncated)?;
-    let tx = payload.get(6..10).ok_or(CodecError::Truncated)?;
-    let rx = payload.get(10..14).ok_or(CodecError::Truncated)?;
-    Ok(RadioStats {
-        noise_floor_dbm: i16::from_le_bytes([noise[0], noise[1]]),
-        last_rssi: rssi as i8,
-        last_snr_quarter_db: snr as i8,
-        tx_air_secs: u32::from_le_bytes([tx[0], tx[1], tx[2], tx[3]]),
-        rx_air_secs: u32::from_le_bytes([rx[0], rx[1], rx[2], rx[3]]),
-    })
+/// A NUL-padded fixed-width string, as the firmware writes them.
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .trim_end_matches('\0')
+        .trim()
+        .to_string()
 }
 
 /// Parse `RESP_STATS` for `STATS_TYPE_CORE`.
@@ -1160,88 +929,6 @@ pub fn parse_core_stats(payload: &[u8]) -> Result<CoreStats, CodecError> {
         err_flags: u16::from_le_bytes([flags[0], flags[1]]),
         queue_len: queue,
     })
-}
-
-/// Parse `RESP_SELF_INFO`, stopping at whatever the frame length allows.
-pub fn parse_self_info(payload: &[u8]) -> Result<SelfInfo, CodecError> {
-    match payload.first() {
-        Some(&codes::SELF_INFO) => {}
-        Some(&got) => return Err(CodecError::WrongResponse { want: codes::SELF_INFO, got }),
-        // An empty frame is a truncated reply, and the fields below are parsed as far as the
-        // length allows; there is nothing to parse here.
-        None => return Err(CodecError::WrongResponse { want: codes::SELF_INFO, got: 0 }),
-    }
-    let mut info = SelfInfo::default();
-    let mut rest = &payload[1..];
-    macro_rules! take {
-        ($n:expr) => {{
-            if rest.len() < $n {
-                return Ok(info);
-            }
-            let (head, tail) = rest.split_at($n);
-            rest = tail;
-            head
-        }};
-    }
-    // The same bytes as a fixed-size array: `take!` has already proved the length, so this cannot
-    // fail, and it does not need an `unwrap` to say so. A truncated SELF_INFO from older firmware
-    // ends the parse at the first missing field, which is what the `return Ok(info)` above is for.
-    macro_rules! take_array {
-        ($n:expr) => {{
-            let head = take!($n);
-            let mut out = [0u8; $n];
-            out.copy_from_slice(head);
-            out
-        }};
-    }
-    info.adv_type = take!(1)[0];
-    info.tx_power = take!(1)[0];
-    info.max_tx_power = take!(1)[0];
-    info.public_key = take_array!(32);
-    info.adv_lat = i32::from_le_bytes(take_array!(4)) as f64 / 1e6;
-    info.adv_lon = i32::from_le_bytes(take_array!(4)) as f64 / 1e6;
-    let _multi_acks = take!(1)[0];
-    info.adv_loc_policy = take!(1)[0];
-    let _telemetry = take!(1)[0];
-    let _manual = take!(1)[0];
-    info.radio_freq_mhz = u32::from_le_bytes(take_array!(4)) as f64 / 1000.0;
-    info.radio_bw_khz = u32::from_le_bytes(take_array!(4)) as f64 / 1000.0;
-    info.radio_sf = take!(1)[0];
-    info.radio_cr = take!(1)[0];
-    info.name = String::from_utf8_lossy(rest).trim_end_matches('\0').to_string();
-    Ok(info)
-}
-
-/// Parse `RESP_DEVICE_INFO`. Only the protocol version is guaranteed; every later
-/// field is version-gated, which is how one client serves several firmware
-/// generations.
-pub fn parse_device_info(payload: &[u8]) -> Option<DeviceInfo> {
-    if payload.first() != Some(&codes::DEVICE_INFO) || payload.len() < 2 {
-        return None;
-    }
-    let mut info = DeviceInfo { firmware_version_code: payload[1], ..Default::default() };
-    let mut rest = &payload[2..];
-    if info.firmware_version_code >= 3 && rest.len() >= 1 + 1 + 4 + 12 + 40 + 20 {
-        info.max_contacts = Some(rest[0] as u16 * 2); // firmware stores half
-        info.max_channels = Some(rest[1]);
-        info.ble_pin = Some(u32::from_le_bytes([rest[2], rest[3], rest[4], rest[5]]));
-        info.firmware_build = text(&rest[6..18]);
-        info.manufacturer = text(&rest[18..58]);
-        info.firmware_version = text(&rest[58..78]);
-        rest = &rest[78..];
-    }
-    if info.firmware_version_code >= 9 && !rest.is_empty() {
-        info.repeat_enabled = Some(rest[0] != 0);
-        rest = &rest[1..];
-    }
-    if info.firmware_version_code >= 10 && !rest.is_empty() {
-        info.path_hash_mode = Some(rest[0]);
-    }
-    Some(info)
-}
-
-fn text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).trim_end_matches('\0').trim().to_string()
 }
 
 #[cfg(test)]
@@ -1340,7 +1027,7 @@ mod tests {
         // A framing fault, named as one: it used to be reported as `TooManyHops`, a path error,
         // which sent a reader looking at the route when the answer was simply another command's.
         match parse_self_info(&[codes::DEVICE_INFO, 3]) {
-            Err(CodecError::WrongResponse { want, got }) => {
+            Err(CommandError::WrongAnswer { want, got }) => {
                 assert_eq!((want, got), (codes::SELF_INFO, codes::DEVICE_INFO));
             }
             other => panic!("expected a framing error, got {other:?}"),

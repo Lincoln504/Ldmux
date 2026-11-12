@@ -6,6 +6,10 @@ import android.bluetooth.BluetoothManager
 import android.content.Context
 import io.iotone.meshcore.android.AndroidBleTransport
 import io.iotone.meshcore.transport.MeshcoreTransport
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * The only BLE code left on the radio route.
@@ -21,9 +25,12 @@ import io.iotone.meshcore.transport.MeshcoreTransport
  *
  * The pipe is **pull only** like the engine: it never writes on its own. A caller with a frame calls
  * [write]; a caller with nothing to do does not, and the radio stays silent. That is also what keeps
- * one command in flight — [write] is refused while the previous write has not completed, so a caller
- * that also issues radio-management commands can serialise them here rather than racing the engine
- * (`RC-2`).
+ * one write in flight — [write] is refused while the previous write has not completed (`RC-2`).
+ *
+ * **The pipe holds the radio lease.** A MeshCore companion accepts exactly one central, and Android
+ * will not arbitrate which app that is, so the apps agree between themselves (ADR-0036). That used to
+ * live in `AndroidRadioLink`, which meant the one thing that owns the GATT link did not own the
+ * permission to it. It does now: taken before the first connection, released when the link closes.
  */
 class AndroidBlePipe(
     /**
@@ -45,6 +52,13 @@ class AndroidBlePipe(
     private val ble: MeshcoreTransport = transport ?: AndroidBleTransport(
         requireNotNull(context) { "a pipe with no transport needs a Context to build one" },
     )
+
+    /** Where the lease is taken and given back; a pipe's own scope, cancelled with it. */
+    private val leaseScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    /** Whether this pipe has announced that it wants the radio. */
+    @Volatile
+    private var leased: Boolean = false
 
     // Held under names of their own because the listener below declares methods called `onFrame`
     // and `onConnectionChanged`: an unqualified call inside it would recurse into the listener
@@ -109,6 +123,15 @@ class AndroidBlePipe(
             problemSink("not a Bluetooth address")
             return false
         }
+        // **Ask the other apps to let go before opening the GATT client.** A companion accepts one
+        // central; a second one often connects and is dropped later, which reads as a flaky radio
+        // rather than as a busy one (ADR-0036). The connect proceeds either way — a counterpart that
+        // is not running answers nothing, and a link that is attempted and fails names its reason
+        // where a connect that never happened explains nothing.
+        if (!leased) {
+            leased = true
+            leaseScope.launch { runCatching { RadioLease.acquire(ctx) } }
+        }
         (ble as? AndroidBleTransport)?.connectToDevice(device)
             ?: run {
                 problemSink("this transport cannot be connected")
@@ -150,6 +173,14 @@ class AndroidBlePipe(
             ble.close()
         } catch (e: Exception) {
             // Closing a link that is already gone is not a failure worth a sentence.
+        }
+        // **The lease goes back with the link.** It used to be released only from `close()` of the
+        // old link object, which `closeNow()` never called, so a phone that abandoned the radio left
+        // the other app believing it still held it (`RC-12`, `S17`).
+        val ctx = context
+        if (leased && ctx != null) {
+            leased = false
+            RadioLease.release(ctx)
         }
     }
 }

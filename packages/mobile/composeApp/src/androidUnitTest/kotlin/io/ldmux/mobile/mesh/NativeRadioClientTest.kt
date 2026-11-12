@@ -2,6 +2,7 @@ package io.ldmux.mobile.mesh
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -86,16 +87,31 @@ class NativeRadioClientTest {
     }
 
     @Test
-    fun connect_puts_at_least_one_frame_on_the_air() {
+    fun connect_asks_the_radio_who_it_is_before_anything_else() {
         val c = assertNotNull(client(), "the client could not be created")
         try {
             assertEquals(ClientCode.OK, c.connect(now, now))
-            // The first thing a bootstrap owes is its initiation, so one poll must produce a frame.
+            // **The radio comes up first.** `APP_START` is the companion hello: the firmware latches
+            // the protocol version from `DEVICE_QUERY` and answers everything else in the shapes
+            // that version selects, so nothing may precede it.
             val frame = assertNotNull(c.poll(now), "connect produced nothing to write")
-            assertTrue(frame.isNotEmpty(), "an empty frame is not a frame")
-            // A companion frame is three header bytes and a payload; the engine does not hand out
-            // anything else.
-            assertTrue(frame.size > 3, "a ${frame.size}-byte frame cannot be a companion frame")
+            assertEquals(0x01, frame[0].toInt(), "the first command must be APP_START")
+            // A payload, not a serial frame: a BLE characteristic carries `[opcode][args]`, and the
+            // host adds `<` and a length when it writes to a port.
+            assertTrue(frame[0] != 0x3C.toByte(), "the engine emits a payload, not a serial frame")
+
+            // **Nothing answers here, so the window has to time out to move on** — which is exactly
+            // what a radio that stopped answering does on a real link. Advancing the clock past each
+            // command's deadline is what lets the queue reach the record send behind them.
+            var seenSend = false
+            var guard = 0
+            // **Do not stop on an empty poll.** A poll with nothing to write is a window still
+            // waiting for an answer, not the end of what the engine owes; the clock is what frees it.
+            while (guard++ < 40 && !seenSend) {
+                val next = c.poll(now + guard * 2_000L)
+                if (next != null && next.isNotEmpty() && next[0] == 0x41.toByte()) seenSend = true
+            }
+            assertTrue(seenSend, "no record was ever handed to the radio")
         } finally {
             c.close()
         }
@@ -107,15 +123,17 @@ class NativeRadioClientTest {
         try {
             assertEquals(ClientCode.OK, c.connect(now, now))
 
-            val tiny = ByteArray(4)
+            // The first frame is `APP_START`, which is one byte: an empty buffer is the smallest
+            // thing that cannot hold it.
+            val tiny = ByteArray(0)
             val len = IntArray(1)
             val rc = NativeRadioClient.poll(c.handle, now, tiny, len)
             assertEquals(
                 ClientCode.ERR_BUFFER, rc,
-                "a 4-byte buffer cannot hold a companion frame, so the call must say so",
+                "an empty buffer cannot hold a command, so the call must say so",
             )
             val needed = len[0]
-            assertTrue(needed > 4, "the call did not report the length it needed (got $needed)")
+            assertTrue(needed > 0, "the call did not report the length it needed (got $needed)")
 
             // **Nothing was lost by the refused call**: the same frame comes out of the next one.
             val roomy = ByteArray(needed)
@@ -123,6 +141,47 @@ class NativeRadioClientTest {
             assertEquals(1, NativeRadioClient.poll(c.handle, now, roomy, len2))
             assertEquals(needed, len2[0], "the frame that came out is not the one that was measured")
             assertTrue(roomy.copyOf(len2[0]).isNotEmpty())
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun an_unasked_radio_reports_nothing_rather_than_a_guess() {
+        val c = assertNotNull(client(), "the client could not be created")
+        try {
+            // **No answer, no reading.** A radio nothing has heard from reports no RSSI rather than a
+            // plausible number, and a link nobody has answered has no path — which is why the next
+            // attempt would flood. That is the whole reason the two structs carry a `has_` byte per
+            // optional fact instead of zero, which is a real temperature.
+            val status = c.radio()
+            assertFalse(status.connected, "nothing has said the radio is there")
+            assertNull(status.rssiDbm, "no packet has been heard")
+            assertNull(status.batteryMv, "no battery has been read")
+            assertNull(status.preset, "no tuple has been read")
+            assertNull(status.opsLeft, "no budget has been reported")
+
+            val route = c.route(now)
+            assertFalse(route.known, "no path has been heard")
+            assertTrue(route.flood, "with no path the first attempt is a flood")
+            assertNull(route.hopsOrNull, "a route nobody knows has no hop count")
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun a_scope_is_sixteen_bytes_of_region_key_or_cleared() {
+        val c = assertNotNull(client(), "the client could not be created")
+        try {
+            // The region's key, not the 16-bit code the config carries: the code is an HMAC *of* the
+            // key, so a shorter buffer would name a different region.
+            assertEquals(ClientCode.OK, c.setScope(ByteArray(16) { 0x5A }))
+            assertEquals(ClientCode.OK, c.setScope(ByteArray(0)), "an empty key clears the scope")
+            assertEquals(
+                ClientCode.ERR_ARG, c.setScope(ByteArray(15)),
+                "a 15-byte key is not a region and must not be truncated into one",
+            )
         } finally {
             c.close()
         }

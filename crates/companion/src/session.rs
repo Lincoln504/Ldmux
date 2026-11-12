@@ -25,7 +25,7 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use crate::codec::{
-    APP_TARGET_VERSION, AdvertPath, CodecError, CoreStats, DeviceInfo, FloodScope, RadioStats,
+    APP_TARGET_VERSION, AdvertPath, CodecError, CommandError, CoreStats, DeviceInfo, FloodScope, RadioStats,
     SelfInfo, build_default_flood_scope, build_raw_direct, codes, commands, parse_advert_path,
     parse_core_stats, parse_default_flood_scope, parse_device_info, parse_radio_stats,
     parse_self_info,
@@ -102,6 +102,12 @@ impl std::error::Error for SessionError {}
 impl From<io::Error> for SessionError {
     fn from(e: io::Error) -> Self {
         SessionError::Io(e)
+    }
+}
+
+impl From<CommandError> for SessionError {
+    fn from(e: CommandError) -> Self {
+        SessionError::Codec(CodecError::from(e))
     }
 }
 

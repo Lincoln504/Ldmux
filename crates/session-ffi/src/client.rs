@@ -17,13 +17,9 @@ use std::future::Future;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
-use ldmux_mesh::carrier::{Carrier, Event};
-use ldmux_mesh::companion::build as packets;
 use ldmux_mesh::error::MeshError;
-use ldmux_mesh::route::Carriage;
 use ldmux_protocol::mesh_term::{self, Message};
-use ldmux_session::client::{Client, ClientConfig, ClientError, ClientEvent, PageMirror};
-use ldmux_session::endpoint::{ArrivalInfo, CarriageSink};
+use ldmux_session::client::{Client, ClientConfig, ClientError, ClientEvent, FrameOutcome, PageMirror};
 use ldmux_session::handshake::Keypair;
 
 use crate::{
@@ -174,6 +170,84 @@ pub struct LdmuxClientStats {
     pub sessions_established: u64,
     /// Retry rungs spent.
     pub rungs_used: u64,
+    /// Bootstrap rungs sent while no path to the peer was held.
+    pub blind_asks: u64,
+    /// `1` when the mesh answered a blind ask with a path.
+    pub route_answered: u8,
+    /// Records the engine queued for the radio.
+    pub radio_records: u64,
+    /// Radio commands that were answered.
+    pub radio_answered: u64,
+    /// Radio commands whose deadline passed before their answer arrived.
+    pub radio_expired: u64,
+}
+
+/// What the phone's radio last said about itself.
+///
+/// Every reading is optional separately, because they arrive from different questions and a radio
+/// that answered one may not answer the others: a firmware without `GET_STATS` still reports its
+/// tuple, and a radio that has heard nothing reports no RSSI rather than a plausible number.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct LdmuxRadioStatus {
+    /// `1` once the radio answered `APP_START`, which is the only evidence this end has.
+    pub connected: u8,
+    /// `1` when `rssi_dbm` and `snr_quarter_db` mean anything.
+    pub has_signal: u8,
+    /// The RSSI of the last packet **this end** heard, in dBm.
+    pub rssi_dbm: i8,
+    /// That packet's SNR in quarters of a dB, which is the firmware's own scale.
+    pub snr_quarter_db: i8,
+    /// `1` when `battery_mv` was read.
+    pub has_battery: u8,
+    /// The board's battery, in millivolts.
+    pub battery_mv: u16,
+    /// The radio's own transmit airtime since it booted, in seconds.
+    pub tx_air_secs: u32,
+    /// And its receive airtime.
+    pub rx_air_secs: u32,
+    /// The caller's record budget, as last given to `ldmux_client_set_records_left`; 255 = unknown.
+    pub ops_left: u8,
+    /// `1` when `freq_khz`..`coding_rate` were read.
+    pub has_preset: u8,
+    /// The frequency the radio is tuned to, in kHz.
+    pub freq_khz: u32,
+    /// Its bandwidth, in Hz.
+    pub bw_hz: u32,
+    /// Its spreading factor.
+    pub spreading_factor: u8,
+    /// Its coding rate, as the firmware's denominator index (5 is 4/5).
+    pub coding_rate: u8,
+    /// Its transmit power, in dBm.
+    pub tx_power_dbm: i8,
+    /// The path hash width the firmware reported, in bytes (1..=3); 0 when it did not say.
+    pub path_hash_width: u8,
+    /// The firmware's own version code, or 0 when it was not read.
+    pub firmware_version_code: u8,
+}
+
+/// What this end believes about the path to the peer, for the status line and the history deadline.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LdmuxRoute {
+    /// `1` when a fresh path is held, so the next attempt goes direct.
+    pub known: u8,
+    /// `1` when an authenticated direct arrival proved it. A flood's reversed chain never does.
+    pub proven: u8,
+    /// `1` when it is inside the freshness window.
+    pub fresh: u8,
+    /// `1` when the next transmission would flood, which is also what "no route" looks like.
+    pub flood: u8,
+    /// How many repeaters it crosses.
+    pub hops: u8,
+    /// Bytes per hop it is encoded with.
+    pub path_width: u8,
+    /// Its length in bytes.
+    pub path_len: u8,
+    /// The path itself, `path_len` bytes of it.
+    pub path: [u8; 64],
+    /// The SNR it was heard at, in quarters of a dB.
+    pub snr_quarter_db: i16,
 }
 
 /// Event kinds, as `LdmuxClientEvent::kind`.
@@ -208,13 +282,10 @@ pub const LDMUX_ITEM_KEYS: u8 = 2;
 
 /// A phone's radio route, from connect to screen.
 pub struct LdmuxClient {
+    /// The whole engine: the link, the radio window and the frames it owes.
     client: Client,
-    /// Frames waiting to be written to the BLE characteristic.
-    out: VecDeque<Vec<u8>>,
     /// Events taken from the engine and not yet handed to the caller.
     pending: VecDeque<Ready>,
-    /// What the carrier composes a packet from.
-    link: LinkSettings,
 }
 
 /// One event, already encoded, so a caller whose buffer was too small loses nothing.
@@ -224,82 +295,14 @@ struct Ready {
     text: Vec<u8>,
 }
 
-/// The fixed facts a packet is built from.
-#[derive(Clone, Copy)]
-struct LinkSettings {
-    peer_key: [u8; 32],
-    own_key: [u8; 32],
-    hash_size: u8,
-    scope: Option<[u8; 16]>,
-}
-
-/// The carrier the engine drives: it builds each record into a frame and queues it.
-///
-/// There is no radio here. The caller owns the BLE characteristic, so "send" means "make the frame
-/// the caller will write", which is what keeps the engine free of I/O and the ABI pull-only.
-struct FrameSink {
-    out: VecDeque<Vec<u8>>,
-    link: LinkSettings,
-    carriage: Option<Carriage>,
-    nonce: u32,
-}
-
-impl Carrier for FrameSink {
-    async fn send_record(&mut self, _seq: u8, record: &[u8]) -> Result<(), MeshError> {
-        let Some(carriage) = self.carriage.take() else {
-            // A send whose carriage was never named is a bug in the caller, and guessing (flood,
-            // say) would spend twenty times the airtime on a mistake nobody would see.
-            return Err(MeshError::Unsupported(
-                "a record was handed to the radio with no carriage".to_owned(),
-            ));
-        };
-        // A fresh nonce per transmission: the firmware's duplicate table hashes the packet, so a
-        // retransmission carrying the same four bytes would be swallowed at the first repeater.
-        self.nonce = self.nonce.wrapping_add(0x9E37_79B9).max(1);
-        let nonce = self.nonce.to_le_bytes();
-        let packet = match &carriage {
-            Carriage::Direct { path } => packets::raw_direct(self.link.hash_size, path, record),
-            Carriage::Flood => packets::record_flood(
-                self.link.hash_size,
-                &self.link.peer_key,
-                &self.link.own_key,
-                self.link.scope.as_ref(),
-                &nonce,
-                record,
-            ),
-        };
-        let packet = packet.map_err(|e| MeshError::Unsupported(e.to_string()))?;
-        let frame = packets::send_raw_frame(&packet).map_err(|e| MeshError::Unsupported(e.to_string()))?;
-        self.out.push_back(frame);
-        Ok(())
-    }
-
-    async fn recv(&mut self) -> Result<Event, MeshError> {
-        // The engine is fed arrivals through `on_record`, not by polling a radio, so this is never
-        // reached. Saying so is better than returning a fabricated event.
-        Err(MeshError::Unsupported(
-            "this carrier is fed by the caller, not read".to_owned(),
-        ))
-    }
-}
-
-impl CarriageSink for FrameSink {
-    async fn set_carriage(&mut self, carriage: &Carriage) -> Result<(), MeshError> {
-        self.carriage = Some(carriage.clone());
-        Ok(())
-    }
-}
-
 /// Run a future that never really waits.
 ///
-/// The sink above resolves on its first poll, so `Pending` means a bug rather than a wait. There is
-/// deliberately no executor: the engine is synchronous state, and an executor would be a runtime the
-/// phone's library does not have.
+/// The engine's own carrier resolves on its first poll — it composes a packet and queues a frame —
+/// so `Pending` means a bug rather than a wait. There is deliberately no executor: the engine is
+/// synchronous state, and an executor would be a runtime the phone's library does not have.
 fn block_on<F: Future>(future: F) -> F::Output {
     let mut future = pin!(future);
     let mut cx = Context::from_waker(Waker::noop());
-    // One poll, and no loop: the sink resolves immediately by construction, so a `Pending` here is a
-    // bug rather than a wait, and spinning on it would hang the caller's frame instead of saying so.
     match future.as_mut().poll(&mut cx) {
         Poll::Ready(value) => value,
         Poll::Pending => panic!("the phone's carrier never waits, so this is a bug"),
@@ -514,18 +517,7 @@ pub unsafe extern "C" fn ldmux_client_new(
         }
         let handle = Box::new(LdmuxClient {
             client: Client::new(config, local),
-            out: VecDeque::new(),
             pending: VecDeque::new(),
-            link: LinkSettings {
-                peer_key: cfg.peer_static,
-                own_key: cfg.local_public,
-                hash_size: cfg.path_width,
-                // A scoped flood needs the region's 16-byte **key**, which is not the 16-bit code
-                // the config carries: the code is an HMAC *of* the key. So an unscoped send is the
-                // only one this ABI can compose, and the caller that wants a scope passes it in
-                // `ldmux_client_set_scope`. See the header.
-                scope: None,
-            },
         });
         // SAFETY: `out` is non-null and writable.
         unsafe { *out = Box::into_raw(handle) };
@@ -603,18 +595,16 @@ pub unsafe extern "C" fn ldmux_client_on_ble_rx(
             }
             // SAFETY: non-null with `len` readable bytes.
             let bytes = unsafe { std::slice::from_raw_parts(frame, len) };
-            let Some(arrival) = ldmux_mesh::companion::push::classify(bytes) else {
-                return 0;
-            };
-            let info = if arrival.flood {
-                ArrivalInfo::flood(arrival.path.clone(), arrival.path_width, arrival.snr_db())
-            } else if arrival.hops() == 0 {
-                ArrivalInfo::direct(arrival.snr_db())
-            } else {
-                ArrivalInfo::in_transit(arrival.hops(), arrival.snr_db())
-            };
-            h.client.on_record(&arrival.record, &info, now_ms, now_ms);
-            1
+            // **The engine decides what a payload is**, not this shim: a receive-log push, an answer
+            // to a command, or a push about somebody else's traffic. Splitting that decision here
+            // is what gave the caller a protocol to reimplement.
+            match h.client.on_frame(bytes, now_ms, now_ms) {
+                FrameOutcome::Record => 1,
+                FrameOutcome::Ignored
+                | FrameOutcome::Answered(_)
+                | FrameOutcome::Unexpected
+                | FrameOutcome::Discarded => 0,
+            }
         })
     }
 }
@@ -638,31 +628,24 @@ pub unsafe extern "C" fn ldmux_client_poll(
             if out_len.is_null() {
                 return LDMUX_ERR_NULL;
             }
-            let mut sink = FrameSink {
-                out: std::mem::take(&mut h.out),
-                link: h.link,
-                carriage: None,
-                nonce: 1,
-            };
-            let polled = block_on(h.client.poll(now_ms, &mut sink));
-            h.out = sink.out;
-            if let Err(e) = polled {
+            if let Err(e) = block_on(h.client.poll(now_ms)) {
                 return match e {
                     MeshError::Closed => LDMUX_ERR_NOT_OPEN,
                     _ => LDMUX_ERR_ARG,
                 };
             }
-            let Some(frame) = h.out.front().cloned() else {
+            let Some(frame) = h.client.take_frame() else {
                 // SAFETY: out_len is non-null.
                 unsafe { *out_len = 0 };
                 return 0;
             };
             let rc = put(&frame, out, cap, out_len);
             if rc == LDMUX_OK {
-                h.out.pop_front();
                 return 1;
             }
-            // Too small a buffer keeps the frame: dropping it here would lose a record.
+            // Too small a buffer keeps the frame: dropping it here would lose a record. The engine
+            // handed it over once, so the caller must ask again for the same bytes.
+            h.client.put_back(frame);
             rc
         })
     }
@@ -1090,6 +1073,7 @@ pub unsafe extern "C" fn ldmux_client_stats(c: *mut LdmuxClient, out: *mut Ldmux
             }
             let stats = h.client.stats();
             let link = h.client.link_stats();
+            let radio = h.client.radio().counters();
             let filled = LdmuxClientStats {
                 records_sent: link.records_sent,
                 records_received: link.records_received,
@@ -1099,9 +1083,163 @@ pub unsafe extern "C" fn ldmux_client_stats(c: *mut LdmuxClient, out: *mut Ldmux
                 snapshots_refused: stats.snapshots_refused,
                 sessions_established: link.sessions_established,
                 rungs_used: link.rungs_used,
+                blind_asks: stats.blind_asks,
+                route_answered: u8::from(stats.route_answered),
+                radio_records: radio.records,
+                radio_answered: radio.answered,
+                radio_expired: radio.expired,
             };
             // SAFETY: `out` is non-null and writable; the struct is plain data.
             unsafe { *out = filled };
+            LDMUX_OK
+        })
+    }
+}
+
+impl Default for LdmuxRoute {
+    fn default() -> Self {
+        Self {
+            known: 0,
+            proven: 0,
+            fresh: 0,
+            flood: 1,
+            hops: 0,
+            path_width: 1,
+            path_len: 0,
+            path: [0; 64],
+            snr_quarter_db: 0,
+        }
+    }
+}
+
+/// What the phone's radio last said about itself.
+///
+/// Read after `ldmux_client_poll` has handed answers back through `ldmux_client_on_ble_rx`: the
+/// engine updates it from `SELF_INFO`, `DEVICE_INFO`, the radio's stats and the battery answer, and
+/// from the readings on every receive-log push.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_client_radio(c: *mut LdmuxClient, out: *mut LdmuxRadioStatus) -> i32 {
+    // SAFETY: see `with_client`.
+    unsafe {
+        with_client(c, |h| {
+            if out.is_null() {
+                return LDMUX_ERR_NULL;
+            }
+            let status = h.client.radio().status();
+            let (tx_air_secs, rx_air_secs) = status.airtime_secs();
+            let mut filled = LdmuxRadioStatus {
+                connected: u8::from(status.connected),
+                ops_left: status.ops_left.unwrap_or(u8::MAX),
+                tx_air_secs,
+                rx_air_secs,
+                ..LdmuxRadioStatus::default()
+            };
+            if let Some(rssi) = status.last_rssi_dbm {
+                filled.has_signal = 1;
+                filled.rssi_dbm = rssi;
+                filled.snr_quarter_db = status.last_snr_quarter_db.unwrap_or(0);
+            }
+            if let Some(battery) = status.battery {
+                filled.has_battery = 1;
+                filled.battery_mv = battery.millivolts;
+            }
+            if let Some((freq_khz, bw_hz, sf, cr)) = status.preset() {
+                filled.has_preset = 1;
+                filled.freq_khz = freq_khz;
+                filled.bw_hz = bw_hz;
+                filled.spreading_factor = sf;
+                filled.coding_rate = cr;
+                filled.tx_power_dbm = status
+                    .self_info
+                    .as_ref()
+                    .map_or(0, |info| info.tx_power as i8);
+            }
+            filled.path_hash_width = status.path_hash_width().unwrap_or(0);
+            filled.firmware_version_code = status
+                .device_info
+                .as_ref()
+                .map_or(0, |info| info.firmware_version_code);
+            // SAFETY: `out` is non-null and writable; the struct is plain data.
+            unsafe { *out = filled };
+            LDMUX_OK
+        })
+    }
+}
+
+/// What this end believes about the path to the peer, as of `now_ms`.
+///
+/// `hops` is the reason this exists: `answerDeadlineMs(HISTORY_WAIT_MS, hops)` sizes a scrollback
+/// wait against the route, so a flat deadline on a twenty-hop route is the up-key losing a page that
+/// was still arriving.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_client_route(
+    c: *mut LdmuxClient,
+    now_ms: u64,
+    out: *mut LdmuxRoute,
+) -> i32 {
+    // SAFETY: see `with_client`.
+    unsafe {
+        with_client(c, |h| {
+            if out.is_null() {
+                return LDMUX_ERR_NULL;
+            }
+            let route = h.client.route();
+            let sf = 0; // `best` reads the margin table; zero keeps every copy eligible.
+            let mut filled = LdmuxRoute::default();
+            if let Some(best) = route.best(now_ms, sf) {
+                filled.known = 1;
+                filled.proven = u8::from(best.is_proven());
+                filled.fresh = u8::from(best.is_fresh(now_ms));
+                filled.hops = best.hops();
+                filled.path_width = best.path_width();
+                let path = best.path();
+                let n = path.len().min(filled.path.len());
+                filled.path[..n].copy_from_slice(&path[..n]);
+                filled.path_len = u8::try_from(n).unwrap_or(0);
+                #[allow(clippy::cast_possible_truncation)]
+                let quarter = (best.snr_db() * 4.0).round() as i16;
+                filled.snr_quarter_db = quarter;
+            }
+            // The carrier the *first* transmission of the next part would take, which is the one a
+            // status line has to name: a later attempt always floods, so asking about it would say
+            // "flood" for every link that ever missed once.
+            filled.flood = u8::from(route.carrier_for(1, now_ms, sf).is_flood());
+            // SAFETY: `out` is non-null and writable; the struct is plain data.
+            unsafe { *out = filled };
+            LDMUX_OK
+        })
+    }
+}
+
+/// Set the region key this radio's floods are scoped with, or clear it.
+///
+/// A scoped flood carries `HMAC-SHA-256(key, payload_type || payload)` cut to two bytes, so the key
+/// is 16 bytes and the 16-bit code in the config is **not** it — the code is an HMAC *of* it. A
+/// caller with no key sends unscoped, which most meshes forward.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_client_set_scope(
+    c: *mut LdmuxClient,
+    key: *const u8,
+    key_len: usize,
+) -> i32 {
+    // SAFETY: see `with_client`; the caller promised `key_len` readable bytes at `key`.
+    unsafe {
+        with_client(c, |h| {
+            if key_len == 0 {
+                h.client.set_scope(None);
+                return LDMUX_OK;
+            }
+            if key.is_null() {
+                return LDMUX_ERR_NULL;
+            }
+            if key_len != 16 {
+                return LDMUX_ERR_ARG;
+            }
+            // SAFETY: non-null with 16 readable bytes.
+            let bytes = unsafe { std::slice::from_raw_parts(key, 16) };
+            let mut region = [0u8; 16];
+            region.copy_from_slice(bytes);
+            h.client.set_scope(Some(region));
             LDMUX_OK
         })
     }

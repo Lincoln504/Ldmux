@@ -32,6 +32,7 @@ pub mod client;
 pub mod direction;
 pub mod endpoint;
 pub mod handshake;
+pub mod radio;
 pub mod record;
 pub mod session;
 pub mod transaction;

@@ -39,7 +39,10 @@
  * partly written. */
 #define MIRROR_FIELDS 12
 #define EVENT_FIELDS 8
-#define STATS_FIELDS 8
+#define STATS_FIELDS 13
+#define RADIO_FIELDS 17
+#define ROUTE_FIELDS 8
+#define PATH_MAX 64
 
 static LdmuxClient *client_of(jlong h) { return (LdmuxClient *)(intptr_t)h; }
 
@@ -301,6 +304,77 @@ JNIEXPORT jint JNICALL JNI(list)(JNIEnv *env, jclass cls, jlong handle, jlong no
   return ldmux_client_list(client_of(handle), (uint64_t)now_ms);
 }
 
+
+/* ---------------------------------------------------------------------------------------------
+ * The phone's own radio
+ * ------------------------------------------------------------------------------------------- */
+
+/* The reading, as RADIO_FIELDS ints in the order NativeRadioClient.RadioStatus reads them.
+ *
+ * The `has_` bytes are kept beside every optional field: a radio that has heard nothing reports no
+ * RSSI, and a Kotlin `Int` cannot say "not read" on its own. */
+JNIEXPORT jint JNICALL JNI(radio)(JNIEnv *env, jclass cls, jlong handle, jintArray out) {
+  (void)cls;
+  if (!out || (*env)->GetArrayLength(env, out) < RADIO_FIELDS) return LDMUX_ERR_ARG;
+  LdmuxRadioStatus r;
+  memset(&r, 0, sizeof r);
+  int rc = ldmux_client_radio(client_of(handle), &r);
+  if (rc != LDMUX_OK) return rc;
+  put_i32(env, out, 0, (jint)r.connected);
+  put_i32(env, out, 1, (jint)r.has_signal);
+  put_i32(env, out, 2, (jint)r.rssi_dbm);
+  put_i32(env, out, 3, (jint)r.snr_quarter_db);
+  put_i32(env, out, 4, (jint)r.has_battery);
+  put_i32(env, out, 5, (jint)r.battery_mv);
+  /* Airtime is seconds since boot and can pass 2^31 on a long-lived radio. */
+  put_i64(env, out, 6, (jlong)r.tx_air_secs);
+  put_i64(env, out, 7, (jlong)r.rx_air_secs);
+  put_i32(env, out, 8, (jint)r.ops_left);
+  put_i32(env, out, 9, (jint)r.has_preset);
+  put_i32(env, out, 10, (jint)r.freq_khz);
+  put_i32(env, out, 11, (jint)r.bw_hz);
+  put_i32(env, out, 12, (jint)r.spreading_factor);
+  put_i32(env, out, 13, (jint)r.coding_rate);
+  put_i32(env, out, 14, (jint)r.tx_power_dbm);
+  put_i32(env, out, 15, (jint)r.path_hash_width);
+  put_i32(env, out, 16, (jint)r.firmware_version_code);
+  return (*env)->ExceptionCheck(env) ? LDMUX_ERR_ARG : LDMUX_OK;
+}
+
+/* The route, as ROUTE_FIELDS ints in the order NativeRadioClient.Route reads them, and the path
+ * bytes in path_out (its length in `path_len[0]`). */
+JNIEXPORT jint JNICALL JNI(route)(JNIEnv *env, jclass cls, jlong handle, jlong now_ms, jintArray out,
+                                  jbyteArray path_out, jintArray path_len) {
+  (void)cls;
+  if (!out || (*env)->GetArrayLength(env, out) < ROUTE_FIELDS) return LDMUX_ERR_ARG;
+  LdmuxRoute r;
+  memset(&r, 0, sizeof r);
+  int rc = ldmux_client_route(client_of(handle), (uint64_t)now_ms, &r);
+  if (rc != LDMUX_OK) return rc;
+  put_i32(env, out, 0, (jint)r.known);
+  put_i32(env, out, 1, (jint)r.proven);
+  put_i32(env, out, 2, (jint)r.fresh);
+  put_i32(env, out, 3, (jint)r.flood);
+  put_i32(env, out, 4, (jint)r.hops);
+  put_i32(env, out, 5, (jint)r.path_width);
+  put_i32(env, out, 6, (jint)r.snr_quarter_db);
+  put_i32(env, out, 7, (jint)r.path_len);
+  if (path_len) put_i32(env, path_len, 0, (jint)r.path_len);
+  if (path_out && r.path_len > 0) {
+    if ((size_t)(*env)->GetArrayLength(env, path_out) < r.path_len) return LDMUX_ERR_BUFFER;
+    if (!put_bytes(env, path_out, r.path, r.path_len)) return LDMUX_ERR_BUFFER;
+  }
+  return (*env)->ExceptionCheck(env) ? LDMUX_ERR_ARG : LDMUX_OK;
+}
+
+JNIEXPORT jint JNICALL JNI(setScope)(JNIEnv *env, jclass cls, jlong handle, jbyteArray key) {
+  (void)cls;
+  uint8_t buf[32];
+  size_t n = 0;
+  if (!get_bytes(env, key, buf, sizeof buf, &n)) return LDMUX_ERR_ARG;
+  return ldmux_client_set_scope(client_of(handle), buf, n);
+}
+
 /* ---------------------------------------------------------------------------------------------
  * Reading back
  * ------------------------------------------------------------------------------------------- */
@@ -397,5 +471,10 @@ JNIEXPORT jint JNICALL JNI(stats)(JNIEnv *env, jclass cls, jlong handle, jlongAr
   put_i64(env, out, 5, (jlong)s.snapshots_refused);
   put_i64(env, out, 6, (jlong)s.sessions_established);
   put_i64(env, out, 7, (jlong)s.rungs_used);
+  put_i64(env, out, 8, (jlong)s.blind_asks);
+  put_i64(env, out, 9, (jlong)s.route_answered);
+  put_i64(env, out, 10, (jlong)s.radio_records);
+  put_i64(env, out, 11, (jlong)s.radio_answered);
+  put_i64(env, out, 12, (jlong)s.radio_expired);
   return (*env)->ExceptionCheck(env) ? LDMUX_ERR_ARG : LDMUX_OK;
 }

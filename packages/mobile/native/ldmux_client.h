@@ -163,7 +163,60 @@ typedef struct {
     uint64_t snapshots_refused;
     uint64_t sessions_established;
     uint64_t rungs_used;
+    /* Bootstrap rungs sent while no path to the peer was held, and whether the mesh answered one. */
+    uint64_t blind_asks;
+    uint8_t route_answered;
+    /* What the phone's own radio answered: records queued, commands answered, deadlines missed. */
+    uint64_t radio_records;
+    uint64_t radio_answered;
+    uint64_t radio_expired;
 } LdmuxClientStats;
+
+/*
+ * What the phone's radio last said about itself.
+ *
+ * Every reading is optional separately, because they arrive from different questions and a radio
+ * that answered one may not answer the others: a firmware without GET_STATS still reports its
+ * tuple, and a radio that has heard nothing reports no RSSI rather than a plausible number. A field
+ * whose `has_` byte is 0 has not been read.
+ */
+typedef struct {
+    uint8_t connected;        /* 1 once the radio answered APP_START */
+    uint8_t has_signal;       /* 1 when rssi_dbm and snr_quarter_db mean anything */
+    int8_t rssi_dbm;          /* the last packet **this end** heard */
+    int8_t snr_quarter_db;    /* its SNR, in quarters of a dB */
+    uint8_t has_battery;
+    uint16_t battery_mv;
+    uint32_t tx_air_secs;     /* the radio's own transmit airtime since boot */
+    uint32_t rx_air_secs;
+    uint8_t ops_left;         /* the caller's record budget; 255 = not reported */
+    uint8_t has_preset;
+    uint32_t freq_khz;
+    uint32_t bw_hz;
+    uint8_t spreading_factor;
+    uint8_t coding_rate;      /* the firmware's denominator index: 5 is 4/5 */
+    int8_t tx_power_dbm;
+    uint8_t path_hash_width;  /* bytes per hop, 1..=3; 0 when the firmware did not say */
+    uint8_t firmware_version_code;
+} LdmuxRadioStatus;
+
+/*
+ * What this end believes about the path to the peer.
+ *
+ * `hops` is why this exists: the scrollback wait is sized against the route, so a flat deadline on a
+ * twenty-hop route loses a page that was still arriving.
+ */
+typedef struct {
+    uint8_t known;        /* 1 when a fresh path is held, so the next attempt goes direct */
+    uint8_t proven;       /* 1 when an authenticated direct arrival proved it */
+    uint8_t fresh;
+    uint8_t flood;        /* 1 when the next first attempt would flood */
+    uint8_t hops;
+    uint8_t path_width;
+    uint8_t path_len;
+    uint8_t path[64];
+    int16_t snr_quarter_db;
+} LdmuxRoute;
 
 /* ---------------------------------------------------------------------------------------------
  * Life cycle
@@ -193,14 +246,24 @@ int32_t ldmux_client_set_records_left(LdmuxClient *c, uint32_t left);
  * The air
  * ------------------------------------------------------------------------------------------- */
 
-/* Hand one BLE notification to the engine: the whole companion frame, byte for byte.
- * Returns 1 when it carried a session record offered to the link, 0 when it carried nothing of ours
- * (an advert, a route request, a stranger's channel traffic), or a negative error. */
+/* Hand one BLE notification to the engine: one companion **payload**, opcode first.
+ *
+ * A characteristic carries the payload and no serial framing; the engine decides whether it is a
+ * receive-log push carrying a record, the answer to a command it asked, or a push about somebody
+ * else's traffic. Returns 1 when it carried a record offered to the link, 0 for anything else, or a
+ * negative error. */
 int32_t ldmux_client_on_ble_rx(LdmuxClient *c, const uint8_t *frame, size_t len, uint64_t now_ms);
 
 /* Write **at most one** frame to `out`, and its length to `*out_len`.
+ *
+ * The frame is a companion **payload**, ready for the characteristic: `[opcode][args...]`. It is not
+ * a serial frame — no `0x3C` and no length — because a BLE write carries the payload and a serial
+ * caller wraps it once.
+ *
  * Returns 1 when a frame was written, 0 when there is nothing to send, or a negative error; a `cap`
- * too small writes nothing, keeps the frame and reports the length it needed in *out_len. */
+ * too small writes nothing, keeps the frame and reports the length it needed in *out_len. Call in a
+ * loop until it returns 0: a command queued behind another becomes writable the moment the first is
+ * answered. */
 int32_t ldmux_client_poll(LdmuxClient *c, uint64_t now_ms, uint8_t *out, size_t cap, size_t *out_len);
 
 /* When the caller should look again even if nothing arrives: 1 and *out set, or 0 for no deadline.
@@ -278,6 +341,23 @@ int32_t ldmux_client_poll_event(LdmuxClient *c, LdmuxClientEvent *out, uint8_t *
 
 /* The client's own counters. */
 int32_t ldmux_client_stats(LdmuxClient *c, LdmuxClientStats *out);
+
+/* ---------------------------------------------------------------------------------------------
+ * The phone's own radio
+ * ------------------------------------------------------------------------------------------- */
+
+/* What the radio last said about itself. Read after answers have been handed back through
+ * ldmux_client_on_ble_rx: the engine updates it from SELF_INFO, DEVICE_INFO, the radio's stats and
+ * the battery answer, and from the readings on every receive-log push. */
+int32_t ldmux_client_radio(LdmuxClient *c, LdmuxRadioStatus *out);
+
+/* What this end believes about the path to the peer, as of `now_ms`. */
+int32_t ldmux_client_route(LdmuxClient *c, uint64_t now_ms, LdmuxRoute *out);
+
+/* Set the region key this radio's floods are scoped with, or clear it with key_len 0.
+ * A scoped flood carries HMAC-SHA-256(key, payload_type || payload) cut to two bytes, so the key is
+ * 16 bytes — the 16-bit code in the config is an HMAC *of* the key and is not it. */
+int32_t ldmux_client_set_scope(LdmuxClient *c, const uint8_t *key, size_t key_len);
 
 #ifdef __cplusplus
 }

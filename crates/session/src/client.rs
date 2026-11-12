@@ -19,6 +19,10 @@
 //! * **the screen** — a `Snapshot` is one atomic screen: geometry, cursor, rows and the answer to the
 //!   command that produced it. [`PageMirror`] applies it whole or not at all, which is what makes
 //!   `RC-11` (a screen drawn from three messages that could arrive apart) impossible.
+//! * **the radio itself** — the questions a client asks its own radio, its one-command window, and
+//!   the last reading ([`crate::radio`]). It is here rather than in the app because radio
+//!   management is protocol, and a second owner writing commands to one GATT link is `RC-2`
+//!   (`docs/RADIO-PLAN.md` §12.7d).
 //!
 //! # Purity
 //!
@@ -30,7 +34,11 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use ldmux_mesh::carrier::{Carrier, Event};
+use ldmux_mesh::companion::build as packets;
+use ldmux_mesh::companion::push;
 use ldmux_mesh::error::MeshError;
+use ldmux_mesh::route::{Carriage, RouteTable};
 use ldmux_protocol::mesh_term::{
     Decoder, EncodeError, MAX_CHUNKS, MAX_SEND_ITEMS, MarkEntry, Message, Patch, SendItem,
     SessionEntry, SnapshotAssembly, VERSION as TERMINAL_VERSION, applied, snapshot_flag,
@@ -39,6 +47,7 @@ use ldmux_protocol::mesh_term::{
 use crate::endpoint::{
     ArrivalInfo, CarriageSink, EndpointConfig, Outbound, RadioEndpoint, Role, SentKind, Stats,
 };
+use crate::radio::Radio;
 use crate::handshake::{HandshakeError, Keypair};
 use crate::transaction::BeginError;
 
@@ -482,6 +491,16 @@ pub struct ClientStats {
     pub unknown_downlink: u64,
     /// A screen dropped because its chunks never all arrived.
     pub snapshots_refused: u64,
+    /// Bootstrap rungs sent while no usable path to the peer was held.
+    ///
+    /// This is what "no route: nothing answered N request(s)" counts. There is no separate route
+    /// request in this protocol — the bootstrap initiation **is** the discovery — so a rung sent
+    /// blind is one attempt at finding a peer nobody has a path to yet.
+    pub blind_asks: u64,
+    /// Whether the mesh answered a blind ask: a path was learned after one.
+    ///
+    /// Cleared when the link is rebuilt, because the question it answers is about *this* attempt.
+    pub route_answered: bool,
 }
 
 impl ClientStats {
@@ -501,10 +520,33 @@ impl ClientStats {
     }
 }
 
-/// The phone's client: pages, screens and the link underneath them.
+/// What the frame builder needs that is not key material.
+///
+/// The engine composes the packet and the frame, so the caller writes bytes and nothing else: a
+/// caller that framed its own records would be a second implementation of the frame format, which is
+/// the class of defect this rebuild removed.
+#[derive(Clone, Copy, Debug)]
+pub struct LinkSettings {
+    /// The host radio's static public key: the flood wrapper's destination hash is cut from it.
+    pub peer_key: [u8; 32],
+    /// This phone's own public key, which the wrapper's source hash is cut from.
+    pub own_key: [u8; 32],
+    /// Bytes per hop, as the mesh encodes its paths.
+    pub hash_size: u8,
+    /// The region's 16-byte flood key, when this radio's floods are scoped.
+    pub scope: Option<[u8; 16]>,
+}
+
+/// The phone's client: pages, screens, its own radio and the link underneath them.
 pub struct Client {
     endpoint: RadioEndpoint,
     config: ClientConfig,
+    /// The phone's own radio: one command in flight, and the last thing it said.
+    radio: Radio,
+    /// What a packet is composed from.
+    link: LinkSettings,
+    /// The next transmission nonce, so a retransmission is not byte-identical to the copy before it.
+    nonce: u32,
     /// One page per open shell, keyed by the id the messages carry.
     pages: BTreeMap<String, Page>,
     /// The pages in the order they were opened, which is the order the pager shows them.
@@ -524,9 +566,23 @@ impl Client {
     /// A client for one host, holding one keypair.
     #[must_use]
     pub fn new(config: ClientConfig, local: Keypair) -> Self {
+        // Read the public half before the keypair is consumed: `Keypair` owns its secret and wipes
+        // it on drop, so it cannot be borrowed afterwards.
+        let own_key = local.public;
         let endpoint = RadioEndpoint::phone(config.endpoint(), local);
         Self {
             endpoint,
+            radio: Radio::new(),
+            link: LinkSettings {
+                peer_key: config.peer_static,
+                own_key,
+                hash_size: config.path_width,
+                // A scoped flood needs the region's 16-byte *key*, not the 16-bit code the config
+                // carries: the code is an HMAC of the key. Until a caller supplies the key, this
+                // radio's floods are unscoped, and `set_scope` is the way in.
+                scope: None,
+            },
+            nonce: 1,
             config,
             pages: BTreeMap::new(),
             order: Vec::new(),
@@ -545,6 +601,11 @@ impl Client {
     /// [`HandshakeError`] when the initiation cannot be built, which is a bad key or a bad pairing
     /// rather than anything the air did.
     pub fn connect(&mut self, now_ms: u64, wall_ms: u64) -> Result<(), HandshakeError> {
+        // **The radio comes up first.** `APP_START` is the companion hello: the firmware latches the
+        // protocol version from `DEVICE_QUERY` and answers everything else in the shapes that
+        // version selects, so a session begun before it would be a session whose radio this end
+        // knows nothing about. Queueing it here costs nothing and orders it first.
+        self.radio.bring_up(now_ms);
         self.endpoint.connect(now_ms, wall_ms)
     }
 
@@ -848,30 +909,135 @@ impl Client {
         self.take_events()
     }
 
-    /// Let the link decide what it owes the air, and hand it to the carrier.
+    /// Let the link decide what it owes the air, and make the frames available.
+    ///
+    /// The caller writes what [`Client::take_frame`] hands it and nothing else: the packet, the
+    /// carriage and the companion frame are all composed here, which is what stops the app keeping a
+    /// second copy of the wire.
     ///
     /// # Errors
     ///
-    /// [`MeshError`] when the carrier refuses a record or closes.
-    pub async fn poll<C: CarriageSink>(
-        &mut self,
-        now_ms: u64,
-        carrier: &mut C,
-    ) -> Result<Vec<Outbound>, MeshError> {
-        let report = self.endpoint.poll(now_ms, carrier).await?;
+    /// [`MeshError`] when a record cannot be composed.
+    pub async fn poll(&mut self, now_ms: u64) -> Result<Vec<Outbound>, MeshError> {
+        // The radio's window first: a status ask or a pending record goes out before anything new is
+        // decided, and a deadline that has passed is closed so the next command may run.
+        self.radio.pump(now_ms);
+        let Self {
+            endpoint,
+            radio,
+            link,
+            nonce,
+            ..
+        } = self;
+        let mut sink = RecordSink {
+            radio,
+            link: *link,
+            carriage: None,
+            nonce: *nonce,
+        };
+        let report = endpoint.poll(now_ms, &mut sink).await?;
+        *nonce = sink.nonce;
         for item in &report {
-            self.note(item);
+            self.note(item, now_ms);
         }
         for message in self.endpoint.take_inbound() {
             self.absorb(&message, now_ms);
         }
+        if self.stats.blind_asks > 0 && self.endpoint.route().best(now_ms, self.config.sf).is_some()
+        {
+            self.stats.route_answered = true;
+        }
+        // A record that was handed over in this pass may have taken the window; the next frame is
+        // written once this one is answered, which is what one command in flight means.
+        self.radio.pump(now_ms);
         Ok(report)
     }
 
+    /// Take the next frame the caller must write, if there is one.
+    ///
+    /// One companion payload, ready for the characteristic: `[opcode][args…]`. A serial caller wraps
+    /// it with `ldmux_mesh::companion::framing::encode`; a BLE caller writes it as it is, because the
+    /// characteristic carries the payload and not a frame header.
+    pub fn take_frame(&mut self) -> Option<Vec<u8>> {
+        self.radio.take_frame()
+    }
+
+    /// Return a frame the caller could not write, so the next call offers it again.
+    pub fn put_back(&mut self, frame: Vec<u8>) {
+        self.radio.put_back(frame);
+    }
+
+    /// Hand one whole companion payload from the radio to the engine.
+    ///
+    /// This is the only entry for what the radio says: a receive-log push carries a record and its
+    /// readings, and everything else is an answer to a command. Splitting that decision between the
+    /// engine and the caller is how the caller came to own a protocol.
+    ///
+    /// Returns what the push or the answer did, so a caller can log it.
+    pub fn on_frame(&mut self, payload: &[u8], now_ms: u64, wall_ms: u64) -> FrameOutcome {
+        if payload.first() == Some(&push::PUSH_LOG_RX_DATA) {
+            return match push::classify(payload) {
+                Some(arrival) => {
+                    self.radio
+                        .note_heard(arrival.rssi_dbm, arrival.snr_quarter_db);
+                    let info = if arrival.flood {
+                        ArrivalInfo::flood(
+                            arrival.path.clone(),
+                            arrival.path_width,
+                            arrival.snr_db(),
+                        )
+                    } else if arrival.hops() == 0 {
+                        ArrivalInfo::direct(arrival.snr_db())
+                    } else {
+                        ArrivalInfo::in_transit(arrival.hops(), arrival.snr_db())
+                    };
+                    self.on_record(&arrival.record, &info, now_ms, wall_ms);
+                    FrameOutcome::Record
+                }
+                // A push about somebody else's traffic: an advert, a channel message, a route
+                // request. Not ours, and not an error.
+                None => FrameOutcome::Ignored,
+            };
+        }
+        match self.radio.on_answer(payload, now_ms) {
+            ldmux_mesh::companion::fifo::Answer::Settled(settled) => {
+                FrameOutcome::Answered(settled.answer)
+            }
+            ldmux_mesh::companion::fifo::Answer::Unexpected { .. } => FrameOutcome::Unexpected,
+            ldmux_mesh::companion::fifo::Answer::Discarded { .. } => FrameOutcome::Discarded,
+        }
+    }
+
+    /// The phone's own radio: its last reading, its counters, and its one-command window.
+    #[must_use]
+    pub fn radio(&self) -> &Radio {
+        &self.radio
+    }
+
+    /// What this end believes about the path to the peer.
+    #[must_use]
+    pub fn route(&self) -> &RouteTable {
+        self.endpoint.route()
+    }
+
+    /// Set the region key this radio's floods are scoped with, or `None` for unscoped.
+    pub fn set_scope(&mut self, key: Option<[u8; 16]>) {
+        self.link.scope = key;
+    }
+
     /// When the caller should look again even if nothing arrives.
+    ///
+    /// The earliest of the link's own deadlines and the radio window's, so a timer built from this
+    /// never leaves a record queued behind an answer that has already arrived.
     #[must_use]
     pub fn next_deadline_ms(&self) -> Option<u64> {
-        self.endpoint.next_deadline_ms()
+        match (
+            self.endpoint.next_deadline_ms(),
+            self.radio.next_deadline_ms(),
+        ) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// The screen for one open shell.
@@ -1076,10 +1242,17 @@ impl Client {
         }
     }
 
-    fn note(&mut self, outbound: &Outbound) {
+    fn note(&mut self, outbound: &Outbound, now_ms: u64) {
         match outbound {
             Outbound::Sent { what, .. } => match what {
-                SentKind::Initiation => self.stats.initiations_sent += 1,
+                SentKind::Initiation => {
+                    self.stats.initiations_sent += 1;
+                    // A rung sent with no path in hand is an ask the mesh has to answer; one sent
+                    // down a path is not a question at all.
+                    if self.endpoint.route().best(now_ms, self.config.sf).is_none() {
+                        self.stats.blind_asks += 1;
+                    }
+                }
                 SentKind::Part {
                     retransmit: true, ..
                 } => {
@@ -1099,6 +1272,83 @@ impl Client {
             Outbound::Superseded { .. } => self.stats.superseded += 1,
             Outbound::BootstrapFailed { .. } => self.stats.bootstrap_failures += 1,
         }
+    }
+}
+
+/// What one companion payload from the radio did.
+///
+/// A caller logs it and nothing else: whether a payload was a record, a push about somebody else's
+/// traffic, or the answer to a command is a protocol question, and the engine is where it is
+/// answered.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FrameOutcome {
+    /// A receive-log push carrying a record for this session.
+    Record,
+    /// A push about traffic that is not ours: an advert, a channel message, a route request.
+    Ignored,
+    /// The answer to the command in flight, settled by `code`.
+    Answered(u8),
+    /// An answer for nothing outstanding, or for a command this end did not ask.
+    Unexpected,
+    /// An answer that arrived inside a drain window, after its command had expired. Dropped on
+    /// purpose: the firmware echoes no sequence number, so it cannot be told from the next one's.
+    Discarded,
+}
+
+/// The carrier the endpoint drives: it composes a packet and hands it to the radio's window.
+///
+/// There is no I/O here. "Sending" a record means building the packet the radio will transmit and
+/// queueing the frame the caller must write — which is what keeps the engine pure and what puts a
+/// record inside the same one-command window as every other command.
+struct RecordSink<'a> {
+    radio: &'a mut Radio,
+    link: LinkSettings,
+    carriage: Option<Carriage>,
+    nonce: u32,
+}
+
+impl Carrier for RecordSink<'_> {
+    async fn send_record(&mut self, _seq: u8, record: &[u8]) -> Result<(), MeshError> {
+        let Some(carriage) = self.carriage.take() else {
+            // A send whose carriage was never named is a bug in this endpoint, and guessing — flood,
+            // say — would spend twenty times the airtime on a mistake nobody would see.
+            return Err(MeshError::Unsupported(
+                "a record was handed over with no carriage".to_owned(),
+            ));
+        };
+        // A fresh nonce per transmission: the firmware's duplicate table hashes the packet, so a
+        // retransmission carrying the same four bytes would be swallowed at the first repeater.
+        self.nonce = self.nonce.wrapping_add(0x9E37_79B9).max(1);
+        let nonce = self.nonce.to_le_bytes();
+        let packet = match &carriage {
+            Carriage::Direct { path } => packets::raw_direct(self.link.hash_size, path, record),
+            Carriage::Flood => packets::record_flood(
+                self.link.hash_size,
+                &self.link.peer_key,
+                &self.link.own_key,
+                self.link.scope.as_ref(),
+                &nonce,
+                record,
+            ),
+        }
+        .map_err(|e| MeshError::Unsupported(e.to_string()))?;
+        self.radio.send_record(&packet);
+        Ok(())
+    }
+
+    async fn recv(&mut self) -> Result<Event, MeshError> {
+        // The engine is fed arrivals through `on_frame`, not by polling a radio, so this is never
+        // reached. Saying so is better than returning a fabricated event.
+        Err(MeshError::Unsupported(
+            "this carrier is fed by the caller, not read".to_owned(),
+        ))
+    }
+}
+
+impl CarriageSink for RecordSink<'_> {
+    async fn set_carriage(&mut self, carriage: &Carriage) -> Result<(), MeshError> {
+        self.carriage = Some(carriage.clone());
+        Ok(())
     }
 }
 

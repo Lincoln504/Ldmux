@@ -145,6 +145,7 @@ fn a_normal_loop_drives_a_connect_and_gets_bytes_on_the_air() {
     let mut out = vec![0u8; 512];
     let mut len = 0usize;
     let mut written = 0;
+    let mut seen: Vec<u8> = Vec::new();
     for step in 0..20u64 {
         // SAFETY: `out` is `out.len()` writable bytes and `len` is writable.
         let rc = unsafe {
@@ -159,15 +160,25 @@ fn a_normal_loop_drives_a_connect_and_gets_bytes_on_the_air() {
         assert!(rc >= 0, "poll failed: {rc}");
         if rc == 1 {
             written += 1;
-            assert!(len > 3, "a frame is a header plus a payload");
-            // The frame is the companion protocol's own: `<`, a length, then the command.
-            assert_eq!(out[0], 0x3C, "host start byte");
-            assert_eq!(out[3], 0x41, "CMD_SEND_RAW_PACKET");
+            assert!(len > 0, "a frame is at least its command byte");
+            // **The payload, not the serial frame.** A BLE characteristic carries `[opcode][args]`
+            // and the host adds `<` and a length when it writes to a port, so a `0x3C` here would be
+            // three bytes the radio reads as a command.
+            assert_ne!(out[0], 0x3C, "the engine emits a payload, not a serial frame");
+            seen.push(out[0]);
         }
     }
     assert!(
         written > 0,
         "a phone that connects owes the air an initiation and never emitted one"
+    );
+    assert!(
+        seen.contains(&0x01),
+        "the radio was never sent APP_START, so it was never told this client exists: {seen:?}"
+    );
+    assert!(
+        seen.contains(&0x41),
+        "no record was ever handed to the radio: {seen:?}"
     );
 
     // A deadline the caller can set a timer from.
@@ -194,7 +205,7 @@ fn a_buffer_too_small_reports_the_size_and_keeps_the_frame() {
     // SAFETY: a null buffer with capacity 0 is the documented way to ask how big it is.
     let rc = unsafe { ldmux_client_poll(h.0, NOW, null_mut(), 0, &mut len) };
     assert_eq!(rc, LDMUX_ERR_BUFFER, "a zero-capacity buffer is too small");
-    assert!(len > 3, "the needed length must be reported");
+    assert!(len > 0, "the needed length must be reported");
 
     // The same frame is still there, and now it fits.
     let mut out = vec![0u8; len];
@@ -211,7 +222,10 @@ fn a_buffer_too_small_reports_the_size_and_keeps_the_frame() {
     };
     assert_eq!(rc, 1, "the frame a short buffer preserved must come back");
     assert_eq!(got, len);
-    assert_eq!(out[0], 0x3C);
+    // The first thing a client that has just connected asks its radio is `APP_START`: it is what
+    // tells the firmware this client exists, and everything else is answered in the shapes it
+    // selects.
+    assert_eq!(out[0], 0x01, "APP_START is the first command");
 }
 
 #[test]
@@ -315,4 +329,159 @@ fn the_handle_is_a_real_pointer_the_caller_can_hold() {
     assert_eq!(unsafe { ldmux_client_established(holder.client.as_ptr()) }, 0);
     // SAFETY: the handle came from `ldmux_client_new`.
     unsafe { ldmux_client_free(&mut raw) };
+}
+
+/// A phone that has never heard from its radio reports nothing rather than a plausible reading.
+#[test]
+fn an_unasked_radio_reports_nothing_rather_than_a_guess() {
+    let cfg = config();
+    let h = Handle::new(&cfg);
+    let mut status = LdmuxRadioStatus::default();
+    // SAFETY: the handle is live and `status` is writable.
+    let rc = unsafe { ldmux_client_radio(h.0, &mut status) };
+    assert_eq!(rc, 0);
+    assert_eq!(status.connected, 0, "nothing has said the radio is there");
+    assert_eq!(status.has_signal, 0, "no packet has been heard");
+    assert_eq!(status.has_battery, 0);
+    assert_eq!(status.has_preset, 0);
+    assert_eq!(status.ops_left, u8::MAX, "no budget has been reported");
+    // SAFETY: nulls are the argument under test; the ABI promises to refuse them.
+    let radio_rc = unsafe { ldmux_client_radio(h.0, null_mut()) };
+    assert_eq!(radio_rc, LDMUX_ERR_NULL);
+    // SAFETY: the same, for the route.
+    let route_rc = unsafe { ldmux_client_route(h.0, NOW, null_mut()) };
+    assert_eq!(route_rc, LDMUX_ERR_NULL);
+}
+
+/// The radio's answers reach the status: `SELF_INFO`, `DEVICE_INFO`, the battery and the stats.
+///
+/// This is the whole of `AR-13` as a test: the engine asks, the answers come back through the one
+/// notification entry, and the reading is what the settings screen draws.
+#[test]
+fn the_radios_answers_reach_the_status_through_the_one_entry() {
+    let cfg = config();
+    let h = Handle::new(&cfg);
+    // SAFETY: the handle is live.
+    unsafe { assert_eq!(ldmux_client_connect(h.0, NOW, NOW), 0) };
+
+    let mut frame = vec![0u8; 512];
+    let mut len = 0usize;
+    let mut seen: Vec<u8> = Vec::new();
+    let mut step = 0u64;
+    while seen.len() < 4 && step < 32 {
+        // SAFETY: `frame` is `len` writable bytes and `len` is writable.
+        let rc = unsafe {
+            ldmux_client_poll(h.0, NOW + step, frame.as_mut_ptr(), frame.len(), &mut len)
+        };
+        assert!(rc >= 0, "poll failed: {rc}");
+        step += 1;
+        if rc != 1 {
+            continue;
+        }
+        let command = frame[0];
+        seen.push(command);
+        let answer = answer_to(command);
+        // SAFETY: `answer` is a live slice for the call.
+        unsafe { ldmux_client_on_ble_rx(h.0, answer.as_ptr(), answer.len(), NOW + step) };
+    }
+    assert!(
+        seen.contains(&0x01) && seen.contains(&0x16) && seen.contains(&0x14),
+        "the engine did not ask its radio the things it needs: {seen:?}"
+    );
+
+    let mut status = LdmuxRadioStatus::default();
+    // SAFETY: the handle is live and `status` is writable.
+    unsafe { assert_eq!(ldmux_client_radio(h.0, &mut status), 0) };
+    assert_eq!(status.connected, 1, "APP_START was answered");
+    assert_eq!(status.has_preset, 1);
+    assert_eq!(status.freq_khz, 910_525);
+    assert_eq!(status.bw_hz, 62_500);
+    assert_eq!(status.spreading_factor, 7);
+    assert_eq!(status.coding_rate, 5);
+    assert_eq!(status.path_hash_width, 1, "mode 0 is a one-byte hash");
+    assert_eq!(status.has_battery, 1);
+    assert_eq!(status.battery_mv, 4_050);
+}
+
+/// A route that has never been heard is unknown, and the next attempt floods.
+#[test]
+fn a_link_with_no_route_says_so_and_would_flood() {
+    let cfg = config();
+    let h = Handle::new(&cfg);
+    let mut route = LdmuxRoute::default();
+    // SAFETY: the handle is live and `route` is writable.
+    unsafe { assert_eq!(ldmux_client_route(h.0, NOW, &mut route), 0) };
+    assert_eq!(route.known, 0);
+    assert_eq!(route.proven, 0);
+    assert_eq!(route.flood, 1, "with no path the first attempt is a flood");
+    assert_eq!(route.hops, 0);
+}
+
+/// The scope is 16 bytes of region key or nothing: the 16-bit code in the config is not it.
+#[test]
+fn a_scope_is_sixteen_bytes_or_cleared() {
+    let cfg = config();
+    let h = Handle::new(&cfg);
+    let key = [0x5Au8; 16];
+    // SAFETY: the handle is live and `key` is 16 bytes.
+    assert_eq!(unsafe { ldmux_client_set_scope(h.0, key.as_ptr(), 16) }, 0);
+    // SAFETY: the same.
+    assert_eq!(unsafe { ldmux_client_set_scope(h.0, key.as_ptr(), 0) }, 0);
+    // A length that is not 16 is refused rather than truncated into a different region.
+    // SAFETY: the buffer is live; the length is the thing under test.
+    let short = unsafe { ldmux_client_set_scope(h.0, key.as_ptr(), 15) };
+    assert_eq!(short, LDMUX_ERR_ARG);
+    // SAFETY: nulls are the argument under test.
+    let no_key = unsafe { ldmux_client_set_scope(h.0, null(), 16) };
+    assert_eq!(no_key, LDMUX_ERR_NULL);
+}
+
+/// The answer a stock radio gives each command the engine asks on connect.
+fn answer_to(command: u8) -> Vec<u8> {
+    match command {
+        // `RESP_CODE_SELF_INFO`: the public preset and a name.
+        0x01 => {
+            let mut out = vec![0x05, 1, 22, 22];
+            out.extend_from_slice(&[0x11; 32]);
+            out.extend_from_slice(&0i32.to_le_bytes());
+            out.extend_from_slice(&0i32.to_le_bytes());
+            out.extend_from_slice(&[0, 0, 0, 0]);
+            out.extend_from_slice(&910_525u32.to_le_bytes());
+            out.extend_from_slice(&62_500u32.to_le_bytes());
+            out.extend_from_slice(&[7, 5]);
+            out.extend_from_slice(b"radio");
+            out
+        }
+        // `RESP_CODE_DEVICE_INFO`, firmware 13 with a one-byte path hash mode.
+        0x16 => {
+            let mut out = vec![0x0D, 13, 175, 40];
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&[0u8; 12]);
+            out.extend_from_slice(&[0u8; 40]);
+            out.extend_from_slice(&[0u8; 20]);
+            out.push(1);
+            out.push(0);
+            out
+        }
+        // `RESP_CODE_BATT_AND_STORAGE`.
+        0x14 => {
+            let mut out = vec![0x0C];
+            out.extend_from_slice(&4_050u16.to_le_bytes());
+            out.extend_from_slice(&12u32.to_le_bytes());
+            out.extend_from_slice(&256u32.to_le_bytes());
+            out
+        }
+        // `RESP_CODE_STATS`, radio type.
+        0x38 => {
+            let mut out = vec![0x18, 1];
+            out.extend_from_slice(&(-120i16).to_le_bytes());
+            out.push((-90i8) as u8);
+            out.push((-12i8) as u8);
+            out.extend_from_slice(&7u32.to_le_bytes());
+            out.extend_from_slice(&250u32.to_le_bytes());
+            out
+        }
+        // A send, and anything else: `RESP_CODE_OK`.
+        _ => vec![0x00],
+    }
 }

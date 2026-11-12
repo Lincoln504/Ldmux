@@ -12,6 +12,7 @@
 //! a radio, because the host and the phone issue different commands.
 
 pub mod build;
+pub mod command;
 pub mod fifo;
 pub mod framing;
 pub mod push;

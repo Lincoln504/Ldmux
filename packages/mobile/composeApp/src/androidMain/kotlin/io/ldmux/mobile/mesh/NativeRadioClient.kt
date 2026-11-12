@@ -129,6 +129,20 @@ object NativeRadioClient {
     /** [out] receives [STATS_FIELDS] counters. */
     external fun stats(handle: Long, out: LongArray): Int
 
+    // ---- the phone's own radio ---------------------------------------------------------------
+
+    /** [out] receives [RADIO_FIELDS] values in [RadioStatus] order. */
+    external fun radio(handle: Long, out: IntArray): Int
+
+    /**
+     * [out] receives [ROUTE_FIELDS] values in [Route] order, and [pathOut] the path bytes whose
+     * length lands in `pathLen[0]`.
+     */
+    external fun route(handle: Long, nowMs: Long, out: IntArray, pathOut: ByteArray, pathLen: IntArray): Int
+
+    /** The region's 16-byte flood key, or an empty array to send unscoped. */
+    external fun setScope(handle: Long, key: ByteArray): Int
+
     // ---- layout the shim writes ---------------------------------------------------------------
 
     /** How many values [mirror] writes. */
@@ -138,7 +152,13 @@ object NativeRadioClient {
     const val EVENT_FIELDS = 8
 
     /** How many counters [stats] writes. */
-    const val STATS_FIELDS = 8
+    const val STATS_FIELDS = 13
+
+    /** How many values [radio] writes. */
+    const val RADIO_FIELDS = 17
+
+    /** How many values [route] writes. */
+    const val ROUTE_FIELDS = 8
 }
 
 /** Status codes, exactly as `ldmux_client.h` defines them. */
@@ -291,6 +311,13 @@ data class ClientStats(
     val snapshotsRefused: Long,
     val sessionsEstablished: Long,
     val rungsUsed: Long,
+    /** Bootstrap rungs sent while no path to the host was held. */
+    val blindAsks: Long,
+    /** True when the mesh answered a blind ask with a path. */
+    val routeAnswered: Boolean,
+    val radioRecords: Long,
+    val radioAnswered: Long,
+    val radioExpired: Long,
 ) {
     companion object {
         internal fun of(v: LongArray): ClientStats = ClientStats(
@@ -302,6 +329,128 @@ data class ClientStats(
             snapshotsRefused = v[5],
             sessionsEstablished = v[6],
             rungsUsed = v[7],
+            blindAsks = v[8],
+            routeAnswered = v[9] != 0L,
+            radioRecords = v[10],
+            radioAnswered = v[11],
+            radioExpired = v[12],
+        )
+    }
+}
+
+/**
+ * What the phone's radio last said about itself.
+ *
+ * Every reading is separately optional, because they arrive from different questions and a radio
+ * that answered one may not answer the others. [rssiDbm] is the last packet **this end** heard,
+ * which is fresher than the radio's own answer to `GET_STATS` — a busy mesh means that answer is
+ * about whatever a neighbour said last.
+ */
+data class RadioStatus(
+    /** The radio answered `APP_START`, which is the only evidence this end has that it is there. */
+    val connected: Boolean,
+    val rssiDbm: Int?,
+    /** In quarters of a dB, which is the firmware's own scale. */
+    val snrQuarterDb: Int?,
+    val batteryMv: Int?,
+    /** The radio's own transmit airtime since it booted. */
+    val txAirSecs: Long,
+    val rxAirSecs: Long,
+    /** The caller's record budget, or null when nothing reported one. */
+    val opsLeft: Int?,
+    val preset: RadioPreset?,
+    /** Bytes per hop the firmware reported, or null when it did not say. */
+    val pathHashWidth: Int?,
+    val firmwareVersionCode: Int,
+) {
+    companion object {
+        /** Nothing has been asked, or nothing has answered. */
+        val UNKNOWN = RadioStatus(
+            connected = false, rssiDbm = null, snrQuarterDb = null, batteryMv = null,
+            txAirSecs = 0, rxAirSecs = 0, opsLeft = null, preset = null,
+            pathHashWidth = null, firmwareVersionCode = 0,
+        )
+
+        internal fun of(v: IntArray): RadioStatus = RadioStatus(
+            connected = v[0] != 0,
+            rssiDbm = if (v[1] != 0) v[2] else null,
+            snrQuarterDb = if (v[1] != 0) v[3] else null,
+            batteryMv = if (v[4] != 0) v[5] else null,
+            txAirSecs = v[6].toLong(),
+            rxAirSecs = v[7].toLong(),
+            opsLeft = if (v[8] == 255) null else v[8],
+            preset = if (v[9] != 0) {
+                RadioPreset(
+                    frequencyMhz = v[10] / 1000.0,
+                    bandwidthKhz = v[11] / 1000.0,
+                    spreadingFactor = v[12],
+                    codingRate = v[13],
+                    txPowerDbm = v[14],
+                    pathHashSize = if (v[15] == 0) 1 else v[15],
+                )
+            } else {
+                null
+            },
+            pathHashWidth = if (v[15] == 0) null else v[15],
+            firmwareVersionCode = v[16],
+        )
+    }
+}
+
+/**
+ * What the engine believes about the path to the host.
+ *
+ * [hops] is why this exists: the scrollback wait is sized against the route, so a flat deadline on a
+ * twenty-hop route loses a page that was still arriving.
+ */
+data class Route(
+    /** A fresh path is held, so the next attempt goes direct. */
+    val known: Boolean,
+    /** An authenticated direct arrival proved it. A flood's reversed chain never does. */
+    val proven: Boolean,
+    val fresh: Boolean,
+    /** The next first attempt would flood, which is also what "no route" looks like. */
+    val flood: Boolean,
+    val hops: Int,
+    val pathWidth: Int,
+    val path: ByteArray,
+    val snrQuarterDb: Int,
+) {
+    /** How far away the host is, or null when no path is known. */
+    val hopsOrNull: Int? get() = if (known) hops else null
+
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is Route) return false
+        return known == other.known && proven == other.proven && fresh == other.fresh &&
+            flood == other.flood && hops == other.hops && pathWidth == other.pathWidth &&
+            path.contentEquals(other.path) && snrQuarterDb == other.snrQuarterDb
+    }
+
+    override fun hashCode(): Int {
+        var result = known.hashCode()
+        result = 31 * result + hops
+        result = 31 * result + pathWidth
+        result = 31 * result + path.contentHashCode()
+        return result
+    }
+
+    companion object {
+        /** No path is held: every first attempt floods. */
+        val UNKNOWN = Route(
+            known = false, proven = false, fresh = false, flood = true, hops = 0, pathWidth = 1,
+            path = ByteArray(0), snrQuarterDb = 0,
+        )
+
+        internal fun of(v: IntArray, path: ByteArray, pathLen: Int): Route = Route(
+            known = v[0] != 0,
+            proven = v[1] != 0,
+            fresh = v[2] != 0,
+            flood = v[3] != 0,
+            hops = v[4],
+            pathWidth = v[5],
+            snrQuarterDb = v[6],
+            path = path.copyOf(pathLen.coerceIn(0, path.size)),
         )
     }
 }
@@ -342,7 +491,14 @@ class RadioClient private constructor(private val slot: LongArray) {
 
     // ---- the air ----------------------------------------------------------------------------
 
-    /** Feed one whole companion frame. Returns 1 when it carried a session record. */
+    /**
+     * Feed one companion **payload** from the radio.
+     *
+     * A characteristic carries the payload and no serial framing, so the bytes go in as they
+     * arrived. The engine decides what they are: a receive-log push carrying a record, the answer to
+     * a command it asked, or a push about somebody else's traffic. Returns 1 when it carried a
+     * record.
+     */
     fun onBleRx(frame: ByteArray, nowMs: Long): Int =
         NativeRadioClient.onBleRx(handle, frame, nowMs)
 
@@ -370,6 +526,39 @@ class RadioClient private constructor(private val slot: LongArray) {
         val out = LongArray(1)
         return if (NativeRadioClient.nextDeadline(handle, out) == 1) out[0] else null
     }
+
+    // ---- the phone's own radio ----------------------------------------------------------------
+
+    /**
+     * What the radio last said about itself.
+     *
+     * Read after every answer has been fed back: the engine updates it from `SELF_INFO`,
+     * `DEVICE_INFO`, the radio's stats and the battery answer, and from the readings on every
+     * receive-log push.
+     */
+    fun radio(): RadioStatus {
+        val out = IntArray(NativeRadioClient.RADIO_FIELDS)
+        val rc = NativeRadioClient.radio(handle, out)
+        return if (rc == ClientCode.OK) RadioStatus.of(out) else RadioStatus.UNKNOWN
+    }
+
+    /**
+     * What the engine believes about the path to the host.
+     *
+     * [hops][Route.hops] is the number the scrollback wait is sized against: a page that has not
+     * arrived is not a page that is lost, and a flat deadline on a long route loses one still
+     * travelling.
+     */
+    fun route(nowMs: Long): Route {
+        val out = IntArray(NativeRadioClient.ROUTE_FIELDS)
+        val path = ByteArray(64)
+        val len = IntArray(1)
+        val rc = NativeRadioClient.route(handle, nowMs, out, path, len)
+        return if (rc == ClientCode.OK) Route.of(out, path, len[0]) else Route.UNKNOWN
+    }
+
+    /** The region's 16-byte flood key, or an empty array for unscoped floods. */
+    fun setScope(key: ByteArray): Int = NativeRadioClient.setScope(handle, key)
 
     // ---- pages ------------------------------------------------------------------------------
 
