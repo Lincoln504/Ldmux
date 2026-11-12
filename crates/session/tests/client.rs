@@ -37,6 +37,10 @@ struct ShellState {
     /// The screen the host would paint: the last write, cut into lines.
     lines: Vec<String>,
     snapshot: u32,
+    /// The grid the pty is fitted to. **The host fits it from the phone's request**, so a test can
+    /// tell an attach that carried a grid from one that attached at the host's own size.
+    cols: u8,
+    rows: u8,
 }
 
 struct Host {
@@ -48,6 +52,12 @@ struct Host {
     chunks_seen: usize,
     /// Whether another client is supposed to hold every shell.
     held: bool,
+    /// The shells this host made in answer to a `Create`, in order.
+    created: Vec<String>,
+    /// The shells a phone asked the desktop to open, in order.
+    made_live: Vec<String>,
+    /// The shells a phone ended, in order.
+    closed: Vec<String>,
 }
 
 impl Host {
@@ -69,6 +79,9 @@ impl Host {
                 assembly: SendAssembly::default(),
                 chunks_seen: 0,
                 held: false,
+                created: Vec::new(),
+                made_live: Vec::new(),
+                closed: Vec::new(),
             },
             key,
         )
@@ -100,9 +113,53 @@ impl Host {
 
     fn handle(&mut self, message: &Message, now_ms: u64) {
         match message {
-            Message::Attach { selector, .. } => {
+            Message::Attach {
+                selector,
+                cols,
+                rows,
+                ..
+            } => {
+                let state = self.shells.entry(selector.clone()).or_default();
+                // A zero grid means "not stated", which is what a version before 13 sent.
+                if *cols > 0 && *rows > 0 {
+                    state.cols = *cols;
+                    state.rows = *rows;
+                }
+                self.answer(selector, None, 0, now_ms);
+            }
+            Message::Create { cwd, .. } => {
+                let id = format!("run{}", self.created.len() + 1);
+                let state = self.shells.entry(id.clone()).or_default();
+                state.lines = vec![format!("{}$", if cwd.is_empty() { "~" } else { cwd })];
+                self.created.push(id.clone());
+                let message = Message::Created { id };
+                if let Ok(bytes) = message.encode() {
+                    let _ = self.endpoint.submit(&bytes, now_ms);
+                }
+            }
+            Message::Takeover { selector } => {
                 self.shells.entry(selector.clone()).or_default();
                 self.answer(selector, None, 0, now_ms);
+            }
+            Message::MakeLive { selector } => {
+                self.made_live.push(selector.clone());
+            }
+            Message::WantHistory { from, rows } => {
+                let message = Message::HistoryPage {
+                    from: *from,
+                    last: true,
+                    older: *from > 0,
+                    lines: (0..usize::from(*rows))
+                        .map(|i| format!("line {}", u64::from(*from) + i as u64))
+                        .collect(),
+                };
+                if let Ok(bytes) = message.encode() {
+                    let _ = self.endpoint.submit(&bytes, now_ms);
+                }
+            }
+            Message::Close { selector } => {
+                self.shells.remove(selector);
+                self.closed.push(selector.clone());
             }
             Message::Send { op_id, shell, .. } => {
                 self.chunks_seen += 1;
@@ -163,8 +220,8 @@ impl Host {
             base_id: 0,
             applied_op_id: op_id,
             applied_status: status.unwrap_or(applied::NONE),
-            cols: COLS,
-            rows: ROWS,
+            cols: if state.cols == 0 { COLS } else { state.cols },
+            rows: if state.rows == 0 { ROWS } else { state.rows },
             cursor_x: 2,
             cursor_y: 1,
             first_line: 0,
@@ -397,7 +454,7 @@ impl Link {
     fn open(&mut self, shell: &str) {
         let now = self.now;
         self.client
-            .open(shell, now)
+            .open(shell, 46, 20, now)
             .expect("the page can be opened");
         self.client
             .fetch(shell, COLS, ROWS, now)
@@ -429,6 +486,159 @@ impl Link {
             .mirror(shell)
             .and_then(|m| m.lines.first().cloned())
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// 1a. Every uplink request the old radio path could make, and what its answer is.
+//
+// The survey in S5a found that a rewire would have silently dropped these: the engine could carry a
+// command and a refresh, and nothing else. A capability that stops existing does not fail — the
+// screen simply stops showing something — so each one gets a test that proves it reached the host.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn an_attach_carries_the_phone_grid_so_the_host_fits_the_pty_before_it_paints() {
+    let mut link = Link::new(11, 1, 0.0);
+    link.connect();
+    let now = link.now;
+    // Opening a page is what asks for a screen, and the grid is what the host fits the pty to
+    // **before** it captures. A zero grid here is the clipped-picture defect: the host paints at
+    // its own size and the phone has to drop the top rows, which are the prompt and the command.
+    link.client
+        .open("grid", 46, 17, now)
+        .expect("the page can be opened");
+    link.run_until(120_000, 250, |link| {
+        link.client.mirror("grid").is_some_and(PageMirror::painted)
+    });
+    let mirror = link.client.mirror("grid").expect("the page painted");
+    assert_eq!(
+        (mirror.cols, mirror.rows),
+        (46, 17),
+        "the host painted a grid the phone did not ask for: {:?}",
+        link.client.stats()
+    );
+}
+
+#[test]
+fn a_history_request_goes_out_and_the_page_comes_back_as_an_event() {
+    let mut link = Link::new(12, 1, 0.0);
+    link.connect();
+    link.open("hist");
+    let now = link.now;
+    link.client
+        .want_history("hist", 0, 8, now)
+        .expect("a history request is legal");
+    link.run_until(120_000, 250, |link| {
+        link.events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::History { .. }))
+    });
+    let page = link
+        .events
+        .iter()
+        .find_map(|e| match e {
+            ClientEvent::History { from, lines, older, .. } => Some((*from, lines.clone(), *older)),
+            _ => None,
+        })
+        .expect("the host answered the history request");
+    assert!(
+        !page.1.is_empty() || page.0 > 0,
+        "an empty first page at line 0 is not an answer: {page:?}"
+    );
+}
+
+#[test]
+fn a_create_answers_with_the_id_to_open_rather_than_a_guess() {
+    let mut link = Link::new(13, 1, 0.0);
+    link.connect();
+    let now = link.now;
+    link.client
+        .create("", now)
+        .expect("a create is legal on an established link");
+    link.run_until(120_000, 250, |link| {
+        link.events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::Created { .. }))
+    });
+    let id = link
+        .events
+        .iter()
+        .find_map(|e| match e {
+            ClientEvent::Created { id } => Some(id.clone()),
+            _ => None,
+        })
+        .expect("the host never said which shell it made");
+    assert!(!id.is_empty(), "the host named an empty shell");
+    // The id it named is one the phone can actually open, which is the whole point of saying it.
+    link.open(&id);
+    assert!(link.client.mirror(&id).is_some_and(PageMirror::painted));
+}
+
+#[test]
+fn taking_a_shell_back_is_its_own_request_and_not_an_attach() {
+    let mut link = Link::new(14, 1, 0.0);
+    link.connect();
+    let now = link.now;
+    link.client
+        .takeover("held", now)
+        .expect("a takeover is legal on an established link");
+    link.run_until(120_000, 250, |link| {
+        link.client
+            .mirror("held")
+            .is_some_and(PageMirror::painted)
+    });
+    assert!(
+        link.client.mirror("held").is_some_and(PageMirror::painted),
+        "a takeover opened no page to paint: {:?}",
+        link.client.stats()
+    );
+}
+
+#[test]
+fn send_to_desktop_is_its_own_request_and_spends_no_command() {
+    let mut link = Link::new(15, 1, 0.0);
+    link.connect();
+    link.open("live");
+    let before = link.client.stats().commands_sent;
+    let now = link.now;
+    link.client
+        .make_live("live", now)
+        .expect("make-live is legal on an established link");
+    link.run_until(60_000, 250, |_| false);
+    assert_eq!(
+        link.client.stats().commands_sent,
+        before,
+        "opening a desk window must not count as a command written to the shell"
+    );
+}
+
+#[test]
+fn ending_a_shell_tells_the_host_and_forgets_the_page() {
+    let mut link = Link::new(16, 1, 0.0);
+    link.connect();
+    link.open("gone");
+    let now = link.now;
+    link.client
+        .end("gone", now)
+        .expect("ending a shell is legal on an established link");
+    assert!(
+        link.client.mirror("gone").is_none(),
+        "the page outlived the shell it was bound to"
+    );
+    link.run_until(60_000, 250, |_| false);
+    // The host put it down, so there is nothing left to draw and no page to send to.
+    assert_eq!(
+        link.client
+            .send(
+                "gone",
+                &[SendItem::Text(b"x".to_vec())],
+                COLS,
+                ROWS,
+                link.now
+            )
+            .unwrap_err(),
+        ClientError::NoPage("gone".to_owned())
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -676,10 +886,10 @@ fn the_sixth_page_is_refused_and_the_first_five_keep_working() {
     let now = link.now;
     for shell in &shells {
         link.client
-            .open(shell, now)
+            .open(shell, 46, 20, now)
             .expect("five pages can be opened");
     }
-    match link.client.open("sixth", now) {
+    match link.client.open("sixth", 46, 20, now) {
         Err(ClientError::TooManyPages { max }) => assert_eq!(max, MAX_OPEN_PAGES),
         other => panic!("the sixth page was not refused with the cap: {other:?}"),
     }

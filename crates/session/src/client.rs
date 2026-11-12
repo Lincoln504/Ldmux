@@ -281,6 +281,14 @@ pub enum ClientEvent {
         /// The shells on this page.
         entries: Vec<SessionEntry>,
     },
+    /// The host made a shell this client asked for, and this is its id.
+    ///
+    /// Without it the phone would attach by guessing from a list another client may have changed in
+    /// between, which is how a shell created from a phone could end up attaching to somebody else's.
+    Created {
+        /// The id `Create` produced, usable as an `open` selector.
+        id: String,
+    },
     /// One page of the marks the host holds, so the launcher can draw a finished shell.
     Marks {
         /// The first page of a run.
@@ -557,7 +565,7 @@ impl Client {
     /// # Errors
     ///
     /// [`ClientError::TooManyPages`], [`ClientError::AlreadyOpen`], or a transport refusal.
-    pub fn open(&mut self, shell: &str, now_ms: u64) -> Result<(), ClientError> {
+    pub fn open(&mut self, shell: &str, cols: u8, rows: u8, now_ms: u64) -> Result<(), ClientError> {
         if self.pages.contains_key(shell) {
             return Err(ClientError::AlreadyOpen(shell.to_owned()));
         }
@@ -569,8 +577,11 @@ impl Client {
         let message = Message::Attach {
             version: TERMINAL_VERSION,
             selector: shell.to_owned(),
-            cols: 0,
-            rows: 0,
+            // **The phone's grid, not the host's default.** A pty left at the host's own size paints
+            // a screen the phone has to clip, and the clipped rows are the top of the picture — the
+            // prompt and the command. Attaching without a grid is a defect this route removed once.
+            cols,
+            rows,
         };
         self.submit(&message, now_ms)?;
         self.stats.attaches_sent += 1;
@@ -608,6 +619,106 @@ impl Client {
             self.assembling.clear();
             self.assembling_since = None;
         }
+        Ok(())
+    }
+
+    /// Ask the host to start a shell in `cwd` (empty means the host's default directory).
+    ///
+    /// The answer is a [`ClientEvent::Created`] carrying the id to open. A `Create` does not open a
+    /// page: the phone attaches to the id it is given, so a shell created from a phone is one the
+    /// phone knows the name of rather than one it has to guess out of a list another client may have
+    /// changed in between.
+    ///
+    /// # Errors
+    ///
+    /// A transport refusal, or [`ClientError::Encode`] when the directory is too long to say.
+    pub fn create(&mut self, cwd: &str, now_ms: u64) -> Result<(), ClientError> {
+        let message = Message::Create {
+            version: TERMINAL_VERSION,
+            cwd: cwd.to_owned(),
+        };
+        self.submit(&message, now_ms)
+    }
+
+    /// Take `shell` from whoever holds it, displacing them.
+    ///
+    /// A plain [`Client::open`] is refused while a desk window holds the shell, so taking it is
+    /// always something the operator chose — which is what the tailnet's takeover is, and the second
+    /// half of saying "in use on desktop · take it back".
+    ///
+    /// # Errors
+    ///
+    /// A transport refusal.
+    pub fn takeover(&mut self, shell: &str, now_ms: u64) -> Result<(), ClientError> {
+        let message = Message::Takeover {
+            selector: shell.to_owned(),
+        };
+        self.submit(&message, now_ms)?;
+        // The page exists locally as well: the host answers a takeover with a screen, and a screen
+        // with no page to land on would be refused as a screen for a shell nobody opened.
+        if !self.pages.contains_key(shell) {
+            self.pages.insert(
+                shell.to_owned(),
+                Page {
+                    mirror: PageMirror::blank(shell),
+                    attached: false,
+                    pending: None,
+                },
+            );
+            self.order.push(shell.to_owned());
+        }
+        self.stats.attaches_sent += 1;
+        Ok(())
+    }
+
+    /// Ask the host to open `shell` in a desk window: **send to desktop**.
+    ///
+    /// # Errors
+    ///
+    /// A transport refusal.
+    pub fn make_live(&mut self, shell: &str, now_ms: u64) -> Result<(), ClientError> {
+        let message = Message::MakeLive {
+            selector: shell.to_owned(),
+        };
+        self.submit(&message, now_ms)
+    }
+
+    /// Ask the host for a page of `shell`'s own scrollback, starting at absolute line `from`.
+    ///
+    /// **The keeper has the history; the link never sends it.** A screen the phone never saw — a
+    /// shell joined late, or one that printed while the view was frozen — is history it cannot have,
+    /// and the pad's up key on such a screen used to answer "no history yet on this link", which is
+    /// true and useless. The answer is one or more [`ClientEvent::History`] pages.
+    ///
+    /// # Errors
+    ///
+    /// A transport refusal, or [`ClientError::Encode`] when `rows` is past what one page may carry.
+    pub fn want_history(
+        &mut self,
+        shell: &str,
+        from: u32,
+        rows: u8,
+        now_ms: u64,
+    ) -> Result<(), ClientError> {
+        let _ = shell;
+        let message = Message::WantHistory { from, rows };
+        self.submit(&message, now_ms)
+    }
+
+    /// Ask the host to end `shell`, or to put it down when a desk window holds it.
+    ///
+    /// The local page goes too, because a page for a shell that no longer exists would draw its last
+    /// screen for ever and refuse every command.
+    ///
+    /// # Errors
+    ///
+    /// A transport refusal.
+    pub fn end(&mut self, shell: &str, now_ms: u64) -> Result<(), ClientError> {
+        let message = Message::Close {
+            selector: shell.to_owned(),
+        };
+        self.submit(&message, now_ms)?;
+        let _ = self.close(shell);
         Ok(())
     }
 
@@ -818,6 +929,7 @@ impl Client {
         match message {
             Message::Snapshot { .. } => self.absorb_snapshot(&message, now_ms),
             Message::Closed { reason } => self.events.push(ClientEvent::Closed { reason }),
+            Message::Created { id } => self.events.push(ClientEvent::Created { id }),
             Message::Sessions { last, entries, .. } => {
                 self.events.push(ClientEvent::Sessions { last, entries });
             }

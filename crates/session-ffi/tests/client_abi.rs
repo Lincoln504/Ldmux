@@ -80,17 +80,17 @@ fn a_length_that_lies_is_refused() {
     // SAFETY: the pointers are live; the *lengths* are the lie under test.
     unsafe {
         assert_eq!(
-            ldmux_client_open(h.0, null(), 4, NOW),
+            ldmux_client_open(h.0, null(), 4, 46, 20, NOW),
             LDMUX_ERR_ARG,
             "a null pointer with a non-zero length must be refused"
         );
         assert_eq!(
-            ldmux_client_open(h.0, b"shell".as_ptr(), 0, NOW),
+            ldmux_client_open(h.0, b"shell".as_ptr(), 0, 46, 20, NOW),
             LDMUX_ERR_ARG,
             "an empty shell id must be refused"
         );
         assert_eq!(
-            ldmux_client_open(h.0, b"shell".as_ptr(), LDMUX_SHELL_MAX + 1, NOW),
+            ldmux_client_open(h.0, b"shell".as_ptr(), LDMUX_SHELL_MAX + 1, 46, 20, NOW),
             LDMUX_ERR_ARG,
             "a shell id past the wire's own limit must be refused"
         );
@@ -220,7 +220,7 @@ fn a_shell_id_that_is_not_utf8_is_refused() {
     let h = Handle::new(&cfg);
     let bad = [0xFFu8, 0xFE];
     // SAFETY: the buffer is live; the bytes are the thing under test.
-    let rc = unsafe { ldmux_client_open(h.0, bad.as_ptr(), bad.len(), NOW) };
+    let rc = unsafe { ldmux_client_open(h.0, bad.as_ptr(), bad.len(), 46, 20, NOW) };
     assert_eq!(rc, LDMUX_ERR_ARG);
 }
 

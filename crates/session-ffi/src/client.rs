@@ -190,6 +190,9 @@ pub const LDMUX_EV_SESSIONS: u8 = 5;
 pub const LDMUX_EV_MARKS: u8 = 6;
 /// One page of scrollback.
 pub const LDMUX_EV_HISTORY: u8 = 7;
+/// The host made a shell this client asked for. `text` carries its id as UTF-8 — **not** a wire
+/// message, because a `Create`'s answer is a name, not something the app draws.
+pub const LDMUX_EV_CREATED: u8 = 8;
 
 /// The most bytes a shell id may be, which is `mesh_term::MAX_SELECTOR`.
 pub const LDMUX_SHELL_MAX: usize = 40;
@@ -198,6 +201,10 @@ pub const LDMUX_SHELL_MAX: usize = 40;
 pub const LDMUX_ITEM_TEXT: u8 = 0;
 /// The same bytes, marked as a paste so the host wraps them for the pane's bracketed-paste mode.
 pub const LDMUX_ITEM_PASTE: u8 = 1;
+/// Key names, space separated — the same names `mesh_term`'s `Key` message takes (`Up`, `S-Tab`,
+/// `C-c`). The engine encodes them for the pane's live cursor-key and Kitty mode, which only the
+/// host can read, so the phone sends names rather than escape sequences it would have to guess.
+pub const LDMUX_ITEM_KEYS: u8 = 2;
 
 /// A phone's radio route, from connect to screen.
 pub struct LdmuxClient {
@@ -399,6 +406,12 @@ fn encode_event(event: &ClientEvent) -> Ready {
                 lines: lines.clone(),
             })
         }
+        ClientEvent::Created { id } => {
+            // The id is the text; there is no message to encode, because the host's `Created` is a
+            // name rather than something the app draws.
+            ready.text = id.as_bytes().to_vec();
+            None
+        }
         ClientEvent::Attached { .. } | ClientEvent::Settled { .. } | ClientEvent::Held { .. } => None,
     };
     if let Some(message) = message {
@@ -453,6 +466,12 @@ fn fill(ready: &Ready, text_len: u32) -> LdmuxClientEvent {
         ClientEvent::Sessions { .. } => out.kind = LDMUX_EV_SESSIONS,
         ClientEvent::Marks { .. } => out.kind = LDMUX_EV_MARKS,
         ClientEvent::History { .. } => out.kind = LDMUX_EV_HISTORY,
+        ClientEvent::Created { id } => {
+            out.kind = LDMUX_EV_CREATED;
+            // A created id is a name, so it goes in the text buffer; a caller that asked for one
+            // reads it there. It is not a message and nothing decodes it.
+            out.text_len = u32::try_from(id.len()).unwrap_or(0);
+        }
     }
     out
 }
@@ -676,6 +695,8 @@ pub unsafe extern "C" fn ldmux_client_open(
     c: *mut LdmuxClient,
     shell_bytes: *const u8,
     shell_len: usize,
+    cols: u8,
+    rows: u8,
     now_ms: u64,
 ) -> i32 {
     // SAFETY: see `with_client`; `shell()` checks the pointer and length.
@@ -684,7 +705,7 @@ pub unsafe extern "C" fn ldmux_client_open(
             let Some(id) = shell(shell_bytes, shell_len) else {
                 return LDMUX_ERR_ARG;
             };
-            match h.client.open(id, now_ms) {
+            match h.client.open(id, cols, rows, now_ms) {
                 Ok(()) => LDMUX_OK,
                 Err(e) => client_err(&e),
             }
@@ -746,6 +767,19 @@ pub unsafe extern "C" fn ldmux_client_send(
             let item = match kind {
                 LDMUX_ITEM_TEXT => mesh_term::SendItem::Text(bytes),
                 LDMUX_ITEM_PASTE => mesh_term::SendItem::Paste(bytes),
+                LDMUX_ITEM_KEYS => {
+                    // The `Key` message's own convention: names, single-space separated. Splitting
+                    // here rather than in Kotlin keeps one spelling of a key name in the tree.
+                    let Ok(text) = String::from_utf8(bytes) else {
+                        return LDMUX_ERR_ARG;
+                    };
+                    let names: Vec<String> =
+                        text.split(' ').filter(|n| !n.is_empty()).map(str::to_owned).collect();
+                    if names.is_empty() {
+                        return LDMUX_ERR_ARG;
+                    }
+                    mesh_term::SendItem::Keys(names)
+                }
                 _ => return LDMUX_ERR_ARG,
             };
             match h.client.send(id, &[item], cols, rows, now_ms) {
@@ -779,6 +813,138 @@ pub unsafe extern "C" fn ldmux_client_fetch(
                 return LDMUX_ERR_ARG;
             };
             match h.client.fetch(id, cols, rows, now_ms) {
+                Ok(()) => LDMUX_OK,
+                Err(e) => client_err(&e),
+            }
+        })
+    }
+}
+
+/// Ask the host to start a shell in `cwd` (empty means its default directory).
+///
+/// The answer is a `CREATED` event whose text is the id to pass to [`ldmux_client_open`]. The phone
+/// attaches to the name it is given rather than guessing one out of a list another client may have
+/// changed in between.
+///
+/// # Errors
+///
+/// [`LDMUX_ERR_NULL`], [`LDMUX_ERR_ARG`] for a directory that is not UTF-8 or too long to say, or
+/// the transaction layer's refusal.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_client_create(
+    c: *mut LdmuxClient,
+    cwd: *const u8,
+    cwd_len: usize,
+    now_ms: u64,
+) -> i32 {
+    // SAFETY: see `with_client`; the bytes are checked below.
+    unsafe {
+        with_client(c, |h| {
+            let cwd = if cwd.is_null() || cwd_len == 0 {
+                String::new()
+            } else {
+                // SAFETY: non-null with `cwd_len` readable bytes.
+                match String::from_utf8(unsafe { std::slice::from_raw_parts(cwd, cwd_len) }.to_vec())
+                {
+                    Ok(text) => text,
+                    Err(_) => return LDMUX_ERR_ARG,
+                }
+            };
+            match h.client.create(&cwd, now_ms) {
+                Ok(()) => LDMUX_OK,
+                Err(e) => client_err(&e),
+            }
+        })
+    }
+}
+
+/// Take `shell` from whoever holds it, displacing them. A plain open is refused while a desk window
+/// holds a shell, so taking one is always something the operator chose.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_client_takeover(
+    c: *mut LdmuxClient,
+    shell_bytes: *const u8,
+    shell_len: usize,
+    now_ms: u64,
+) -> i32 {
+    // SAFETY: see `with_client`; `shell()` checks the pointer and length.
+    unsafe {
+        with_client(c, |h| {
+            let Some(id) = shell(shell_bytes, shell_len) else {
+                return LDMUX_ERR_ARG;
+            };
+            match h.client.takeover(id, now_ms) {
+                Ok(()) => LDMUX_OK,
+                Err(e) => client_err(&e),
+            }
+        })
+    }
+}
+
+/// Ask the host to open `shell` in a desk window: **send to desktop**.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_client_make_live(
+    c: *mut LdmuxClient,
+    shell_bytes: *const u8,
+    shell_len: usize,
+    now_ms: u64,
+) -> i32 {
+    // SAFETY: see `with_client`; `shell()` checks the pointer and length.
+    unsafe {
+        with_client(c, |h| {
+            let Some(id) = shell(shell_bytes, shell_len) else {
+                return LDMUX_ERR_ARG;
+            };
+            match h.client.make_live(id, now_ms) {
+                Ok(()) => LDMUX_OK,
+                Err(e) => client_err(&e),
+            }
+        })
+    }
+}
+
+/// Ask the host for a page of `shell`'s own scrollback from absolute line `from`, `rows` at most.
+///
+/// The answer is one or more `HISTORY` events. **The keeper has the history; the link never sends
+/// it**, so this is the only way a screen the phone never saw can be read back.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_client_history(
+    c: *mut LdmuxClient,
+    shell_bytes: *const u8,
+    shell_len: usize,
+    from_line: u32,
+    rows: u8,
+    now_ms: u64,
+) -> i32 {
+    // SAFETY: see `with_client`; `shell()` checks the pointer and length.
+    unsafe {
+        with_client(c, |h| {
+            let Some(id) = shell(shell_bytes, shell_len) else {
+                return LDMUX_ERR_ARG;
+            };
+            match h.client.want_history(id, from_line, rows, now_ms) {
+                Ok(()) => LDMUX_OK,
+                Err(e) => client_err(&e),
+            }
+        })
+    }
+}
+
+/// Ask the host to end `shell`, or to put it down when a desk window holds it, and forget the page.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_client_end(
+    c: *mut LdmuxClient,
+    shell_bytes: *const u8,
+    shell_len: usize,
+    now_ms: u64,
+) -> i32 {
+    // SAFETY: see `with_client`; `shell()` checks the pointer and length.
+    unsafe {
+        with_client(c, |h| {
+            let Some(id) = shell(shell_bytes, shell_len) else {
+                return LDMUX_ERR_ARG;
+            };
+            match h.client.end(id, now_ms) {
                 Ok(()) => LDMUX_OK,
                 Err(e) => client_err(&e),
             }

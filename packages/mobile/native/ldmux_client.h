@@ -67,6 +67,10 @@ typedef struct LdmuxClient LdmuxClient;
 /* What one `send` item is. */
 #define LDMUX_ITEM_TEXT 0
 #define LDMUX_ITEM_PASTE 1
+/* Key names, space separated — the same names mesh_term's `Key` message takes (`Up`, `S-Tab`,
+ * `C-c`). The engine encodes them for the pane's live cursor-key and Kitty mode, which only the
+ * host can read, so the phone sends names rather than escape sequences it would have to guess. */
+#define LDMUX_ITEM_KEYS 2
 
 /* Event kinds, as LdmuxClientEvent.kind. */
 #define LDMUX_EV_ATTACHED 1
@@ -76,6 +80,9 @@ typedef struct LdmuxClient LdmuxClient;
 #define LDMUX_EV_SESSIONS 5
 #define LDMUX_EV_MARKS 6
 #define LDMUX_EV_HISTORY 7
+/* The host made the shell a Create asked for. `text` carries its id as UTF-8 — not a wire message,
+ * because a Create's answer is a name rather than something the app draws. */
+#define LDMUX_EV_CREATED 8
 
 /*
  * What the client needs to start. Every field is a fact the caller already has: the pairing's keys
@@ -126,6 +133,7 @@ typedef struct {
  *   LDMUX_EV_SESSIONS    value = 1 when it is the last page             a Sessions message
  *   LDMUX_EV_MARKS       value = 1 when it is the last page             a Marks message
  *   LDMUX_EV_HISTORY     value = 1 when it is the last page             a HistoryPage message
+ *   LDMUX_EV_CREATED     -                                             the new shell's id, UTF-8
  *
  * The four message kinds are the wire bytes of the message the host sent, so the caller decodes them
  * with the decoder it already has. A second encoding for one fact would be a second thing to be
@@ -205,7 +213,8 @@ int32_t ldmux_client_next_deadline(LdmuxClient *c, uint64_t *out);
 
 /* Open a page for `shell`. The answer is a screen, which arrives as LDMUX_EV_ATTACHED and then
  * LDMUX_EV_SETTLED. Refused with LDMUX_ERR_TOO_MANY_PAGES when the cap is reached. */
-int32_t ldmux_client_open(LdmuxClient *c, const uint8_t *shell, size_t shell_len, uint64_t now_ms);
+int32_t ldmux_client_open(LdmuxClient *c, const uint8_t *shell, size_t shell_len, uint8_t cols,
+                          uint8_t rows, uint64_t now_ms);
 
 /* Let go of `shell`. */
 int32_t ldmux_client_close(LdmuxClient *c, const uint8_t *shell, size_t shell_len);
@@ -218,6 +227,28 @@ int32_t ldmux_client_close(LdmuxClient *c, const uint8_t *shell, size_t shell_le
 int32_t ldmux_client_send(LdmuxClient *c, const uint8_t *shell, size_t shell_len, uint8_t kind,
                           const uint8_t *items, size_t items_len, uint8_t cols, uint8_t rows,
                           uint64_t now_ms, uint32_t *op_id);
+
+/* Ask the host to start a shell in `cwd` (empty = its default directory). The answer is one
+ * LDMUX_EV_CREATED whose text is the id to pass to ldmux_client_open: the phone attaches to the name
+ * it is given rather than guessing one out of a list another client may have changed. */
+int32_t ldmux_client_create(LdmuxClient *c, const uint8_t *cwd, size_t cwd_len, uint64_t now_ms);
+
+/* Take `shell` from whoever holds it. A plain open is refused while a desk window holds a shell, so
+ * taking one is always something the operator chose. */
+int32_t ldmux_client_takeover(LdmuxClient *c, const uint8_t *shell, size_t shell_len, uint64_t now_ms);
+
+/* Ask the host to open `shell` in a desk window: send to desktop. */
+int32_t ldmux_client_make_live(LdmuxClient *c, const uint8_t *shell, size_t shell_len,
+                               uint64_t now_ms);
+
+/* Ask the host for a page of `shell`'s own scrollback from absolute line `from_line`, `rows` at
+ * most. The answer is one or more LDMUX_EV_HISTORY. **The keeper has the history; the link never
+ * sends it**, so this is the only way a screen the phone never saw can be read back. */
+int32_t ldmux_client_history(LdmuxClient *c, const uint8_t *shell, size_t shell_len,
+                             uint32_t from_line, uint8_t rows, uint64_t now_ms);
+
+/* Ask the host to end `shell`, or to put it down when a desk window holds it, and forget the page. */
+int32_t ldmux_client_end(LdmuxClient *c, const uint8_t *shell, size_t shell_len, uint64_t now_ms);
 
 /* Ask for `shell`'s screen again, at the grid the phone draws with. **Spends no draft**: looking at
  * a shell can never run what is typed in it. */

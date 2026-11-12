@@ -65,6 +65,12 @@ const NOT_IN_TERMINAL_LIB = new Set([
   "test_jni.c",
   "ldmux_session.h",
   "ldmux_session_jni.c",
+  // The radio route's own library: `ldmux_client.h` is the C ABI over the phone's whole radio
+  // route and `ldmux_client_jni.c` its JNI shim, both linked into `libldmux_session.so` by
+  // `native/build-session.sh`. They are not part of the terminal engine's library, but they are
+  // part of the session library's freshness and symbol checks above.
+  "ldmux_client.h",
+  "ldmux_client_jni.c",
 ]);
 
 /** The libraries Gradle will package, one per ABI. */

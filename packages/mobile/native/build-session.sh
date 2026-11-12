@@ -39,7 +39,8 @@ host)
   build_rust ""
   out="$here/build/host"; mkdir -p "$out"
   cc -shared -fPIC -O2 -Wall -Wextra -I"$jdk/include" -I"$jdk/include/linux" -I"$here" \
-    "$here/ldmux_session_jni.c" "$root/target/release/libldmux_session_ffi.a" \
+    "$here/ldmux_session_jni.c" "$here/ldmux_client_jni.c" \
+    "$root/target/release/libldmux_session_ffi.a" \
     -lpthread -ldl -lm -o "$out/libldmux_session.so"
   echo "$out/libldmux_session.so"
   ;;
@@ -51,7 +52,8 @@ android)
     build_rust "$triple"
     dest="$here/../composeApp/src/androidMain/jniLibs/$abi"; mkdir -p "$dest"
     "$bin/${triple}28-clang" -shared -fPIC -O2 -Wall -Wextra -I"$here" \
-      "$here/ldmux_session_jni.c" "$root/target/$triple/release/libldmux_session_ffi.a" \
+      "$here/ldmux_session_jni.c" "$here/ldmux_client_jni.c" \
+      "$root/target/$triple/release/libldmux_session_ffi.a" \
       -llog -lm -ldl -Wl,-z,max-page-size=16384 -Wl,--gc-sections -o "$dest/libldmux_session.so"
     echo "$dest/libldmux_session.so"
   done
