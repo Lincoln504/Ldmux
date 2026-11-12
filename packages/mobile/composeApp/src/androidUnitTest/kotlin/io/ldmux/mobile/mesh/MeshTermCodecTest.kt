@@ -193,11 +193,11 @@ class MeshTermCodecTest {
         val all = with(MeshTerm.Unsupported) { SCROLLBACK or STYLE or HYPERLINKS or MOUSE or IMAGES or RESIZE or CLIPBOARD }
         assertEquals(n("unsupportedAllV1"), all)
         // The radio's own record limits are mirrored from `ldmux_mesh::constants` and were the
-        // one set with nothing asserting they agreed. They live in three files on this side
-        // (`AndroidRadioLink`, `SessionLib`, `Radio`), so the fixture is what holds them down.
+        // one set with nothing asserting they agreed. They lived in three files on this side
+        // (`AndroidRadioLink`, `SessionLib`, `Radio`); the first two are gone with the v14 stack,
+        // so `MeshRecordLimits` is the one copy left and the fixture holds it to the Rust.
         assertEquals(n("recordFloor"), MeshRecordLimits.FLOOR)
         assertEquals(n("recordMax"), MeshRecordLimits.MAX)
-        assertEquals(n("recordMax"), SessionLib.RECORD_MAX)
         assertEquals(n("recordReceivedMax"), MeshRecordLimits.RECEIVED_MAX)
         assertEquals(n("creditWindow"), MeshRecordLimits.CREDIT_WINDOW)
     }
@@ -215,7 +215,7 @@ class MeshTermCodecTest {
      */
     @Test
     fun theAirtimeBudgetIsTheHostsBudget() {
-        val rust = java.io.File("../../../crates/daemon/src/mesh_serial.rs")
+        val rust = java.io.File("../../../crates/daemon/src/mesh_carrier.rs")
         assertTrue(rust.exists(), "the host constant is missing: ${rust.absolutePath}")
         val text = rust.readText()
         val eu = Regex("const AIRTIME_BUDGET_MS: f64 = ([0-9_.]+);").find(text)

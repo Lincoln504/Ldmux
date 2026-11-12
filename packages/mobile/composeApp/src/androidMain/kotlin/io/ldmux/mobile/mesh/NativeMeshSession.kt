@@ -1,47 +1,19 @@
 package io.ldmux.mobile.mesh
 
 /**
- * The JNI declarations for `native/ldmux_session_jni.c`. Names must match exactly. This is the
- * whole Android half: each method is an ABI call, and [SessionLib] is its Kotlin face.
+ * The Android half of [SessionLib]: one keypair call, delegated to the library that owns the suite.
+ *
+ * It used to declare the whole v14 ABI as `external` methods. That ABI is gone — the engine owns
+ * the session — so what is left is a delegation, and [available] still asks the same question the
+ * settings screen asks: is the native library here?
  */
 object NativeMeshSession : SessionLib {
     /** True if the native library loaded. Never throws. */
-    val available: Boolean = try {
-        System.loadLibrary("ldmux_session")
-        true
-    } catch (t: Throwable) {
-        false
-    }
+    val available: Boolean = NativeRadioClient.available
 
-    external override fun keypair(priv: ByteArray, pub: ByteArray): Int
-    external override fun initiatorStart(
-        priv: ByteArray, pub: ByteArray, remotePub: ByteArray, psk: ByteArray,
-        timestampMs: Long, out: LongArray, msg1: ByteArray,
-    ): Int
-    external override fun initiatorFinish(hs: Long, msg2: ByteArray, recordLimit: Int, nowMs: Long, out: LongArray): Int
-    external override fun initiatorFree(hs: Long)
-    external override fun responderAccept(
-        priv: ByteArray, pub: ByteArray, psk: ByteArray, pinned: ByteArray?,
-        lastTimestampMs: Long, nowMs: Long, msg1: ByteArray, index: Int, recordLimit: Int,
-        reply: ByteArray, remoteStatic: ByteArray, out: LongArray,
-    ): Int
-    external override fun send(h: Long, shell: Int, data: ByteArray): Int
-    external override fun receive(h: Long, nowMs: Long, record: ByteArray): Int
-    external override fun takeDelivered(h: Long, out: ByteArray, meta: IntArray): Int
-    external override fun poll(h: Long, nowMs: Long, recordsLeft: Int, l2Slots: Int): Int
-    external override fun takeRecord(h: Long, out: ByteArray, meta: IntArray): Int
-    external override fun takeRecordSeq(h: Long, out: ByteArray, meta: IntArray): Int
-    external override fun refuseSeq(h: Long, nowMs: Long, seq: Int): Int
-    external override fun close(h: Long): Int
-    external override fun setAirtime(h: Long, airtimeMs: Double): Int
-    external override fun setHops(h: Long, hops: Int): Int
-    external override fun setRecordLimit(h: Long, bytes: Int): Int
-    external override fun status(h: Long, nowMs: Long): Int
-    external override fun pending(h: Long): Int
-    external override fun nextDeadline(h: Long, out: LongArray): Int
-    external override fun peerKey(h: Long, out: ByteArray): Int
-    external override fun dropped(h: Long): Int
-    external override fun free(h: Long)
+    override fun keypair(priv: ByteArray, pub: ByteArray): Int =
+        NativeRadioClient.keypair(priv, pub)
 }
 
+/** The Android [loadSessionLib]: the object above, when the library loaded. */
 actual fun loadSessionLib(): SessionLib? = if (NativeMeshSession.available) NativeMeshSession else null

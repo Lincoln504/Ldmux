@@ -510,6 +510,38 @@ fn fill(ready: &Ready, text_len: u32) -> LdmuxClientEvent {
     out
 }
 
+/// Fill `priv_out` and `pub_out` with a fresh device keypair (32 bytes each).
+///
+/// The one call the app needs outside a client handle: a pairing starts before there is a session
+/// to put it in. It lives here rather than in a second library so the app links one `.so` and the
+/// suite has one implementation (`docs/RADIO-PLAN.md` §10a).
+///
+/// # Errors
+///
+/// [`LDMUX_ERR_NULL`] for a null pointer, [`LDMUX_ERR_PANIC`] for a panic inside.
+///
+/// # Safety
+///
+/// `priv_out` and `pub_out` must each be valid for writes of 32 bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_client_keypair(priv_out: *mut u8, pub_out: *mut u8) -> i32 {
+    guard(|| {
+        if priv_out.is_null() || pub_out.is_null() {
+            return LDMUX_ERR_NULL;
+        }
+        let Ok(pair) = Keypair::generate() else {
+            return LDMUX_ERR_ARG;
+        };
+        // SAFETY: both pointers are non-null (checked above) and the caller guarantees room for the
+        // 32 bytes `as_bytes` writes.
+        unsafe {
+            std::ptr::copy_nonoverlapping(pair.private.as_ptr(), priv_out, 32);
+            std::ptr::copy_nonoverlapping(pair.public.as_ptr(), pub_out, 32);
+        }
+        LDMUX_OK
+    })
+}
+
 /// Build a client from `config` and write the handle to `out`.
 ///
 /// # Errors

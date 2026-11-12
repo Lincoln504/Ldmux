@@ -91,7 +91,7 @@ class AndroidRadioEngine(
 
     private val localKeys: Pair<ByteArray, ByteArray>? = creds?.let {
         it.keys.localPrivate to it.keys.localPublic
-    } ?: runCatching { MeshSession.generateKeypair(NativeMeshSession) }.getOrNull()
+    } ?: runCatching { NativeRadioClient.keypair() }.getOrNull()
 
     private val client: RadioClient? = localKeys?.let { (localPrivate, localPublic) ->
         RadioClient.create(

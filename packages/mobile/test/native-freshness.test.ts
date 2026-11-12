@@ -48,8 +48,8 @@ function nativeSources(): string[] {
  * - `test_engine.c` is the *host* suite: `scripts/test-native.sh` compiles it against the portable
  *   core and runs it here. It is linked into no Android library anywhere.
  * - `test_jni.c` is the same idea for the shim.
- * - `ldmux_session.h` and `ldmux_session_jni.c` belong to the **second** library,
- *   `libldmux_session.so` (Rust session plus its JNI shim, `native/build-session.sh`), which is
+ * - `ldmux_client.h` and `ldmux_client_jni.c` belong to the **second** library,
+ *   `libldmux_session.so` (the Rust engine plus its JNI shim, `native/build-session.sh`), which is
  *   built separately so a session change does not rebuild libghostty (`docs/ARCHITECTURE.md` §3).
  *
  * The stamp used to be a glob of `*.c *.h`, so editing one of these declared the packaged `.so`
@@ -63,12 +63,12 @@ function nativeSources(): string[] {
 const NOT_IN_TERMINAL_LIB = new Set([
   "test_engine.c",
   "test_jni.c",
-  "ldmux_session.h",
-  "ldmux_session_jni.c",
   // The radio route's own library: `ldmux_client.h` is the C ABI over the phone's whole radio
   // route and `ldmux_client_jni.c` its JNI shim, both linked into `libldmux_session.so` by
   // `native/build-session.sh`. They are not part of the terminal engine's library, but they are
-  // part of the session library's freshness and symbol checks above.
+  // part of the session library's freshness and symbol checks above. **The v14 pair is gone** —
+  // `ldmux_session.h` and `ldmux_session_jni.c` were the second implementation of the same suite
+  // (`docs/RADIO-PLAN.md` §10a).
   "ldmux_client.h",
   "ldmux_client_jni.c",
 ]);
@@ -100,8 +100,8 @@ const SESSION_LIBS = packagedLibs("libldmux_session.so");
  */
 function sessionSources(): string[] {
   const out = [
-    join(NATIVE, "ldmux_session.h"),
-    join(NATIVE, "ldmux_session_jni.c"),
+    join(NATIVE, "ldmux_client.h"),
+    join(NATIVE, "ldmux_client_jni.c"),
   ];
   const workspaceRoot = join(ROOT, "..", ".."); // ROOT is packages/mobile
   for (const crate of ["mesh", "session", "session-ffi"]) {
@@ -283,7 +283,7 @@ const TERMINAL_KT = join(
   "term",
   "NativeTerminal.kt",
 );
-const SESSION_KT = join(
+const RADIO_KT = join(
   ROOT,
   "composeApp",
   "src",
@@ -293,7 +293,7 @@ const SESSION_KT = join(
   "ldmux",
   "mobile",
   "mesh",
-  "NativeMeshSession.kt",
+  "NativeRadioClient.kt",
 );
 
 test("every native method Kotlin declares is defined in libldmux_terminal.so", () => {
@@ -340,10 +340,9 @@ test("every packaged libldmux_session.so is newer than the Rust it wraps", () =>
   }
 });
 
-test("every native method NativeMeshSession declares is defined in libldmux_session.so", () => {
+test("every native method the radio client declares is defined in libldmux_session.so", () => {
   if (SESSION_LIBS.length === 0) return;
-  assert.ok(existsSync(SESSION_KT), "NativeMeshSession.kt is where the session methods live");
-  const { prefix, names } = jniDeclarations(SESSION_KT);
+  const { prefix, names } = jniDeclarations(RADIO_KT);
 
   for (const lib of SESSION_LIBS) {
     const defined = definedSymbols(lib);
@@ -357,22 +356,22 @@ test("every native method NativeMeshSession declares is defined in libldmux_sess
   }
 });
 
-test("the session shim exports the name NativeMeshSession.kt asks for", () => {
+test("the radio shim exports the name the Kotlin object asks for", () => {
   // The artefact test above can only fail once somebody rebuilds. This one reads the shim source,
   // so a rename in either place is caught on the next `npm test` rather than on the next build —
   // and a mismatch here is an `UnsatisfiedLinkError` at the first radio call on a device.
-  const { prefix } = jniDeclarations(SESSION_KT);
-  const shim = readFileSync(join(NATIVE, "ldmux_session_jni.c"), "utf8");
+  const { prefix } = jniDeclarations(RADIO_KT);
+  const shim = readFileSync(join(NATIVE, "ldmux_client_jni.c"), "utf8");
   const macro = /^#define\s+JNI\(name\)\s+([A-Za-z0-9_]+)##name\s*$/m.exec(shim)?.[1];
   assert.ok(
     macro,
-    "native/ldmux_session_jni.c must define `JNI(name)` as `<class-prefix>##name`, so the exported " +
+    "native/ldmux_client_jni.c must define `JNI(name)` as `<class-prefix>##name`, so the exported " +
       "symbols can be derived from the Kotlin declaration instead of being spelled twice",
   );
   assert.equal(
     macro,
     prefix,
-    `native/ldmux_session_jni.c exports ${macro}* but ${SESSION_KT} will look up ${prefix}*. ` +
+    `native/ldmux_client_jni.c exports ${macro}* but ${RADIO_KT} will look up ${prefix}*. ` +
       `One of the two was renamed and the other was not, which is a link failure at the first call.`,
   );
 });

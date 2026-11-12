@@ -148,6 +148,25 @@ JNIEXPORT void JNICALL JNI(free)(JNIEnv *env, jclass cls, jlongArray slot) {
   set_i64(env, slot, 0, (jlong)(intptr_t)c);
 }
 
+/*
+ * A fresh device keypair, for a pairing that happens before there is a handle. Two 32-byte arrays
+ * filled field by field, the same way every other out-struct crosses: Kotlin never sees a C layout.
+ */
+JNIEXPORT jint JNICALL JNI(keypair)(JNIEnv *env, jclass cls, jbyteArray priv, jbyteArray pub) {
+  (void)cls;
+  if (!priv || !pub) return LDMUX_ERR_NULL;
+  if ((*env)->GetArrayLength(env, priv) < 32 || (*env)->GetArrayLength(env, pub) < 32) {
+    return LDMUX_ERR_BUFFER;
+  }
+  uint8_t k_priv[32], k_pub[32];
+  int32_t rc = ldmux_client_keypair(k_priv, k_pub);
+  if (rc == LDMUX_OK) {
+    (*env)->SetByteArrayRegion(env, priv, 0, 32, (const jbyte *)k_priv);
+    (*env)->SetByteArrayRegion(env, pub, 0, 32, (const jbyte *)k_pub);
+  }
+  return rc;
+}
+
 JNIEXPORT jint JNICALL JNI(connect)(JNIEnv *env, jclass cls, jlong handle, jlong now_ms, jlong wall_ms) {
   (void)env; (void)cls;
   return ldmux_client_connect(client_of(handle), (uint64_t)now_ms, (uint64_t)wall_ms);

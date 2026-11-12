@@ -1,158 +1,36 @@
 package io.ldmux.mobile.mesh
 
 /**
- * The C ABI of `native/ldmux_session.h` as a Kotlin interface: the platform leaf. Every method
- * is one ABI call and nothing else; there is no logic to get wrong here, which is the point
- * (ADR-0013). Handles are opaque `Long`s: never interpret one. Outputs are written into arrays
- * the caller owns. Return values are the header's status codes.
+ * The one call the app makes outside a client handle: a device keypair for a fresh pairing.
  *
- * The constants repeat the header's numbers; `MeshSessionAbiTest` loads the real library and
- * fails if either side drifts.
+ * **This interface used to be the whole v14 C ABI** — Noise handshake, the 6+2+16 record, the ARQ,
+ * every poll and every queue. All of it is inside `ldmux_client_*` now
+ * (`crates/session/src/client.rs`, `docs/RADIO-PLAN.md` §10a), and a second ABI for the same suite
+ * was two implementations waiting to disagree. What is left is the call a pairing needs *before*
+ * there is a session to put it in.
  */
 interface SessionLib {
     fun keypair(priv: ByteArray, pub: ByteArray): Int
 
-    /** `out[0]` receives the initiator handle. */
-    fun initiatorStart(
-        priv: ByteArray,
-        pub: ByteArray,
-        remotePub: ByteArray,
-        psk: ByteArray,
-        timestampMs: Long,
-        out: LongArray,
-        msg1: ByteArray,
-    ): Int
-
-    /** Consumes [hs] whatever the outcome. `out[0]` receives the session handle. */
-    fun initiatorFinish(hs: Long, msg2: ByteArray, recordLimit: Int, nowMs: Long, out: LongArray): Int
-
-    fun initiatorFree(hs: Long)
-
-    /** `out[0]` = session handle, `out[1]` = timestamp to remember. */
-    fun responderAccept(
-        priv: ByteArray,
-        pub: ByteArray,
-        psk: ByteArray,
-        pinned: ByteArray?,
-        lastTimestampMs: Long,
-        nowMs: Long,
-        msg1: ByteArray,
-        index: Int,
-        recordLimit: Int,
-        reply: ByteArray,
-        remoteStatic: ByteArray,
-        out: LongArray,
-    ): Int
-
-    fun send(h: Long, shell: Int, data: ByteArray): Int
-    fun receive(h: Long, nowMs: Long, record: ByteArray): Int
-
-    /** `meta[0]` = shell, `meta[1]` = length. Returns 1, 0 or an error. */
-    fun takeDelivered(h: Long, out: ByteArray, meta: IntArray): Int
-    fun poll(h: Long, nowMs: Long, recordsLeft: Int, l2Slots: Int): Int
-
-    /** `meta[0]` = length. Returns 1, 0 or an error. */
-    fun takeRecord(h: Long, out: ByteArray, meta: IntArray): Int
-
-    /**
-     * As [takeRecord], but `meta[1]` receives the ARQ sequence number that names the record's slot.
-     *
-     * The number is what [refuseSeq] needs: the radio's send result echoes the sequence *the
-     * caller* wrote into the send frame, and only this number maps that answer back to the slot it
-     * belongs to. The default keeps fakes and older bindings compiling: it reports `-1`, "unknown",
-     * and callers must not refuse a record whose number they do not have.
-     */
-    fun takeRecordSeq(h: Long, out: ByteArray, meta: IntArray): Int {
-        val rc = takeRecord(h, out, meta)
-        if (rc == 1) meta[1] = -1
-        return rc
-    }
-
-    /**
-     * Tell the session the radio refused that record without transmitting it. The attempt is given
-     * back and the retry follows the radio's transmit-table pace instead of a full retry interval,
-     * so a burst the radio could not take becomes a slower burst rather than a dead session.
-     *
-     * Returns 1 when the slot was in flight, 0 when it was already settled. The default does
-     * nothing and reports 0, so a fake or an older binding simply leaves the retry ladder alone.
-     */
-    fun refuseSeq(h: Long, nowMs: Long, seq: Int): Int = 0
-    /**
-     * Retransmission timing for this radio: one full record's airtime at the active preset.
-     *
-     * A fixed two-second retry is shorter than a round trip on a slow preset or across
-     * repeaters, and every early retry spends airtime on a duplicate. Zero keeps the defaults.
-     */
-    fun setAirtime(h: Long, airtimeMs: Double): Int
-
-    /**
-     * How many repeaters the route to the host crosses.
-     *
-     * The session's first retransmission is six airtimes *per hop* (MeshCore's own direct-send
-     * factor): a flat six is right for a neighbour and too short for a route, where the first copy
-     * is still travelling when the timer fires. The measured round trip corrects it after that.
-     */
-    fun setHops(h: Long, hops: Int): Int
-
-    /**
-     * **Re-size the record because the route changed**, without a new handshake.
-     *
-     * A repeater's hops come out of the same 176-byte frame as the record, so a full record built
-     * for an empty path is refused at the first path byte once the phone walks out of direct range.
-     * A handshake is only needed when the keys change; the size is a property of the route, and at
-     * range a handshake is a dozen records of air spent to change one number.
-     */
-    fun setRecordLimit(h: Long, bytes: Int): Int
-
-    fun close(h: Long): Int
-    fun status(h: Long, nowMs: Long): Int
-    fun pending(h: Long): Int
-    fun nextDeadline(h: Long, out: LongArray): Int
-    fun peerKey(h: Long, out: ByteArray): Int
-    fun dropped(h: Long): Int
-    fun free(h: Long)
-
+    /** A keypair coordinate, in bytes. */
     companion object {
-        const val OK = 0
-        const val ERR_NULL = -1
-        const val ERR_PANIC = -2
-        const val ERR_ARG = -3
-        const val ERR_BUFFER = -4
-        const val ERR_CRYPTO = -10
-        const val ERR_MALFORMED = -11
-        const val ERR_BAD_FILTER = -12
-        const val ERR_STALE = -13
-        const val ERR_REPLAY = -14
-        const val ERR_PIN_MISMATCH = -15
-        const val ERR_WRONG_INDEX = -20
-        const val ERR_DUPLICATE = -21
-        const val ERR_TOO_OLD = -22
-        const val ERR_BAD_TAG = -23
-        const val ERR_TOO_LONG = -24
-        const val ERR_COUNTER_EXHAUSTED = -25
-        const val ERR_DECODE = -26
-        const val ERR_RECORD_LIMIT = -27
-        const val ERR_QUEUE_FULL = -30
-        const val ERR_NOT_OPEN = -31
-
-        const val RX_QUIET = 0
-        const val RX_DATA = 1
-        const val RX_CLOSED = 2
-
-        const val STATUS_FAILED = 1
-        const val STATUS_PEER_CLOSED = 2
-        const val STATUS_NEEDS_REKEY = 4
-
         const val KEY_LEN = 32
-        const val MSG1_LEN = 121
-        const val MSG2_LEN = 50
-        const val RECORD_MAX = 172
+
+        /** The ABI status for a call that worked. */
+        const val OK = 0
+
+        /** A null argument: the Kotlin side passed something the JNI shim could not hand on. */
+        const val ERR_NULL = -1
+
+        /** A buffer too small for the answer. */
+        const val ERR_BUFFER = -2
     }
 }
 
 /**
- * The platform's library, or null where it cannot be loaded. Null is a real answer, not an
- * error: a route that needs the session reports [MeshRouteProblem.SessionNotBuilt] and the app
- * runs on, rather than crashing at startup on a device whose ABI has no build.
+ * The platform's [SessionLib], or null when the native library did not load.
+ *
+ * A null is the settings screen's "the library is missing" and the pairing's "cannot make a
+ * keypair here", so it is a value rather than an exception.
  */
 expect fun loadSessionLib(): SessionLib?

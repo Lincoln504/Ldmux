@@ -26,7 +26,6 @@
 //! [`transaction::TransactionLayer`] is the layer a caller should reach for instead.
 #![forbid(unsafe_code)]
 
-pub mod arq;
 pub mod bootstrap;
 pub mod client;
 pub mod direction;
@@ -34,7 +33,6 @@ pub mod endpoint;
 pub mod handshake;
 pub mod radio;
 pub mod record;
-pub mod session;
 pub mod transaction;
 
 pub use client::{
@@ -43,4 +41,3 @@ pub use client::{
 pub use direction::{Arrival, Side, Verdict, admit};
 pub use endpoint::{ArrivalInfo, CarriageSink, EndpointConfig, RadioEndpoint, Role};
 pub use handshake::{Established, HandshakeError, Initiator, Keypair, PairingEntry, Responder};
-pub use session::{Inbound, Sealed, Session, SessionError};

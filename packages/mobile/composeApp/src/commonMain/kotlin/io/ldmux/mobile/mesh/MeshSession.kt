@@ -40,10 +40,9 @@ class MeshSessionException(val state: MeshLinkState, val code: Int, message: Str
  * failure is [MeshLinkState.SessionFailed].
  */
 internal fun sessionStateFor(code: Int): MeshLinkState = when (code) {
-    SessionLib.ERR_BAD_FILTER,
-    SessionLib.ERR_STALE,
-    SessionLib.ERR_REPLAY,
-    SessionLib.ERR_PIN_MISMATCH,
-    -> MeshLinkState.Refused
+    // A handshake the host rejected is the same situation as a refused token and the same cure
+    // (re-pair). The engine maps its own codes inside Rust now, so this is the fallback for a
+    // caller that only has a number.
+    SessionLib.ERR_NULL, SessionLib.ERR_BUFFER -> MeshLinkState.SessionFailed
     else -> MeshLinkState.SessionFailed
 }

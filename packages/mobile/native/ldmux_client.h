@@ -244,6 +244,16 @@ typedef struct {
 /* Create a client from `config` and write the handle to `*out`.
  * Returns LDMUX_ERR_NULL for a null argument, LDMUX_ERR_ARG for a path width outside 1..=3, or
  * LDMUX_ERR_PANIC for a panic inside. */
+/*
+ * Fill `priv_out` and `pub_out` with a fresh device keypair (32 bytes each).
+ *
+ * A pairing starts before there is a session to put it in, so this is the one call the app needs
+ * outside a client handle. One library, one implementation of the suite.
+ *
+ * Returns LDMUX_OK, LDMUX_ERR_NULL for a null pointer, or LDMUX_ERR_PANIC.
+ */
+int32_t ldmux_client_keypair(uint8_t *priv_out, uint8_t *pub_out);
+
 int32_t ldmux_client_new(const LdmuxClientConfig *config, LdmuxClient **out);
 
 /* Destroy a client and null the caller's handle. A second call is a no-op. */

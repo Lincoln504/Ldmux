@@ -46,6 +46,28 @@ object NativeRadioClient {
     ): Int
 
     /** Frees the client and zeroes `slot[0]`. A second call is a no-op. */
+    /**
+     * Fill [priv] and [pub] with a fresh device keypair, 32 bytes each.
+     *
+     * The one call the app makes outside a client handle: a pairing starts before there is a
+     * session to put it in. It lives on this object so the app links one library and the suite has
+     * one implementation.
+     */
+    external fun keypair(priv: ByteArray, pub: ByteArray): Int
+
+    /** The pair, or null when the library refused. Convenience over [keypair] for the one caller. */
+    fun keypair(): Pair<ByteArray, ByteArray>? {
+        val priv = ByteArray(KEY_LEN)
+        val pub = ByteArray(KEY_LEN)
+        return if (keypair(priv, pub) == OK) priv to pub else null
+    }
+
+    /** A keypair coordinate, in bytes. */
+    const val KEY_LEN = 32
+
+    /** The ABI status for a call that worked. */
+    const val OK = 0
+
     external fun free(slot: LongArray)
 
     external fun connect(handle: Long, nowMs: Long, wallMs: Long): Int
