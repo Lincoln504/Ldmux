@@ -49,6 +49,9 @@ import no.nordicsemi.android.ble.observer.ConnectionObserver;
  */
 public final class AndroidBleTransport implements BleTransport {
 
+    /** Logcat tag for the link's own events, which is where a silent stall is found. */
+    private static final String TAG = "ldmux-ble";
+
     /** Requested MTU — fits any MeshCore frame with room to spare. */
     private static final int PREFERRED_MTU = 256;
 
@@ -218,8 +221,18 @@ public final class AndroidBleTransport implements BleTransport {
                 notifyConnectionChanged(false);
                 return;
             }
+            // **A send that never completes is invisible without this.** `enqueue` only queues the
+            // request: if the manager's queue is blocked, nothing reaches the stack, no callback
+            // fires, and the engine's frame is gone with no trace. Measured 2026-11-12: the engine
+            // logged "radio first frame: 1 bytes", this method returned normally, and logcat showed
+            // no `writeCharacteristic` at all.
+            Log.d(TAG, "ble send " + frame.length + "B type=" + writeType);
             writeCharacteristic(rxCharacteristic, frame, writeType)
-                    .fail((device, status) -> notifyConnectionChanged(false))
+                    .done((device) -> Log.d(TAG, "ble send ok " + frame.length + "B"))
+                    .fail((device, status) -> {
+                        Log.d(TAG, "ble send failed status=" + status);
+                        notifyConnectionChanged(false);
+                    })
                     .enqueue();
         }
 
@@ -332,10 +345,14 @@ public final class AndroidBleTransport implements BleTransport {
             // This is the readiness point. onDeviceReady() runs when
             // initialize() returns, before bonding, MTU and notifications have
             // completed, and the engine sends APP_START on that signal.
+            Log.d(TAG, "ble subscribe (enableNotifications on " + txCharacteristic.getUuid() + ")");
             enableNotifications(txCharacteristic)
-                    .done((device) -> notifyConnectionChanged(true))
+                    .done((device) -> {
+                        Log.d(TAG, "ble subscribed");
+                        notifyConnectionChanged(true);
+                    })
                     .fail((device, status) -> {
-                        Log.d("ldmux", "ble subscribe failed status=" + status);
+                        Log.d(TAG, "ble subscribe failed status=" + status);
                         notifyConnectionChanged(false);
                     })
                     .enqueue();

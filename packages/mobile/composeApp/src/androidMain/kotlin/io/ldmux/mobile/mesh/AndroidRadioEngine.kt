@@ -149,6 +149,11 @@ class AndroidRadioEngine(
         context = io.ldmux.mobile.AndroidApp.maybeContext,
         onFrame = { frame -> onNotification(frame) },
         onLink = { up ->
+            // **The link's own transitions, in the operator's log.** Whether the pipe ever says
+            // "up" is the first question when the radio is connected and the app is silent, and it
+            // is invisible from every screen: measured 2026-11-12, a live GATT link with MTU 247
+            // and not one frame written.
+            io.ldmux.mobile.appLog("radio link ${if (up) "up" else "down"}")
             _linkUp.value = up
             if (up) _problem.value = null
             queue.trySend(Work.Wake)
@@ -178,7 +183,8 @@ class AndroidRadioEngine(
         }
         if (started) return
         started = true
-        pipe.connect(address)
+        io.ldmux.mobile.appLog("radio start: $address")
+        if (!pipe.connect(address)) io.ldmux.mobile.appLog("radio start refused: $address")
     }
 
     @Volatile
@@ -331,9 +337,21 @@ class AndroidRadioEngine(
      */
     private suspend fun pump(c: RadioClient) {
         while (true) {
-            if (pendingFrame == null && pipe.ready) pendingFrame = c.poll(wallNow())
+            if (pendingFrame == null && pipe.ready) {
+                pendingFrame = c.poll(wallNow())
+                if (pendingFrame != null && !loggedFirstFrame) {
+                    loggedFirstFrame = true
+                    io.ldmux.mobile.appLog("radio first frame: ${pendingFrame?.size} bytes")
+                }
+            }
             val frame = pendingFrame ?: break
-            if (!pipe.write(frame)) break
+            if (!pipe.write(frame)) {
+                if (!loggedWriteRefusal) {
+                    loggedWriteRefusal = true
+                    io.ldmux.mobile.appLog("radio write refused: link not ready")
+                }
+                break
+            }
             pendingFrame = null
         }
         _radio.value = c.radio()
@@ -343,6 +361,10 @@ class AndroidRadioEngine(
 
     /** The one frame the pipe would not take, kept for the next turn. */
     private var pendingFrame: ByteArray? = null
+
+    /** Each of these is logged once, so a stall cannot flood the operator's log. */
+    private var loggedFirstFrame = false
+    private var loggedWriteRefusal = false
 
     private suspend fun apply(c: RadioClient, work: Work) {
         when (work) {
