@@ -2345,6 +2345,48 @@ pub struct SessionSummary {
     pub shell: String,
 }
 
+/// The `Marks` pages for a table of `(shell id, kind)`.
+///
+/// **A message has a body ceiling and the table does not.** [`MAX_ROWS_BODY`] is 134 bytes and an
+/// entry is its id plus two bytes, so a dozen marked shells already overflow one message — and a
+/// reply drops a message it cannot encode, which would have meant "no marks at all" exactly when an
+/// operator had many shells marked. Pages are cheap: the phone's decoder is a stream decoder, so
+/// several messages cost the records they already cost and nothing more. `first` opens a run and
+/// `last` closes it, so the phone appends rather than replacing per page. Always at least one page,
+/// empty included: an empty table is how the phone learns a mark it still draws has expired.
+#[must_use]
+pub fn marks_pages(marks: Vec<(String, u8)>) -> Vec<Message> {
+    // The flags byte is part of the body, so a page carries one byte less than the ceiling.
+    let ceiling = MAX_ROWS_BODY - 1;
+    let mut pages: Vec<Message> = Vec::new();
+    let mut page: Vec<MarkEntry> = Vec::new();
+    let mut used = 0usize;
+    for (id, kind) in marks {
+        // An id the wire cannot carry is not silently shortened into a mark for another shell: it is
+        // dropped, and only a bug could produce one (session ids are ten characters).
+        if id.len() > MAX_SELECTOR {
+            continue;
+        }
+        let cost = 2 + id.len();
+        if !page.is_empty() && used + cost > ceiling {
+            pages.push(Message::Marks {
+                first: pages.is_empty(),
+                last: false,
+                entries: std::mem::take(&mut page),
+            });
+            used = 0;
+        }
+        used += cost;
+        page.push(MarkEntry { id, kind });
+    }
+    pages.push(Message::Marks {
+        first: pages.is_empty(),
+        last: true,
+        entries: page,
+    });
+    pages
+}
+
 /// The `Sessions` pages for a list of sessions: at most [`MAX_SESSIONS`] entries, ids,
 /// labels and paths cut to their limits, each page packed up to [`MAX_ROWS_BODY`] so it fits one
 /// record, the final page flagged `last`. `cwd` says the entries carry the working directory
@@ -3580,6 +3622,47 @@ mod tests {
                 "a long list really does span records"
             );
         }
+    }
+
+    /// **The mark table is paged too, and every page fits one record.** A table of a dozen shells
+    /// overflows `MAX_ROWS_BODY`, and a reply drops a message it cannot encode — which used to mean
+    /// "no marks at all" exactly when an operator had many shells marked.
+    #[test]
+    fn marks_pages_fit_one_record_and_say_which_is_first_and_last() {
+        for n in [0usize, 1, 2, 7, 40] {
+            let table = (0..n)
+                .map(|i| (format!("shell-{i:05}"), u8::try_from(i % 2).expect("a kind")))
+                .collect();
+            let pages = marks_pages(table);
+            let mut total = 0;
+            for (i, m) in pages.iter().enumerate() {
+                let bytes = m.encode().expect("a mark page encodes");
+                assert!(
+                    bytes.len() <= MAX_MESSAGE && bytes.len() <= RECORD_PAYLOAD,
+                    "n={n} page {i} is {} bytes",
+                    bytes.len()
+                );
+                let Message::Marks {
+                    first,
+                    last,
+                    entries,
+                } = m
+                else {
+                    panic!("a mark table is sent as Marks pages")
+                };
+                assert_eq!(*first, i == 0, "only the opening page is first");
+                assert_eq!(*last, i + 1 == pages.len(), "only the final page is last");
+                total += entries.len();
+            }
+            assert_eq!(total, n, "n={n}: nothing lost and nothing invented");
+        }
+        let many: Vec<(String, u8)> = (0..40)
+            .map(|i| (format!("shell-{i:05}"), 0))
+            .collect();
+        assert!(
+            marks_pages(many).len() > 1,
+            "a long mark table really does span records"
+        );
     }
 
     #[test]

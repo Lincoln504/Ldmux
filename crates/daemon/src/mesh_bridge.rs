@@ -31,13 +31,18 @@ use std::time::{Duration, Instant};
 
 use ldmux_protocol::keeper::SnapshotResult;
 use ldmux_protocol::mesh_term::{
-    CWD_VERSION, DecodeError, Decoder, Differ, KEY_VERSION, MARKS_VERSION, MIN_VERSION, MarkEntry,
-    Message, ORIGIN_VERSION, OWNER_VERSION, RESIZE_VERSION, SHELL_CONTROL_VERSION, SHELL_VERSION,
-    STREAM_VERSION, Screen, VERSION, closed, session_pages,
+    CWD_VERSION, DecodeError, Decoder, Differ, KEY_VERSION, MARKS_VERSION, MIN_VERSION, Message,
+    ORIGIN_VERSION, OWNER_VERSION, RESIZE_VERSION, SHELL_CONTROL_VERSION, SHELL_VERSION,
+    STREAM_VERSION, Screen, VERSION, closed, marks_pages, session_pages,
 };
 
 use crate::mesh_apply::PaneModes;
 use crate::mesh_rpc::{MeshHost, MeshRpc, Outcome};
+
+// **The claim rule and the grid bound outlive this file.** Both moved to `mesh_rpc`, which is the
+// module stage A keeps when the frame loop is deleted; they are re-exported here so the bridge and
+// its callers keep one spelling of each (`docs/RADIO-PLAN.md` §10a).
+pub use crate::mesh_rpc::{ClaimOutcome, MAX_GRID_COLS, MAX_GRID_ROWS, stated_grid};
 
 /// The peer a version-15 command came from.
 ///
@@ -88,9 +93,9 @@ pub trait Link {
     }
 }
 
-/// Every [`Host`] is a [`MeshHost`]: the version-15 service asks for four of the keeper operations
-/// the bridge already names, so the adapter states which four rather than wrapping the host in a
-/// second object that would have to keep two borrows alive.
+/// Every [`Host`] is a [`MeshHost`]: the version-15 service asks for keeper and claim-table
+/// operations the bridge already names, so the adapter states which rather than wrapping the host in
+/// a second object that would have to keep two borrows alive.
 ///
 /// The methods are spelled out instead of delegating by name-free magic because they are the seam
 /// stage A keeps when this file is deleted: the compiler then says exactly what the replacement has
@@ -107,6 +112,33 @@ impl<H: Host> MeshHost for H {
     }
     async fn resize(&mut self, id: &str, cols: u8, rows: u8) -> Result<(), String> {
         Host::resize(self, id, cols, rows).await
+    }
+    async fn listing(&mut self) -> Option<Vec<ldmux_protocol::mesh_term::SessionSummary>> {
+        Host::listing(self).await
+    }
+    async fn marks(&mut self) -> Vec<(String, u8)> {
+        Host::marks(self).await
+    }
+    async fn holder(&mut self, id: &str) -> Option<String> {
+        Host::holder(self, id).await
+    }
+    async fn claim(&mut self, id: &str, takeover: bool) -> Result<ClaimOutcome, String> {
+        Host::claim(self, id, takeover).await
+    }
+    async fn release(&mut self, id: &str) -> bool {
+        Host::release(self, id).await
+    }
+    async fn create(&mut self, cwd: &str, cols: u8, rows: u8) -> Result<String, String> {
+        Host::create(self, cwd, cols, rows).await
+    }
+    async fn close(&mut self, id: &str) -> Result<(), String> {
+        Host::close(self, id).await
+    }
+    async fn make_live(&mut self, id: &str) -> Result<(), String> {
+        Host::make_live(self, id).await
+    }
+    async fn history(&mut self, id: &str, from: u32, rows: u8) -> Option<(u32, bool, Vec<String>)> {
+        Host::history(self, id, from, rows).await
     }
 }
 
@@ -682,46 +714,6 @@ pub struct Bridge<H, L> {
     /// two downlink waves into the same repeater chain. A version-14 phone is served by the frame
     /// loop alone, so the shipped app keeps working through this change.
     rpc: MeshRpc,
-}
-
-/// The mark table, cut into `Marks` messages that each fit one record.
-///
-/// **A message has a body ceiling and the table does not.** `MAX_ROWS_BODY` is 134 bytes and an
-/// entry is its id plus two bytes, so a table of a dozen shells already overflows one message — and
-/// `reply` drops a message it cannot encode, which would have meant "no marks at all" exactly when
-/// an operator had many shells marked. Pages are cheap: the phone's decoder is a stream decoder, so
-/// several messages cost the records they already cost and nothing more.
-fn marks_pages(marks: Vec<(String, u8)>) -> Vec<Message> {
-    use ldmux_protocol::mesh_term::{MAX_ROWS_BODY, MAX_SELECTOR};
-    // The flags byte is part of the body, so a page carries one byte less than the ceiling.
-    let ceiling = MAX_ROWS_BODY - 1;
-    let mut pages: Vec<Message> = Vec::new();
-    let mut page: Vec<MarkEntry> = Vec::new();
-    let mut used = 0usize;
-    for (id, kind) in marks {
-        // An id the wire cannot carry is not silently shortened into a mark for another shell: it is
-        // dropped, and only a bug could produce one (session ids are ten characters).
-        if id.len() > MAX_SELECTOR {
-            continue;
-        }
-        let cost = 2 + id.len();
-        if !page.is_empty() && used + cost > ceiling {
-            pages.push(Message::Marks {
-                first: pages.is_empty(),
-                last: false,
-                entries: std::mem::take(&mut page),
-            });
-            used = 0;
-        }
-        used += cost;
-        page.push(MarkEntry { id, kind });
-    }
-    pages.push(Message::Marks {
-        first: pages.is_empty(),
-        last: true,
-        entries: page,
-    });
-    pages
 }
 
 impl<H: Host, L: Link> Bridge<H, L> {
@@ -2199,15 +2191,6 @@ impl<H: Host, L: Link> Bridge<H, L> {
 /// carries one phone key, and a second phone means a new pairing.
 const MESH_DEVICE: &str = "mesh-link";
 
-/// What the host said about a claim.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ClaimOutcome {
-    /// The shell is this link's now. Whoever held it was idle, or was displaced by consent.
-    Claimed,
-    /// An in-use holder refuses, and the user is offered `take it back`.
-    Held { holder: String },
-}
-
 /// The daemon as a [`Host`]: every call is an RPC the control socket already serves.
 pub struct DaemonHost(pub Arc<tokio::sync::Mutex<crate::daemon::LdmuxDaemon>>);
 
@@ -2559,21 +2542,6 @@ impl Host for DaemonHost {
 /// bug in that measurement (or in the keyboard inset arithmetic) can produce 255x255, and a pane
 /// that size is 65 000 cells — twenty-odd records of a full frame, about twelve seconds of air, for
 /// a screen nobody could read. The bound is far above any real device (a 13-inch tablet at a small
-/// font is about 150x50) and far below what the wire allows, so it only ever catches a mistake.
-pub const MAX_GRID_COLS: u8 = 200;
-pub const MAX_GRID_ROWS: u8 = 120;
-
-/// A stated grid, if it is one worth fitting: both dimensions present and inside the bound.
-///
-/// **Not the same bound as the keeper's.** `clamp_pane_size` allows 2000 columns and 255 rows,
-/// because a desk window on a large monitor is a real pane; this is the tighter limit a radio client
-/// is held to, and it exists for the airtime of the frame, not for the protocol.
-#[must_use]
-pub fn stated_grid(cols: u8, rows: u8) -> Option<(u8, u8)> {
-    ((1..=MAX_GRID_COLS).contains(&cols) && (1..=MAX_GRID_ROWS).contains(&rows))
-        .then_some((cols, rows))
-}
-
 /// Slice a history page out of a keeper snapshot, in the keeper's own line numbering.
 ///
 /// **Three counts, and confusing them is a silently empty page.** `total` is every line the pane
