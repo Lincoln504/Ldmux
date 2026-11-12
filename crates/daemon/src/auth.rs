@@ -75,7 +75,7 @@ pub fn load_or_create_token(state_dir: &str, token_path: Option<&str>) -> Result
     // short token if the write fails partway (every paired phone locked out, with nothing on screen
     // to say why), and the temp file is created 0600 from its first byte rather than chmod-ed after,
     // so the umask cannot widen it.
-    crate::mesh_session::write_private(std::path::Path::new(&path), token.as_bytes())
+    crate::mesh_identity::write_private(std::path::Path::new(&path), token.as_bytes())
         .map_err(|e| format!("write the token {path}: {e}"))?;
 
     // Once the token has a path of its own, the legacy copy must go, so a

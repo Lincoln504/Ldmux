@@ -609,6 +609,14 @@ impl<L: ByteLink> Companion<L> {
     /// * **A deadline frees the window once.** The frame that was already on its way may still
     ///   arrive, so the window stays closed for a drain window afterwards, and the answer is
     ///   dropped rather than handed to whoever asks next.
+    ///
+    /// The residual, stated rather than hidden: an answer that arrives **after** the drain window
+    /// is indistinguishable from an answer to the next command, because the firmware echoes no
+    /// sequence number. What bounds the damage is the command set — the only host command whose
+    /// answer is a bare `OK` is a raw send, and "the radio accepted it" is a claim the session layer
+    /// above already treats as *not* delivery, so a mis-attributed one costs a retransmission and no
+    /// correctness. A command whose answer carries data (`DEVICE_INFO`, `ADVERT_PATH`, `STATS`) can
+    /// never be settled by another command's reply, since the reply is not in its set.
     fn execute(&mut self, payload: &[u8], timeout: Duration) -> Result<Vec<u8>, SessionError> {
         let command = payload
             .first()

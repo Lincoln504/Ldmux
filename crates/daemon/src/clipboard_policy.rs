@@ -26,7 +26,7 @@ pub fn read(state_dir: &Path) -> bool {
 
 /// Persist the policy, through the one private-file writer the daemon has.
 pub fn write(state_dir: &Path, on: bool) -> std::io::Result<()> {
-    crate::mesh_session::write_private(&path(state_dir), if on { b"on\n" } else { b"off\n" })
+    crate::mesh_identity::write_private(&path(state_dir), if on { b"on\n" } else { b"off\n" })
 }
 
 #[cfg(test)]

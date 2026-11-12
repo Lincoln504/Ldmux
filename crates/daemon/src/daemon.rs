@@ -2819,7 +2819,7 @@ impl LdmuxDaemon {
             .collect();
         // One writer for every private file: see `write_private`, which holds the reason the bytes
         // must reach the disk before the name does.
-        if let Err(e) = crate::mesh_session::write_private(
+        if let Err(e) = crate::mesh_identity::write_private(
             &self.claims_path(),
             Value::Array(rows).to_string().as_bytes(),
         ) {

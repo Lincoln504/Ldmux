@@ -34,6 +34,8 @@ use std::time::{Duration, Instant};
 use ldmux_companion::codec::{
     parse_advert_path, parse_packet, parse_route_reply, parse_route_request,
 };
+use ldmux_mesh::route::Carriage;
+use ldmux_session::endpoint::CarriageSink;
 use ldmux_companion::{
     ByteLink, Companion, FloodScope, KNOWN_SCOPE_TAGS, RouteRequest, SerialLink, SessionError,
     identify_scope,
@@ -744,7 +746,17 @@ const TENTH_PERCENT_MS: f64 = 3_600.0;
 
 /// The one command the loop has for the radio.
 enum Command {
-    Record { seq: u8, record: Vec<u8> },
+    Record {
+        seq: u8,
+        record: Vec<u8>,
+        /// The carriage an endpoint named for this record, or `None` for the legacy loop, which
+        /// leaves the decision to this thread.
+        ///
+        /// **Two ways to choose one carriage is one way too many**, so the field is `Option` only
+        /// for as long as the old loop exists: `RadioEndpoint` always names it, and a send that
+        /// arrives with `None` is the old path, which the transport swap deletes.
+        carriage: Option<Carriage>,
+    },
     /// Tune the radio, and answer on this channel when the firmware has.
     SetPreset {
         freq_khz: u32,
@@ -767,6 +779,12 @@ enum Command {
 
 /// The radio, seen as a carrier.
 pub struct SerialCarrier {
+    /// The carriage an endpoint named for the next record, consumed by the send.
+    ///
+    /// It is `Option` because the loop that names it and the send that consumes it are one
+    /// decision: an endpoint that named a carriage and then failed to send must not leave this
+    /// thread believing the next record is a flood.
+    next_carriage: Option<Carriage>,
     /// `None` once dropped, so the radio thread sees the channel close.
     commands: Option<Sender<Command>>,
     events: async_mpsc::Receiver<Result<Event, MeshError>>,
@@ -808,6 +826,7 @@ impl SerialCarrier {
             .map_err(MeshError::Io)?;
         Ok((
             Self {
+                next_carriage: None,
                 commands: Some(command_tx),
                 events: event_rx,
                 worker: Some(worker),
@@ -881,10 +900,14 @@ impl Carrier for SerialCarrier {
 
     async fn send_record(&mut self, seq: u8, record: &[u8]) -> Result<(), MeshError> {
         let commands = self.commands.as_ref().ok_or(MeshError::Closed)?;
+        // The carriage travels with the command, and is taken rather than read: a send whose
+        // carriage was never named falls back to the legacy policy, and one that named it can
+        // never leave a stale choice behind for the next record.
         commands
             .send(Command::Record {
                 seq,
                 record: record.to_vec(),
+                carriage: self.next_carriage.take(),
             })
             .map_err(|_| MeshError::Closed)
     }
@@ -894,6 +917,18 @@ impl Carrier for SerialCarrier {
             Some(result) => result,
             None => Err(MeshError::Closed),
         }
+    }
+}
+
+impl CarriageSink for SerialCarrier {
+    /// Record the carriage `RadioEndpoint` chose for the next record.
+    ///
+    /// The endpoint decides per attempt — direct along a known path, flood otherwise — and this is
+    /// the telling. It is kept rather than sent, because the decision and the record are one
+    /// instruction and a separate message could be lost between them.
+    async fn set_carriage(&mut self, carriage: &Carriage) -> Result<(), MeshError> {
+        self.next_carriage = Some(carriage.clone());
+        Ok(())
     }
 }
 
@@ -1354,12 +1389,68 @@ fn serve_loop<L: ByteLink>(
         }
 
         match commands.recv_timeout(COMMAND_WAIT) {
-            Ok(Command::Record { seq, record }) => {
+            Ok(Command::Record {
+                seq,
+                record,
+                carriage,
+            }) => {
+                last_outbound = Some(Instant::now());
+                // **The endpoint named the carriage, so this thread only builds and sends.** No
+                // path memory, no flood ladder, no escalation: those decisions belong to
+                // `RadioEndpoint` (`docs/RADIO-PLAN.md` §1 `A1`), and a second copy of them here is
+                // how the old stack came to hold two answers to every question.
+                if let Some(carriage) = carriage {
+                    let nonce = route_nonce();
+                    let carrier_settings = crate::mesh_carrier::CarrierSettings {
+                        hash_size: settings.hash_size,
+                        own_key: settings.preset.public_key,
+                        peer_key: settings.peer_key.unwrap_or([0u8; 32]),
+                        scope: scope.scope.clone(),
+                        airtime_ms: Some(settings.airtime_ms),
+                    };
+                    let outcome = match crate::mesh_carrier::build_packet(
+                        &carrier_settings,
+                        &carriage,
+                        &record,
+                        &nonce,
+                    ) {
+                        Ok(packet) => match send_retrying(|d| {
+                            companion.send_packet_within(&packet, d)
+                        }) {
+                            Ok(()) => match carriage {
+                                Carriage::Direct { .. } => SendOutcome::SentDirect,
+                                Carriage::Flood => SendOutcome::SentFlood,
+                            },
+                            Err(e) => refused(&e),
+                        },
+                        // A record that does not fit its carriage is a sizing bug the endpoint's
+                        // budget should have prevented; it is refused rather than transmitted to
+                        // die at the receiver's 173-byte ceiling (`RC-6`).
+                        Err(_) => SendOutcome::ErrTooLong,
+                    };
+                    sent = sent.saturating_add(1);
+                    if let Some(path) = settings.window_record.as_deref() {
+                        save_window(path, window_start_unix, sent);
+                    }
+                    if events
+                        .blocking_send(Ok(Event::SendResult(SendResult { seq, outcome })))
+                        .is_err()
+                    {
+                        return;
+                    }
+                    if events
+                        .blocking_send(Ok(Event::Status(status(&settings, budget, sent))))
+                        .is_err()
+                    {
+                        return;
+                    }
+                    continue;
+                }
                 // Something is trying to cross: the asker above uses this, and the last record
                 // heard from the peer, to decide whether a pathless host should ask at all. Without
                 // it a host with no phone in range floods on a timer for ever; with it, nothing
                 // moved for two minutes means nothing wants to.
-                last_outbound = Some(Instant::now());
+                // (Already stamped above, before the named-carriage branch.)
                 // **The reply follows the path the request arrived by.** Without it a phone behind
                 // a repeater is unreachable: a direct packet with no path travels only as far as
                 // this radio's own antenna.
@@ -2595,6 +2686,7 @@ mod tests {
             drop(command_rx);
         });
         let carrier = SerialCarrier {
+            next_carriage: None,
             commands: Some(command_tx),
             events: event_rx,
             worker: Some(worker),
@@ -3303,7 +3395,11 @@ mod tests {
         });
 
         command_tx
-            .send(Command::Record { seq: 7, record: vec![1, 2, 3] })
+            .send(Command::Record {
+                seq: 7,
+                record: vec![1, 2, 3],
+                carriage: None,
+            })
             .unwrap();
         // A status first: the loop starts with no budget, and unknown is zero.
         match event_rx.blocking_recv() {

@@ -75,7 +75,9 @@ use ldmux_mesh::error::MeshError;
 use ldmux_session::arq::Limits;
 use tokio::sync::Notify;
 
-use crate::mesh_session::{INBOUND_MAX, SessionFiles, SessionHost, SessionSnapshot};
+use crate::mesh_identity::{SessionFiles, SessionSnapshot};
+use crate::mesh_session::INBOUND_MAX;
+use crate::mesh_session::SessionHost;
 
 /// What turns the radio route on: the serial device the daemon owns.
 ///
@@ -166,10 +168,10 @@ impl SessionSetup {
     /// dir is a tmpfs under systemd, so a session key kept there was re-minted on every boot
     /// and every paired phone's pinned host key stopped matching. `legacy_dir` is the old
     /// location, consulted once: anything still there is moved over by
-    /// [`crate::mesh_session::adopt_legacy`].
+    /// [`crate::mesh_identity::adopt_legacy`].
     pub fn from_env(persist_dir: &Path, legacy_dir: &Path) -> Result<Option<Self>, String> {
         let env = std::env::var("LDMUX_MESH_PSK").ok();
-        let moved = crate::mesh_session::adopt_legacy(legacy_dir, persist_dir);
+        let moved = crate::mesh_identity::adopt_legacy(legacy_dir, persist_dir);
         if !moved.is_empty() {
             eprintln!(
                 "ldmuxd: moved {} from {} to {}. The state dir does not survive a reboot, so a mesh key kept there was re-minted on every boot",
@@ -186,7 +188,7 @@ impl SessionSetup {
         let psk = match env {
             Some(text) => {
                 let psk = parse_hex::<32>(text, "LDMUX_MESH_PSK")?;
-                crate::mesh_session::write_private(&path, &psk)
+                crate::mesh_identity::write_private(&path, &psk)
                     .map_err(|e| format!("{}: {e}", path.display()))?;
                 psk
             }
@@ -834,7 +836,7 @@ async fn session<C: Carrier>(
     // The L3 host lives as long as this L2 connection: a reconnect means a new handshake
     // (ADR-0020 section 3), so nothing here outlives the socket.
     let mut host: Option<SessionHost> = setup.as_ref().map(|s| {
-        let key = crate::mesh_session::SessionFiles::clone_key(&s.files);
+        let key = crate::mesh_identity::SessionFiles::clone_key(&s.files);
         SessionHost::new(
             key,
             s.files.current_pairing(),
