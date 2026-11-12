@@ -126,8 +126,6 @@ class MeshEngineDriverTest {
             opened_ = false
         }
 
-        suspend fun emit(event: ClientEvent) = eventFlow.emit(event)
-
         fun mirrorOf(shell: String, lines: List<String>, cursorY: Int = 0) {
             rows[shell] = lines
             mirrors[shell] = ClientMirror(
