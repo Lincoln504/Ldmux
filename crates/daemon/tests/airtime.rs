@@ -26,7 +26,16 @@ use std::time::Duration;
 use common::rig::Rig;
 use ldmux_companion::codec::time_on_air_ms;
 use ldmux_daemon::mesh_bridge::{Bridge, DaemonHost, Link};
-use ldmux_protocol::mesh_term::{Message, VERSION};
+use ldmux_protocol::mesh_term::Message;
+
+/// The version these tests exercise the **frame loop** with.
+///
+/// `VERSION` is 15 and a version-15 phone is served by the request/answer service
+/// (`crates/daemon/src/mesh_rpc.rs`), which builds no `Rows`/`Commit` at all. Everything here
+/// asserts on frames, holds, echoes or a real pane's repaint — the version-14 path, which is what
+/// the shipped app still uses — so these attach as 14.
+const FRAME_LOOP_VERSION: u8 = 14;
+
 
 /// One record on the air is the payload plus the packet's header byte and its path byte.
 const AIR_OVERHEAD: usize = 2;
@@ -154,7 +163,7 @@ async fn bridge_on(rig: &Rig) -> (Bridge<DaemonHost, CountingLink>, CountingLink
     let link = CountingLink::default();
     let mut bridge = Bridge::new(DaemonHost(rig.arc.clone()), link.clone());
     link.phone_says(&Message::Attach {
-        version: VERSION,
+        version: FRAME_LOOP_VERSION,
         selector: rig.session.clone(),
         cols: 0,
         rows: 0,

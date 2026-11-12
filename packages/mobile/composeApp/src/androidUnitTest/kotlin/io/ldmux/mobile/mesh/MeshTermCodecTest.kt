@@ -500,6 +500,66 @@ class MeshTermCodecTest {
         assertEquals(MeshTerm.Closed.EXITED, m.closed)
     }
 
+    /**
+     * **A `Snapshot` is one screen, and the mirror applies it as one.**
+     *
+     * The version-15 downlink replaced `Profile` + `Rows` + `Commit` with a single message for one
+     * reason: three messages could be lost separately, and a `Profile` that arrived without its
+     * rows cleared the mirror and drew nothing. This pins the replacement's two behaviours — a full
+     * paint clears every row first, and a diff is applied only onto the screen it names.
+     */
+    @Test
+    fun aSnapshotPaintsOneScreenAndADiffNeedsItsBase() {
+        val m = RowMirror()
+        assertTrue(
+            m.apply(
+                TermMessage.Snapshot(
+                    flags = MeshTerm.SnapshotFlag.FULL or MeshTerm.SnapshotFlag.SETTLED or MeshTerm.SnapshotFlag.HAS_APPLIED,
+                    chunkIdx = 0, chunkCount = 1, snapshotId = 7, baseId = 0,
+                    appliedOpId = 3, appliedStatus = MeshTerm.Applied.WRITTEN,
+                    cols = 10, rows = 3, cursorX = 4, cursorY = 2, firstLine = 0,
+                    shell = "ab12-1",
+                    patches = listOf(TermPatch(0, false, "$ ls"), TermPatch(2, false, "a.txt")),
+                ),
+            ),
+        )
+        assertEquals(listOf("$ ls", "", "a.txt"), m.lines)
+        assertEquals(4, m.cursorX)
+        assertEquals(2, m.cursorY)
+        assertEquals("ab12-1", m.shell)
+        assertEquals(3, m.appliedOpId)
+        assertEquals(MeshTerm.Applied.WRITTEN, m.appliedStatus)
+
+        // A diff naming a base this mirror never painted is dropped, not patched onto row 0.
+        assertFalse(
+            m.apply(
+                TermMessage.Snapshot(
+                    flags = 0, chunkIdx = 0, chunkCount = 1, snapshotId = 8, baseId = 99,
+                    appliedOpId = 4, appliedStatus = MeshTerm.Applied.NONE,
+                    cols = 10, rows = 3, cursorX = 0, cursorY = 1, firstLine = 0,
+                    shell = "ab12-1",
+                    patches = listOf(TermPatch(1, false, "wrong")),
+                ),
+            ),
+        )
+        assertEquals(listOf("$ ls", "", "a.txt"), m.lines)
+
+        // A diff onto the screen it names replaces only the rows it carries.
+        assertTrue(
+            m.apply(
+                TermMessage.Snapshot(
+                    flags = 0, chunkIdx = 0, chunkCount = 1, snapshotId = 9, baseId = 7,
+                    appliedOpId = 5, appliedStatus = MeshTerm.Applied.WRITTEN,
+                    cols = 10, rows = 3, cursorX = 1, cursorY = 0, firstLine = 0,
+                    shell = "ab12-1",
+                    patches = listOf(TermPatch(0, false, "$ pwd")),
+                ),
+            ),
+        )
+        assertEquals(listOf("$ pwd", "", "a.txt"), m.lines)
+        assertEquals(9, m.epoch, "the snapshot identity becomes the base the next diff names")
+    }
+
     @Test
     fun inputBytesKeepControlCharacters() {
         assertContentEquals(byteArrayOf(0x02, 0x01, 0x03), TermMessage.Input(byteArrayOf(3)).encode())

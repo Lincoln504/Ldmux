@@ -638,6 +638,13 @@ suite (574 cases) green.
 
 ## 18. State and risks at `548759f` (2026-11-10)
 
+> **Radio, 2026-11-11 (version 15).** The mesh terminal profile is at **version 15**: a phone that
+> attaches as 15 sends `Send` (one whole command) or `Fetch` (the screen, and nothing else) and is
+> answered with **one atomic `Snapshot`**, served by `crates/daemon/src/mesh_rpc.rs`. A phone that
+> attaches as 14 — the shipped app — is served by the frame loop exactly as before, so this is a
+> version rather than a flag day. Row 17.x below describes version 14 behaviour and still applies to
+> a version-14 phone.
+>
 > **This page was first written at `838f101` and the radio path has changed underneath it.** The
 > authoritative root-cause and integration review is [`RADIO-AUDIT-REVIEW.md`](RADIO-AUDIT-REVIEW.md)
 > (2026-11-11, documenting 12 radio/protocol root causes `RC-1`..`RC-12` and 8 cross-layer

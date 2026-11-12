@@ -24,8 +24,13 @@ object MeshTerm {
      * Version 6 adds a shell's working directory to each `Sessions` entry, so the picker shows the
      * folder instead of the id it would send. Version 13 adds the phone's grid to `Attach`, so the
      * pane is fitted before the host's first frame instead of being repainted twice.
+     *
+     * Version 15 is the request/answer protocol: `Send` carries one whole command, `Fetch` asks for
+     * the screen without touching a draft, and the answer is one atomic [TermMessage.Snapshot]. A
+     * host that accepts 15 stops sending `Rows`/`Commit` to that phone, so this constant is what
+     * decides which of the two downlinks a shell uses.
      */
-    const val VERSION = 14
+    const val VERSION = 15
     const val MIN_VERSION = 1
     /** The first version that has `Key` and the shell id in `Profile`. */
     const val KEY_VERSION = 2
@@ -1482,6 +1487,17 @@ class RowMirror {
     /** The `Closed` reason, once the host ended the attach. */
     var closed: Int? = null
         private set
+    /**
+     * What the host did with the last `Send`, from the `Snapshot` that answered it (version 15).
+     *
+     * Zero (`MeshTerm.Applied.NONE`) means no command is being answered, which is the case for a
+     * `Fetch`. The status is part of the screen rather than a message of its own so the two can
+     * never disagree about which command they are about.
+     */
+    var appliedOpId = 0
+        private set
+    var appliedStatus = 0
+        private set
 
     private var pendingEpoch = -1
     private var pendingFull = false
@@ -1525,6 +1541,44 @@ class RowMirror {
                 lines = next
                 cursorX = m.cursorX; cursorY = m.cursorY; flags = m.flags; epoch = m.epoch
                 firstLine = m.firstLine
+                return true
+            }
+            is TermMessage.Snapshot -> {
+                // **One message, one screen** (version 15). Geometry, cursor and rows arrive
+                // together, so a `Profile` can no longer clear the mirror without its `Rows`: what
+                // used to be three messages that could be lost separately is one that cannot.
+                //
+                // A full paint clears every row first, exactly as a `Rows { full }` does. A diff is
+                // patched onto the rows this mirror already holds, so a diff naming a base this
+                // mirror never painted (`baseId != epoch`) is dropped rather than applied to the
+                // wrong screen, which is why `epoch` carries the snapshot identity for a v15 screen.
+                if (!m.flags.let { it and MeshTerm.SnapshotFlag.FULL != 0 } && m.baseId != epoch) {
+                    return false
+                }
+                profile = ProfileInfo(m.cols, m.rows, profile?.unsupported ?: 0)
+                if (m.shell.isNotEmpty()) shell = m.shell
+                val next = if (m.flags and MeshTerm.SnapshotFlag.FULL != 0) {
+                    MutableList(m.rows) { "" }
+                } else {
+                    val grown = lines.toMutableList()
+                    while (grown.size < m.rows) grown.add("")
+                    grown
+                }
+                for (p in m.patches) {
+                    if (p.y !in next.indices) continue
+                    next[p.y] = if (p.append) next[p.y] + p.text else p.text
+                }
+                lines = next
+                cursorX = m.cursorX
+                cursorY = m.cursorY
+                firstLine = m.firstLine
+                epoch = m.snapshotId
+                flags = m.flags
+                appliedOpId = m.appliedOpId
+                appliedStatus = m.appliedStatus
+                // A snapshot ends any half-open frame: it is a complete screen, so rows waiting for
+                // a `Commit` belong to a protocol this one replaced.
+                hasPending = false; pending = ArrayList()
                 return true
             }
             is TermMessage.Closed -> { closed = m.reason; return false }

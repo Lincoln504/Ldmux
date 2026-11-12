@@ -77,7 +77,14 @@ use std::collections::VecDeque;
 /// `Sessions` page is answered **before** an attach can succeed (the phone learns which shell to
 /// attach to from it), so it cannot be gated on a `Profile`'s version: the page carries a flag of
 /// its own and the host sets it only for a phone that has attached with version 6 or later.
-pub const VERSION: u8 = 14;
+///
+/// **Version 15 is the request/answer protocol** ([`TRANSACTION_VERSION`]): a phone sends `Send`
+/// (one command, whole) or `Fetch` (the screen, and nothing else), and is answered with one atomic
+/// `Snapshot`. A host that accepts 15 serves those messages and stops building `Rows`/`Commit` for
+/// that phone, because one screen from two mechanisms is two downlink waves into the same repeater
+/// chain. A phone that attaches with 14 or lower is served exactly as before, which is what lets
+/// this be a version rather than a flag day.
+pub const VERSION: u8 = 15;
 /// The oldest profile version a host still speaks.
 pub const MIN_VERSION: u8 = 1;
 /// **The first version whose `Attach` names the phone's grid.**

@@ -36,6 +36,18 @@ use ldmux_protocol::mesh_term::{
     STREAM_VERSION, Screen, VERSION, closed, session_pages,
 };
 
+use crate::mesh_apply::PaneModes;
+use crate::mesh_rpc::{MeshHost, MeshRpc, Outcome};
+
+/// The peer a version-15 command came from.
+///
+/// **One radio link carries one phone at a time**, because a session is established with one static
+/// key and a second phone cannot share it. So the peer is the link, and the at-most-once ring keys
+/// every command to the same device. The field exists rather than being left out because the ring's
+/// identity is what makes a duplicate safe, and a multiplexed link would key it per peer without
+/// touching the service.
+const PEER_LINK: u32 = 0;
+
 /// The session as the bridge sees it.
 pub trait Link {
     /// An L3 session is established.
@@ -73,6 +85,28 @@ pub trait Link {
     /// the timer-only behaviour, which is what the test link wants.
     fn incoming(&self) -> Option<Arc<tokio::sync::Notify>> {
         None
+    }
+}
+
+/// Every [`Host`] is a [`MeshHost`]: the version-15 service asks for four of the keeper operations
+/// the bridge already names, so the adapter states which four rather than wrapping the host in a
+/// second object that would have to keep two borrows alive.
+///
+/// The methods are spelled out instead of delegating by name-free magic because they are the seam
+/// stage A keeps when this file is deleted: the compiler then says exactly what the replacement has
+/// to provide.
+impl<H: Host> MeshHost for H {
+    async fn screen(&mut self, id: &str) -> Result<Screen, String> {
+        Host::screen(self, id).await
+    }
+    async fn input(&mut self, id: &str, bytes: &[u8]) -> Result<(), String> {
+        Host::input(self, id, bytes).await
+    }
+    async fn keys(&mut self, id: &str, names: &[String]) -> Result<(), String> {
+        Host::keys(self, id, names).await
+    }
+    async fn resize(&mut self, id: &str, cols: u8, rows: u8) -> Result<(), String> {
+        Host::resize(self, id, cols, rows).await
     }
 }
 
@@ -640,6 +674,14 @@ pub struct Bridge<H, L> {
     /// The pacing clock, a field rather than `Instant::now()` at the call site so a test can
     /// move time without sleeping.
     clock: Arc<dyn Fn() -> Instant + Send + Sync>,
+    /// The version-15 request/answer service: chunk assembly, the at-most-once ring, and the
+    /// settle engine (`crate::mesh_rpc`).
+    ///
+    /// A shell whose phone attached as version 15 or later is served **only** by it: the frame
+    /// loop builds no `Rows`/`Commit` for such a shell, because one screen from two mechanisms is
+    /// two downlink waves into the same repeater chain. A version-14 phone is served by the frame
+    /// loop alone, so the shipped app keeps working through this change.
+    rpc: MeshRpc,
 }
 
 /// The mark table, cut into `Marks` messages that each fit one record.
@@ -714,6 +756,7 @@ impl<H: Host, L: Link> Bridge<H, L> {
             stats: BridgeStats::default(),
             quiet_ticks: 0,
             clock: Arc::new(Instant::now),
+            rpc: MeshRpc::new(),
         }
     }
 
@@ -932,6 +975,32 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
         Ok(())
     }
 
+    /// Answer every waiting version-15 command whose pane has settled.
+    ///
+    /// Driven from the same pass as everything else, so a settled command's answer leaves on the
+    /// next tick rather than on a timer of its own. A shell with nothing waiting costs one `HashMap`
+    /// lookup: the pane is read only while a command waits, which is what keeps an idle radio shell
+    /// costing nothing on the air and nothing on the keeper.
+    async fn answer_settled(&mut self) {
+        let waiting: Vec<u8> = self
+            .shells
+            .keys()
+            .copied()
+            .filter(|shell| self.rpc.busy(*shell))
+            .collect();
+        for shell in waiting {
+            let Some(a) = self.shells.get(&shell) else {
+                self.rpc.forget_shell(shell);
+                continue;
+            };
+            let id = a.shell.clone();
+            let now = (self.clock)();
+            if let Some(messages) = self.rpc.settle(shell, &id, &mut self.host, now).await {
+                self.reply(shell, &messages);
+            }
+        }
+    }
+
     /// How long to wait before the next pass.
     ///
     /// **Every pass costs one host round trip per attached shell**, and `DaemonHost::screen`
@@ -952,6 +1021,9 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
     pub async fn tick(&mut self) {
         let before = work(&self.stats);
         self.tick_once().await;
+        // After taking what the phone sent and pushing what changed: a command that arrived on this
+        // pass has had its bytes applied, and its gift of airtime is the single answer below.
+        self.answer_settled().await;
         if work(&self.stats) == before {
             self.quiet_ticks = self.quiet_ticks.saturating_add(1);
         } else {
@@ -1020,6 +1092,14 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
         }
         let ids: Vec<u8> = self.shells.keys().copied().collect();
         for shell in ids {
+            // **A version-15 shell is served by the request/answer service, not by the frame loop.**
+            // Its phone does not stream, so there is no picture to keep current: a command's single
+            // answer is built when it settles, and a `Fetch` asks for the screen on demand. Building
+            // `Rows`/`Commit` for it as well would be two downlink mechanisms racing through the same
+            // repeaters, which is exactly the collision `docs/RADIO-PLAN.md` §6.3 exists to remove.
+            if self.speaks_v15(shell) {
+                continue;
+            }
 
             // **Keep the pipe full, do not build a backlog.** This used to stop looking at the
             // screen while ANY record was unacked, which cost a whole round trip per update: the
@@ -1343,6 +1423,99 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
             }
         }
         self.decoders.remove(&shell);
+    }
+
+    /// Whether this shell is served by the request/answer service rather than the frame loop.
+    ///
+    /// **Two conditions, and the second is the one that matters.** The phone must speak version 15,
+    /// because a `Snapshot` is what the answer is and a version-14 build cannot read one; *and* it
+    /// must have **used** the model by sending a `Send` or a `Fetch`. A version byte is a claim
+    /// about what a build can decode, not a promise that it has stopped relying on `Rows`/`Commit`:
+    /// a phone that attaches as 15 and then keeps typing `Input` watches the frame loop, and
+    /// serving it neither would leave it with no picture at all. Stopping the stream on first use
+    /// is a migration with no flag day and no way to brick a client that has not been updated yet.
+    #[must_use]
+    fn speaks_v15(&self, shell: u8) -> bool {
+        let claims = self
+            .versions
+            .get(&shell)
+            .copied()
+            .is_some_and(|v| v >= ldmux_protocol::mesh_term::TRANSACTION_VERSION);
+        claims && self.rpc.has_driven(shell)
+    }
+
+    /// One version-15 `Send`: apply it at most once, then answer once when the pane settles.
+    async fn v15_send(&mut self, shell: u8, m: Message) {
+        let Some(a) = self.shells.get(&shell) else {
+            // Not attached: the phone is told so, rather than left waiting for a screen that belongs
+            // to no pane. Nothing is written, and the ring is not touched: the command never ran.
+            let (op_id, base) = match &m {
+                Message::Send {
+                    op_id,
+                    have_snapshot_id,
+                    ..
+                } => (*op_id, *have_snapshot_id),
+                _ => return,
+            };
+            self.reply(
+                shell,
+                &[MeshRpc::refusal(op_id, base, ldmux_protocol::mesh_term::applied::NO_SHELL)],
+            );
+            return;
+        };
+        let session = a.session.clone();
+        let id = a.shell.clone();
+        let pane = PaneModes {
+            bracketed_paste: a.bracketed_paste,
+        };
+        if self.displaced(&session).await {
+            self.refuse_held_write(shell).await;
+            return;
+        }
+        let grid = self.grids.get(&shell).copied().filter(|(c, r)| *c > 0 && *r > 0);
+        let now = (self.clock)();
+        let request = crate::mesh_rpc::SendRequest {
+            shell,
+            device: PEER_LINK,
+            id: &id,
+            grid,
+            pane,
+        };
+        let outcome = self.rpc.on_send(request, &m, &mut self.host, now).await;
+        self.stats.inputs = self.stats.inputs.saturating_add(1);
+        match outcome {
+            Ok(Outcome::Pending) => {}
+            Ok(Outcome::Answer(messages)) => {
+                self.reply(shell, &messages);
+            }
+            Err(status) => {
+                let (op_id, base) = match &m {
+                    Message::Send {
+                        op_id,
+                        have_snapshot_id,
+                        ..
+                    } => (*op_id, *have_snapshot_id),
+                    _ => (0, 0),
+                };
+                self.reply(shell, &[MeshRpc::refusal(op_id, base, status)]);
+            }
+        }
+    }
+
+    /// One version-15 `Fetch`: the screen now, and the draft untouched.
+    async fn v15_fetch(&mut self, shell: u8, m: Message) {
+        let Some(a) = self.shells.get(&shell) else {
+            return;
+        };
+        let id = a.shell.clone();
+        let session = a.session.clone();
+        if self.displaced(&session).await {
+            self.refuse_held_write(shell).await;
+            return;
+        }
+        if let Outcome::Answer(messages) = self.rpc.on_fetch(shell, &id, &m, &mut self.host).await {
+            self.reply(shell, &messages);
+        }
     }
 
     /// Whether the shell this phone attached to has moved to another device since.
@@ -1897,6 +2070,15 @@ fn frame_run(run: &[Message], with_dict: bool) -> Vec<Message> {
                 // A name the table refuses is the daemon's refusal: nothing reaches the shell.
                 let _ = self.host.keys(&session, &names).await;
             }
+            // **A version-15 command: one message in, one screen out** (`docs/RADIO-PLAN.md` §6).
+            //
+            // The whole point of the message is that it is *one*: typing `ls` and pressing enter
+            // used to be `Hold(false)`, `Input` and `Key`, three records and three chances to lose
+            // part of one keystroke (`RC-8`). The service applies every item in composition order,
+            // at most once, and answers once when the pane settles.
+            m @ Message::Send { .. } => self.v15_send(shell, m).await,
+            // Looking at a shell without sending the draft in it.
+            m @ Message::Fetch { .. } => self.v15_fetch(shell, m).await,
             Message::Resize { cols, rows } => {
                 let Some(a) = self.shells.get(&shell) else {
                     return;
@@ -2839,6 +3021,21 @@ mod tests {
             + Duration::from_millis(N.fetch_add(2_000, std::sync::atomic::Ordering::Relaxed))
     }
 
+    /// A clock a test moves itself, in milliseconds from a fixed origin.
+    ///
+    /// The settle engine is a set of deadlines, so a test of it that used the unpaced clock would
+    /// only prove that every deadline had already passed. This hands back the value to bump, and
+    /// every read returns the current one instead of advancing it.
+    fn stepped_clock() -> (Arc<dyn Fn() -> Instant + Send + Sync>, Arc<AtomicU64>) {
+        let ms = Arc::new(AtomicU64::new(0));
+        let origin = Instant::now();
+        let read = Arc::clone(&ms);
+        (
+            Arc::new(move || origin + Duration::from_millis(read.load(Ordering::Relaxed))),
+            ms,
+        )
+    }
+
     fn setup() -> (Bridge<FakeHost, FakeLink>, FakeHost, FakeLink) {
         let host = FakeHost::default();
         host.0.lock().unwrap().running = vec!["abcd-1".into()];
@@ -2860,6 +3057,18 @@ mod tests {
         b.clock = Arc::new(unpaced_now);
         (b, host, link)
     }
+
+    /// The version the frame-loop suite exercises.
+    ///
+    /// **Not [`VERSION`].** `VERSION` is 15 and a version-15 phone is served by the request/answer
+    /// service (`crate::mesh_rpc`), which builds no `Rows`/`Commit` at all. Every test in this
+    /// module that asserts on a frame, a differ, a hold or an echo is a test of the version-14 path,
+    /// which is still the path the shipped app uses, so it attaches as 14. The version-15 path has
+    /// its own tests beside them.
+    const V14: u8 = 14;
+
+    use crate::mesh_rpc::SETTLE_NO_CHANGE_MS;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn phone_says(link: &FakeLink, shell: u8, m: &Message) {
         link.0
@@ -2895,7 +3104,7 @@ mod tests {
             &link,
             3,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -2941,6 +3150,219 @@ mod tests {
         assert_eq!(paste_bytes(b"a\x1b[201~", true), b"a\x1b[201~");
     }
 
+    // ── version 15: one command, one screen ───────────────────────────────────
+
+    /// A version-15 phone is served by the request/answer service: one `Send` writes once and is
+    /// answered with one `Snapshot`, and the frame loop builds nothing for that shell.
+    #[tokio::test]
+    async fn a_v15_send_is_one_write_and_one_snapshot() {
+        let (mut b, host, link) = setup();
+        let (clock, now_ms) = stepped_clock();
+        b.clock = clock;
+        phone_says(
+            &link,
+            3,
+            &Message::Attach {
+                version: V14,
+                selector: String::new(),
+                cols: 0,
+                rows: 0,
+            },
+        );
+        b.tick().await;
+        // The attach is answered by the frame loop's own profile, which a v15 phone still reads for
+        // the grid it is about to draw; everything after it must be Snapshot.
+        let before = sent_messages(&link, 3).len();
+
+        phone_says(
+            &link,
+            3,
+            &Message::Send {
+                op_id: 1,
+                chunk_idx: 0,
+                chunk_count: 1,
+                have_snapshot_id: 0,
+                cols: 40,
+                rows: 10,
+                flags: 0,
+                shell: "abcd-1".to_owned(),
+                items: vec![
+                    ldmux_protocol::mesh_term::SendItem::Text(b"ls".to_vec()),
+                    ldmux_protocol::mesh_term::SendItem::Keys(vec!["Enter".to_owned()]),
+                ],
+            },
+        );
+        b.tick().await;
+        assert_eq!(
+            host.0.lock().unwrap().typed,
+            vec![("abcd-1".to_owned(), b"ls".to_vec())],
+            "the text is one write"
+        );
+        assert_eq!(
+            host.0.lock().unwrap().keyed,
+            vec![("abcd-1".to_owned(), vec!["Enter".to_owned()])],
+            "and the enter is one key call for the keeper to encode"
+        );
+        assert!(
+            !sent_messages(&link, 3)
+                .iter()
+                .skip(before)
+                .any(|m| matches!(m, Message::Snapshot { .. })),
+            "nothing is answered before the pane settles"
+        );
+
+        // A command that changes nothing is answered at the no-change deadline.
+        now_ms.fetch_add(SETTLE_NO_CHANGE_MS + 1, Ordering::Relaxed);
+        b.tick().await;
+        let after: Vec<Message> = sent_messages(&link, 3)
+            .into_iter()
+            .skip(before)
+            .filter(|m| matches!(m, Message::Snapshot { .. }))
+            .collect();
+        assert_eq!(after.len(), 1, "exactly one snapshot per command: {after:?}");
+        match &after[0] {
+            Message::Snapshot {
+                applied_status,
+                applied_op_id,
+                shell,
+                flags,
+                ..
+            } => {
+                assert_eq!(*applied_status, ldmux_protocol::mesh_term::applied::WRITTEN);
+                assert_eq!(*applied_op_id, 1);
+                assert_eq!(shell, "abcd-1");
+                assert_ne!(
+                    flags & ldmux_protocol::mesh_term::snapshot_flag::SETTLED,
+                    0,
+                    "a quiet pane is settled"
+                );
+            }
+            other => panic!("expected a Snapshot, got {other:?}"),
+        }
+    }
+
+    /// The same command twice writes once: the retransmission a lost acknowledgement causes must
+    /// never type the operator's command a second time.
+    #[tokio::test]
+    async fn a_resent_v15_send_is_never_written_twice() {
+        let (mut b, host, link) = setup();
+        let (clock, now_ms) = stepped_clock();
+        b.clock = clock;
+        phone_says(
+            &link,
+            3,
+            &Message::Attach {
+                version: V14,
+                selector: String::new(),
+                cols: 0,
+                rows: 0,
+            },
+        );
+        b.tick().await;
+        let command = Message::Send {
+            op_id: 5,
+            chunk_idx: 0,
+            chunk_count: 1,
+            have_snapshot_id: 0,
+            cols: 40,
+            rows: 10,
+            flags: 0,
+            shell: "abcd-1".to_owned(),
+            items: vec![
+                ldmux_protocol::mesh_term::SendItem::Text(b"reboot".to_vec()),
+                ldmux_protocol::mesh_term::SendItem::Keys(vec!["Enter".to_owned()]),
+            ],
+        };
+        phone_says(&link, 3, &command);
+        b.tick().await;
+        now_ms.fetch_add(SETTLE_NO_CHANGE_MS + 1, Ordering::Relaxed);
+        b.tick().await;
+        let writes = host.0.lock().unwrap().typed.len();
+        phone_says(&link, 3, &command);
+        b.tick().await;
+        assert_eq!(
+            host.0.lock().unwrap().typed.len(),
+            writes,
+            "a retransmitted command must not reach the pty again"
+        );
+        let last = sent_messages(&link, 3)
+            .into_iter()
+            .rfind(|m| matches!(m, Message::Snapshot { .. }))
+            .expect("the duplicate is answered");
+        match last {
+            Message::Snapshot {
+                applied_status, ..
+            } => assert_eq!(
+                applied_status,
+                ldmux_protocol::mesh_term::applied::DUPLICATE,
+                "the phone is told it had already run"
+            ),
+            other => panic!("expected a Snapshot, got {other:?}"),
+        }
+    }
+
+    /// A `Fetch` answers with the screen and touches no draft.
+    #[tokio::test]
+    async fn a_v15_fetch_answers_without_writing() {
+        let (mut b, host, link) = setup();
+        phone_says(
+            &link,
+            3,
+            &Message::Attach {
+                version: V14,
+                selector: String::new(),
+                cols: 0,
+                rows: 0,
+            },
+        );
+        b.tick().await;
+        phone_says(
+            &link,
+            3,
+            &Message::Fetch {
+                have_snapshot_id: 0,
+                cols: 40,
+                rows: 10,
+                shell: "abcd-1".to_owned(),
+            },
+        );
+        b.tick().await;
+        assert!(host.0.lock().unwrap().typed.is_empty(), "a fetch writes nothing");
+        let answered = sent_messages(&link, 3)
+            .into_iter()
+            .any(|m| matches!(m, Message::Snapshot { .. }));
+        assert!(answered, "a fetch is answered at once");
+    }
+
+    /// A version-14 phone keeps the frame loop: one host serves both, and nothing about the shipped
+    /// app changes.
+    #[tokio::test]
+    async fn a_v14_phone_is_still_served_by_rows_and_commit() {
+        let (mut b, host, link) = setup();
+        phone_says(
+            &link,
+            3,
+            &Message::Attach {
+                version: 14,
+                selector: String::new(),
+                cols: 0,
+                rows: 0,
+            },
+        );
+        b.tick().await;
+        b.tick().await;
+        let messages = sent_messages(&link, 3);
+        assert!(
+            messages.iter().any(|m| matches!(m, Message::Rows { .. })),
+            "a version-14 phone is still drawn with rows"
+        );
+        assert!(
+            !messages.iter().any(|m| matches!(m, Message::Snapshot { .. })),
+            "and is never sent a message it cannot paint"
+        );
+        assert!(host.0.lock().unwrap().typed.is_empty());
+    }
+
     #[tokio::test]
     async fn a_multiline_paste_arrives_as_text_where_the_pane_asked_for_it() {
         let (mut b, host, link) = setup();
@@ -2955,7 +3377,7 @@ mod tests {
             &link,
             3,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -2978,7 +3400,7 @@ mod tests {
             &link,
             3,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -3001,7 +3423,7 @@ mod tests {
             &link,
             3,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -3060,7 +3482,7 @@ mod tests {
             &link,
             3,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: "abcd".into(),
                 cols: 0,
                 rows: 0,
@@ -3158,7 +3580,7 @@ mod tests {
             &link,
             0,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: "abcd".into(),
                 cols: 0,
                 rows: 0,
@@ -3195,7 +3617,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -3229,7 +3651,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -3333,7 +3755,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: "abcd-1".into(),
                 cols: 0,
                 rows: 0,
@@ -3361,7 +3783,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: "abcd-1".into(),
                 cols: 0,
                 rows: 0,
@@ -3410,7 +3832,7 @@ mod tests {
             &link,
             0,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: "zzzz".into(),
                 cols: 0,
                 rows: 0,
@@ -3420,7 +3842,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: "abcd".into(),
                 cols: 0,
                 rows: 0,
@@ -3430,7 +3852,7 @@ mod tests {
             &link,
             2,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -3649,7 +4071,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -3690,7 +4112,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -3751,7 +4173,7 @@ mod tests {
             &link,
             3,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -3798,7 +4220,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -3830,7 +4252,7 @@ mod tests {
         };
         // An empty selector: the host picked the shell, and says which.
         assert!(
-            matches!(first(1), Message::Profile { version, shell, .. } if version == VERSION && shell == "abcd-1")
+            matches!(first(1), Message::Profile { version, shell, .. } if version == V14 && shell == "abcd-1")
         );
         // A version-1 phone gets the five-byte Profile it can decode, with no shell.
         assert!(matches!(first(2), Message::Profile { version: 1, shell, .. } if shell.is_empty()));
@@ -3853,7 +4275,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -3873,7 +4295,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -3907,7 +4329,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -3945,7 +4367,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -3990,7 +4412,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -4136,7 +4558,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -4201,7 +4623,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -4370,7 +4792,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -4405,7 +4827,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -4476,7 +4898,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -4525,7 +4947,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -4549,7 +4971,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -4568,7 +4990,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -4620,7 +5042,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -4679,7 +5101,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: "abcd-1".into(),
                 cols: 0,
                 rows: 0,
@@ -4732,7 +5154,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: "abcd-1".into(),
                 cols: 0,
                 rows: 0,
@@ -4775,7 +5197,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: "abcd-1".into(),
                 cols: 0,
                 rows: 0,
@@ -4793,7 +5215,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: "abcd-1".into(),
                 cols: 0,
                 rows: 0,
@@ -4833,7 +5255,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: "abcd-1".into(),
                 cols: 0,
                 rows: 0,
@@ -4850,7 +5272,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: "abcd-1".into(),
                 cols: 0,
                 rows: 0,
@@ -4879,7 +5301,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: "abcd-1".into(),
                 cols: 0,
                 rows: 0,
@@ -4917,7 +5339,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: "abcd-1".into(),
                 cols: 0,
                 rows: 0,
@@ -5036,7 +5458,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: "abcd-1".into(),
                 cols: 0,
                 rows: 0,
@@ -5140,7 +5562,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -5476,7 +5898,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -5501,7 +5923,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -5531,7 +5953,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: "abcd-1".into(),
                 cols: 0,
                 rows: 0,
@@ -5543,7 +5965,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: "abcd-2".into(),
                 cols: 0,
                 rows: 0,
@@ -5567,7 +5989,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: "abcd-1".into(),
                 cols: 0,
                 rows: 0,
@@ -5578,7 +6000,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: "abcd-1".into(),
                 cols: 0,
                 rows: 0,
@@ -5617,7 +6039,7 @@ mod tests {
             &link,
             3,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -5690,7 +6112,7 @@ mod tests {
             &link,
             3,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -5729,7 +6151,7 @@ mod tests {
             &link,
             3,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: "abcd-1".into(),
                 cols: 0,
                 rows: 0,
@@ -5760,7 +6182,7 @@ mod tests {
             &link,
             3,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -5797,7 +6219,7 @@ mod tests {
             &link,
             3,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: "abcd-1".into(),
                 cols: 0,
                 rows: 0,
@@ -5874,7 +6296,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 46,
                 rows: 17,
@@ -5921,7 +6343,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 46,
                 rows: 17,
@@ -5990,7 +6412,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 46,
                 rows: 17,
@@ -6010,7 +6432,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 46,
                 rows: 17,
@@ -6039,7 +6461,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -6074,7 +6496,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -6104,7 +6526,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: "abcd-1".into(),
                 cols: 0,
                 rows: 0,
@@ -6140,7 +6562,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: "abcd-1".into(),
                 cols: 0,
                 rows: 0,
@@ -6171,7 +6593,7 @@ mod tests {
             &link,
             3,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -6231,7 +6653,7 @@ mod tests {
             &link,
             2,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: String::new(),
                 cols: 0,
                 rows: 0,
@@ -6267,7 +6689,7 @@ mod tests {
             &link,
             1,
             &Message::Attach {
-                version: VERSION,
+                version: V14,
                 selector: "abcd-1".into(),
                 cols: 0,
                 rows: 0,
@@ -6300,6 +6722,73 @@ mod tests {
                 .iter()
                 .any(|m| matches!(m, Message::Profile { shell, .. } if shell == "abcd-1")),
             "and the phone is given the screen it asked for"
+        );
+    }
+    use ldmux_protocol::mesh_term::{Message, TRANSACTION_VERSION};
+
+    fn rows_for(link: &FakeLink, shell: u8) -> usize {
+        link.0
+            .lock()
+            .unwrap()
+            .sent
+            .iter()
+            .filter(|(s, _)| *s == shell)
+            .flat_map(|(_, bytes)| Decoder::new().push(bytes).unwrap())
+            .filter(|m| matches!(m, Ok(Message::Rows { .. })))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_version_15_phone_keeps_receiving_rows_until_it_asks_for_its_screen() {
+        let (mut b, host, link) = setup();
+        let clock = FakeClock::new();
+        b.clock = clock.reader();
+        b.tick().await;
+        paced(&host, &["a desk frame", ""]);
+        phone_says(
+            &link,
+            1,
+            &Message::Attach {
+                version: TRANSACTION_VERSION,
+                selector: String::new(),
+                cols: 0,
+                rows: 0,
+            },
+        );
+        b.tick().await;
+        phone_says(&link, 1, &Message::Resize { cols: 46, rows: 17 });
+        b.tick().await;
+        clock.advance(2_000);
+        b.tick().await;
+
+        // The phone has typed nothing: it is watching the frame loop, exactly as a version-14
+        // build would, so it must still be getting rows.
+        assert!(
+            rows_for(&link, 1) > 0,
+            "a version-15 phone that has not asked for its screen was left with no picture"
+        );
+
+        // It asks. From here the answer is a `Snapshot`, so the frame loop must stop for this
+        // shell, or the two downlink mechanisms would race through the same repeaters.
+        let before = rows_for(&link, 1);
+        phone_says(
+            &link,
+            1,
+            &Message::Fetch {
+                have_snapshot_id: 0,
+                cols: 46,
+                rows: 17,
+                shell: String::new(),
+            },
+        );
+        b.tick().await;
+        paced(&host, &["a desk frame", "changed"]);
+        clock.advance(2_000);
+        b.tick().await;
+        assert_eq!(
+            rows_for(&link, 1),
+            before,
+            "the frame loop kept streaming after the phone moved to the request/answer model"
         );
     }
 }

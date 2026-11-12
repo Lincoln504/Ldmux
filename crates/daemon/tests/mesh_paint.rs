@@ -14,7 +14,16 @@ use std::time::Duration;
 
 use common::rig::Rig;
 use ldmux_daemon::mesh_bridge::{Bridge, DaemonHost, Link};
-use ldmux_protocol::mesh_term::{Decoder, Message, Mirror, VERSION};
+use ldmux_protocol::mesh_term::{Decoder, Message, Mirror};
+
+/// The version these tests exercise the **frame loop** with.
+///
+/// `VERSION` is 15 and a version-15 phone is served by the request/answer service
+/// (`crates/daemon/src/mesh_rpc.rs`), which builds no `Rows`/`Commit` at all. Everything here
+/// asserts on frames, holds, echoes or a real pane's repaint — the version-14 path, which is what
+/// the shipped app still uses — so these attach as 14.
+const FRAME_LOOP_VERSION: u8 = 14;
+
 
 #[derive(Default)]
 struct Wire {
@@ -73,7 +82,7 @@ async fn a_first_attach_paints_the_pane_at_the_phones_grid() {
     // travelling with the attach is what lets the host fit the pane before its first frame.
     // **No `Resize` follows**: the grid rides the attach, which is what makes one repaint enough.
     link.phone_says(&Message::Attach {
-        version: VERSION,
+        version: FRAME_LOOP_VERSION,
         selector: rig.session.clone(),
         cols: 46,
         rows: 17,
@@ -138,7 +147,7 @@ async fn a_stated_grid_wins_over_the_remembered_one() {
     let mut bridge = Bridge::new(DaemonHost(rig.arc.clone()), link.clone());
     // First attach states 46x17, and the bridge remembers it.
     link.phone_says(&Message::Attach {
-        version: VERSION,
+        version: FRAME_LOOP_VERSION,
         selector: rig.session.clone(),
         cols: 46,
         rows: 17,
@@ -157,7 +166,7 @@ async fn a_stated_grid_wins_over_the_remembered_one() {
     link.phone_says(&Message::Detach);
     bridge.tick().await;
     link.phone_says(&Message::Attach {
-        version: VERSION,
+        version: FRAME_LOOP_VERSION,
         selector: rig.session.clone(),
         cols: 40,
         rows: 12,

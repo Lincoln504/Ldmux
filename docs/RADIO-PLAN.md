@@ -443,7 +443,7 @@ tree or a command that was run; nothing is a plan.
 | **S0** | **Done** | `ldmux-protocol` has a `host-ipc` feature (default on) owning `tokio` + `nix`; `cargo tree -p ldmux-protocol --no-default-features` is `serde`, `serde_json`, `uuid`, `flate2` and nothing else. `crates/mesh/src/sim/` is the `VirtualMesh` harness (173-byte receive ceiling, `SHA256(payload_type‖payload)` 160-entry dedup, the origin's own first-hop echo, half-duplex deafness, per-hop forward delay, path accumulation and consumption, flood hop caps, scoping) with `airtime.rs` beside it, pinned against the companion's own time-on-air by `crates/companion/tests/airtime_agreement.rs`. `native-freshness.test.ts` now checks both `libldmux_terminal.so` and `libldmux_session.so` for staleness and for their `Java_io_ldmux_*` symbols (6/6). |
 | **S1** | **Done** | `crates/mesh/src/budget.rs` (`172 − path` direct, `161 − path − scope` flood, 93 guaranteed and 125 near, all derived and compile-time pinned). `crates/mesh/src/route.rs` (`Candidate`, `ProofWitness` as the only route to `Proven`, SNR-margin ranking, `carrier_for`). `crates/session/src/direction.rs` (the six kinds, one definition, re-exported by `handshake.rs` and `record.rs`). `crates/mesh/src/companion/fifo.rs` plus the host's answer contract in `crates/companion/src/window.rs`: one command in flight, settled only by its own answer, a foreign answer reported rather than consumed. |
 | **S2** | **Done** | `crates/session/src/bootstrap.rs`: `Initiator` holds one ephemeral across every rung, `msg1` direct 123 B or two fragments 67/66 B with a per-transmit `tx_nonce`, `msg2` 52 B, `KIND_NEED_HANDSHAKE` 25 B, `Responder` with a 64-entry ±5 min cache that re-emits its cached answer without rebuilding the session, and a 5 s answer rate limit. `crates/session/src/transaction.rs`: 10-byte header, parts of 118 B so any part halves onto the narrow carrier, selective `ack_mask` retransmission, ack suppression to the burst tail, clean supersession, and a timeout that leaves the session intact. `crates/session/src/endpoint.rs`: one state machine for both ends — role, bootstrap, per-attempt carriage, post-authentication route updates, transaction dispatch, deadlines and a `Stats` that names every rejection. `crates/session/tests/endpoint.rs` runs two real endpoints over one `VirtualMesh`; the six-repeater, 15 %-loss gate delivers a request and its answer with the route proven by a direct arrival. |
-| **S3** | **Wire half and handoff done, service not started** | Done: the three version-15 messages are in the wire contract and pinned by the shared fixture on both sides — `T_SEND = 0x0E` (coalesced items, `op_id`, `have_snapshot_id`, grid, flags), `T_FETCH = 0x0F`, and `T_SNAPSHOT = 0x8E` (flags, `snapshot_id`/`base_id`, the applied answer, grid, cursor, `first_line`, a patch stream deflated against the frame dictionary), with `TRANSACTION_VERSION = 15`, `send_flag`/`snapshot_flag`/`applied` on both ends. Done: `mesh_apply::apply_send` turns a `Send`'s items into the ordered plan of keeper steps the host performs (§6.2), so the new vocabulary has a consumer and its order and newline rules are pinned by tests rather than left to the service. **`VERSION` deliberately stays at 14**, because a version is what a build can *answer* and no host serves a `Send` until the next step. Next, in order: replace `crates/daemon/src/mesh_bridge.rs` with a single-task `MeshRpcService` driving `RadioEndpoint` (S2), settling through `PaneStream`, calling `apply_send`, and keeping the `(device_id, op_id)` at-most-once ring; then bump `VERSION` to 15 on both ends in the same commit; then delete `mesh_session.rs`, `mesh_serial.rs`'s loop and the `Exchange` ring. The chunk envelope (§12.2) is on the wire on both ends with its assemblers, so the service can send an answer larger than one transaction without a second design. |
+| **S3** | **Live for a version-15 phone** | Done: the three messages are in the wire contract and pinned by the shared fixture on both sides (`T_SEND = 0x0E`, `T_FETCH = 0x0F`, `T_SNAPSHOT = 0x8E`, with the chunk envelope of §12.2). Done: `crates/daemon/src/mesh_rpc.rs` is the service — chunk assembly, the 64-entry `(device, op_id)` at-most-once ring, and the settle engine (`SETTLE_QUIET_MS` 500, `SETTLE_NO_CHANGE_MS` 700, `INLINE_SETTLE_MAX_MS` 3_500) — behind a five-operation `MeshHost` seam, with ten unit tests and four end-to-end tests through the real `Bridge`. Done: `crates/daemon/src/mesh_bridge.rs` dispatches `Send` and `Fetch` to it and **builds no frame for a shell whose phone attached as 15**, so one host serves both protocols and a retransmitted command is never typed twice. Done: `VERSION` is 15 and the phone speaks it, so §12.4's half-migration is closed. Not done, and the whole of what stage A still owns: the transport swap — replacing the loop in `crates/daemon/src/mesh.rs` with `RadioEndpoint`, and deleting `mesh_session.rs`, `mesh_serial.rs`'s session loop and the `Exchange` ring. |
 | **S4** | **Not started** | `crates/session-ffi` gains the shared client engine (companion FIFO, `RadioEndpoint`, `mesh_term` client) behind the pull-only C ABI in §8.1, so the phone stops reimplementing the protocol in Kotlin. |
 | **S5** | **Partly done** | Landed: the claim wedge (`CLAIM_RELEASE_MS` gone, `resumeShell` assigned by one rule, `MeshResumeTest`), the blank/clipped screen (grid sent only after the IME gate, cursor-aware `GridPlacement`), multiline paste as one paste operation on both routes, the provisional draft drawn with `⏎`/`⇥` and windowed by display width (`term/DisplayWidth.kt`), and the flood token bucket now actually metered (`sessionUp(true)` is called). 725 JVM tests pass. Open: the unified pager and per-shell state across `AppContent` and `MeshTerminalScreen`, the `Send`/`Refresh` controls, dictation into the draft, batch coalescing (which needs v15 — separately sending `Hold(false)`, `Input` and `Key` cannot be fixed inside the old protocol), and deleting `vendor/libmeshcore`. |
 
@@ -473,9 +473,9 @@ against the rest of the system, and the sections above are amended where the fin
 |---|---|---|---|
 | `ldmux_mesh` (budget, route, sim, airtime, `CompanionFifo`) | 47 tests | only `budget`/`route`/`sim` used by `ldmux-session`; `CompanionFifo` used by nothing | **inert** |
 | `ldmux_session` (bootstrap, transaction, endpoint, direction) | 87 tests | `handshake`/`record`/`session`/`arq` used by the daemon; `bootstrap`, `transaction`, `endpoint`, `direction` used by nothing | **inert** |
-| `ldmux_protocol` v15 (`Send`, `Fetch`, `Snapshot`) | 119 + 725 tests | the daemon still speaks version 14 and never constructs a v15 message | **inert** |
-| `crates/daemon/src/mesh_apply.rs` | unit tests | nothing calls `apply_send` | **inert** |
-| `crates/daemon/src/mesh_bridge.rs` (6,305 lines), `mesh.rs`, `mesh_serial.rs`, `mesh_session.rs` | the whole e2e suite | **this is what runs** | live |
+| `ldmux_protocol` v15 (`Send`, `Fetch`, `Snapshot`) | 129 + 735 tests | **live**: a phone that attaches as 15 is served by it | **wired** |
+| `crates/daemon/src/mesh_apply.rs` and `crates/daemon/src/mesh_rpc.rs` | 10 unit + 4 end-to-end | **live** for a version-15 phone; a version-14 phone keeps the frame loop | **wired** |
+| `crates/daemon/src/mesh_bridge.rs` (6,305 lines), `mesh.rs`, `mesh_serial.rs`, `mesh_session.rs` | the whole e2e suite | **this is the transport**, for both protocol versions | live |
 
 **AR-1 — the tree is green while the deployed path is unchanged, and that is the most dangerous
 state this work can be in.** Every test that proves the new design passes, and the code the phone
@@ -571,7 +571,8 @@ outlives its reason: an app that can encode v15, negotiates v14, and is tested a
 looks finished and is not. *Disposition:* keep the split, but make it a **compile-time coupling**
 in the host half: the service that serves `Send` sets `mesh_term::VERSION` to 15 in the same change
 that gives it a receive path, and the plan's S3b is the only place that may do it. Record it in §11
-(already done) and in the release audit when the daemon changes.
+(already done) and in the release audit when the daemon changes. **Closed 2026-11-11**: the host
+now serves `Send`/`Fetch`, `VERSION` is 15, and the app's own constant moved with it.
 
 ### 12.5 Route proof is one-sided by construction
 
@@ -619,15 +620,36 @@ The one place the plan is **underscoped** is chunking (§12.2, AR-3): it assumed
 one message, and a paste does not. That is being corrected before version 15 ships, which is the
 cheapest moment it will ever be.
 
+### 12.7a AR-9 — a version claim is not a migration
+
+**Found by reading the B-stage wiring rather than by a test, and it would have bricked the app.**
+The host stopped streaming `Rows`/`Commit` for any shell whose phone attached with version 15
+(`speaks_v15`), on the reasoning that a v15 phone is served by `Snapshot`. The app was already
+carrying `VERSION = 15` because its codec can decode the new messages, while the controls that
+send `Send`/`Fetch` are the S5 work that has not landed. Deployed, that pairing gives a phone that
+claims 15, receives no rows, and never asks for a screen: a **frozen picture on every shell**, with
+no error anywhere.
+
+A version byte is what a build can **decode**. It is not a promise that the build has stopped
+relying on the old path. The host now keeps the frame loop until the phone *demonstrates* the
+request/answer model by sending a `Send` or a `Fetch`, and stops streaming for that shell only from
+that moment (`MeshRpc::has_driven`/`mark_driven`, `mesh_bridge.rs`). A phone that has not been
+updated cannot be broken by the host being ready first, which is what a migration is supposed to
+mean.
+
+Pinned by `a_version_15_phone_keeps_receiving_rows_until_it_asks_for_its_screen`: rows before the
+first request, none after it.
+
 ### 12.8 Findings index
 
 | Id | Finding | Severity | Disposition |
 |---|---|---|---|
-| AR-1 | the new stack is inert while the old one runs | **risk** | S3b deletes the old modules; §11 states what is live |
+| AR-1 | the new stack is inert while the old one runs | **risk, partly closed** | the version-15 upload and the settle engine are now on the live path (`mesh_rpc.rs` reached from `mesh_bridge.rs`); the transport swap that deletes `mesh_session.rs` and the `Exchange` ring is still the whole of stage A |
 | AR-2 | codec accepted a body the transport cannot carry | **defect** | **fixed:** `crates/session/tests/payload_fits.rs` proves the ordering at the worst legal record sizes |
 | AR-3 | a paste over ~550 bytes could not be sent | **defect (regression)** | **fixed:** `chunk_idx`/`chunk_count` on `T_SEND` and `T_SNAPSHOT`, with `SendAssembly`/`SnapshotAssembly` and a non-zero-chunk fixture case |
 | AR-4 | gates ran non-production retry configuration | **gate weakness** | **fixed:** `Run::shipped` plus `a_link_comes_up_at_the_retry_ladder_that_ships` |
-| AR-5 | version negotiation half-migrated | **risk** | coupling stated; S3b owns the bump |
+| AR-5 | version negotiation half-migrated | **closed** | `VERSION` is 15 on both ends in the same change that gave the host a receive path for it |
 | AR-6 | route proof is one-sided | **by design** | document what the counter means |
 | AR-7 | `sha2` in `ldmux-mesh` without an ADR line | **process** | **fixed:** ADR-0039 gained a Dependencies section naming the crate and why the simulator must hash as the firmware does |
 | AR-8 | the client's command table is an input, not a derivation | **doc** | **fixed:** §8.1 says each side supplies its own answer table, so the S4 client engine gets the phone's rather than inheriting the host's |
+| AR-9 | a version claim stopped the frame loop for an app that cannot yet ask for its screen | **defect (would brick the app)** | **fixed:** the host keeps streaming until the phone has actually sent a `Send` or a `Fetch` |

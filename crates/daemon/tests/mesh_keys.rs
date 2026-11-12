@@ -15,7 +15,16 @@ use std::time::Duration;
 
 use common::rig::Rig;
 use ldmux_daemon::mesh_bridge::{Bridge, DaemonHost, Link};
-use ldmux_protocol::mesh_term::{Decoder, Message, VERSION};
+use ldmux_protocol::mesh_term::{Decoder, Message};
+
+/// The version these tests exercise the **frame loop** with.
+///
+/// `VERSION` is 15 and a version-15 phone is served by the request/answer service
+/// (`crates/daemon/src/mesh_rpc.rs`), which builds no `Rows`/`Commit` at all. Everything here
+/// asserts on frames, holds, echoes or a real pane's repaint — the version-14 path, which is what
+/// the shipped app still uses — so these attach as 14.
+const FRAME_LOOP_VERSION: u8 = 14;
+
 
 #[derive(Default)]
 struct Wire {
@@ -96,7 +105,7 @@ async fn press_up_through_the_bridge(rig: &Rig) -> (Bridge<DaemonHost, FakeLink>
     phone_says(
         &link,
         &Message::Attach {
-            version: VERSION,
+            version: FRAME_LOOP_VERSION,
             selector: rig.session.clone(),
             cols: 0,
             rows: 0,
@@ -185,7 +194,7 @@ async fn the_profile_names_the_shell_the_host_chose() {
     phone_says(
         &link,
         &Message::Attach {
-            version: VERSION,
+            version: FRAME_LOOP_VERSION,
             selector: String::new(),
             cols: 0,
             rows: 0,
@@ -210,7 +219,7 @@ async fn the_profile_names_the_shell_the_host_chose() {
         .expect("the host answered with a profile");
     match profile {
         Message::Profile { version, shell, .. } => {
-            assert_eq!(version, VERSION);
+            assert_eq!(version, FRAME_LOOP_VERSION);
             assert_eq!(shell, rig.session);
         }
         _ => unreachable!(),
@@ -228,7 +237,7 @@ async fn a_resize_changes_the_real_pane_and_the_next_profile_says_so() {
     phone_says(
         &link,
         &Message::Attach {
-            version: VERSION,
+            version: FRAME_LOOP_VERSION,
             selector: rig.session.clone(),
             cols: 0,
             rows: 0,
