@@ -19,6 +19,7 @@ documents consolidated away at `731970f`, and are readable at `c3d7c56`).
 | `daemon` | registry, ownership, remote WS, streams, desktop + inventory, CLI (`bin/ldmux`), daemon entry (`bin/ldmuxd`) |
 | `attach` | the desktop-window client (`ldmuxd attach`) |
 | `vt-sys` | hand-written FFI against the vendored libghostty-vt headers |
+| `companion` | the host's MeshCore companion radio driver over USB serial |
 | `mesh` | the L2 client for MeshCore radios: frames, commands, events (no tokio state) |
 | `session` | the L3 session over that link: Noise `IKpsk2`, records, replay window, ARQ. Pure, no I/O |
 | `session-ffi` | the C ABI the mobile client calls instead of reimplementing the session in Kotlin |
@@ -27,12 +28,15 @@ documents consolidated away at `731970f`, and are readable at `c3d7c56`).
 the port and is kept.
 
 `docs/ARCHITECTURE.md` is the authoritative design: layers, wire, invariants,
-security, failure modes, platform support. `docs/adr/` is the decision record, and
-`docs/adr/README.md` lists every one with its status. `docs/RELEASE-AUDIT.md` is the open work,
-aspect by aspect, and the store material. `README.md` is for a person meeting the project.
-A change that alters behaviour updates all three that it touches, in the same commit.
-Those are the whole documentation set (`docs/media` holds the README's images); anything else in `docs/` was
-consolidated into them at `731970f` and is readable at `c3d7c56`.
+security, failure modes, platform support. `docs/RADIO-PLAN.md` is the architectural
+redesign and plan of record for the radio path, paired with `docs/RADIO-AUDIT-REVIEW.md`
+(the consolidated root-cause, firmware, and integration audit; the intermediate 2026-11-10
+scratchpads were consolidated into it and remain readable at `9cf722e`). `docs/adr/` is
+the decision record, and `docs/adr/README.md` lists every one with its status.
+`docs/RELEASE-AUDIT.md` is the open work, aspect by aspect, and the store material
+(with `docs/SECURITY.md`, `docs/PRIVACY.md`, and `docs/AIRTIME.md`). `README.md` is for a
+person meeting the project. A change that alters behaviour updates all docs that it touches,
+in the same commit.
 
 ## Status
 

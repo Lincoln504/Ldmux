@@ -1,6 +1,6 @@
 # 0037 — Two carriers: direct by default, a flood when there is no route
 
-**Status:** accepted (2026-11-10)
+**Status:** accepted (2026-11-10). **Under revision, 2026-11-11:** the two-carrier model (`RAW_CUSTOM` direct + `REQ` `LDMR` flood) stands, but the capacity claim in *Consequences* below omitted the flood's growing travel path `P_arrival` and the companion's 3-byte `0x88` receive-log header (`R <= 161 - S - P_arrival`, `RC-6`), and adopting a flood's reversed travel path as `proven = true` conflated inbound arrival with outbound proof. Corrected in [`docs/RADIO-PLAN.md`](../RADIO-PLAN.md) §4–§5 and [`docs/RADIO-AUDIT-REVIEW.md`](../RADIO-AUDIT-REVIEW.md).
 
 ## Context
 

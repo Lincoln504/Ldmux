@@ -1,7 +1,9 @@
 # 0035 — A request is answered by a flood, because the answer is the only thing that has to arrive
 
-- **Status:** accepted
+- **Status:** accepted (under revision, 2026-11-11)
 - **Date:** 2026-11-09
+
+> **Audit note, 2026-11-11:** two defects broke this mechanism in the field: (1) carrying an inner path inside the flooded `LDRR` bloated the packet to `49 + S + P_carried + P_arrival` bytes, exceeding the companion's 173-byte `logRxRaw` (`0x88`) ceiling (`RC-6`), and (2) on the phone, `AndroidRadioLink.answerRequest` passed `RadioRoute.replyFlood` into `send(reply)`, double-wrapping the `LDRR` flood packet inside an `LDMR`/`RAW_CUSTOM` session record so the host could never parse it (`RC-4`). See [`docs/RADIO-AUDIT-REVIEW.md`](../RADIO-AUDIT-REVIEW.md) and [`docs/RADIO-PLAN.md`](../RADIO-PLAN.md) §4.1, §5.1.
 - **Supersedes part of:** 0032 (which chose a *direct* reply)
 
 ## Context

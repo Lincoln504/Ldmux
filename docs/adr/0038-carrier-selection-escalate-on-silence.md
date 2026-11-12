@@ -1,6 +1,12 @@
 # 0038 — Carrier selection: escalate on silence, decay on any arrival
 
 **Status:** accepted (2026-11-10). Supersedes the carrier rule in ADR-0037, which said only *when*
+
+> **Under revision, 2026-11-10/11.** The escalation rule stands, but the inbound flags that implement
+> it conflate what arrived with what the next send should use, and "a direct record proves the direct
+> path" is inbound proof only. `RADIO-PLAN.md` §4.2 keeps per-attempt choice and requires an
+> outbound candidate to be proven by a correlated authenticated result instead. The capacity figure
+> in *Consequences* below is corrected there too.
 the two carriers exist; this says how one is chosen per send.
 
 ## Context
@@ -66,5 +72,9 @@ Concretely:
 
 - The carrier is invisible above the link: the session sees one record either way, and the wire is
   identical. Only timing and capacity differ, and both follow the carrier that will actually be used.
-- A record that will ride a flood is capped at 162 bytes (the flood wrapper costs 12), so both ends
-  publish that limit while no route is fresh rather than the pathless direct maximum of 171.
+- A record that will ride a flood is capped by the **receiver**, not the sender: the flood wrapper
+  costs 12 bytes, the companion's receive-log header costs three more, and the flood's travel path
+  grows at every repeater, so the usable record is `161 − path bytes` (`157` scoped). The 162 this
+  record originally published was the send-side arithmetic alone and a full-size flooded record was
+  therefore never reported to the receiving app. See `RADIO-PLAN.md` §4.1–§4.3 and
+  `RADIO-AUDIT-REVIEW.md` §1–§3.

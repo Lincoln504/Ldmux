@@ -1,5 +1,9 @@
 # What a session costs on the air
 
+> **See also:** [`RADIO-PLAN.md`](RADIO-PLAN.md) §6 (the single-burst transaction that replaces the harness measured here) and [`RADIO-AUDIT-REVIEW.md`](RADIO-AUDIT-REVIEW.md) §6.1 (the verified time-on-air table for every packet size the plan uses).
+>
+> **Audit correction, 2026-11-11:** the harness behind this page drove `MeshBridge` directly in Rust (`crates/daemon/tests/airtime.rs`) and bypassed the mobile app's `MeshInputPump` and `MeshTermDriver.sendToShell`, where a single `Sync` of typed text + `Enter` actually transmitted 3+ separate LoRa records (`Hold(false)`, `Input`, `Key`) and connect-time precursor floods (`SELF_ADVERT`, 3× `LDRQ`, 3× `LDRH`) added 14 flood packets before the first session record. See [`RADIO-AUDIT-REVIEW.md`](RADIO-AUDIT-REVIEW.md) (`RC-1`, `RC-8`) and [`RADIO-PLAN.md`](RADIO-PLAN.md) (§1, §6) for the corrected single-burst transaction architecture.
+
 **Batched mode spends a small fraction of the air live mode spends for the same work.** Typing is
 the whole of the difference — the answer is identical in both modes — and typing is where one record
 per keystroke becomes one record per command. The measurements below come from

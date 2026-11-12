@@ -21,9 +21,16 @@ tailnet, or a pair of LoRa radios when there is no internet at all.
   spreading factor and coding rate. Repeaters need a route at both ends: the desktop floods an
   advert so its radio is discoverable, and the reply direction follows the path a record arrived
   by (`docs/ARCHITECTURE.md` §11 states what the phone still has to do to learn its own route).
-- **Records are sealed end to end.** Each is a Noise session message inside a MeshCore
-  `RAW_CUSTOM` packet addressed to the peer radio's key; the radio's own channel encryption is
-  never used. [`docs/SECURITY.md`](docs/SECURITY.md).
+- **Records are sealed end to end.** Each is a Noise session message inside a MeshCore packet
+  addressed to the peer radio's key — `RAW_CUSTOM` when the route is direct, a `REQ` flood carrying
+  the sealed record when it is not — and the radio's own channel encryption is never used.
+  [`docs/SECURITY.md`](docs/SECURITY.md).
+- **The radio path is under rework, and its published size is not yet truthful.** A full-size flooded
+  record is bigger than the receive interface will report, and the handshake does not fit a long
+  route. [`docs/RADIO-PLAN.md`](docs/RADIO-PLAN.md) is the plan of record;
+  [`docs/RADIO-AUDIT-REVIEW.md`](docs/RADIO-AUDIT-REVIEW.md) is the evidence behind it, and
+  [`docs/adr/0039-batch-transaction-radio-architecture.md`](docs/adr/0039-batch-transaction-radio-architecture.md)
+  is the decision.
 - **One owner per shell.** A second device is told who holds it and offered a takeover, never
   displaced silently.
 - **LoRa stays affordable.** Batch mode sends forty keystrokes as one transmission on `sync`, so a
@@ -49,8 +56,8 @@ tailnet, or a pair of LoRa radios when there is no internet at all.
 | Mode | Carried by | Notes |
 |---|---|---|
 | tailnet | a WebSocket | instant handshake, scrolling with momentum |
-| LoRa live | the radios | keystrokes leave as typed |
-| LoRa batch | the radios | typing leaves as one batch on `sync`, forced on a public channel |
+| LoRa live | the radios | keystrokes leave as typed; retired by ADR-0039, so the deployed behaviour is the batch row |
+| LoRa batch | the radios | typing leaves as one batch on `sync`, the only radio mode once ADR-0039 lands |
 
 <p align="center">
   <img src="docs/media/01-launcher.png" width="30%" alt="the launcher: new shell, the desktop's shells, and the menu on one this phone started">
@@ -85,9 +92,13 @@ tailnet, or a pair of LoRa radios when there is no internet at all.
   desktop allows it.
 - **Tap** moves the cursor: a click for a program that tracks the mouse, arrow keys for a prompt.
 - **Dictation** types into the shell from the panel's microphone, prefers on-device recognition,
-  and says when it falls back to a cloud recogniser. Portrait uses the keyboard's own.
+  and says when it falls back to a cloud recogniser. Portrait uses the keyboard's own. On the
+  radio route the transcript becomes a draft item, so a misheard word is read and corrected before
+  it is sent (ADR-0039).
 - **Predictive echo** draws a keystroke before the desktop answers while the link is slow, turns
-  itself off below the threshold, and never at a password prompt.
+  itself off below the threshold, and never at a password prompt. On the radio route the unsent
+  draft is drawn as faint provisional text with visible key glyphs (`⏎`, `⇥`, `^C`), so it never
+  scrolls the picture it is drawn over (ADR-0039).
 - **Leaving the shell** — back to the list, or on to another page — gives it back at once, so the
   desk window the phone displaced comes back without a keystroke, and the shell keeps running.
   Off the screen entirely, a 10 s grace on the radio route covers a glance, and the platform's 45 s
@@ -106,16 +117,21 @@ tailnet, or a pair of LoRa radios when there is no internet at all.
   the tuple this radio had when the panel opened, and the tuple the desktop reports.
 - **Input mode** is `live` or `batch`; `live` is refused on a public channel; the 36 second an
   hour limit is forced on between 869.4 and 869.65 MHz. The desktop applies the same allowance
-  from the tuple the radio reports.
+  from the tuple the radio reports. ADR-0039 retires `live` on the radio route entirely, leaving
+  the two controls `send` and `refresh`.
 - **Batch bar**: the held text and its cost (`12 characters, 1 record`), then `sending…`,
   `waiting for answer` (until the desktop says the pane settled), or `no answer yet · link busy or
   down`. One button: `sync` while text waits, `show` when only screens do; held text is dropped when
   leaving the page. It does not count screens behind: that number described the client's own hold,
-  could not be acted on, and the state is the only thing worth saying.
+  could not be acted on, and the state is the only thing worth saying. ADR-0039 replaces this pair
+  with `send` (the draft, in one record) and `refresh` (one screen, never touching the draft), and a
+  command's answer arrives as at most one burst.
 - **Limits**: 64 live shells (`LDMUX_MAX_SESSIONS`), 10 000 lines or 40 MiB of scrollback each.
 - **Android 9 or newer**, `arm64-v8a` or `x86_64`, Tailscale signed in for the tailnet. There is
-  no iOS client yet. One is planned, and it will be tailnet only, because the radio route's
-  MeshCore library is Java for Android and would have to be written again for iOS.
+  no iOS client yet. One is planned, and only the tailnet route would reach it today, because the
+  radio route's MeshCore library is Java for Android. ADR-0039 moves the companion, routing and
+  terminal engine behind the Rust C ABI both platforms can call, which is what makes the radio
+  route portable.
 
 `scripts/android.sh install` builds and installs over adb; there is no store listing.
 
@@ -207,8 +223,12 @@ The terminal engine is libghostty-vt, built from one pinned Ghostty commit by a 
   secrets live.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): layers, wire, invariants, failure modes, platform
   support, and radio bring-up.
+- [`docs/RADIO-PLAN.md`](docs/RADIO-PLAN.md): the radio path's redesign and plan of record.
+- [`docs/RADIO-AUDIT-REVIEW.md`](docs/RADIO-AUDIT-REVIEW.md): the root causes, the firmware
+  verification and the field evidence behind that plan.
+- [`docs/AIRTIME.md`](docs/AIRTIME.md): what a session costs on the air.
 - [`docs/RELEASE-AUDIT.md`](docs/RELEASE-AUDIT.md): every way this fails, what is fixed, what is
-  open.
+  open, and the store material.
 - [`docs/adr/`](docs/adr/): one record per decision, indexed in
   [`README.md`](docs/adr/README.md).
 - [`AGENTS.md`](AGENTS.md): for agents working in this repository.

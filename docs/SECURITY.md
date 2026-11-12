@@ -2,7 +2,10 @@
 
 What each route protects, what it does not, and where the secrets live. The design is
 `docs/ARCHITECTURE.md` §7; the radio decision and its alternatives are
-`docs/adr/0029-the-session-rides-raw-custom.md`.
+`docs/adr/0029-the-session-rides-raw-custom.md`. What the radio redesign changes about this page is
+in `docs/RADIO-PLAN.md` §5: the record kinds stay inside the same Noise session, `KIND_NEED_HANDSHAKE`
+carries a PSK-authenticated tag so a stranger cannot force a handshake, and the phone's identity
+becomes its own session static key rather than an install UUID.
 
 ## The tailnet route
 
@@ -18,10 +21,12 @@ What each route protects, what it does not, and where the secrets live. The desi
 
 ## The radios
 
-- **A record is a Noise message inside a MeshCore `RAW_CUSTOM` packet**, addressed to the peer
-  radio's public key: `Noise_IKpsk2_25519_ChaChaPoly_SHA256` over `snow`
-  (`crates/session/src/handshake.rs`). MeshCore's own encryption is never applied, so no channel
-  key is involved and the shared preset is a frequency, not a secret.
+- **A record is a Noise message inside a MeshCore packet**, addressed to the peer radio's public
+  key: `Noise_IKpsk2_25519_ChaChaPoly_SHA256` over `snow`
+  (`crates/session/src/handshake.rs`). The vehicle is a `RAW_CUSTOM` direct packet when a route is
+  known and a `REQ` flood carrying the sealed record when it is not (ADR-0037), and the wrapper is
+  never trusted for confidentiality. MeshCore's own encryption is never applied, so no channel key
+  is involved and the shared preset is a frequency, not a secret.
 - **Why not MeshCore's channel encryption**: its channel envelope is AES-128-ECB with no nonce or
   IV, a HMAC-SHA256 tag truncated to two bytes, and one shared key per channel, which is
   deterministic and forgeable at 1 in 65,536 per attempt; per-contact traffic uses a static-static

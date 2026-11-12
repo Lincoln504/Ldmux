@@ -1,6 +1,6 @@
 # ADR-0032 — A route is asked for, not waited for
 
-**Status:** Accepted (2026-11-08).
+**Status:** Accepted (2026-11-08). **Partially superseded by ADR-0035 and revised 2026-11-11:** overlapping `canSendRaw()` with `GET_CONTACT_BY_KEY` (`0x1E`) and `GET_ADVERT_PATH` (`0x2A`) caused `ERR_CODE_NOT_FOUND` replies from those queries to settle `pendingRaw` (`sendRawPacket`) as `ErrNotFound`, wiping the learned route and killing the session (`RC-2` in [`docs/RADIO-AUDIT-REVIEW.md`](../RADIO-AUDIT-REVIEW.md)); and running `LDRQ` before `msg1` on connect caused `LDRR` and `msg1` to collide (`RC-1`). See [`docs/RADIO-PLAN.md`](../RADIO-PLAN.md) §3.2 and §5.1.
 
 - **Date:** 2026-11-08
 - **Related:** ADR-0030 (no contacts; a route comes from an advert), ADR-0029 (the session rides

@@ -455,8 +455,8 @@ by the host radio, by the app before it retunes, and by every budget below.
 | macOS daemon | not supported yet |
 | Windows | not supported, not planned |
 | Android client | done, verified on a device |
-| iOS client | planned, and tailnet only: the radio route's MeshCore library is Java for Android and would have to be written again for iOS. Needs a macOS host for the xcframework |
-| LoRa route, Android plus host | built and run on real radios, multi-hop recovery not implemented |
+| iOS client | planned (needs a macOS host for the xcframework; under [`RADIO-PLAN.md`](RADIO-PLAN.md) §1 `A2`, the companion, routing, and `mesh_term` client move into shared Rust behind `crates/session-ffi`, removing the Java `libmeshcore` blocker) |
+| LoRa route, Android plus host | built and run on real radios; multi-hop public-mesh redesign (`A1`–`A5`) specified in [`RADIO-PLAN.md`](RADIO-PLAN.md) and [`RADIO-AUDIT-REVIEW.md`](RADIO-AUDIT-REVIEW.md) |
 
 
 ### The client's look and its voice
@@ -586,9 +586,13 @@ is already losing a quarter of its records from being flooded by its own repair 
 **Small messages share a record, on both sides.** A record is the unit of air, so `Attach` and its
 `Resize` travel together (17 bytes in one record instead of two), and the host packs its replies to
 the record's *live* payload — 143 at an empty path, and less with every repeater, since the path
-occupies the same frame: at 28 hops a record carries 120 application bytes, so a message at the
-protocol's 137-byte input limit becomes two records out there. The figures are per-route, not
-constants.
+occupies the same frame: at 28 one-byte hops a **direct** record carries 120 application bytes, so a
+message at the protocol's 137-byte input limit becomes two records out there. A flooded record at
+that path is smaller again (133 bytes, 108 application), and with two-byte path hashes the direct
+figure falls to 92 and the flood figure to 81. The figures are per-route and per-carrier, not
+constants; full direct payload capacity with sub-fragmented flood retry is the subject of
+[`RADIO-PLAN.md`](RADIO-PLAN.md) §4.1 and §5.3.
+
 Two more records are saved by timing rather than packing: an owed ack waits `max(150 ms, 2 airtimes)`
 before going out alone, so it rides the next outgoing record instead, and the "answer finished"
 marker is sent only when an answer took two or more frames, because a one-frame echo's own commit
@@ -649,6 +653,19 @@ the sender's chain reversed, so one reception repairs the route in the direction
 must take. The carrier is chosen per send — direct when the route is fresh, flood when it is
 not — and the host escalates rather than starting there: a pathless zero-hop reply is cheap
 and correct for a neighbour, so the flood is used only after that fails to be answered.
+
+**The flood carrier's size is the receiver's, not the sender's.** A record in that wrapper
+reaches the companion app only while `record ≤ 161 − path bytes` (`157` scoped): the packet
+plus the three-byte receive-log header must fit the 176-byte frame, and the flood's travel
+path grows at every repeater. Both ends currently publish `162`, which is the send-side
+arithmetic with no path and no receive header, so a full-size flooded record is transmitted
+and never reported. The same arithmetic applies to a direct packet arriving after repeaters
+have consumed path hashes, and to the flooded route reply, whose wrapper is larger again.
+The corrected receiver-side budget (`min(172 − P_out, 171)` direct, `161 − S − P_arrival` flood),
+sub-fragmented flood retries (`FLAG_SUBFRAG`), compact `LDRR`, and 2-part bootstrap fragmentation
+(`KIND_MSG1_FRAG`) for the 121-byte handshake are specified in
+[`RADIO-PLAN.md`](RADIO-PLAN.md) §4–§5; [`RADIO-AUDIT-REVIEW.md`](RADIO-AUDIT-REVIEW.md) §1–§3
+carries the derivation and the source lines.
 
 0. **An advert cannot be the mechanism.** A repeater drops an advert once it has travelled
    `flood_max_advert` hops — **8 by default** (`examples/simple_repeater/MyMesh.cpp:907`, upstream
@@ -927,7 +944,30 @@ subject is clear, rename it when the subject changes, and `ldmux buzz` when the 
 - **There is no CI.** Nothing runs on push: the gate is the four commands in the README's Development section, run by whoever is about to push. `nix flake check` is the one that also builds in the sandbox.
   It does not build the Android artifact, by decision.
 
-## 13. Where the code is
+## 13. Where the documents are
+
+One page per question, so a reader is never sent to two places for one answer:
+
+| Document | The question it answers |
+|---|---|
+| `README.md` | what this is, and how to meet it |
+| `docs/ARCHITECTURE.md` (this page) | how the deployed system is built: layers, wire, invariants, failure modes |
+| `docs/RADIO-PLAN.md` | how the radio path is being rebuilt, and the plan of record for doing it |
+| `docs/RADIO-AUDIT-REVIEW.md` | why the radio path failed in the field: root causes, firmware evidence, cross-layer integration |
+| `docs/RELEASE-AUDIT.md` | what is fixed, what is open, what is unverified, and the store material |
+| `docs/adr/` | one record per decision, indexed in `docs/adr/README.md` |
+
+Supporting pages: `docs/SECURITY.md` (what each route protects and where secrets live),
+`docs/AIRTIME.md` (what a session costs on the air), `docs/PRIVACY.md` (the store policy text),
+and `AGENTS.md` (the working rules for this repository).
+
+**The radio path is the one subject with two pages.** `RADIO-AUDIT-REVIEW.md` is the evidence and
+`RADIO-PLAN.md` is the specification, and a decision that changes the radio architecture updates
+both in the same commit, with ADR-0039 as its decision record. The 2026-11-10 audit scratchpads
+(`MESH-RADIO-CONSIDERATIONS.md`, `RADIO-AUDIT-LOOP.md`, `RADIO-AUDIT-DISPOSITION.md`) were
+consolidated into those two and removed; they are readable at `git show 9cf722e:<path>`.
+
+## 13a. Where the code is
 
 `crates/protocol` is the one place a wire format is defined, for the daemon RPC, the
 keeper, the pairing link and the mesh terminal protocol. `crates/session` is pure and

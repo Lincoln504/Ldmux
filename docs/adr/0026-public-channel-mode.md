@@ -1,6 +1,6 @@
 # ADR-0026: Public-channel mode — typing held on the phone, one sync button
 
-**Status:** Accepted (2026-11-04). Implements the mode asked for after the first field sessions on a
+**Status:** Accepted (2026-11-04). **Under revision, 2026-11-11:** superseded on the radio route by the demand-only batch transaction model (`Send` + `Refresh`, coalesced `T_SEND`, and atomic `T_SNAPSHOT` with no `Hold` message and no live radio mode) specified in [`docs/RADIO-PLAN.md`](../RADIO-PLAN.md) §1–§7; see [`docs/RADIO-AUDIT-REVIEW.md`](../RADIO-AUDIT-REVIEW.md) (`RC-8`, `RC-11`). Implements the mode asked for after the first field sessions on a
 public channel. **Related:** ADR-0025 (the mesh terminal profile), `docs/ARCHITECTURE.md#4-the-wire` (the
 record budget), `docs/ARCHITECTURE.md#9-airtime`. **Scope:** `packages/mobile/composeApp/src/commonMain/
 kotlin/dev/ldmux/mobile/mesh/` — `PublicChannelHold.kt`, `PublicChannelBar.kt`,

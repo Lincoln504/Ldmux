@@ -1,6 +1,6 @@
 # ADR-0034: A hold bounds output, not validity — and the attach states the grid
 
-**Status:** Accepted (2026-11-09). Amends ADR-0025 (the mesh terminal profile) and ADR-0026
+**Status:** Accepted (2026-11-09). **Under revision, 2026-11-11:** the `Attach` grid field stands (and is extended to `Takeover`, `Create`, `Send`, and `Fetch`), but `Hold(true)` clearing `owe_frame = false` (`mesh_bridge.rs:655`) while `Resize` was deferred behind `pending > 0` cancelled the resize repaint and produced a blank clipped screen (`RC-11` in [`docs/RADIO-AUDIT-REVIEW.md`](../RADIO-AUDIT-REVIEW.md)). Replaced by demand-only `MeshRpcService` and atomic `Snapshot` in [`docs/RADIO-PLAN.md`](../RADIO-PLAN.md) §1, §6, §7. Amends ADR-0025 (the mesh terminal profile) and ADR-0026
 (public-channel mode). **Related:** `docs/ARCHITECTURE.md` §9, `docs/AIRTIME.md`, ADR-0021.
 **Scope:** `crates/protocol/src/mesh_term.rs` (protocol 13), `crates/daemon/src/mesh_bridge.rs`,
 `packages/mobile/composeApp/src/commonMain/kotlin/io/ldmux/mobile/mesh/` —
