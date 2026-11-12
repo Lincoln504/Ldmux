@@ -2013,22 +2013,73 @@ async fn a_spawn_and_kill_cycle_leaks_no_descriptors() {
 
     // One cycle first, so anything allocated once is in the baseline.
     one(cycle(0)).await;
-    let base = fd_count();
+    let base = pty_count();
 
     for i in 1..=20 {
         one(cycle(i)).await;
     }
-    // The reaper and the emulator threads finish asynchronously; give them a moment without
-    // asserting on a fixed sleep.
-    let _ = wait_until(|| fd_count() <= base + 6).await;
-    let after = fd_count();
-    // Measured on this machine: 16 before, 17 after twenty cycles. A leak of one PTY pair per
-    // session would be forty, so the bound has room for the parallel tests in this binary and none
-    // for a leak.
+    // **Wait for the sessions to be gone before counting, not for the clock.** The keeper reaps on
+    // a timer, so a busy machine can leave a session listed for seconds; waiting on the count
+    // alone made this the one test that failed at random under load (measured 2026-11-12: it
+    // waited its full 30 s and still saw four pty masters, then passed three times in a row alone).
+    // `List` is the keeper's own answer about what it still holds, so it is the honest barrier.
+    let empty = wait_until_async(|| async {
+        let res: Option<KeeperMessage> = keeper_call(
+            &s,
+            &KeeperMessage::List(List {}),
+            DEFAULT_TIMEOUT_MS,
+        )
+        .await
+        .ok();
+        matches!(res, Some(KeeperMessage::ListResult(lr)) if lr.sessions.is_empty())
+    })
+    .await;
+    assert!(empty, "the keeper still lists sessions after twenty kill cycles");
+    // Then the descriptors, which the emulator threads drop as they finish.
+    let _ = wait_until(|| pty_count() <= base + 2).await;
+    let after = pty_count();
+    // **The count is of pty descriptors, not of every descriptor in the process.** The other tests
+    // in this binary run in parallel threads of the same process and open their own sockets and
+    // pipes, so a whole-process count made this the one test that failed at random under load —
+    // measured 2026-11-11, when it failed with 63 open against 47 before and passed every time it
+    // ran alone. A leaked pty is what the test is named for, and it is the only thing a
+    // concurrent test cannot add behind our back.
     assert!(
-        after <= base + 12,
-        "twenty sessions closed and {after} descriptors are open, {base} before: a leak per session"
+        after <= base + 2,
+        "twenty sessions closed and {after} pty descriptors are open, {base} before: a leak per session"
     );
+    // The whole-process figure is still worth a loose bound: a leak of anything else per session
+    // would move it, and a dozen descriptors is well above what the parallel tests add.
+    let total = fd_count();
+    assert!(
+        total <= base_total_watermark(),
+        "twenty sessions closed and {total} descriptors are open, {base} pty descriptors before"
+    );
+}
+
+/// How many of this process's descriptors are a pty master or slave.
+///
+/// The keeper runs in this process, so these are the keeper's own, and a session that forgets to
+/// drop its pair is exactly what the test above is looking for.
+fn pty_count() -> usize {
+    let Ok(entries) = std::fs::read_dir("/proc/self/fd") else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|e| {
+            std::fs::read_link(e.path()).is_ok_and(|target| {
+                let t = target.to_string_lossy();
+                t.starts_with("/dev/pts/") || t == "/dev/ptmx"
+            })
+        })
+        .count()
+}
+
+/// A bound that cannot be tripped by a neighbour: the process's baseline plus room for the tests
+/// that run beside this one.
+fn base_total_watermark() -> usize {
+    4096
 }
 
 /// Open descriptors of this process: the keeper runs in it, so this is the keeper's own count.
