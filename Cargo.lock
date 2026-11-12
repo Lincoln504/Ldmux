@@ -352,6 +352,7 @@ dependencies = [
  "ldmux-companion",
  "ldmux-mesh",
  "ldmux-protocol",
+ "ldmux-radio-harness",
  "ldmux-session",
  "ldmux-testkeeper",
  "ldmux-vt-sys",
@@ -398,12 +399,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ldmux-radio-harness"
+version = "0.1.0"
+dependencies = [
+ "ldmux-mesh",
+ "ldmux-session",
+]
+
+[[package]]
 name = "ldmux-session"
 version = "0.1.0"
 dependencies = [
  "hmac",
  "ldmux-mesh",
  "ldmux-protocol",
+ "ldmux-radio-harness",
  "serde_json",
  "sha2",
  "snow",

@@ -329,7 +329,12 @@ pub struct MeshSnapshot {
 }
 
 impl MeshSnapshot {
-    fn new(cfg: &MeshConfig) -> Self {
+    /// The snapshot a link starts from: `connecting`, with every reading absent.
+    ///
+    /// Public because [`LinkLoop`] takes one and the full-stack gate builds its own; a link's
+    /// published state is not a secret and a test that had to reach through `start_with_session`
+    /// to get one would be testing the spawner instead of the loop.
+    pub fn new(cfg: &MeshConfig) -> Self {
         Self {
             state: "connecting",
             own_radio_key: None,
@@ -800,7 +805,12 @@ impl Channels {
     }
 }
 
-/// One connected session, from handshake to close.
+/// The link loop's state, so the full-stack gate can step it instead of waiting on a clock.
+///
+/// `session()` is this plus a `select!`; `crates/daemon/tests/mesh_full_stack.rs` is this plus a
+/// simulated mesh. It is exposed because a loop that can only be run against a real radio is a loop
+/// nobody can prove, and `AR-15` is what happens when the two ends are only ever tested apart: the
+/// phone moved to the new transport, the host did not, and every test still passed.
 ///
 /// **The loop is a poll, a send and a delivery.** `RadioEndpoint` owns the handshake, the replay
 /// window, the transaction layer, the retries, the acks and the route table; `MeshRpc` owns the
@@ -808,7 +818,205 @@ impl Channels {
 /// the claim table. Nothing here decides a retry, a timeout or a byte layout — a second copy of any
 /// of those is how the old stack came to have two answers to every question
 /// (`docs/RADIO-PLAN.md` §10a).
-async fn session<C, H>(mut carrier: C, promise: Bound, runtime: &MeshRuntime, setup: Option<&mut SessionSetup>, bound: Arc<AtomicBool>, mut host: H,
+pub struct LinkLoop<C, H> {
+    /// The carriage. Public so the driver can retune it and read from it.
+    pub carrier: C,
+    endpoint: RadioEndpoint,
+    rpc: MeshRpc,
+    channels: Channels,
+    host: H,
+    snapshot: Arc<Mutex<MeshSnapshot>>,
+    stats: crate::mesh_bridge::BridgeStats,
+    pairing: PairingEntry,
+    persist: crate::mesh_identity::Persister,
+    /// When the carriage last carried anything, for the silence backstop.
+    pub last_carrier: Instant,
+}
+
+impl<C, H> LinkLoop<C, H>
+where
+    C: ldmux_session::endpoint::CarriageSink,
+    H: crate::mesh_rpc::MeshHost,
+{
+    /// Build the loop from the pairing and the radio's own promise.
+    ///
+    /// The endpoint is a **host**: it answers a phone and never initiates, which is what makes the
+    /// pairing's pinned key the only way in.
+    pub fn new(
+        carrier: C,
+        setup: &SessionSetup,
+        promise: Bound,
+        preset: &crate::mesh_serial::RadioPreset,
+        host: H,
+        snapshot: Arc<Mutex<MeshSnapshot>>,
+    ) -> Self {
+        let pairing = setup.files.current_pairing();
+        let peer_static = pairing.pinned.unwrap_or([0u8; 32]);
+        let config = EndpointConfig::new(Role::Host, peer_static, pairing.psk)
+            .with_airtime_ms(promise.airtime_ms.unwrap_or(602.6))
+            .with_path_width(preset.hash_size)
+            .with_sf(preset.sf)
+            // The endpoint only needs to know *whether* floods are scoped, for the record budget;
+            // the scope key itself is the carrier's, and it is already in `CarrierSettings`.
+            .with_scope(preset.hash_size.checked_mul(0).map(|_| 0u16))
+            .with_pairings(vec![pairing.clone()]);
+        let endpoint = RadioEndpoint::host(config, setup.files.clone_key());
+        Self {
+            carrier,
+            endpoint,
+            rpc: MeshRpc::new(),
+            channels: Channels::default(),
+            host,
+            snapshot,
+            stats: crate::mesh_bridge::BridgeStats::default(),
+            pairing,
+            persist: setup.files.persister(),
+            last_carrier: Instant::now(),
+        }
+    }
+
+    /// One pass: what this end owes the air, what arrived, and what settled.
+    ///
+    /// `now` is the settle engine's clock and `now_ms` the session's; a caller that steps a
+    /// simulated mesh supplies both from its own virtual clock, so a settle window is a fact the
+    /// test controls rather than a wall-clock wait.
+    pub async fn step(&mut self, now_ms: u64, now: Instant) -> Result<(), MeshError> {
+        // **What this end owes the air, decided once and handed over.** The endpoint stages a
+        // bootstrap initiation, a queued record whose instant has come, and new transaction work,
+        // in that order; a call with nothing due does no work.
+        let report = self.endpoint.poll(now_ms, &mut self.carrier).await?;
+        for out in &report {
+            if let Outbound::TimedOut { tx_id } = out {
+                set(&self.snapshot, |s| {
+                    s.last_error = Some(format!("message {tx_id} ran out of attempts"));
+                });
+            }
+        }
+
+        // **Deliver what arrived.** One message is one command: the transaction layer reassembled
+        // it, so a partial command never reaches a pty.
+        for bytes in self.endpoint.take_inbound() {
+            dispatch(
+                &bytes,
+                &mut self.rpc,
+                &mut self.channels,
+                &mut self.host,
+                &mut self.endpoint,
+                &mut self.stats,
+                &self.snapshot,
+                now_ms,
+                now,
+            )
+            .await;
+        }
+
+        // **Answer every command whose pane has settled.** Driven from the same pass as everything
+        // else, so a settled command's answer leaves on the next pass rather than on a timer of its
+        // own. A shell with nothing waiting costs one map lookup.
+        let busy: Vec<u8> = self
+            .channels
+            .by_id
+            .values()
+            .copied()
+            .filter(|slot| self.rpc.busy(*slot))
+            .collect();
+        for slot in busy {
+            let Some(id) = self.rpc.attached_to(slot).map(str::to_owned) else {
+                self.rpc.forget_shell(slot);
+                continue;
+            };
+            if let Some(messages) = self.rpc.settle(slot, &id, &mut self.host, now).await {
+                submit(
+                    &mut self.endpoint,
+                    &messages,
+                    now_ms,
+                    &mut self.stats,
+                    &self.snapshot,
+                );
+            }
+        }
+
+        // **A pin is persisted the moment the handshake produces one.** The endpoint computes it and
+        // cannot write the file; a host that accepted a phone and never pinned it would let anyone
+        // holding the PSK re-negotiate the pairing.
+        if let Some((key, timestamp)) = self.endpoint.take_pin() {
+            let entry = PairingEntry {
+                psk: self.pairing.psk,
+                pinned: Some(key),
+                last_timestamp_ms: timestamp,
+            };
+            if let Err(e) = (self.persist)(&entry) {
+                set(&self.snapshot, |s| {
+                    s.last_error = Some(format!("could not record the pairing: {e}"));
+                });
+            }
+            set(&self.snapshot, |s| {
+                s.session.peer_key = Some(hex(&key));
+                s.session.state = "established";
+            });
+        }
+        set(&self.snapshot, |s| {
+            s.session.state = if self.endpoint.established() {
+                "established"
+            } else {
+                "waiting"
+            };
+            s.session.pending = self.endpoint.queued();
+            s.bridge = self.stats;
+        });
+        Ok(())
+    }
+
+    /// A record arrived from the air, with how it arrived.
+    pub fn on_record(&mut self, record: &[u8], info: &ArrivalInfo, now_ms: u64, wall_ms: u64) {
+        let _ = self.endpoint.on_record(record, info, now_ms, wall_ms);
+    }
+
+    /// How long the loop may sleep before it must look again.
+    ///
+    /// The earliest of: the endpoint's own next deadline, and the settle engine's quiet window while
+    /// a command waits. A loop with nothing to do sleeps for [`MAX_IDLE_WAIT`] and is woken by the
+    /// carrier or by a retune.
+    pub fn next_wait(&self, now_ms: u64) -> Duration {
+        let mut wait = self
+            .endpoint
+            .next_deadline_ms()
+            .map_or(MAX_IDLE_WAIT, |d| {
+                Duration::from_millis(d.saturating_sub(now_ms))
+            })
+            .min(MAX_IDLE_WAIT);
+        if self.channels.by_id.values().any(|slot| self.rpc.busy(*slot)) {
+            // A waiting command is read once per pass; the settle engine's own windows are tens of
+            // milliseconds, so a pass that slept longer would answer late.
+            wait = wait.min(SETTLE_TICK);
+        }
+        wait
+    }
+
+    /// Whether the handshake has completed.
+    pub fn established(&self) -> bool {
+        self.endpoint.established()
+    }
+
+    /// How many records the endpoint still owes the air.
+    pub fn queued(&self) -> usize {
+        self.endpoint.queued()
+    }
+
+    /// What the service has done, for a test that wants to say so.
+    pub fn stats(&self) -> &crate::mesh_bridge::BridgeStats {
+        &self.stats
+    }
+}
+
+/// One connected session, from handshake to close.
+async fn session<C, H>(
+    carrier: C,
+    promise: Bound,
+    runtime: &MeshRuntime,
+    setup: Option<&mut SessionSetup>,
+    bound: Arc<AtomicBool>,
+    host: H,
     preset: crate::mesh_serial::RadioPreset,
 ) -> Result<(), MeshError>
 where
@@ -831,23 +1039,15 @@ where
         return idle(carrier, runtime).await;
     };
 
-    let pairing = setup.files.current_pairing();
-    let mut persist = setup.files.persister();
-    let peer_static = pairing.pinned.unwrap_or([0u8; 32]);
-    let config = EndpointConfig::new(Role::Host, peer_static, pairing.psk)
-        .with_airtime_ms(promise.airtime_ms.unwrap_or(602.6))
-        .with_path_width(preset.hash_size)
-        .with_sf(preset.sf)
-        // The endpoint only needs to know *whether* floods are scoped, for the record budget; the
-        // scope key itself is the carrier's, and it is already in `CarrierSettings`.
-        .with_scope(preset.hash_size.checked_mul(0).map(|_| 0u16))
-        .with_pairings(vec![pairing.clone()]);
-    let mut endpoint = RadioEndpoint::host(config, setup.files.clone_key());
-    let mut rpc = MeshRpc::new();
-    let mut channels = Channels::default();
+    let mut link = LinkLoop::new(
+        carrier,
+        setup,
+        promise,
+        &preset,
+        host,
+        Arc::clone(snapshot),
+    );
     let started = runtime_start();
-    let mut last_carrier = Instant::now();
-    let mut stats = crate::mesh_bridge::BridgeStats::default();
 
     loop {
         if runtime.reset_pin.swap(false, Ordering::SeqCst) {
@@ -861,101 +1061,27 @@ where
         // **A retune is the radio's own, so the link task does it.** The firmware validates the
         // tuple and either retunes (and saves it) or refuses, and the snapshot says which.
         if let Some(want) = runtime.take_preset() {
-            apply_retune(&mut carrier, snapshot, want).await;
+            apply_retune(&mut link.carrier, snapshot, want).await;
         }
 
-        // **What this end owes the air, decided once and handed over.** The endpoint stages a
-        // bootstrap initiation, a queued record whose instant has come, and new transaction work, in
-        // that order; a call with nothing due does no work.
         let now_ms = elapsed_ms(started);
-        let report = endpoint.poll(now_ms, &mut carrier).await?;
-        for out in &report {
-            if let Outbound::TimedOut { tx_id } = out {
-                set(snapshot, |s| {
-                    s.last_error = Some(format!("message {tx_id} ran out of attempts"));
-                });
-            }
-        }
-
-        // **Deliver what arrived.** One message is one command: the transaction layer reassembled
-        // it, so a partial command never reaches a pty.
-        for bytes in endpoint.take_inbound() {
-            dispatch(
-                &bytes,
-                &mut rpc,
-                &mut channels,
-                &mut host,
-                &mut endpoint,
-                &mut stats,
-                snapshot,
-                now_ms,
-            )
-            .await;
-        }
-
-        // **Answer every command whose pane has settled.** Driven from the same pass as everything
-        // else, so a settled command's answer leaves on the next pass rather than on a timer of its
-        // own. A shell with nothing waiting costs one map lookup.
-        let busy: Vec<u8> = channels
-            .by_id
-            .values()
-            .copied()
-            .filter(|slot| rpc.busy(*slot))
-            .collect();
-        for slot in busy {
-            let Some(id) = rpc.attached_to(slot).map(str::to_owned) else {
-                rpc.forget_shell(slot);
-                continue;
-            };
-            if let Some(messages) = rpc.settle(slot, &id, &mut host, Instant::now()).await {
-                submit(&mut endpoint, &messages, now_ms, &mut stats, snapshot);
-            }
-        }
-
-        // **A pin is persisted the moment the handshake produces one.** The endpoint computes it and
-        // cannot write the file; a host that accepted a phone and never pinned it would let anyone
-        // holding the PSK re-negotiate the pairing.
-        if let Some((key, timestamp)) = endpoint.take_pin() {
-            let entry = PairingEntry {
-                psk: pairing.psk,
-                pinned: Some(key),
-                last_timestamp_ms: timestamp,
-            };
-            if let Err(e) = persist(&entry) {
-                set(snapshot, |s| {
-                    s.last_error = Some(format!("could not record the pairing: {e}"));
-                });
-            }
-            set(snapshot, |s| {
-                s.session.peer_key = Some(hex(&key));
-                s.session.state = "established";
-            });
-        }
-        set(snapshot, |s| {
-            s.session.state = if endpoint.established() {
-                "established"
-            } else {
-                "waiting"
-            };
-            s.session.pending = endpoint.queued();
-            s.bridge = stats;
-        });
+        link.step(now_ms, Instant::now()).await?;
 
         // **Silence with something outstanding is the end of this connection.** The endpoint's own
         // ladder fails a message after its attempts; this is the backstop for a carriage that stops
         // delivering *anything*, including the answers the ladder is waiting for.
-        if endpoint.queued() > 0 && last_carrier.elapsed() >= CARRIER_SILENCE {
+        if link.queued() > 0 && link.last_carrier.elapsed() >= CARRIER_SILENCE {
             return Err(MeshError::Timeout("the carriage stopped answering"));
         }
 
         // **Wait for the next thing, not for a tick.** An idle radio waits for a notification, a
         // deadline the endpoint named, or the settle engine's own quiet window.
-        let wait = wait_for(&endpoint, &rpc, &channels, started);
+        let wait = link.next_wait(now_ms);
         tokio::select! {
             biased;
-            event = carrier.recv() => {
-                last_carrier = Instant::now();
-                on_event(event?, &mut endpoint, snapshot, started);
+            event = link.carrier.recv() => {
+                link.last_carrier = Instant::now();
+                on_event(event?, &mut link.endpoint, snapshot, elapsed_ms(started), now_unix_ms());
             }
             () = tokio::time::sleep(wait) => {}
             () = runtime.wake.notified() => {}
@@ -968,31 +1094,7 @@ fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-/// How long the loop may sleep before it must look again.
-///
-/// The earliest of: the endpoint's own next deadline, and the settle engine's quiet window while a
-/// command waits. A loop with nothing to do sleeps for [`MAX_IDLE_WAIT`] and is woken by the carrier
-/// or by a retune.
-fn wait_for(
-    endpoint: &RadioEndpoint,
-    rpc: &MeshRpc,
-    channels: &Channels,
-    started: Instant,
-) -> Duration {
-    let now = elapsed_ms(started);
-    let mut wait = endpoint
-        .next_deadline_ms()
-        .map_or(MAX_IDLE_WAIT, |d| Duration::from_millis(d.saturating_sub(now)))
-        .min(MAX_IDLE_WAIT);
-    if channels.by_id.values().any(|slot| rpc.busy(*slot)) {
-        // A waiting command is read once per pass; the settle engine's own windows are tens of
-        // milliseconds, so a pass that slept longer would answer late.
-        wait = wait.min(SETTLE_TICK);
-    }
-    wait
-}
-
-/// Apply a retune the operator asked for, and publish what the radio said.
+    /// Apply a retune the operator asked for, and publish what the radio said.
 async fn apply_retune<C: ldmux_session::endpoint::CarriageSink>(
     carrier: &mut C,
     snapshot: &Arc<Mutex<MeshSnapshot>>,
@@ -1040,7 +1142,8 @@ fn on_event(
     event: Event,
     endpoint: &mut RadioEndpoint,
     snapshot: &Arc<Mutex<MeshSnapshot>>,
-    started: Instant,
+    now_ms: u64,
+    wall_ms: u64,
 ) {
     match event {
         Event::Signal(reading) => {
@@ -1089,8 +1192,7 @@ fn on_event(
             } else {
                 ArrivalInfo::in_transit(hops, snr_db)
             };
-            let now = elapsed_ms(started);
-            match endpoint.on_record(&record, &info, now, now_unix_ms()) {
+            match endpoint.on_record(&record, &info, now_ms, wall_ms) {
                 Admitted::Answered { .. } => {}
                 Admitted::Ignored(_) | Admitted::Message { .. } | Admitted::Part { .. } => {}
                 Admitted::Ack | Admitted::AnswerAccepted { .. } | Admitted::HandshakeRequested => {}
@@ -1123,6 +1225,7 @@ async fn dispatch<H: crate::mesh_rpc::MeshHost>(
     stats: &mut crate::mesh_bridge::BridgeStats,
     snapshot: &Arc<Mutex<MeshSnapshot>>,
     now_ms: u64,
+    now: Instant,
 ) -> Vec<Message> {
     let mut answers = Vec::new();
     let mut decoder = Decoder::new();
@@ -1175,7 +1278,7 @@ async fn dispatch<H: crate::mesh_rpc::MeshHost>(
             },
         };
         let outcome = rpc
-            .on_message(slot, PEER_LINK, &message, host, Instant::now())
+            .on_message(slot, PEER_LINK, &message, host, now)
             .await;
         // An attach that resolved binds the shell to its slot, so the next `Send` finds it.
         if matches!(message, Message::Attach { .. } | Message::Takeover { .. })
@@ -1392,6 +1495,7 @@ mod tests {
             &mut stats,
             &runtime.snapshot,
             0,
+            Instant::now(),
         )
         .await;
         assert_eq!(answers.len(), 1, "one message, not a screen and a refusal");
@@ -1440,6 +1544,7 @@ mod tests {
             &mut stats,
             &runtime.snapshot,
             0,
+            Instant::now(),
         )
         .await;
         assert_eq!(answers.len(), 1, "the refusal is the whole answer");
@@ -1486,6 +1591,7 @@ mod tests {
             &mut stats,
             &runtime.snapshot,
             0,
+            Instant::now(),
         )
         .await;
         assert_eq!(
@@ -1513,6 +1619,7 @@ mod tests {
             &mut stats,
             &runtime.snapshot,
             0,
+            Instant::now(),
         )
         .await;
         assert_eq!(
@@ -1562,6 +1669,7 @@ mod tests {
                 &mut stats,
                 &runtime.snapshot,
                 0,
+                Instant::now(),
             )
             .await;
         }
@@ -1593,6 +1701,7 @@ mod tests {
                 &mut stats,
                 &runtime.snapshot,
                 0,
+                Instant::now(),
             )
             .await;
         }

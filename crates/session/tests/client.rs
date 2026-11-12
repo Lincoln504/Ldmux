@@ -6,8 +6,6 @@
 //! rule `docs/RADIO-PLAN.md` §10 `S4` names, and it is deliberately not a second implementation of
 //! `MeshRpc`: nothing here tries to be the daemon.
 
-mod support;
-
 use std::collections::BTreeMap;
 
 use ldmux_mesh::route::Carriage;
@@ -19,7 +17,9 @@ use ldmux_session::client::{Applied, Client, ClientConfig, ClientError, ClientEv
 use ldmux_session::endpoint::{ArrivalInfo, EndpointConfig, RadioEndpoint, Role};
 use ldmux_session::handshake::{Keypair, PairingEntry};
 use ldmux_session::{MAX_OPEN_PAGES, PageMirror};
-use support::{AIRTIME_MS, FakeRadio, Port, WALL_BASE_MS, block_on, chain, info_of};
+use ldmux_radio_harness::{
+    AIRTIME_MS, FakeRadio, Port, WALL_BASE_MS, block_on, chain, info_of,
+};
 
 const PSK: [u8; 32] = [0x42; 32];
 const COLS: u8 = 40;

@@ -1,14 +1,21 @@
-//! Pieces the radio tests share: a port that puts records on a simulated mesh, and the loop that
-//! joins two ends.
+//! The pieces the radio tests share: a port that puts records on a simulated mesh, a fake companion
+//! radio, and the chain that joins two ends.
 //!
-//! This exists so a test can say what it is about instead of rebuilding a radio. `endpoint.rs` has
-//! its own copy of the older half of this (it drives two raw endpoints), and folding that in is a
-//! follow-up rather than a risk taken in a green suite; what is here is the part a *client* test
-//! needs, named for what it is.
+//! **Why a crate and not a `tests/support` module.** `crates/session/tests/client.rs` proves the
+//! phone engine against a host endpoint, and `crates/daemon/src/mesh.rs` proves the daemon loop
+//! against a fake host — but nothing ran the two against each other, which is exactly the join
+//! `AR-15` showed can rot while both halves stay green. A module under one crate's `tests/` cannot
+//! be reached from the other, so the harness lives here and both depend on it.
+//!
+//! It is a **dev-dependency** of `ldmux-session` and `ldmux-daemon`: a test instrument must not
+//! reach a shipping binary. `ldmux-mesh`'s `sim` feature stays where it is — the simulator models
+//! the wire, this crate drives it.
+
 #![allow(dead_code)]
 
 use std::future::Future;
 use std::pin::pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use ldmux_mesh::carrier::{Carrier, Event};
@@ -54,6 +61,12 @@ impl Port {
     }
 }
 
+impl Default for Port {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Carrier for Port {
     async fn send_record(&mut self, _seq: u8, record: &[u8]) -> Result<(), MeshError> {
         self.out.push(record.to_vec());
@@ -73,10 +86,72 @@ impl ldmux_session::CarriageSink for Port {
     }
 }
 
-/// How a delivery reached its node.
+/// A port whose output the harness can drain **while the loop owns it**.
+///
+/// `Port` keeps its records in a plain `Vec`, which is right for a test that owns the carrier. The
+/// daemon's loop owns its carrier, so the full-stack gate needs the records to be reachable from
+/// outside: the same intent, shared.
+pub struct SharedPort {
+    pub carriage: Carriage,
+    pub out: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+impl SharedPort {
+    pub fn new() -> Self {
+        Self {
+            carriage: Carriage::Flood,
+            out: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Take everything the loop handed the carrier since the last call.
+    pub fn drain(&self) -> Vec<Vec<u8>> {
+        let mut guard = self.out.lock().expect("the port's output is not poisoned");
+        std::mem::take(&mut *guard)
+    }
+}
+
+impl Default for SharedPort {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Carrier for SharedPort {
+    async fn send_record(&mut self, _seq: u8, record: &[u8]) -> Result<(), MeshError> {
+        self.out
+            .lock()
+            .expect("the port's output is not poisoned")
+            .push(record.to_vec());
+        Ok(())
+    }
+
+    async fn recv(&mut self) -> Result<Event, MeshError> {
+        // The harness reads the air itself; nothing is ever pushed at a port.
+        Err(MeshError::Closed)
+    }
+}
+
+impl ldmux_session::CarriageSink for SharedPort {
+    async fn set_carriage(&mut self, carriage: &Carriage) -> Result<(), MeshError> {
+        self.carriage = carriage.clone();
+        Ok(())
+    }
+}
+
+/// How a delivery reached its node, at a one-byte path width.
 pub fn info_of(delivery: &Delivery) -> ArrivalInfo {
+    info_of_width(delivery, 1)
+}
+
+/// How a delivery reached its node, at `path_width` bytes per hash.
+///
+/// The width is not decoration: a flood's `path` is `hops × width` bytes, and the endpoint divides
+/// by it to count hops. A harness that assumed one byte would read a two-byte path as twice the
+/// hops it crossed.
+pub fn info_of_width(delivery: &Delivery, path_width: u8) -> ArrivalInfo {
     if delivery.flood {
-        ArrivalInfo::flood(delivery.path.clone(), 1, delivery.snr_db)
+        ArrivalInfo::flood(delivery.path.clone(), path_width, delivery.snr_db)
     } else if delivery.hops == 0 {
         ArrivalInfo::direct(delivery.snr_db)
     } else {

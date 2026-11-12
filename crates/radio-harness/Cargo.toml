@@ -1,0 +1,17 @@
+[package]
+name = "ldmux-radio-harness"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The pieces the radio tests share: a port that puts records on a simulated mesh, a fake companion radio, and the chain that joins two ends. A dev-dependency, never shipped"
+
+[dependencies]
+# The simulator models the wire; this crate drives it. `sim` is off in a shipping build, and this
+# crate is a dev-dependency of the two crates that test the radio, so neither reaches a binary.
+ldmux-mesh = { path = "../mesh", features = ["sim"] }
+ldmux-session = { path = "../session" }
+
+[lints]
+workspace = true

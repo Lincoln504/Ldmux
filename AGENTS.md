@@ -21,8 +21,9 @@ documents consolidated away at `731970f`, and are readable at `c3d7c56`).
 | `vt-sys` | hand-written FFI against the vendored libghostty-vt headers |
 | `companion` | the host's MeshCore companion radio driver over USB serial |
 | `mesh` | the L2 client for MeshCore radios: frames, commands, events (no tokio state) |
-| `session` | the L3 session over that link: Noise `IKpsk2`, records, replay window, ARQ. Pure, no I/O |
+| `session` | the L3 session over that link: Noise `IKpsk2`, message transactions, retry ladder, replay window, and the phone's engine behind `ldmux_client_*`. Pure, no I/O |
 | `session-ffi` | the C ABI the mobile client calls instead of reimplementing the session in Kotlin |
+| `radio-harness` | the pieces the radio tests share (a port, a fake companion radio, the chain that joins two ends); a dev-dependency, never shipped |
 
 `packages/mobile` is the KMP/Compose client and the JNI shim; it is not part of
 the port and is kept.

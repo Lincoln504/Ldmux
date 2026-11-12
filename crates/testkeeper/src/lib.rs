@@ -401,6 +401,18 @@ impl FakeKeeper {
             s.snapshot_text = text.to_string();
         }
     }
+
+    /// Say whether this pane asked for bracketed paste (`CSI ? 2004 h`).
+    ///
+    /// The real keeper reads it from the emulator, which reads it from the shell's own escape
+    /// sequence. A test that wants a paste to be *inserted* rather than run has to say the pane
+    /// asked for it, because that is the only thing the daemon's encoder consults.
+    pub fn set_paste_mode(&self, session_id: &str, bracketed: bool) {
+        let mut sessions = self.sessions.lock().unwrap();
+        if let Some(s) = sessions.get_mut(session_id) {
+            s.bracketed_paste = bracketed;
+        }
+    }
 }
 
 #[cfg(test)]

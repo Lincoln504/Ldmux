@@ -36,6 +36,10 @@ ldmux-vt-sys = { path = "../vt-sys" }
 # The in-memory keeper: unit tests and integration tests both run the daemon against it.
 # A dev-dependency, so the shipped `ldmuxd` does not carry a second keeper implementation.
 ldmux-testkeeper = { path = "../testkeeper" }
+# The shared radio harness: a port, a fake companion radio, and the chain that joins two ends. The
+# full-stack gate (`tests/mesh_full_stack.rs`) runs the real loop and the real phone engine over a
+# simulated mesh, which is the join `AR-15` showed can rot while both halves stay green.
+ldmux-radio-harness = { path = "../radio-harness" }
 
 [lints]
 workspace = true
