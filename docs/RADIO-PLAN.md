@@ -718,10 +718,15 @@ It was invisible because the test counted **every** descriptor in the process wi
 twelve-descriptor allowance, so it passed whenever sixty sibling tests happened to inflate the
 baseline, and failed whenever they did not. The bound was measuring the neighbours.
 
-*Disposition:* the test is `#[ignore]`d with that paragraph as its reason and this entry as its
-tracker, and when the keeper fix lands the test is the proof. Nothing in the radio workstream
-depends on it, and the alternative — a loosened bound or a red gate — would have hidden a leak that
-eventually kills a daemon after a few hundred shells.
+*Cause and fix:* counting live emulator threads named it — **two of eight killed sessions left
+their emulator thread asleep in `poll` with the pty master in its hand.** The channel disconnect was
+not a reliable stop: a wake could be missed, and a clone of the handle kept the channel alive. The
+session now sets a flag on its last drop as well as waking, and the thread checks that flag at the
+top of every pass. `Emu::drop` also only sets it when the handle is the last one, because a
+`Resize` clones it for the length of one request and a clone's drop must not end the session.
+
+The test is un-ignored and is the proof: eight cycles, zero threads left, pty count back to its
+baseline.
 
 ### 12.8 Findings index
 
@@ -740,7 +745,7 @@ eventually kills a daemon after a few hundred shells.
 | AR-11 | the transport swap cannot precede the phone, and has no `Link` to preserve | **plan correction** | **fixed in the plan:** S6, after S4 and S5 |
 | AR-12 | the client engine lacked six shipped features, and `open` sent a zero grid (a fixed defect reintroduced) | **defect (silent regression)** | **fixed:** the six are implemented and tested; capability surveys are now part of a stage's definition of done |
 | AR-13 | the BLE pipe still owned radio management, so `AndroidRadioLink` could not die and one GATT link would have had two owners | **architecture** | **S5b-0:** radio management moves into the engine, through the same command FIFO, with the lease on the pipe |
-| AR-14 | a killed keeper session can keep its pty master (≈0.4 per session, permanent) | **defect (leak)** | **open:** test `#[ignore]`d with the measurement as its reason; the keeper fix is its own stage |
+| AR-14 | a killed keeper session could keep its pty master (2 of 8, permanent) | **defect (leak)** | **fixed:** the emulator thread now stops on a flag set by the session's last drop, not on a channel disconnect that could be missed |
 | AR-11 | the transport swap cannot precede the phone, and has no `Link` to preserve | **plan correction** | **fixed in the plan:** S6 (§10a) is one stage — transport and bridge together, after S4/S5 — because `Link`'s page byte is a frame-loop fact that every v15 message already carries as a field |
 
 ### 10a. S6 scope: the host transport and the bridge are one stage

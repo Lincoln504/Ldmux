@@ -86,6 +86,8 @@ use tokio::sync::oneshot;
 struct Emu {
     tx: mpsc::Sender<emulator::EmuMsg>,
     waker: Option<Arc<OwnedFd>>,
+    /// Set on the last drop so the thread stops even if a sender clone outlives us.
+    stop: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Emu {
@@ -109,6 +111,12 @@ impl Emu {
 /// is harmless: the thread re-checks, finds nothing, and waits again.)
 impl Drop for Emu {
     fn drop(&mut self) {
+        // **Only the last handle stops the thread.** `Emu` is cloned for the length of one request
+        // (a `Resize`), and a clone's drop must not end the session's emulator: two handles mean
+        // the thread and the session, so anything above that is a request's temporary.
+        if Arc::strong_count(&self.stop) <= 2 {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         emulator::wake(&self.waker);
     }
 }
@@ -163,6 +171,15 @@ pub enum Exit {
 /// emulator for the life of the process.
 pub const DEAD_SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
+
+/// How many emulator threads are alive in this process.
+///
+/// A session's thread owns its pty master, so this is the number that answers "did the thread exit
+/// or did the descriptor leak" — `AR-14` in `docs/RADIO-PLAN.md`.
+#[must_use]
+pub fn emulator_live_threads() -> usize {
+    emulator::LIVE.load(std::sync::atomic::Ordering::SeqCst)
+}
 /// How long a write to a pane's input may wait before the caller is told it is
 /// still blocked. Below the daemon's keeper-call timeout (8 s) on purpose: the
 /// answer "the pane is not reading" is more useful than a bare timeout, and it
@@ -1385,6 +1402,7 @@ impl Keeper {
         let touched = Arc::new(AtomicU64::new(now_ms()));
         let (em_tx, em_rx) = mpsc::channel();
         let waker = emulator::new_waker();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (boot_tx, boot_rx) = oneshot::channel();
         // The emulator thread owns this session's ghostty-vt (the `!Send`
         // values are created inside the thread, not moved in). It always
@@ -1398,6 +1416,7 @@ impl Keeper {
                 waker: waker.clone(),
                 out: out.clone(),
                 activity: activity.clone(),
+                stop: stop.clone(),
             },
             em_rx,
             boot_tx,
@@ -1422,7 +1441,11 @@ impl Keeper {
             exit: None,
             died_at: None,
             out,
-            em: Emu { tx: em_tx, waker },
+            em: Emu {
+                tx: em_tx,
+                waker,
+                stop: stop.clone(),
+            },
             activity,
             touched,
             write_lock: Arc::new(Mutex::new(())),

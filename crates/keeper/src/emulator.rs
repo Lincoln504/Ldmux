@@ -276,6 +276,12 @@ pub struct Outcome {
 /// would not give us one — in which case the thread falls back to the 1 ms poll
 /// this replaced. `EFD_CLOEXEC` so no shell inherits it, `EFD_NONBLOCK` so the
 /// wake can never block the sender.
+/// How many emulator threads are alive right now.
+///
+/// Exists so the keeper's own tests can tell "the thread exited" from "the descriptor leaked":
+/// `AR-14` in `docs/RADIO-PLAN.md` is the reason, and a count is cheaper to read than a probe.
+pub(crate) static LIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 pub(crate) fn new_waker() -> Option<Arc<OwnedFd>> {
     use nix::libc;
     // SAFETY: `eventfd` takes only integers; it returns a new descriptor or -1.
@@ -326,6 +332,13 @@ pub(crate) struct Wiring {
     pub waker: Option<Arc<OwnedFd>>,
     pub out: Arc<Mutex<crate::OutBuf>>,
     pub activity: Arc<AtomicU64>,
+    /// Set by the session's drop, and checked at the top of every pass.
+    ///
+    /// **The channel disconnect alone is not a reliable stop.** Measured 2026-11-12: two of eight
+    /// killed sessions left their emulator thread alive, and with it the pty master (`AR-14`). A
+    /// flag the session sets is a fact the thread can see on any wake, including the one the drop
+    /// itself sends.
+    pub stop: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Start the session's emulator thread.
@@ -346,6 +359,7 @@ pub(crate) fn spawn(
         waker,
         out,
         activity,
+        stop,
     } = wiring;
     // A dedicated OS thread: the loop blocks in `poll` for the life of the
     // session, which would pin a slot of tokio's bounded blocking pool (shared
@@ -355,6 +369,16 @@ pub(crate) fn spawn(
     let _ = std::thread::Builder::new()
         .name("ldmux-emulator".into())
         .spawn(move || {
+            LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // Decremented however this loop ends: the count is the evidence, so a panic must not
+            // hide a thread that exited.
+            struct Counts;
+            impl Drop for Counts {
+                fn drop(&mut self) {
+                    LIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            let _counts = Counts;
             // Created here: the values are `!Send`, so they cannot be moved into
             // this closure from the caller.
             let mut term = match new_terminal(cols, rows) {
@@ -389,6 +413,9 @@ pub(crate) fn spawn(
             }
             let mut reading = true;
             loop {
+                if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
                 // 1. A waiting message is serviced before any I/O.
                 match rx.try_recv() {
                     Ok(msg) => {

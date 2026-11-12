@@ -1990,18 +1990,15 @@ async fn kill_reaps_the_shell_so_no_zombie_remains() {
 /// enough to tell a leak (two to four descriptors each, so forty to eighty) from the handful the
 /// parallel tests in this binary add at the same time — `/proc/self/fd` is the whole process, so
 /// the bound is deliberately loose rather than exact.
-/// **Known defect, measured 2026-11-12: a killed session can leave its pty master open.**
+/// **This test found a real leak, and now proves its fix.**
 ///
-/// Eight spawn/kill cycles with a live child leave four pty descriptors open against one before,
-/// reproducibly, and they never come down — a thirty-second probe printed the same count every
-/// second. The sessions are gone from the keeper's own `List`, so this is not a registry leak: the
-/// emulator thread is not exiting, or something else holds its `Arc<OwnedFd>`.
-///
-/// It is ignored rather than loosened. The old assertion counted every descriptor in the process
-/// with a twelve-descriptor allowance, which passed only because sixty sibling tests inflated the
-/// baseline — the bound was measuring the neighbours, not the leak. Tracked as `AR-14` in
-/// `docs/RADIO-PLAN.md`; when the keeper fix lands this test is the proof.
-#[ignore = "AR-14: a killed session can retain its pty master (measured, not yet fixed)"]
+/// It used to count every descriptor in the process with a twelve-descriptor allowance, so it
+/// passed whenever sixty sibling tests inflated the baseline and failed whenever they did not — the
+/// bound was measuring the neighbours. Counting pty descriptors instead made it fail
+/// reproducibly, and the count of live emulator threads named the cause: **two of eight killed
+/// sessions left their emulator thread asleep in `poll` with the pty master in its hand.** The
+/// channel disconnect was not a reliable stop; the session now sets a flag on drop as well, and the
+/// thread checks it on any wake (`crates/keeper/src/emulator.rs`, `AR-14` in `docs/RADIO-PLAN.md`).
 #[tokio::test]
 async fn a_spawn_and_kill_cycle_leaks_no_descriptors() {
     let socket = socket_path();

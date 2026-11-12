@@ -58,6 +58,9 @@ class AndroidRadioEngine(
     private val _problem = MutableStateFlow<String?>(null)
     override val problem: StateFlow<String?> = _problem.asStateFlow()
 
+    private val _linkState = MutableStateFlow(EngineLink.LinkDown)
+    override val linkState: StateFlow<EngineLink> = _linkState.asStateFlow()
+
     private val _radio = MutableStateFlow(RadioStatus.UNKNOWN)
     override val radio: StateFlow<RadioStatus> = _radio.asStateFlow()
 
@@ -107,6 +110,7 @@ class AndroidRadioEngine(
             queue.trySend(Work.Wake)
         },
         onProblem = { text -> _problem.value = text },
+        onState = { state -> _linkState.value = state },
         transport = transport,
     )
 

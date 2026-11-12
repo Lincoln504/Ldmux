@@ -25,6 +25,16 @@ interface RadioEngine {
     val linkUp: StateFlow<Boolean>
 
     /**
+     * Which of the four things is true about the link, as a fact rather than a sentence.
+     *
+     * **A state the user must cure is a fact the link already has**, and it is reported here so
+     * nothing above has to infer it from [problem]'s wording. `RadioMissing` and `PermissionDenied`
+     * are the two the person can act on; `LinkDown` is everything else that stopped the link, and
+     * retrying is the whole response to it.
+     */
+    val linkState: StateFlow<EngineLink>
+
+    /**
      * Why the last attempt failed, in words, or null while it is fine.
      *
      * A state says what kind of thing is wrong; this says which thing — "Bluetooth is off" and
@@ -153,6 +163,27 @@ interface RadioEngine {
         /** `powerDbm` meaning "leave the radio's transmit power alone", as `ldmux_client.h` has it. */
         const val UNSET_POWER: Int = -128
     }
+}
+
+/**
+ * What is true about the link, in the smallest set a screen needs to act on.
+ *
+ * Deliberately not a protocol vocabulary: there is no "handshaking" or "refused" here, because
+ * those are things the session layer says in [RadioEngine.events] and [RadioEngine.problem]. This
+ * is only "can the phone reach its own radio".
+ */
+enum class EngineLink {
+    /** The radio is not reachable and the phone can fix that: nothing chosen, no adapter, Bluetooth off. */
+    RadioMissing,
+
+    /** Android refused the Bluetooth permission the link needs. */
+    PermissionDenied,
+
+    /** The link is not up, and retrying is the response. */
+    LinkDown,
+
+    /** The GATT link is established. */
+    Connected,
 }
 
 /**

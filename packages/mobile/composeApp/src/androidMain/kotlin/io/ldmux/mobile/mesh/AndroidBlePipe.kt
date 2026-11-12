@@ -47,6 +47,14 @@ class AndroidBlePipe(
     onLink: (Boolean) -> Unit = {},
     /** Why a write failed, in words, when it is not the ordinary "not connected yet". */
     onProblem: (String) -> Unit = {},
+    /**
+     * Which of the four facts is true, so nothing above has to read the sentence.
+     *
+     * Every `problemSink` call below is a fact of one of three kinds, and a screen that has to
+     * decide "can the user cure this" from the wording would be exactly the string-matching the
+     * radio audit spent its length deleting.
+     */
+    onState: (EngineLink) -> Unit = {},
     transport: MeshcoreTransport? = null,
 ) {
     private val ble: MeshcoreTransport = transport ?: AndroidBleTransport(
@@ -66,6 +74,13 @@ class AndroidBlePipe(
     private val frameSink = onFrame
     private val linkSink = onLink
     private val problemSink = onProblem
+    private val stateSink = onState
+
+    /** Report why the link is not usable, as a sentence and as a fact. */
+    private fun fail(kind: EngineLink, text: String) {
+        stateSink(kind)
+        problemSink(text)
+    }
 
     @Volatile
     var connected: Boolean = false
@@ -92,6 +107,7 @@ class AndroidBlePipe(
 
             override fun onConnectionChanged(up: Boolean) {
                 connected = up
+                stateSink(if (up) EngineLink.Connected else EngineLink.LinkDown)
                 linkSink(up)
             }
         })
@@ -110,26 +126,26 @@ class AndroidBlePipe(
     @SuppressLint("MissingPermission")
     fun connect(address: String): Boolean {
         if (address.isBlank()) {
-            problemSink("no radio is chosen")
+            fail(EngineLink.RadioMissing, "no radio is chosen")
             return false
         }
         val ctx = context ?: run {
-            problemSink("this build has no Bluetooth")
+            fail(EngineLink.RadioMissing, "this build has no Bluetooth")
             return false
         }
         val manager = ctx.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
         val adapter: BluetoothAdapter = manager?.adapter ?: run {
-            problemSink("this device has no Bluetooth")
+            fail(EngineLink.RadioMissing, "this device has no Bluetooth")
             return false
         }
         if (!adapter.isEnabled) {
-            problemSink("Bluetooth is off")
+            fail(EngineLink.RadioMissing, "Bluetooth is off")
             return false
         }
         val device = try {
             adapter.getRemoteDevice(address)
         } catch (e: IllegalArgumentException) {
-            problemSink("not a Bluetooth address")
+            fail(EngineLink.RadioMissing, "not a Bluetooth address")
             return false
         }
         // **Ask the other apps to let go before opening the GATT client.** A companion accepts one
@@ -143,7 +159,7 @@ class AndroidBlePipe(
         }
         (ble as? AndroidBleTransport)?.connectToDevice(device)
             ?: run {
-                problemSink("this transport cannot be connected")
+                fail(EngineLink.RadioMissing, "this transport cannot be connected")
                 return false
             }
         return true
@@ -163,8 +179,11 @@ class AndroidBlePipe(
             // The link dropped between the check and the write. Not a protocol fault.
             connected = false
             false
+        } catch (e: SecurityException) {
+            fail(EngineLink.PermissionDenied, "this app may not use Bluetooth")
+            false
         } catch (e: Exception) {
-            problemSink("the radio refused a write: ${e.message ?: e::class.simpleName}")
+            fail(EngineLink.LinkDown, "the radio refused a write: ${e.message ?: e::class.simpleName}")
             false
         } finally {
             writing = false
@@ -173,7 +192,7 @@ class AndroidBlePipe(
 
     /** Ask the radio to start advertising, so a scan can find it again. */
     fun reconnectHint() {
-        problemSink("the radio went away; open the radio settings to reconnect")
+        fail(EngineLink.LinkDown, "the radio went away; open the radio settings to reconnect")
     }
 
     fun close() {
