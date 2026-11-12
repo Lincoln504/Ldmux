@@ -1217,6 +1217,40 @@ pub unsafe extern "C" fn ldmux_client_route(
 /// is 16 bytes and the 16-bit code in the config is **not** it — the code is an HMAC *of* it. A
 /// caller with no key sends unscoped, which most meshes forward.
 #[unsafe(no_mangle)]
+/// Tune the radio to a tuple, and optionally to a path width and a power.
+///
+/// `path_width` 0 and `power_dbm` `LDMUX_UNSET_POWER` (-128) mean "leave it as the radio has it",
+/// which is why they are sentinels rather than `bool` flags: a caller that has a number passes it,
+/// and a caller that does not omits nothing by accident.
+///
+/// The writes are queued on the radio's one command window, so a preset change cannot overlap a
+/// raw send. The firmware's answer arrives on the next `ldmux_client_on_ble_rx`, like every other
+/// command's.
+///
+/// # Safety
+/// `c` must be a handle from [`ldmux_client_new`] that has not been freed.
+pub unsafe extern "C" fn ldmux_client_set_preset(
+    c: *mut LdmuxClient,
+    freq_khz: u32,
+    bw_hz: u32,
+    sf: u8,
+    cr: u8,
+    path_width: u8,
+    power_dbm: i8,
+) -> i32 {
+    // SAFETY: see `with_client`.
+    unsafe {
+        with_client(c, |h| {
+            let width = (path_width != 0).then_some(path_width);
+            let power = (power_dbm != crate::LDMUX_UNSET_POWER).then_some(power_dbm);
+            h.client
+                .set_preset(freq_khz, bw_hz, sf, cr, width, power);
+            LDMUX_OK
+        })
+    }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ldmux_client_set_scope(
     c: *mut LdmuxClient,
     key: *const u8,

@@ -485,3 +485,103 @@ fn answer_to(command: u8) -> Vec<u8> {
         _ => vec![0x00],
     }
 }
+
+/// A preset write uses the radio's one command window like every other command, and a sentinel
+/// leaves a field alone rather than writing a zero into flash.
+#[test]
+fn a_preset_write_is_one_command_and_leaves_what_it_was_not_told() {
+    let cfg = config();
+    let h = Handle::new(&cfg);
+
+    /// Poll until no more frames come out, returning each payload.
+    fn frames(h: &Handle) -> Vec<Vec<u8>> {
+        let mut out = vec![0u8; 512];
+        let mut got = Vec::new();
+        for step in 0..20u64 {
+            let mut len = 0usize;
+            // SAFETY: `out` is writable for its length and `len` is writable.
+            let rc = unsafe {
+                ldmux_client_poll(h.0, 1000 + step, out.as_mut_ptr(), out.len(), &mut len)
+            };
+            assert!(rc >= 0, "poll failed: {rc}");
+            if rc == 1 {
+                got.push(out[..len].to_vec());
+            } else {
+                break;
+            }
+        }
+        got
+    }
+
+    // SAFETY: the handle is live for every call.
+    unsafe {
+        assert_eq!(
+            ldmux_client_set_preset(h.0, 910_525, 62_500, 7, 5, 0, LDMUX_UNSET_POWER),
+            LDMUX_OK
+        );
+    }
+    let got = frames(&h);
+    assert_eq!(got.len(), 1, "a bare preset is one write, got {got:?}");
+    assert_eq!(got[0][0], 0x0B, "SET_RADIO_PARAMS");
+    // 910525 is 0x000D_E4BD, so little-endian is BD E4 0D 00; 62500 is 0x0000_F424.
+    assert_eq!(&got[0][1..5], &[0xBD, 0xE4, 0x0D, 0x00], "frequency in kHz");
+    assert_eq!(&got[0][5..9], &[0x24, 0xF4, 0x00, 0x00], "bandwidth in Hz");
+    assert_eq!(&got[0][9..11], &[7, 5], "sf then cr");
+    assert_eq!(got[0].len(), 11, "no repeat byte, because none was reported");
+
+    // The radio answers the first write, which frees the one command window. A second preset
+    // issued while the first was still unanswered would queue rather than overwrite it, which is
+    // the property `RC-2` is about.
+    // SAFETY: the handle is live and the answer is one readable byte.
+    unsafe {
+        assert_eq!(
+            ldmux_client_on_ble_rx(h.0, [0x00].as_ptr(), 1, 2000),
+            LDMUX_OK
+        );
+    }
+
+    // With a width and a power, all three follow in order — one per window, each freed by the
+    // radio's answer, which is the serialization `RC-2` is about.
+    // SAFETY: the same live handle.
+    unsafe {
+        assert_eq!(
+            ldmux_client_set_preset(h.0, 910_525, 62_500, 7, 5, 2, 20),
+            LDMUX_OK
+        );
+    }
+    let mut ordered: Vec<Vec<u8>> = Vec::new();
+    for step in 0..6u64 {
+        let mut out = vec![0u8; 64];
+        let mut len = 0usize;
+        // SAFETY: `out` is writable for its length and `len` is writable.
+        let rc = unsafe {
+            ldmux_client_poll(h.0, 3000 + step, out.as_mut_ptr(), out.len(), &mut len)
+        };
+        assert!(rc >= 0, "poll failed: {rc}");
+        if rc == 1 {
+            ordered.push(out[..len].to_vec());
+            // The radio answers, which frees the window for the next write.
+            // SAFETY: the handle is live and the answer is one readable byte.
+            unsafe {
+                assert_eq!(
+                    ldmux_client_on_ble_rx(h.0, [0x00].as_ptr(), 1, 3000 + step),
+                    LDMUX_OK
+                );
+            }
+        }
+    }
+    assert_eq!(ordered.len(), 3, "preset, path width and power: {ordered:?}");
+    assert_eq!(ordered[1][0], 0x3D, "SET_PATH_HASH_MODE");
+    assert_eq!(&ordered[1][1..3], &[0, 1], "mode is the width minus one");
+    assert_eq!(ordered[2][0], 0x0C, "SET_RADIO_TX_POWER");
+    assert_eq!(ordered[2][1], 20u8, "the power as a signed byte");
+
+    // A null handle is an error, not a crash.
+    // SAFETY: null is the argument under test.
+    unsafe {
+        assert_eq!(
+            ldmux_client_set_preset(std::ptr::null_mut(), 1, 2, 3, 4, 0, i8::MIN),
+            LDMUX_ERR_NULL
+        );
+    }
+}

@@ -375,6 +375,16 @@ JNIEXPORT jint JNICALL JNI(setScope)(JNIEnv *env, jclass cls, jlong handle, jbyt
   return ldmux_client_set_scope(client_of(handle), buf, n);
 }
 
+JNIEXPORT jint JNICALL JNI(setPreset)(JNIEnv *env, jclass cls, jlong handle, jint freq_khz,
+                                    jint bw_hz, jint sf, jint cr, jint path_width,
+                                    jint power_dbm) {
+  (void)env;
+  (void)cls;
+  return ldmux_client_set_preset(client_of(handle), (uint32_t)freq_khz, (uint32_t)bw_hz,
+                                 (uint8_t)sf, (uint8_t)cr, (uint8_t)path_width,
+                                 (int8_t)power_dbm);
+}
+
 /* ---------------------------------------------------------------------------------------------
  * Reading back
  * ------------------------------------------------------------------------------------------- */

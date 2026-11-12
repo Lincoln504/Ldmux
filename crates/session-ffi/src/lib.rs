@@ -32,6 +32,10 @@ pub mod client;
 
 pub use client::*;
 
+/// `power_dbm` meaning "leave the radio's transmit power alone", for
+/// [`ldmux_client_set_preset`].
+pub const LDMUX_UNSET_POWER: i8 = -128;
+
 pub const LDMUX_OK: i32 = 0;
 pub const LDMUX_ERR_NULL: i32 = -1;
 pub const LDMUX_ERR_PANIC: i32 = -2;

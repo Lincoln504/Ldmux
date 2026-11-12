@@ -143,6 +143,19 @@ object NativeRadioClient {
     /** The region's 16-byte flood key, or an empty array to send unscoped. */
     external fun setScope(handle: Long, key: ByteArray): Int
 
+    /** `powerDbm` meaning "leave the radio's transmit power alone". */
+    const val UNSET_POWER: Int = -128
+
+    external fun setPreset(
+        handle: Long,
+        freqKhz: Int,
+        bwHz: Int,
+        sf: Int,
+        cr: Int,
+        pathWidth: Int,
+        powerDbm: Int,
+    ): Int
+
     // ---- layout the shim writes ---------------------------------------------------------------
 
     /** How many values [mirror] writes. */
@@ -559,6 +572,23 @@ class RadioClient private constructor(private val slot: LongArray) {
 
     /** The region's 16-byte flood key, or an empty array for unscoped floods. */
     fun setScope(key: ByteArray): Int = NativeRadioClient.setScope(handle, key)
+
+    /**
+     * Tune the radio.
+     *
+     * [pathWidth] 0 and [powerDbm] [NativeRadioClient.UNSET_POWER] mean "leave what the radio has", so a screen that
+     * only changes the tuple does not silently rewrite an operator's path width or power. The
+     * writes queue on the radio's one command window; the firmware's answer arrives through the
+     * normal frame loop, never as a return value here.
+     */
+    fun setPreset(
+        freqKhz: Int,
+        bwHz: Int,
+        sf: Int,
+        cr: Int,
+        pathWidth: Int = 0,
+        powerDbm: Int = NativeRadioClient.UNSET_POWER,
+    ): Int = NativeRadioClient.setPreset(handle, freqKhz, bwHz, sf, cr, pathWidth, powerDbm)
 
     // ---- pages ------------------------------------------------------------------------------
 

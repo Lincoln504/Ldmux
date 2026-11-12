@@ -359,6 +359,19 @@ int32_t ldmux_client_route(LdmuxClient *c, uint64_t now_ms, LdmuxRoute *out);
  * 16 bytes — the 16-bit code in the config is an HMAC *of* the key and is not it. */
 int32_t ldmux_client_set_scope(LdmuxClient *c, const uint8_t *key, size_t key_len);
 
+/**
+ * Tune the radio: frequency (kHz), bandwidth (Hz), spreading factor, coding rate, and optionally a
+ * path-hash width (1..3) and a transmit power in dBm.
+ *
+ * `path_width` 0 and `power_dbm` LDMUX_UNSET_POWER (-128) mean "leave what the radio has". The
+ * writes go through the radio's one command window, so a preset change cannot overlap a raw send;
+ * the firmware's answer arrives on the next ldmux_client_on_ble_rx like any other.
+ *
+ * Returns LDMUX_OK, or LDMUX_ERR_NULL.
+ */
+int32_t ldmux_client_set_preset(LdmuxClient *c, uint32_t freq_khz, uint32_t bw_hz, uint8_t sf,
+                                uint8_t cr, uint8_t path_width, int8_t power_dbm);
+
 #ifdef __cplusplus
 }
 #endif

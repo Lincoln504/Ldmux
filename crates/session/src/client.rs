@@ -58,6 +58,13 @@ use crate::transaction::BeginError;
 /// is on, never less.
 pub const MAX_OPEN_PAGES: usize = 5;
 
+/// How long the firmware is given to persist a preset write before the window frees.
+///
+/// `SET_RADIO_PARAMS`, `SET_RADIO_TX_POWER` and `SET_PATH_HASH_MODE` each write flash
+/// (`MyMesh.cpp`, `writeOKFrame`), and flash is slower than an answer: the host's own table gives
+/// them ten seconds, which is the figure this follows.
+const PRESET_TIMEOUT_MS: u32 = 10_000;
+
 /// How long a part-way screen is kept before it is dropped.
 ///
 /// The assembler joins chunks by `snapshot_id` and has no clock of its own. Without a deadline, one
@@ -1023,6 +1030,54 @@ impl Client {
     /// Set the region key this radio's floods are scoped with, or `None` for unscoped.
     pub fn set_scope(&mut self, key: Option<[u8; 16]>) {
         self.link.scope = key;
+    }
+
+    /// Tune the radio to a tuple, and to a path width and power when they are named.
+    ///
+    /// **The write goes through the radio's one command window**, like every other command, so a
+    /// preset change cannot overlap a raw send (`RC-2`). The three writes are queued in order and
+    /// answered in order; the caller sees the firmware's own refusal through
+    /// [`Radio::on_answer`](crate::radio::Radio::on_answer) on the next `on_frame`, which is why
+    /// this returns nothing rather than a deferred answer.
+    ///
+    /// `repeat` is the firmware's client-repeat flag. `MyMesh.cpp:1397-1410` persists the whole
+    /// parameter block, and a frame that stops after the coding rate silently clears an operator's
+    /// repeat setting, so `None` leaves the stored value alone and `Some` sets it.
+    pub fn set_preset(
+        &mut self,
+        freq_khz: u32,
+        bw_hz: u32,
+        sf: u8,
+        cr: u8,
+        path_width: Option<u8>,
+        power_dbm: Option<i8>,
+    ) {
+        let mut payload = ldmux_mesh::companion::command::set_radio_params(freq_khz, bw_hz, sf, cr);
+        if let Some(repeat) = self.repeat_keeping() {
+            payload.push(u8::from(repeat));
+        }
+        self.radio.ask(payload, PRESET_TIMEOUT_MS);
+        if let Some(width) = path_width.filter(|w| (1..=3).contains(w)) {
+            self.radio.ask(
+                ldmux_mesh::companion::command::set_path_hash_mode(width - 1),
+                PRESET_TIMEOUT_MS,
+            );
+        }
+        if let Some(dbm) = power_dbm {
+            self.radio.ask(
+                ldmux_mesh::companion::command::set_radio_tx_power(dbm),
+                PRESET_TIMEOUT_MS,
+            );
+        }
+    }
+
+    /// The client-repeat flag the radio last reported, so a preset write does not clear it.
+    fn repeat_keeping(&self) -> Option<bool> {
+        self.radio
+            .status()
+            .device_info
+            .as_ref()
+            .and_then(|info| info.repeat_enabled)
     }
 
     /// When the caller should look again even if nothing arrives.
