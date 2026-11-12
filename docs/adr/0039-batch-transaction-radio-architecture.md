@@ -1,6 +1,6 @@
 # ADR-0039: Unified Rust radio core and batch transaction architecture
 
-**Status:** Proposed / Plan of record (2026-11-11). Revises ADR-0025, ADR-0026, ADR-0032, ADR-0034, ADR-0035, ADR-0037, and ADR-0038.
+**Status:** Accepted (2026-11-12; proposed 2026-11-11, implemented in stages `S0`–`S6`). Revises ADR-0025, ADR-0026, ADR-0032, ADR-0034, ADR-0035, ADR-0037, and ADR-0038.
 **Specification:** [`docs/RADIO-PLAN.md`](../RADIO-PLAN.md)
 **Evidence:** [`docs/RADIO-AUDIT-REVIEW.md`](../RADIO-AUDIT-REVIEW.md)
 
