@@ -159,9 +159,11 @@ interface RadioEngine {
  * The platform's engine, or null when this build has no radio.
  *
  * Android returns its engine; a build without a radio platform returns null and the screen says so
- * rather than pretending.
+ * rather than pretending. The address and the paired credentials are required because an engine
+ * cannot exist without them: the client is created from the session keys and the pipe needs
+ * somewhere to connect.
  */
-expect fun radioEngine(): RadioEngine?
+expect fun radioEngine(creds: MeshCredentials, address: String): RadioEngine?
 
 /** Status codes, exactly as `ldmux_client.h` defines them. */
 object ClientCode {

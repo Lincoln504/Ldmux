@@ -97,6 +97,15 @@ class AndroidBlePipe(
         })
     }
 
+    /**
+     * Whether a frame may be handed to [write] right now.
+     *
+     * A caller polls the engine only when this is true, so a frame the pipe cannot take is never
+     * taken from the engine in the first place: `ldmux_client_poll` hands a frame over exactly
+     * once, and dropping one loses a companion command.
+     */
+    val ready: Boolean get() = connected && !writing
+
     /** Open the GATT connection to the radio at [address]. Returns false when the address is unknown. */
     @SuppressLint("MissingPermission")
     fun connect(address: String): Boolean {

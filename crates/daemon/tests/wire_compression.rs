@@ -202,12 +202,19 @@ async fn compression_cuts_the_wire_cost_of_every_real_workload() {
     // loaded machine and passed on an idle one. With the extension off the ratio is 1.0 and
     // with a per-message dictionary it is also ~1.0, so 1.5 still catches exactly what this
     // test exists to catch.
+    //
+    // `attach snapshot` is 2.0, not 2.5. Its ratio is a property of the machine's `/usr/lib`, not of
+    // the compressor: the same code measured 2.47x under the parallel gate and 2.6x alone, because
+    // the directory listing it captures differs in length and in how much of it repeats. A floor
+    // that a real workload can miss by a tenth measures the host, not the feature. With the
+    // extension off the ratio is 1.0, and with a per-message dictionary it is also near 1.0, so 2.0
+    // still catches exactly what this test exists to catch.
     for (name, floor) in [
         ("ls -la", 3.0),
         ("seq 1 5000", 2.5),
         ("ls -laR (2000 lines)", 5.0),
         ("yes flood (4 MB)", 100.0),
-        ("attach snapshot", 2.5),
+        ("attach snapshot", 2.0),
     ] {
         let (p, c) = (get(&plain, name), get(&comp, name));
         let ratio = p.1 as f64 / c.1 as f64;
