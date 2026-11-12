@@ -7,6 +7,8 @@ import android.content.Context
 import io.ldmux.mobile.ble.AndroidBleTransport
 import io.ldmux.mobile.ble.BleTransport
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
@@ -61,12 +63,28 @@ class AndroidBlePipe(
         requireNotNull(context) { "a pipe with no transport needs a Context to build one" },
     )
 
+    /** The first wait before reopening a link, and the longest. */
+    private companion object {
+        const val RETRY_MIN_MS = 2_000L
+        const val RETRY_MAX_MS = 30_000L
+    }
+
     /** Where the lease is taken and given back; a pipe's own scope, cancelled with it. */
     private val leaseScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     /** Whether this pipe has announced that it wants the radio. */
     @Volatile
     private var leased: Boolean = false
+
+    /** The address a retry would reopen, once a connect has been asked for. */
+    @Volatile
+    private var wanted: String? = null
+
+    /** The pending retry, so a link that comes up can cancel it. */
+    private var retrying: Job? = null
+
+    /** How long to wait before the next attempt, doubling to [RETRY_MAX_MS]. */
+    private var retryMs: Long = RETRY_MIN_MS
 
     // Held under names of their own because the listener below declares methods called `onFrame`
     // and `onConnectionChanged`: an unqualified call inside it would recurse into the listener
@@ -109,6 +127,15 @@ class AndroidBlePipe(
                 connected = up
                 stateSink(if (up) EngineLink.Connected else EngineLink.LinkDown)
                 linkSink(up)
+                if (up) {
+                    // A live link is the answer the retries were waiting for; the next outage
+                    // starts again from the short wait rather than from the last long one.
+                    retrying?.cancel()
+                    retrying = null
+                    retryMs = RETRY_MIN_MS
+                } else {
+                    scheduleRetry()
+                }
             }
         })
     }
@@ -153,6 +180,12 @@ class AndroidBlePipe(
         // rather than as a busy one (ADR-0036). The connect proceeds either way — a counterpart that
         // is not running answers nothing, and a link that is attempted and fails names its reason
         // where a connect that never happened explains nothing.
+        // **A failed link is retried, because "the radio is off" is a normal state.** The connect
+        // below is one-shot: `AndroidRadioEngine.start()` sets its own `started` flag, so nothing
+        // asks again for the life of the process. Measured 2026-11-12 on a phone whose radio was
+        // switched on *after* the app started: the GATT attempt returned status 8 (timeout), the
+        // screen sat on "connecting" for minutes, and the only cure was a restart of the app.
+        wanted = address
         if (!leased) {
             leased = true
             leaseScope.launch { runCatching { RadioLease.acquire(ctx) } }
@@ -195,8 +228,40 @@ class AndroidBlePipe(
         fail(EngineLink.LinkDown, "the radio went away; open the radio settings to reconnect")
     }
 
+    /**
+     * Try the link again after [retryMs], doubling the wait each time.
+     *
+     * **One attempt at a time.** A failed connect can report twice (the request and the drop), and
+     * two overlapping attempts open two GATT clients on one radio — the thing the lease exists to
+     * prevent. A pending attempt is therefore left alone, and [close] cancels it so a pipe that is
+     * gone cannot reopen a link.
+     */
+    @SuppressLint("MissingPermission")
+    private fun scheduleRetry() {
+        val address = wanted ?: return
+        if (retrying?.isActive == true) return
+        val wait = retryMs
+        retryMs = (retryMs * 2).coerceAtMost(RETRY_MAX_MS)
+        retrying = leaseScope.launch {
+            delay(wait)
+            val ctx = context ?: return@launch
+            val adapter = (ctx.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+            if (adapter?.isEnabled != true) {
+                scheduleRetry()
+                return@launch
+            }
+            val device = runCatching { adapter.getRemoteDevice(address) }.getOrNull()
+            if (device == null) return@launch
+            problemSink("radio not reachable yet; trying again")
+            (ble as? AndroidBleTransport)?.connectToDevice(device)
+        }
+    }
+
     fun close() {
         connected = false
+        retrying?.cancel()
+        retrying = null
+        wanted = null
         try {
             ble.close()
         } catch (e: Exception) {
