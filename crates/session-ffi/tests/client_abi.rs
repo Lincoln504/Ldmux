@@ -401,6 +401,20 @@ fn the_radios_answers_reach_the_status_through_the_one_entry() {
     assert_eq!(status.path_hash_width, 1, "mode 0 is a one-byte hash");
     assert_eq!(status.has_battery, 1);
     assert_eq!(status.battery_mv, 4_050);
+
+    // **The four facts the settings page draws and nothing else would report.** They come from two
+    // different answers, so the two `has_` bytes are separate: a radio can describe its current
+    // operating point without answering `DEVICE_INFO` at all.
+    assert_eq!(status.has_identity, 1, "SELF_INFO was answered");
+    assert_eq!(&status.name[..usize::from(status.name_len)], b"radio");
+    assert_eq!(status.max_tx_power_dbm, 22);
+    assert_eq!(status.has_device, 1, "DEVICE_INFO was answered");
+    assert_eq!(
+        &status.firmware[..usize::from(status.firmware_len)],
+        b"v1.17.1",
+        "the firmware's own version string is carried, not just its code"
+    );
+    assert_eq!(status.max_contacts, 350, "the firmware stores half of it");
 }
 
 /// A route that has never been heard is unknown, and the next attempt floods.
@@ -458,7 +472,10 @@ fn answer_to(command: u8) -> Vec<u8> {
             out.extend_from_slice(&0u32.to_le_bytes());
             out.extend_from_slice(&[0u8; 12]);
             out.extend_from_slice(&[0u8; 40]);
-            out.extend_from_slice(&[0u8; 20]);
+            // The firmware's own version string, space-padded to its 20-byte field.
+            let mut version = [b' '; 20];
+            version[..7].copy_from_slice(b"v1.17.1");
+            out.extend_from_slice(&version);
             out.push(1);
             out.push(0);
             out

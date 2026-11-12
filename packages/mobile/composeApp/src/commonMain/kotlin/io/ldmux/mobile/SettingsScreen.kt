@@ -201,6 +201,7 @@ internal fun SettingsScreen(
                                     current = current,
                                     credentialsVersion = credentialsVersion,
                                     readCredentials = mesh.credentials,
+                                    readKeys = mesh.keys,
                                     onConfig = mesh.onConfig,
                                     // The same `onSave` the other rows use: the config this screen
                                     // is drawing is recomposed with the new value, so the next row

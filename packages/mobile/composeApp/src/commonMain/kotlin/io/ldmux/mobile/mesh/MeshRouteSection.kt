@@ -33,6 +33,7 @@ import io.ldmux.mobile.SettingsNote
 import io.ldmux.mobile.SettingsRow
 import io.ldmux.mobile.SettingsToggle
 import io.ldmux.mobile.SettingsValue
+import kotlin.math.roundToInt
 import kotlinx.coroutines.flow.MutableStateFlow
 import io.ldmux.mobile.Warn
 import io.ldmux.mobile.SettingsInline
@@ -63,6 +64,8 @@ internal fun MeshRouteSection(
     credentialsVersion: Int = 0,
     /** Read secure storage now. Called again after every action, because the config alone may not change. */
     readCredentials: () -> MeshCredentialState,
+    /** The session keys for the radio engine, or null before pairing. */
+    readKeys: () -> MeshCredentials?,
     /** Persist a changed config now (route, radio) without closing Settings. */
     onConfig: (LdmuxConfig) -> Unit,
     /** The radio's channel is shared (a public tuple) or not. Persisted beside the pairing. */
@@ -148,6 +151,7 @@ internal fun MeshRouteSection(
                 // learn this: a mismatch was silent and looked exactly like being out of range.
                 hostPreset = parseHostPreset(current.meshHostPreset),
                 address = current.meshRadio,
+                creds = readKeys(),
                 openAirtime = current.meshOpenAirtime,
                 onBudget = { onConfig(current.copy(meshOpenAirtime = it == RadioBudgetMode.Open)) },
                 onOpenPreset = { showPreset = !showPreset; showPicker = false },
@@ -155,6 +159,7 @@ internal fun MeshRouteSection(
                     if (showPreset) {
                         RadioPresetPanel(
                             address = current.meshRadio,
+                            creds = readKeys(),
                             openAirtime = current.meshOpenAirtime,
                             onBudget = { onConfig(current.copy(meshOpenAirtime = it == RadioBudgetMode.Open)) },
                             onClassified = onRadioChannel,
@@ -209,6 +214,14 @@ internal fun MeshRouteSection(
 class MeshRouteActions(
     /** Read secure storage, never throwing (a broken Keystore reads as "nothing stored"). */
     val credentials: () -> MeshCredentialState,
+    /**
+     * The session keys themselves, or null before pairing.
+     *
+     * The radio engine is built from them, so a page that only had [credentials] could say
+     * "paired" and still not reach the radio. Null is a normal state: a radio's own operating
+     * point is readable with no host at all (`docs/RADIO-PLAN.md` §12.7d).
+     */
+    val keys: () -> MeshCredentials?,
     val onConfig: (LdmuxConfig) -> Unit,
     val onUnpair: () -> Unit,
 )
@@ -230,6 +243,8 @@ class MeshRouteActions(
 @Composable
 private fun MeshRadioFacts(
     address: String,
+    /** The session keys for the engine, or null before pairing. */
+    creds: MeshCredentials?,
     /** The desktop's tuple, when the pairing code carried one. */
     hostPreset: RadioPreset? = null,
     openAirtime: Boolean,
@@ -246,43 +261,18 @@ private fun MeshRadioFacts(
      */
     afterPreset: @Composable () -> Unit = {},
 ) {
-    var link by remember(address) { mutableStateOf<RadioLink?>(null) }
+    // **The same engine the terminal uses**, refcounted by address: Settings must not open a second
+    // GATT client on a radio the terminal already holds (`docs/RADIO-PLAN.md` §12.7d).
+    val engine = rememberRadioEngine(address, creds)
+    val radio by engine.radio.collectAsState()
     val scope = rememberCoroutineScope()
-    val fallbackInfo = remember { MutableStateFlow<RadioSelfInfo?>(null) }
-    val fallbackDevice = remember { MutableStateFlow<RadioDeviceInfo?>(null) }
-    val fallbackStatus = remember { MutableStateFlow<MeshStatus?>(null) }
-    val info by (link?.selfInfo ?: fallbackInfo).collectAsState()
-    val device by (link?.deviceInfo ?: fallbackDevice).collectAsState()
-    val status by (link?.status ?: fallbackStatus).collectAsState()
-    LaunchedEffect(address) {
-        if (address.isEmpty()) return@LaunchedEffect
-        val l = meshRadioLink(address, ByteArray(0)) ?: return@LaunchedEffect
-        link = l
-        // A read, not a session: the radio answers SELF_INFO/DEVICE_INFO without a peer, and a
-        // failure here is not worth a line — the rows below say "not read" instead.
-        runCatching { l.connect() }
+    // **The meter follows the toggle and the radio's own clock.** The engine refuses to start a new
+    // part at zero records, so the allowance has to arrive before the first send and be refreshed as
+    // the radio spends the hour: pushing it once at connect would meter the first minute and stop.
+    LaunchedEffect(openAirtime, radio.preset, radio.txAirSecs) {
+        engine.setRecordsLeft(RadioMeter.recordsLeft(radio, !openAirtime) ?: 255)
     }
-    // **Capture the link, do not read the state in `onDispose`.** `link` is a delegated state
-    // property, so a closure that reads it inside `onDispose` reads the value *at dispose time* —
-    // which is the new link when the key changed from the old one. That released the instance the
-    // effect had just been created for, taking the refcount to zero and closing a live BLE link
-    // the moment it was acquired (measured on the device: the GATT opened and was torn down again
-    // within eight seconds, and the radio's facts stayed "not read").
-    DisposableEffect(link) {
-        val held = link
-        onDispose { held?.release() }
-    }
-
-    val preset = info?.let {
-        RadioPreset(
-            frequencyMhz = it.frequencyMhz,
-            bandwidthKhz = it.bandwidthKhz,
-            spreadingFactor = it.spreadingFactor,
-            codingRate = it.codingRate,
-            txPowerDbm = it.txPowerDbm,
-            pathHashSize = (device?.pathHashMode ?: 0) + 1,
-        )
-    }
+    val preset = radio.preset
     SettingsRow("preset") {
         SettingsValue(
             preset?.let { presetLine(it) } ?: "not read",
@@ -309,15 +299,20 @@ private fun MeshRadioFacts(
             MiniTextButton(onClick = {
                 // **A press that cannot work says so**, the same as the panel's apply: a null link
                 // used to return in silence and the row sat there unchanged.
-                val l = link
-                if (l == null) {
-                    matchProblem = "radio not ready · reopen this panel"
-                    return@MiniTextButton
-                }
                 matchProblem = null
                 scope.launch {
                     // Only the channel: this radio keeps its own power and path width.
-                    val ok = runCatching { l.applyPreset(hostPreset.channelOf(mine)) }.getOrElse { false }
+                    val only = hostPreset.channelOf(mine)
+                    val ok = runCatching {
+                        engine.setPreset(
+                            freqKhz = (only.frequencyMhz * 1000.0).roundToInt(),
+                            bwHz = (only.bandwidthKhz * 1000.0).roundToInt(),
+                            sf = only.spreadingFactor,
+                            cr = only.codingRate,
+                            pathWidth = only.pathHashSize,
+                            powerDbm = only.txPowerDbm,
+                        ) == ClientCode.OK
+                    }.getOrElse { false }
                     // A refused write used to vanish: the row stayed on screen with no sentence,
                     // which reads as the press having done nothing.
                     matchProblem = if (ok) null else "radio did not take desktop's tuple · still on the one above"
@@ -370,7 +365,7 @@ private fun MeshRadioFacts(
             onChange = { metered -> onBudget(if (metered) RadioBudgetMode.Metered else RadioBudgetMode.Open) },
         )
     }
-    SettingsNote(airtimeLine(status, preset))
+    SettingsNote(airtimeLine(radio, preset))
 }
 
 /** The band's allowance in whole seconds, or null when the band has none. */
@@ -389,10 +384,10 @@ internal fun allowanceSeconds(preset: RadioPreset?): Int? =
  * limit, beside the words "no cap", which is three statements where there is one fact. Metering off
  * now says what was spent and says the meter is off.
  */
-internal fun airtimeLine(status: MeshStatus?, preset: RadioPreset?): String {
-    if (status == null) return "not read"
-    val used = status.txAirtimeTenthsThisHour / 10.0
-    val left = status.opsLeftThisHour
+internal fun airtimeLine(status: RadioStatus, preset: RadioPreset?): String {
+    if (!status.connected) return "not read"
+    val used = status.txAirSecs.toDouble()
+    val left = status.opsLeft
     val allowance = preset?.let { RadioAirtime.budgetMsPerHour(it) }?.let { (it / 1000.0) }
     if (left == null || allowance == null) {
         // No duty cycle in this band: a measurement with no denominator, and no countdown, because

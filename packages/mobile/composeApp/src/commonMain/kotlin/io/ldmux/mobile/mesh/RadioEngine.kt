@@ -195,11 +195,15 @@ enum class EngineLink {
  * The platform's engine, or null when this build has no radio.
  *
  * Android returns its engine; a build without a radio platform returns null and the screen says so
- * rather than pretending. The address and the paired credentials are required because an engine
- * cannot exist without them: the client is created from the session keys and the pipe needs
- * somewhere to connect.
+ * rather than pretending.
+ *
+ * **`creds` is null for a phone that has not paired yet**, and that is a real state rather than an
+ * error: the radio's own operating point can be read with no host at all (`SELF_INFO` is answered
+ * before any session exists), which is how the settings page works on a fresh install. An engine
+ * without a peer has no session to start, so [RadioEngine.connect] refuses — it can read and tune a
+ * radio, and it cannot talk to a host that has not been named.
  */
-expect fun radioEngine(creds: MeshCredentials, address: String): RadioEngine?
+expect fun radioEngine(creds: MeshCredentials?, address: String): RadioEngine?
 
 /**
  * The engine on a build that has no native library in it.
@@ -508,6 +512,19 @@ data class RadioStatus(
     /** Bytes per hop the firmware reported, or null when it did not say. */
     val pathHashWidth: Int?,
     val firmwareVersionCode: Int,
+    /**
+     * The node's own name, from `SELF_INFO`, or null when the radio has not answered it.
+     *
+     * A name a person gave the radio is the only thing on the settings page that identifies
+     * *which* box this is: an address is not something anyone recognises.
+     */
+    val name: String? = null,
+    /** The radio's own maximum transmit power in dBm, which is the regulatory ceiling. */
+    val maxTxPowerDbm: Int? = null,
+    /** The firmware's own version string, from `DEVICE_INFO`, or null when it did not say. */
+    val firmware: String? = null,
+    /** The contact capacity the firmware reports, or null when it did not say. */
+    val maxContacts: Int? = null,
 ) {
     companion object {
         /** Nothing has been asked, or nothing has answered. */
@@ -517,7 +534,7 @@ data class RadioStatus(
             pathHashWidth = null, firmwareVersionCode = 0,
         )
 
-        internal fun of(v: IntArray): RadioStatus = RadioStatus(
+        internal fun of(v: IntArray, text: ByteArray = ByteArray(0)): RadioStatus = RadioStatus(
             connected = v[0] != 0,
             rssiDbm = if (v[1] != 0) v[2] else null,
             snrQuarterDb = if (v[1] != 0) v[3] else null,
@@ -539,7 +556,14 @@ data class RadioStatus(
             },
             pathHashWidth = if (v[15] == 0) null else v[15],
             firmwareVersionCode = v[16],
+            name = if (v[17] != 0 && v[19] > 0) utf8(text, 0, v[19]) else null,
+            maxTxPowerDbm = if (v[17] != 0) v[18] else null,
+            firmware = if (v[20] != 0 && v[21] > 0) utf8(text, NAME_MAX, v[21]) else null,
+            maxContacts = if (v[20] != 0 && v[22] != 0xFFFF) v[22] else null,
         )
+
+        /** Bytes of a node's name in the `radio` text buffer. */
+        private const val NAME_MAX = 32
     }
 }
 
@@ -599,4 +623,17 @@ data class Route(
             path = path.copyOf(pathLen.coerceIn(0, path.size)),
         )
     }
+}
+
+/**
+ * `len` bytes of [text] starting at [offset], decoded as UTF-8, or null when they are not valid.
+ *
+ * **Decoded with replacement, never thrown.** The library cuts a name at a character boundary, so
+ * a well-formed one always decodes; this is the belt for a firmware that reports bytes that are not
+ * UTF-8 at all, and a settings page must not crash because a radio's name is not valid text.
+ */
+private fun utf8(text: ByteArray, offset: Int, len: Int): String? {
+    if (offset < 0 || len <= 0 || offset + len > text.size) return null
+    return text.copyOfRange(offset, offset + len).decodeToString(throwOnInvalidSequence = false)
+        .ifEmpty { null }
 }

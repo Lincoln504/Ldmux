@@ -41,14 +41,14 @@ case "$cmd" in
   # a length byte read as a count is a link that never comes up — and until this line existed nothing
   # ran those tests at all. `libmeshcore-android`'s unit tests need an Android toolchain for its test
   # variant and are not part of this gate; the app's own suite covers the same decoders from above.
-  test) gradle_in_mobile :libmeshcore:test :composeApp:testDebugUnitTest ;;
+  test) gradle_in_mobile :composeApp:testDebugUnitTest ;;
   # The only artifacts Play accepts. They fail, loudly and early, when the signing inputs
   # are absent: an unsigned bundle is rejected at upload, which is a worse place to learn it.
   # A release artifact with a failing Kotlin suite is a release nobody checked, and nothing else
   # in the path runs that suite (CI builds Rust only). The test task is cheap next to the build,
   # so it runs first and a red suite stops the artifact before it exists.
-  release) native "$@"; gradle_in_mobile :libmeshcore:test :composeApp:testDebugUnitTest; ./scripts/collect-licenses.sh; gradle_in_mobile :composeApp:assembleRelease ;;
-  bundle) native "$@"; gradle_in_mobile :libmeshcore:test :composeApp:testDebugUnitTest; ./scripts/collect-licenses.sh; gradle_in_mobile :composeApp:bundleRelease ;;
+  release) native "$@"; gradle_in_mobile :composeApp:testDebugUnitTest; ./scripts/collect-licenses.sh; gradle_in_mobile :composeApp:assembleRelease ;;
+  bundle) native "$@"; gradle_in_mobile :composeApp:testDebugUnitTest; ./scripts/collect-licenses.sh; gradle_in_mobile :composeApp:bundleRelease ;;
   native-test) "$mobile/scripts/test-native.sh" ;;
   *) echo "usage: $0 native|build|install|test|release|bundle|native-test [args]" >&2; exit 2 ;;
 esac

@@ -131,8 +131,11 @@ object NativeRadioClient {
 
     // ---- the phone's own radio ---------------------------------------------------------------
 
-    /** [out] receives [RADIO_FIELDS] values in [RadioStatus] order. */
-    external fun radio(handle: Long, out: IntArray): Int
+    /**
+     * [out] receives [RADIO_FIELDS] values in [RadioStatus] order, and [text] the node's name
+     * followed by its firmware string, each at the offset and length the values name.
+     */
+    external fun radio(handle: Long, out: IntArray, text: ByteArray): Int
 
     /**
      * [out] receives [ROUTE_FIELDS] values in [Route] order, and [pathOut] the path bytes whose
@@ -168,7 +171,16 @@ object NativeRadioClient {
     const val STATS_FIELDS = 13
 
     /** How many values [radio] writes. */
-    const val RADIO_FIELDS = 17
+    const val RADIO_FIELDS = 23
+
+    /** Bytes of a node's name in the `radio` text buffer. */
+    const val RADIO_NAME_MAX = 32
+
+    /** Bytes of a firmware string in the `radio` text buffer. */
+    const val RADIO_FIRMWARE_MAX = 24
+
+    /** The whole `radio` text buffer: the name, then the firmware string. */
+    const val RADIO_TEXT = RADIO_NAME_MAX + RADIO_FIRMWARE_MAX
 
     /** How many values [route] writes. */
     const val ROUTE_FIELDS = 8
@@ -257,8 +269,9 @@ class RadioClient private constructor(private val slot: LongArray) {
      */
     fun radio(): RadioStatus {
         val out = IntArray(NativeRadioClient.RADIO_FIELDS)
-        val rc = NativeRadioClient.radio(handle, out)
-        return if (rc == ClientCode.OK) RadioStatus.of(out) else RadioStatus.UNKNOWN
+        val text = ByteArray(NativeRadioClient.RADIO_TEXT)
+        val rc = NativeRadioClient.radio(handle, out, text)
+        return if (rc == ClientCode.OK) RadioStatus.of(out, text) else RadioStatus.UNKNOWN
     }
 
     /**

@@ -203,6 +203,20 @@ typedef struct {
     int8_t tx_power_dbm;
     uint8_t path_hash_width;  /* bytes per hop, 1..=3; 0 when the firmware did not say */
     uint8_t firmware_version_code;
+    /*
+     * Identity, from SELF_INFO. `has_identity` is separate from `has_device` because the two
+     * arrive from different questions: a firmware that answers one and not the other is a real
+     * radio, and a caller draws nothing for what was not read rather than a zero.
+     */
+    uint8_t has_identity;
+    uint8_t name_len;         /* meaningful bytes of `name`; 0 = not read */
+    uint8_t name[32];         /* UTF-8, not NUL-terminated */
+    int8_t max_tx_power_dbm;  /* the radio's own ceiling, beside the tx_power_dbm in use */
+    /* Device description, from DEVICE_INFO. */
+    uint8_t has_device;
+    uint8_t firmware_len;     /* meaningful bytes of `firmware`; 0 = not read */
+    uint8_t firmware[24];     /* UTF-8, not NUL-terminated */
+    uint16_t max_contacts;    /* 0xFFFF when the firmware did not say */
 } LdmuxRadioStatus;
 
 /*

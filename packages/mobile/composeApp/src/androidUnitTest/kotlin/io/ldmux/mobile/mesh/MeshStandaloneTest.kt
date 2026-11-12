@@ -217,23 +217,4 @@ class MeshStandaloneTest {
         assertFalse(isPublicChannel(RadioPreset.USA.copy(codingRate = 7)))
     }
 
-    private class FakeRadio : RadioLink {
-        private val _state = MutableStateFlow(MeshLinkState.Bound)
-        override val state: StateFlow<MeshLinkState> = _state.asStateFlow()
-        override val status: StateFlow<MeshStatus?> = MutableStateFlow(null)
-        override val selfInfo: StateFlow<RadioSelfInfo?> = MutableStateFlow(null)
-        override val deviceInfo: StateFlow<RadioDeviceInfo?> = MutableStateFlow(null)
-        override val received: Flow<ByteArray> = emptyFlow()
-        override val uplinkRecordMax: Int = 172
-        override val lastProblem: StateFlow<String?> = MutableStateFlow(null)
-        var sends = 0
-        override suspend fun connect() = Unit
-        override suspend fun send(record: ByteArray): RadioSendResult {
-            sends++
-            return RadioSendResult.Accepted
-        }
-        override suspend fun readDeviceInfo(): RadioDeviceInfo? = null
-        override suspend fun applyPreset(preset: RadioPreset): Boolean = true
-        override fun close() {}
-    }
 }

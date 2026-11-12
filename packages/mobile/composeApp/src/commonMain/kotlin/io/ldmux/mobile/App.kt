@@ -97,6 +97,7 @@ fun App() {
                     mesh = if (MeshRoute.Mesh in availableRoutes()) {
                         MeshRouteActions(
                             credentials = { readMeshCredentials(meshSessionKeyStore()).first },
+                            keys = { readMeshCredentials(meshSessionKeyStore()).second },
                             onConfig = { store.update(it) },
                             onUnpair = { store.unpairMesh(); credentialsVersion++ },
                         )

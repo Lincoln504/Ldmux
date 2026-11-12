@@ -13,117 +13,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 
-/**
- * A MeshCore radio the phone can own directly.
- *
- * The common layer knows only this seam. The Android implementation is the
- * vendored `libmeshcore-android` session; the driver and the terminal protocol
- * stay exactly where they were.
- */
-interface RadioLink {
-    val state: StateFlow<MeshLinkState>
-    val status: StateFlow<MeshStatus?>
-    val selfInfo: StateFlow<RadioSelfInfo?>
-    val deviceInfo: StateFlow<RadioDeviceInfo?>
-    val received: Flow<ByteArray>
-    val uplinkRecordMax: Int
-
-    /**
-     * Why the last attempt failed, in the words the user should read, or null while it is fine.
-     *
-     * The link already built these sentences and threw them away: `run` carried only the state on,
-     * so "Bluetooth is off", "not a Bluetooth address", "accept the Bluetooth pairing request"
-     * and "the radio did not finish its contact query" all reached the screen as one of four
-     * labels. A state says what kind of thing is wrong; this says which thing. It is cleared when
-     * the link becomes [MeshLinkState.Bound] and at the start of every attempt.
-     */
-    val lastProblem: StateFlow<String?>
-
-    /** Connect, run the companion handshake and wait until the radio is READY. */
-    suspend fun connect()
-
-    /** Send one raw-custom record. The path belongs to the link; the caller sends only the record. */
-    suspend fun send(record: ByteArray): RadioSendResult
-
-    /**
-     * Re-read the route to the host **now**, from both sources the radio has.
-     *
-     * A route is learned from the air, so it is only true while the repeaters that carried it are
-     * still there: a phone that walked while idle holds a path that no longer works, and the first
-     * record of a newly opened shell then goes into a route that is gone. The maintenance loop
-     * re-reads on a timer, which is up to a minute late; this is the "a shell is being opened, learn
-     * where the host is" call. Two serial reads, no airtime, and a failure is silence rather than an
-     * error because a route that cannot be read now is not a reason to refuse to open a shell.
-     */
-    suspend fun refreshRoute() {}
-
-    /**
-     * **A route that just failed a session must not be handed to the next one.**
-     *
-     * The link deliberately outlives a driver rebuild (ownership stays with one radio), so a path
-     * kept here survives the very failure that proves it dead. The next attempt would then send its
-     * handshake down the same chain, lose it the same way, and rebuild again — which is the loop a
-     * person breaks by pressing refresh. After this the next `refreshRoute` asks the mesh instead.
-     */
-    fun forgetRoute(blame: Boolean = true) {}
-
-    /** Read the radio's firmware description (path-hash mode, limits). */
-    suspend fun readDeviceInfo(): RadioDeviceInfo?
-
-    /** Apply a radio preset to the attached radio. False when the write could not be verified. */
-    suspend fun applyPreset(preset: RadioPreset): Boolean
-
-    /** Meter data airtime, or leave the operator's private channel unmetered. */
-    fun setBudgetMode(mode: RadioBudgetMode) {}
-
-    /**
-     * How many repeaters the route to the host uses, or null when no route is known.
-     *
-     * **The one number that says how far away the host is**, and the silence bound is a function of
-     * it: a record's round trip through twenty repeaters is twenty transmissions each way, so a
-     * twenty-second verdict that fits a direct link would tear down a working long-range session and
-     * spend a handshake (a dozen records) proving it wrong.
-     */
-    val routeHops: Int? get() = null
-
-    /**
-     * Whether the route in hand was confirmed inside the freshness window.
-     *
-     * Defaulted to true so an implementation that has no route bookkeeping is not forced to answer:
-     * the driver reads this only to tell "no route" from "a route that stopped carrying", and both
-     * of those need a flood rather than another handshake.
-     */
-    fun routeFresh(): Boolean = true
-
-    /** The furthest a flood has been heard to travel here, for timing a send with no route. */
-    fun meshReach(): Int = 1
-
-    /**
-     * Whether the ldmux session is established, so the link knows when the flood carrier is for.
-     *
-     * A path that has merely gone quiet is not a dead path — the peer may have nothing to say — and
-     * only the session's own retransmission budget can tell the two apart. That fact lives in the
-     * driver, so the driver states it.
-     */
-    fun sessionUp(established: Boolean) {}
-
-    /**
-     * This radio's own public key, once the companion handshake has run.
-     *
-     * Null before that: the key comes from `SELF_INFO`, which is the first answer the radio gives.
-     */
-    val radioPublicKey: ByteArray? get() = null
-
-    fun close()
-
-    /**
-     * Drop one owner's reference. The BLE link closes when the last owner
-     * releases it, so Settings can inspect the same radio the terminal is
-     * already using instead of opening a second GATT client.
-     */
-    fun release() = close()
-}
-
 data class RadioPreset(
     val frequencyMhz: Double,
     val bandwidthKhz: Double,
@@ -506,6 +395,52 @@ object RadioAirtime {
 }
 
 /**
+ * The hourly allowance, spent and left, as the engine wants it.
+ *
+ * **The allowance is the caller's number and the engine never derives it** (`crates/session/src/
+ * radio.rs`): it is a band's duty-cycle rule, which is a fact about the law and the frequency rather
+ * than about the radio. What the engine does with it is real — `TransactionLayer::poll` refuses to
+ * start a new part when `records_left == 0` — so a caller that never pushes it leaves the radio
+ * transmitting unmetered, which in 869.4-869.65 MHz is outside the band's condition of use.
+ *
+ * **The preset that decides is the radio's own**, not the one a screen is proposing: the allowance
+ * belongs to where the radio *is* tuned. A dialog that has picked a new tuple but not applied it
+ * must not meter against it.
+ */
+object RadioMeter {
+    /**
+     * Records of one uplink that still fit this hour, or null when nothing is metered.
+     *
+     * Null means "no allowance in this band" or "the radio has not said what it spent", and both are
+     * the same instruction to the engine: do not gate. A **zero** is different and is passed
+     * through, because it is the answer "nothing more fits this hour" and the engine must stop.
+     */
+    fun recordsLeft(status: RadioStatus, metered: Boolean): Int? {
+        if (!metered) return null
+        val preset = status.preset ?: return null
+        val allowanceMs = RadioAirtime.budgetMsPerHour(preset) ?: return null
+        // The airtime is the radio's own since boot, which is what the firmware counts and what a
+        // band's rule is measured against over an hour. A boot in the middle of the hour makes this
+        // generous by at most the hour's start; the engine's own counter has the same horizon.
+        val spentMs = status.txAirSecs * 1000.0
+        val leftMs = allowanceMs - spentMs
+        if (leftMs <= 0.0) return 0
+        val perRecord = RadioAirtime.timeOnAirMs(preset, RECORD_BYTES)
+        if (perRecord <= 0.0) return null
+        return max(0, (leftMs / perRecord).toInt()).coerceAtMost(255)
+    }
+
+    /**
+     * One full session record on the air: the carrier's ceiling.
+     *
+     * The record, its session wrapper and the flood wrapper's own bytes are what the radio spends
+     * the channel on, so metering against the application payload alone would undercount by about a
+     * fifth and let a European radio past its allowance.
+     */
+    const val RECORD_BYTES = 172
+}
+
+/**
  * The Bluetooth permission, as the two screens that can hit it need it.
  *
  * A denial is not one state on Android 11+: the first one is a dialog the user can answer again,
@@ -573,20 +508,6 @@ data class RadioDeviceInfo(
     val pathHashSize: Int get() = (pathHashMode and 0x03) + 1
 }
 
-/** What the radio did with one raw record. Never delivery. */
-enum class RadioSendResult(val outcome: MeshSendOutcome) {
-    Accepted(MeshSendOutcome.SentDirect),
-    Busy(MeshSendOutcome.ErrBusy),
-    TooLong(MeshSendOutcome.ErrTooLong),
-    NotFound(MeshSendOutcome.ErrNotFound),
-    NoPath(MeshSendOutcome.ErrNotFound),
-    Budget(MeshSendOutcome.ErrBudget),
-    Failed(MeshSendOutcome.Unknown),
-}
-
-/** A connection failure that already has the state the screen should show. */
-class RadioLinkException(val state: MeshLinkState, message: String) : Exception(message)
-
 /**
  * One connection from the mesh screen: the engine, and the driver that translates it.
  *
@@ -603,6 +524,8 @@ class MeshRadioConnection(
     private val selector: String,
     /** The grid to state on the first page; see `MeshEngineDriver`. */
     grid: Pair<Int, Int>? = null,
+    /** Whether data records are metered at the band's allowance; see `MeshEngineDriver`. */
+    metered: Boolean = true,
 ) {
     private val origin = TimeSource.Monotonic.markNow()
     private val clock: () -> Long = { origin.elapsedNow().inWholeMilliseconds }
@@ -633,6 +556,7 @@ class MeshRadioConnection(
         wall = { Clock.System.now().toEpochMilliseconds() },
         selector = selector,
         initialGrid = grid,
+        metered = metered,
     )
 
     /** The host said the pane stopped changing, forwarded from the driver. */
@@ -651,29 +575,4 @@ class MeshRadioConnection(
         released = true
         driver.close()
     }
-}
-
-expect fun meshRadioLink(address: String, hostKey: ByteArray): RadioLink?
-
-/** A link that exists only so the common screen can compile where no radio is built. */
-internal class UnsupportedRadioLink : RadioLink {
-    private val _state = MutableStateFlow(MeshLinkState.NeedsRadio)
-    private val _lastProblem = MutableStateFlow<String?>("mesh route not available on this device")
-    override val lastProblem: StateFlow<String?> = _lastProblem.asStateFlow()
-    override val state: StateFlow<MeshLinkState> = _state.asStateFlow()
-    private val _status = MutableStateFlow<MeshStatus?>(null)
-    override val status: StateFlow<MeshStatus?> = _status.asStateFlow()
-    private val _selfInfo = MutableStateFlow<RadioSelfInfo?>(null)
-    override val selfInfo: StateFlow<RadioSelfInfo?> = _selfInfo.asStateFlow()
-    private val _deviceInfo = MutableStateFlow<RadioDeviceInfo?>(null)
-    override val deviceInfo: StateFlow<RadioDeviceInfo?> = _deviceInfo.asStateFlow()
-    override val received: Flow<ByteArray> = emptyFlow()
-    // A number this link never uses: it throws on every call. Mirroring the shared constant
-    // keeps it from reading like a measurement of a link that has one.
-    override val uplinkRecordMax: Int = MeshRecordLimits.MAX
-    override suspend fun connect() = throw RadioLinkException(MeshLinkState.NeedsRadio, "no radio platform")
-    override suspend fun send(record: ByteArray): RadioSendResult = RadioSendResult.Failed
-    override suspend fun readDeviceInfo(): RadioDeviceInfo? = null
-    override suspend fun applyPreset(preset: RadioPreset): Boolean = false
-    override fun close() {}
 }

@@ -40,7 +40,11 @@
 #define MIRROR_FIELDS 12
 #define EVENT_FIELDS 8
 #define STATS_FIELDS 13
-#define RADIO_FIELDS 17
+#define RADIO_FIELDS 23
+/* name at [0, name_len), firmware at [NAME_MAX, NAME_MAX + firmware_len). */
+#define NAME_MAX 32
+#define FIRMWARE_MAX 24
+#define RADIO_TEXT (NAME_MAX + FIRMWARE_MAX)
 #define ROUTE_FIELDS 8
 #define PATH_MAX 64
 
@@ -313,7 +317,8 @@ JNIEXPORT jint JNICALL JNI(list)(JNIEnv *env, jclass cls, jlong handle, jlong no
  *
  * The `has_` bytes are kept beside every optional field: a radio that has heard nothing reports no
  * RSSI, and a Kotlin `Int` cannot say "not read" on its own. */
-JNIEXPORT jint JNICALL JNI(radio)(JNIEnv *env, jclass cls, jlong handle, jintArray out) {
+JNIEXPORT jint JNICALL JNI(radio)(JNIEnv *env, jclass cls, jlong handle, jintArray out,
+                                  jbyteArray text) {
   (void)cls;
   if (!out || (*env)->GetArrayLength(env, out) < RADIO_FIELDS) return LDMUX_ERR_ARG;
   LdmuxRadioStatus r;
@@ -338,6 +343,21 @@ JNIEXPORT jint JNICALL JNI(radio)(JNIEnv *env, jclass cls, jlong handle, jintArr
   put_i32(env, out, 14, (jint)r.tx_power_dbm);
   put_i32(env, out, 15, (jint)r.path_hash_width);
   put_i32(env, out, 16, (jint)r.firmware_version_code);
+  put_i32(env, out, 17, (jint)r.has_identity);
+  put_i32(env, out, 18, (jint)r.max_tx_power_dbm);
+  put_i32(env, out, 19, (jint)r.name_len);
+  put_i32(env, out, 20, (jint)r.has_device);
+  put_i32(env, out, 21, (jint)r.firmware_len);
+  put_i32(env, out, 22, (jint)r.max_contacts);
+  /* The two strings, in one buffer: name first, then firmware. A caller that gets 0 bytes for
+   * either draws nothing, rather than an empty box where a fact should be. */
+  if (text && (*env)->GetArrayLength(env, text) >= RADIO_TEXT) {
+    uint8_t both[RADIO_TEXT];
+    memset(both, 0, sizeof both);
+    memcpy(both, r.name, (size_t)r.name_len);
+    memcpy(both + NAME_MAX, r.firmware, (size_t)r.firmware_len);
+    if (!put_bytes(env, text, both, RADIO_TEXT)) return LDMUX_ERR_ARG;
+  }
   return (*env)->ExceptionCheck(env) ? LDMUX_ERR_ARG : LDMUX_OK;
 }
 

@@ -41,6 +41,7 @@ import io.ldmux.mobile.Warn
 import io.ldmux.mobile.MonoFont
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 import kotlin.random.Random
 
 /** A bounded scan, shown as a small list. The scan stops itself; closing cancels it. */
@@ -154,6 +155,13 @@ internal fun RadioPickerPanel(
 @Composable
 internal fun RadioPresetPanel(
     address: String,
+    /**
+     * The session keys, or null on a phone that has not paired yet.
+     *
+     * A radio's own operating point needs no host to read (`SELF_INFO` is answered before any
+     * session exists), so a fresh install can still be tuned. See `radioEngine`.
+     */
+    creds: MeshCredentials?,
     openAirtime: Boolean,
     onBudget: (RadioBudgetMode) -> Unit,
     /**
@@ -178,7 +186,7 @@ internal fun RadioPresetPanel(
     hostTuple: RadioPreset? = null,
 ) {
     val scope = rememberCoroutineScope()
-    var link by remember(address) { mutableStateOf<RadioLink?>(null) }
+    val engine = rememberRadioEngine(address, creds)
     var note by remember { mutableStateOf<Notice?>(null) }
     var confirmUnset by remember { mutableStateOf(false) }
     // A press that moves this radio off the desktop's channel asks once, because undoing it needs
@@ -200,52 +208,22 @@ internal fun RadioPresetPanel(
     // stays put, and the phone must land on it.
     var custom by remember { mutableStateOf(false) }
     var customText by remember { mutableStateOf("") }
-    val fallbackState = remember { MutableStateFlow(MeshLinkState.NeedsRadio) }
-    val fallbackInfo = remember { MutableStateFlow<RadioSelfInfo?>(null) }
-    val fallbackDevice = remember { MutableStateFlow<RadioDeviceInfo?>(null) }
-    val fallbackStatus = remember { MutableStateFlow<MeshStatus?>(null) }
-    val fallbackProblem = remember { MutableStateFlow<String?>(null) }
-    val state by (link?.state ?: fallbackState).collectAsState()
-    val info by (link?.selfInfo ?: fallbackInfo).collectAsState()
-    val device by (link?.deviceInfo ?: fallbackDevice).collectAsState()
-    val status by (link?.status ?: fallbackStatus).collectAsState()
-    val problem by (link?.lastProblem ?: fallbackProblem).collectAsState()
-    val current = info?.let {
-        RadioPreset(
-            frequencyMhz = it.frequencyMhz,
-            bandwidthKhz = it.bandwidthKhz,
-            spreadingFactor = it.spreadingFactor,
-            codingRate = it.codingRate,
-            txPowerDbm = it.txPowerDbm,
-            pathHashSize = (device?.pathHashMode ?: 0) + 1,
-        )
-    }
+    val radio by engine.radio.collectAsState()
+    val linkState by engine.linkState.collectAsState()
+    val problem by engine.problem.collectAsState()
+    val bound = linkState == EngineLink.Connected
+    val current = radio.preset
 
     // What the custom field currently parses to. Null when it does not parse, which is also what
     // disables "apply": applying the previous selection because the text was malformed would be a
     // silent surprise on a control that changes the radio's frequency.
     val typed = if (custom && customText.isNotBlank()) parseRadioTuple(customText, selected) else null
 
+    // Opening the engine is the read: it asks `APP_START`, `SELF_INFO`, `DEVICE_INFO` and the two
+    // status questions on its own (`docs/RADIO-PLAN.md` §12.7d), so there is nothing to ask for
+    // here. An empty address is the one thing that cannot work, and it says so.
     LaunchedEffect(address) {
-        if (address.isEmpty()) {
-            note = Notice("choose LoRa radio first", ok = false)
-            return@LaunchedEffect
-        }
-        val l = meshRadioLink(address, ByteArray(0))
-        if (l == null) {
-            note = Notice("no LoRa radio support in this build", ok = false)
-            return@LaunchedEffect
-        }
-        link = l
-        l.setBudgetMode(if (openAirtime) RadioBudgetMode.Open else RadioBudgetMode.Metered)
-        try {
-            l.connect()
-            l.readDeviceInfo()
-        } catch (e: RadioLinkException) {
-            note = Notice(radioLinkProblemLine(e.state), ok = false)
-        } catch (e: Exception) {
-            note = Notice(e.message ?: "LoRa radio did not answer", ok = false)
-        }
+        if (address.isEmpty()) note = Notice("choose LoRa radio first", ok = false)
     }
     // Open on the tuple the radio is actually using, not on a fresh proposal.
     //
@@ -267,7 +245,7 @@ internal fun RadioPresetPanel(
         val c = current ?: return@LaunchedEffect
         onClassified(isPublicChannel(c))
     }
-    LaunchedEffect(current, device) {
+    LaunchedEffect(current, radio.pathHashWidth) {
         val c = current ?: return@LaunchedEffect
         if (!seeded) {
             original = c
@@ -303,17 +281,6 @@ internal fun RadioPresetPanel(
             selected = c
         }
     }
-    // **Capture the link, do not read the state in `onDispose`.** `link` is a delegated state
-    // property, so a closure that reads it inside `onDispose` reads the value *at dispose time* —
-    // which is the new link when the key changed from the old one. That released the instance the
-    // effect had just been created for, taking the refcount to zero and closing a live BLE link
-    // the moment it was acquired (measured on the device: the GATT opened and was torn down again
-    // within eight seconds, and the radio's facts stayed "not read").
-    DisposableEffect(link) {
-        val held = link
-        onDispose { held?.release() }
-    }
-
     fun choose(p: RadioPreset) {
         userTouched = true
         selected = p
@@ -331,27 +298,28 @@ internal fun RadioPresetPanel(
         // **A press that cannot work says so.** `link` is null while the radio page is still
         // acquiring the radio, and the press used to return in silence — indistinguishable from a
         // write that was sent and ignored.
-        val l = link
-        if (l == null) {
-            note = Notice("radio not ready · reopen this panel", ok = false)
-            return
-        }
         busy = true
         scope.launch {
             note = try {
-                if (l.applyPreset(p)) {
+                if (engine.setPreset(
+                        freqKhz = (p.frequencyMhz * 1000.0).roundToInt(),
+                        bwHz = (p.bandwidthKhz * 1000.0).roundToInt(),
+                        sf = p.spreadingFactor,
+                        cr = p.codingRate,
+                        pathWidth = p.pathHashSize,
+                        powerDbm = p.txPowerDbm,
+                    ) == ClientCode.OK
+                ) {
                     // Written from what was asked for, not from a read-back: the radio may have
                     // taken it and the next `SELF_INFO` will correct this if it did not, and the
                     // mode that depends on it is the cautious one either way.
                     onClassified(isPublicChannel(p))
                     Notice("applied", ok = true)
                 } else {
-                    // The reason, when the link recorded one: "not confirmed" alone cannot tell a
+                    // The reason, when the engine has one: "not confirmed" alone cannot tell a
                     // lost read-back from a radio keeping its own width.
-                    Notice(l.lastProblem.value ?: "not confirmed", ok = false)
+                    Notice(engine.problem.value ?: "the radio did not take it", ok = false)
                 }
-            } catch (e: RadioLinkException) {
-                Notice(radioLinkProblemLine(e.state), ok = false)
             } catch (e: Exception) {
                 Notice(e.message ?: "did not finish", ok = false)
             } finally {
@@ -363,7 +331,7 @@ internal fun RadioPresetPanel(
     SettingsPanel("LoRa radio", onDismiss) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
-                    address.ifEmpty { "no LoRa radio" } + "  ·  " + meshLinkLabel(state),
+                    address.ifEmpty { "no LoRa radio" } + "  ·  " + engineLinkLabel(linkState),
                     color = Dim,
                     fontSize = 11.sp,
                     fontFamily = MonoFont,
@@ -382,7 +350,7 @@ internal fun RadioPresetPanel(
                 // "not read" said that nothing had answered, never why: Bluetooth off, no
                 // permission, no bond, another app holding the radio and the wrong firmware all
                 // looked the same on this screen.
-                RadioFacts(info, device, status, problem)
+                RadioFacts(radio, problem)
                 // Wrapped, not one row: the region names are wider than a phone's panel, and a
                 // row that overflows loses the last one — the same bug the portrait key bar was
                 // rebuilt to avoid.
@@ -440,7 +408,7 @@ internal fun RadioPresetPanel(
                     // button writes is not on screen anywhere, so `restore` could be read as "back
                     // to what it is now", which is nothing. `undo` says which direction it goes.
                     MiniTextButton(
-                        enabled = original != null && !busy && state == MeshLinkState.Bound,
+                        enabled = original != null && !busy && bound,
                         onClick = {
                             val o = original ?: return@MiniTextButton
                             region = regionOfPreset(o)
@@ -533,7 +501,7 @@ internal fun RadioPresetPanel(
             // Only a channel change costs the link. A path-width change does not, so it does not
             // ask twice either.
             val breaksLink = hostTuple != null && !sameChannel(selected, hostTuple)
-            val canApply = link != null && !busy && seeded && state == MeshLinkState.Bound && customOk
+            val canApply = bound && !busy && seeded && customOk
             AccentBtn(
                 label = when {
                     busy -> "applying…"
@@ -611,13 +579,6 @@ private fun radioProblemLine(problem: RadioScanProblem?): String = when (problem
     null -> ""
 }
 
-private fun radioLinkProblemLine(state: MeshLinkState): String = when (state) {
-    MeshLinkState.NeedsRadio -> "choose LoRa radio first"
-    MeshLinkState.NeedsPermission -> "Bluetooth permission off"
-    MeshLinkState.RadioUnavailable -> "LoRa radio not answering"
-    MeshLinkState.NoPath -> "host path does not fit"
-    else -> meshLinkLabel(state)
-}
 
 /**
  * The radio's own description, as lines of facts rather than as a form.
@@ -628,9 +589,8 @@ private fun radioLinkProblemLine(state: MeshLinkState): String = when (state) {
  *    the only thing that says which command set the radio has. The vendor pin (`companion-v1.15.0`)
  *    is what the code was written against; the boards in the field ran 1.17.1, so this is the line
  *    that tells a user which one they are on.
- *  - **signal and battery** — the sentinels the radio uses for "not measured" (-128 dBm, 255 %) are
- *    rendered as words, as `ldmux mesh status` does, because a figure that is really "unknown" read
- *    as a measurement is worse than a blank.
+ *  - **signal and battery** — absent readings are dropped rather than drawn as zeros, because a
+ *    figure that is really "unknown" read as a measurement is worse than a blank.
  *  - **power and path width** — the ceiling is regulatory as well as physical, so the dialog states
  *    the radio's own maximum beside the power it is using; the path width in bytes is what neighbours
  *    read in the trace of a message this radio sends.
@@ -639,39 +599,41 @@ private fun radioLinkProblemLine(state: MeshLinkState): String = when (state) {
  * boards, and two apps writing the same field is how a radio ends up named something neither user
  * chose. What this screen configures is the operating point — the tuple — and it says so by only
  * offering that as a control.
+ *
+ * **Everything here comes from one reading** ([RadioStatus]), which the engine fills from
+ * `SELF_INFO`, `DEVICE_INFO`, the status poll and the receive-log pushes. The four identity facts
+ * ride the ABI for this screen alone (`docs/RADIO-PLAN.md` §12.7d): without them the page would
+ * silently stop showing which radio it was configuring.
  */
 @Composable
 private fun RadioFacts(
-    info: RadioSelfInfo?,
-    device: RadioDeviceInfo?,
-    status: MeshStatus?,
+    radio: RadioStatus,
     problem: String?,
 ) {
-    if (info == null && device == null && status == null && problem == null) return
+    val preset = radio.preset
+    if (!radio.connected && preset == null && problem == null) return
     problem?.let { FactLine("problem", it) }
-    if (info != null) {
-        FactLine("name", info.name + (device?.let { "  ·  " + it.firmwareVersion } ?: ""))
-    } else if (device != null) {
-        FactLine("firmware", device.firmwareVersion)
-    }
-    val rssi = status?.rssiDbm
+    val firmware = radio.firmware
+    radio.name?.let { FactLine("name", it + (firmware?.let { f -> "  ·  $f" } ?: "")) }
+        ?: firmware?.let { FactLine("firmware", it) }
+    val rssi = radio.rssiDbm
     // **Voltage, not a percentage.** The companion reports millivolts, and this app has no
-    // discharge curve for the cell the board happens to carry; the old `batteryPercent` field was
-    // never assigned by anything, so its readout here could not fire.
-    val volts = device?.batteryMillivolts?.let { "%.2f V".format(it / 1000.0) }
+    // discharge curve for the cell the board happens to carry.
+    val volts = radio.batteryMv?.let { "%.2f V".format(it / 1000.0) }
     if (rssi != null || volts != null) {
         FactLine(
             "signal",
             listOfNotNull(rssi?.let { "$it dBm" }, volts).joinToString("  ·  "),
         )
     }
-    if (info != null) {
+    if (preset != null) {
         FactLine(
             "power",
             buildList {
-                add("${info.txPowerDbm} of ${info.maxTxPowerDbm} dBm")
-                device?.let { add("path ${it.pathHashSize} B") }
-                device?.let { add("${it.maxContacts} contacts") }
+                val max = radio.maxTxPowerDbm
+                add(if (max != null) "${preset.txPowerDbm} of $max dBm" else "${preset.txPowerDbm} dBm")
+                radio.pathHashWidth?.let { add("path $it B") }
+                radio.maxContacts?.let { add("$it contacts") }
             }.joinToString("  ·  "),
         )
     }
@@ -684,4 +646,34 @@ private fun FactLine(label: String, value: String) {
         Text(label, color = Dim, fontSize = 11.sp, fontFamily = MonoFont)
         Text(value, color = Fg, fontSize = 11.sp, fontFamily = MonoFont, maxLines = 1)
     }
+}
+
+/**
+ * The engine a settings page uses: the same instance the terminal uses, keyed by address.
+ *
+ * **One radio is one GATT client.** The engine factory refcounts by address
+ * (`docs/RADIO-PLAN.md` §12.7d), so opening Settings while a shell is live shares the terminal's
+ * link instead of opening a second one; closing this page releases its reference and leaves the
+ * terminal's alone. The engine asks the radio about itself as soon as it starts, which is the whole
+ * of "read the radio" — there is nothing for a screen to request.
+ */
+@Composable
+internal fun rememberRadioEngine(address: String, creds: MeshCredentials?): RadioEngine {
+    val engine = remember(address, creds) {
+        radioEngine(creds, address) ?: UnavailableRadioEngine
+    }
+    LaunchedEffect(engine) { engine.start() }
+    // **Capture the engine, do not read the state in `onDispose`.** `remember` can hand back a new
+    // instance when the key changes, and a closure that read the property at dispose time would
+    // release the *new* one — the bug that closed a live link eight seconds after it opened.
+    DisposableEffect(engine) { onDispose { engine.close() } }
+    return engine
+}
+
+/** [EngineLink] as the sentence the radio rows use. */
+internal fun engineLinkLabel(state: EngineLink): String = when (state) {
+    EngineLink.Connected -> "connected"
+    EngineLink.RadioMissing -> meshLinkLabel(MeshLinkState.NeedsRadio)
+    EngineLink.PermissionDenied -> meshLinkLabel(MeshLinkState.NeedsPermission)
+    EngineLink.LinkDown -> meshLinkLabel(MeshLinkState.RadioUnavailable)
 }

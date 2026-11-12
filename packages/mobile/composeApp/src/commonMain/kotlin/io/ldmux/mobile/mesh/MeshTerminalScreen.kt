@@ -269,7 +269,13 @@ fun MeshTerminalScreen(
         // **The resume attach states the grid too.** It happens inside `connect`, before any
         // surface has measured anything here: without this the host painted the desk's pane and
         // then the phone's, which is the cost this whole path exists to avoid.
-        MeshRadioConnection(plan.creds, plan.radioAddress, resumeShell, rememberedGridOf(config))
+        MeshRadioConnection(
+            plan.creds,
+            plan.radioAddress,
+            resumeShell,
+            rememberedGridOf(config),
+            metered = !config.meshOpenAirtime,
+        )
     }
     // **A connection that ended is rebuilt, not left dead.** `run` returns when the transport
     // stopped carrying records - a radio that went quiet, a socket the host stopped answering on.

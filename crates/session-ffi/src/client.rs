@@ -224,6 +224,30 @@ pub struct LdmuxRadioStatus {
     pub path_hash_width: u8,
     /// The firmware's own version code, or 0 when it was not read.
     pub firmware_version_code: u8,
+    /// `1` when `name` and `max_tx_power_dbm` were read (`SELF_INFO`).
+    ///
+    /// **Separate from `has_device`, because they arrive from different questions.** A firmware
+    /// that answers `SELF_INFO` and not `DEVICE_INFO` is a real radio, and a caller that draws
+    /// "not read" for the fields it has is worse than one that draws nothing.
+    pub has_identity: u8,
+    /// How many bytes of `name` are meaningful; 0 means nothing was read.
+    pub name_len: u8,
+    /// The node's own name, UTF-8, `name_len` bytes meaningful; the rest is zero.
+    ///
+    /// **Length-prefixed rather than NUL-terminated**: the header promises no pointer into library
+    /// memory and no guessing, and a terminator would be the one place that promise went fuzzy.
+    pub name: [u8; 32],
+    /// The radio's maximum transmit power in dBm, which is the regulatory ceiling beside the one
+    /// in `tx_power_dbm`.
+    pub max_tx_power_dbm: i8,
+    /// `1` when `firmware`, `max_contacts` and `path_hash_width` were read (`DEVICE_INFO`).
+    pub has_device: u8,
+    /// How many bytes of `firmware` are meaningful; 0 means nothing was read.
+    pub firmware_len: u8,
+    /// The firmware's own version string, UTF-8, `firmware_len` bytes meaningful.
+    pub firmware: [u8; 24],
+    /// The contact capacity the firmware reports, or `u16::MAX` when it did not say.
+    pub max_contacts: u16,
 }
 
 /// What this end believes about the path to the peer, for the status line and the history deadline.
@@ -1181,10 +1205,18 @@ pub unsafe extern "C" fn ldmux_client_radio(c: *mut LdmuxClient, out: *mut Ldmux
                     .map_or(0, |info| info.tx_power as i8);
             }
             filled.path_hash_width = status.path_hash_width().unwrap_or(0);
-            filled.firmware_version_code = status
-                .device_info
-                .as_ref()
-                .map_or(0, |info| info.firmware_version_code);
+            filled.max_contacts = u16::MAX;
+            if let Some(info) = status.self_info.as_ref() {
+                filled.has_identity = 1;
+                filled.name_len = copy_text(&mut filled.name, &info.name);
+                filled.max_tx_power_dbm = info.max_tx_power as i8;
+            }
+            if let Some(info) = status.device_info.as_ref() {
+                filled.has_device = 1;
+                filled.firmware_version_code = info.firmware_version_code;
+                filled.firmware_len = copy_text(&mut filled.firmware, &info.firmware_version);
+                filled.max_contacts = info.max_contacts.unwrap_or(u16::MAX);
+            }
             // SAFETY: `out` is non-null and writable; the struct is plain data.
             unsafe { *out = filled };
             LDMUX_OK
@@ -1320,5 +1352,42 @@ fn mirror_of(mirror: &PageMirror) -> LdmuxMirror {
         applied_status: mirror.applied.map(|a| a.status).unwrap_or(0),
         snapshot_id: mirror.snapshot_id,
         first_line: mirror.first_line,
+    }
+}
+
+/// Copy `text` into `dst` at a character boundary and answer how many bytes are meaningful.
+///
+/// **A character boundary, not a byte count.** The name a user gives a radio can be any UTF-8, and
+/// cutting mid-sequence would put a broken character in the caller's buffer — which is invisible
+/// until a screen draws a replacement glyph where a name should be.
+fn copy_text<const N: usize>(dst: &mut [u8; N], text: &str) -> u8 {
+    let mut end = text.len().min(N);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    dst[..end].copy_from_slice(&text.as_bytes()[..end]);
+    end as u8
+}
+
+#[cfg(test)]
+mod copy_text_tests {
+    use super::copy_text;
+
+    #[test]
+    fn a_name_is_cut_at_a_character_boundary() {
+        let mut dst = [0u8; 8];
+        // Four two-byte characters fill exactly eight bytes.
+        assert_eq!(copy_text(&mut dst, "÷÷÷÷"), 8);
+        assert_eq!(&dst, "÷÷÷÷".as_bytes());
+        // A fifth would need a ninth byte, and the cut lands before it rather than inside it.
+        let mut dst = [0u8; 8];
+        assert_eq!(copy_text(&mut dst, "÷÷÷÷÷"), 8);
+        // Three bytes of room holds one two-byte character, not one and a half.
+        let mut dst = [0u8; 3];
+        assert_eq!(copy_text(&mut dst, "÷÷"), 2);
+        assert_eq!(&dst[..2], "÷".as_bytes());
+        // Nothing read is zero bytes, which a caller draws as nothing.
+        let mut dst = [0u8; 8];
+        assert_eq!(copy_text(&mut dst, ""), 0);
     }
 }

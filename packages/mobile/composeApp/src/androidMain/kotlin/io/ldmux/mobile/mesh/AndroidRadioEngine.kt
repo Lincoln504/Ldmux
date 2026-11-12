@@ -47,7 +47,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 @OptIn(ExperimentalCoroutinesApi::class)
 class AndroidRadioEngine(
     private val address: String,
-    creds: MeshCredentials,
+    creds: MeshCredentials?,
     airtimeMs: Float = AIRTIME_MS,
     transport: io.iotone.meshcore.transport.MeshcoreTransport? = null,
 ) : RadioEngine {
@@ -77,20 +77,57 @@ class AndroidRadioEngine(
     private val _events = MutableSharedFlow<ClientEvent>(extraBufferCapacity = 64)
     override val events: Flow<ClientEvent> = _events.asSharedFlow()
 
-    private val client: RadioClient? = RadioClient.create(
-        peerStatic = creds.keys.hostPublic,
-        psk = creds.keys.psk,
-        localPrivate = creds.keys.localPrivate,
-        localPublic = creds.keys.localPublic,
-        pathWidth = 1,
-        sf = 7,
-        floodReachHops = 4,
-        airtimeMs = airtimeMs,
-        maxOpenPages = MAX_PAGES,
-    )
+    /**
+     * The keys this engine runs with.
+     *
+     * **A radio with no host is still a radio.** The settings page reads and tunes the phone's own
+     * radio before any pairing, so an engine built without credentials gets a throwaway local
+     * keypair and zeroed peer fields: enough for `SELF_INFO`, `DEVICE_INFO` and a preset write, and
+     * unable to start a session because there is no peer to start one with ([connect] refuses).
+     * Generating a fresh pair invents no identity that could be mistaken for a paired one — the
+     * engine has no host key to hand a session to.
+     */
+    private val hostPaired: Boolean = creds != null
+
+    private val localKeys: Pair<ByteArray, ByteArray>? = creds?.let {
+        it.keys.localPrivate to it.keys.localPublic
+    } ?: runCatching { MeshSession.generateKeypair(NativeMeshSession) }.getOrNull()
+
+    private val client: RadioClient? = localKeys?.let { (localPrivate, localPublic) ->
+        RadioClient.create(
+            peerStatic = creds?.keys?.hostPublic ?: ByteArray(SessionLib.KEY_LEN),
+            psk = creds?.keys?.psk ?: ByteArray(SessionLib.KEY_LEN),
+            localPrivate = localPrivate,
+            localPublic = localPublic,
+            pathWidth = 1,
+            sf = 7,
+            floodReachHops = 4,
+            airtimeMs = airtimeMs,
+            maxOpenPages = MAX_PAGES,
+        )
+    }
 
     @Volatile
     private var closed = false
+
+    /**
+     * How many screens hold this engine.
+     *
+     * **One radio is one GATT client and one command window**, so the terminal and the settings
+     * pages must share one engine rather than build one each: a second owner sending commands
+     * outside the loop below is `RC-2` with a different name (`docs/RADIO-PLAN.md` §12.7d). The
+     * factory hands out the same instance, and [close] is a *release* — the link, the lease and
+     * the loop go away with the last holder.
+     */
+    private val holders = Holders()
+
+    /** Called once, when the **last** holder released this engine. */
+    var onFinalClose: ((AndroidRadioEngine) -> Unit)? = null
+
+    /** One more screen is using this engine. Balanced by [close]. */
+    fun retain() {
+        holders.retain()
+    }
 
     override val isOpen: Boolean get() = !closed && client != null
 
@@ -120,15 +157,33 @@ class AndroidRadioEngine(
         if (client != null) scope.launch { runLoop() }
     }
 
+    /**
+     * Open the GATT link, once.
+     *
+     * Idempotent because two screens share this engine and both call it on entry: a second
+     * `connectToDevice` on a live link is a second GATT client, which is what the sharing exists to
+     * prevent.
+     */
     override suspend fun start() {
         if (client == null) {
             _problem.value = "this build cannot create a radio client"
             return
         }
+        if (started) return
+        started = true
         pipe.connect(address)
     }
 
+    @Volatile
+    private var started = false
+
     override suspend fun connect(nowMs: Long, wallMs: Long): Int = post { c ->
+        if (!hostPaired) {
+            // **A radio with no host has no session to start.** Said as the refusal it is, rather
+            // than as a handshake that waits for a peer that was never named.
+            _problem.value = "no host is paired · pair with the desktop first"
+            return@post ClientCode.ERR_NOT_OPEN
+        }
         val rc = c.connect(nowMs, wallMs)
         if (rc == ClientCode.OK && recordsLeft >= 0) c.setRecordsLeft(recordsLeft)
         rc
@@ -218,8 +273,13 @@ class AndroidRadioEngine(
     }
 
     override fun close() {
-        if (closed) return
-        closed = true
+        // **A release, not a destroy.** See [holders]: the other screen may still be drawing.
+        if (!holders.release()) return
+        synchronized(this) {
+            if (closed) return
+            closed = true
+        }
+        onFinalClose?.invoke(this)
         // **Closing the pipe gives the lease back.** A phone that abandoned the radio used to leave
         // the other app believing it still held it (`RC-12`, `S17`).
         pipe.close()
@@ -331,8 +391,70 @@ class AndroidRadioEngine(
  * Takes the address and the paired credentials because an engine cannot exist without them: the
  * client is created from the session keys, and the pipe needs somewhere to connect.
  */
-actual fun radioEngine(creds: MeshCredentials, address: String): RadioEngine? =
-    if (nativeRadioAvailable()) AndroidRadioEngine(address, creds) else null
+actual fun radioEngine(creds: MeshCredentials?, address: String): RadioEngine? =
+    if (nativeRadioAvailable()) RadioEngines.acquire(creds, address) else null
+
+/**
+ * The engines this process has open, one per radio address.
+ *
+ * **Two screens, one GATT client.** The terminal and the settings pages both need the radio, and
+ * the radio accepts one central: a second engine would open a second connection, and a second owner
+ * sending commands outside the engine's loop is `RC-2`'s shape. So a request for an address that is
+ * already open returns the same engine with one more holder, and closing releases rather than
+ * destroys. Keyed by address because that is what a GATT connection is to.
+ */
+private object RadioEngines {
+    private val entries = mutableMapOf<String, AndroidRadioEngine>()
+
+    @Synchronized
+    fun acquire(creds: MeshCredentials?, address: String): RadioEngine {
+        val known = entries[address]
+        if (known != null) {
+            known.retain()
+            return known
+        }
+        val engine = AndroidRadioEngine(address, creds)
+        engine.onFinalClose = { closed -> forget(address, closed) }
+        entries[address] = engine
+        return engine
+    }
+
+    /**
+     * The engine that really closed has gone; a later request builds a new one.
+     *
+     * Guarded by identity: a *new* engine for the same address must not be removed by the old one's
+     * callback, which can arrive after a screen has already rebuilt.
+     */
+    @Synchronized
+    private fun forget(address: String, closed: AndroidRadioEngine) {
+        if (entries[address] === closed) entries.remove(address)
+    }
+}
 
 /** Whether the native client library loaded. Never throws. */
 private fun nativeRadioAvailable(): Boolean = NativeRadioClient.available
+
+/**
+ * How many screens hold one engine, and whether the last one has let go.
+ *
+ * Pulled out of [AndroidRadioEngine] so the rule can be tested without a radio: the engine needs a
+ * real `RadioClient` and a Bluetooth adapter, and a refcount that is only exercised on a device is
+ * a refcount nobody has checked. **The terminal and the settings pages share one engine** — one
+ * GATT client, one command window — so this is what stops Settings from closing a link the shell is
+ * still drawing on, and what makes the last release the one that really closes.
+ */
+internal class Holders(initial: Int = 1) {
+    private var count = initial
+
+    @Synchronized
+    fun retain() {
+        count++
+    }
+
+    /** True when this release was the last, so the caller may really close. */
+    @Synchronized
+    fun release(): Boolean {
+        if (count > 0) count--
+        return count == 0
+    }
+}

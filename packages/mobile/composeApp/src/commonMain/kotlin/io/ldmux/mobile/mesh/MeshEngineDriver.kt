@@ -40,6 +40,14 @@ class MeshEngineDriver(
      * never sees.
      */
     initialGrid: Pair<Int, Int>? = null,
+    /**
+     * Whether data records are metered at the band's allowance.
+     *
+     * **The allowance is the caller's, and it is enforced in the engine**: with `records_left == 0`
+     * the transaction layer starts no new part. A caller that never pushes one leaves a radio in a
+     * duty-cycled band transmitting outside its condition of use, so this is not a preference.
+     */
+    private val metered: Boolean = true,
 ) {
     private val _view = MutableStateFlow<MeshTermView>(MeshTermView.Idle)
     val view: StateFlow<MeshTermView> = _view.asStateFlow()
@@ -132,6 +140,7 @@ class MeshEngineDriver(
     suspend fun run() {
         try {
             engine.start()
+            meter()
             engine.connect(clock(), wall())
             attachIfPossible()
             engine.events.collect { event -> apply(event) }
@@ -148,6 +157,21 @@ class MeshEngineDriver(
     /** Begin the link without following events; the caller drives [onEvent] itself. */
     suspend fun start() {
         engine.start()
+        meter()
+    }
+
+    /**
+     * Push the hour's allowance to the engine.
+     *
+     * Called at the start and after every answer, because both facts it is computed from move: the
+     * radio reports its spent airtime on every status poll, and a preset written by the settings
+     * screen changes which band's rule applies. Pushing it once at connect would meter the first
+     * minute and stop — which is the same silence as never pushing it at all, one step later.
+     */
+    suspend fun meter() {
+        engine.setRecordsLeft(
+            RadioMeter.recordsLeft(engine.radio.value, metered) ?: UNMETERED,
+        )
     }
 
     /** Ask for [id]'s page, or ask which shells are running when it is empty. */
@@ -188,6 +212,7 @@ class MeshEngineDriver(
             is ClientEvent.Settled -> {
                 lastScreenAt = clock()
                 attaching = false
+                meter()
                 val mirror = engine.mirror(event.shell) ?: return
                 lastStats = engine.stats()
                 val screen = screenOf(event.shell, mirror) ?: return
@@ -499,6 +524,9 @@ class MeshEngineDriver(
     fun stats(): ClientStats? = lastStats
 
     private companion object {
+        /** A record budget larger than any hour's, for a band that has no allowance. */
+        const val UNMETERED = 255
+
         /**
          * Rungs spent with no session before "trying" becomes "no answer".
          *

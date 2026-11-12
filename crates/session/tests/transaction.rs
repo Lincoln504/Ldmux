@@ -629,3 +629,45 @@ fn each_end_sends_its_own_record_kind() {
     assert_eq!(phone.record_kind(), ldmux_session::direction::KIND_UP);
     assert_eq!(host.record_kind(), ldmux_session::direction::KIND_DOWN);
 }
+
+/// **With no allowance left, the engine starts nothing.**
+///
+/// The band's duty cycle is enforced by the caller pushing `records_left`, and the layer is where
+/// it becomes real: `poll` must return no `Send` at all. This is the assertion the app's metering
+/// depends on — a value that arrives and is ignored would read as metering while the radio
+/// transmitted, which in 869.4-869.65 MHz is outside the band's condition of use.
+#[test]
+fn no_allowance_means_no_record_starts() {
+    let (_host, mut phone) = pair();
+    let peer = PeerId(7);
+    phone
+        .layer
+        .begin(peer, &message(MessageKind(0x10), &[0xAB; 40]), 0)
+        .expect("a small message fits");
+
+    // A part that would have gone out with an allowance, so the silence below is the gate and not
+    // an empty queue.
+    let would_send = phone.layer.poll(0, RecordBudget::direct(0), 1);
+    assert!(
+        matches!(would_send, Some(Action::Send { .. })),
+        "the message was never sendable, so this test would prove nothing: {would_send:?}"
+    );
+
+    // Same instant, no allowance: nothing new starts. (The first call consumed the ready part, so
+    // a second call with an allowance is the control.)
+    let mut fresh = TransactionLayer::new(config(Side::Phone));
+    fresh
+        .begin(peer, &message(MessageKind(0x10), &[0xCD; 40]), 0)
+        .expect("a small message fits");
+    assert!(
+        fresh.poll(0, RecordBudget::direct(0), 0).is_none(),
+        "a record was handed out with no allowance left"
+    );
+    assert!(
+        matches!(
+            fresh.poll(0, RecordBudget::direct(0), 255),
+            Some(Action::Send { .. })
+        ),
+        "the allowance gate swallowed the message instead of holding it"
+    );
+}

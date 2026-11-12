@@ -25,14 +25,15 @@ android {
 }
 
 dependencies {
-    // Protocol layer, built from the same source tree.
-    api(project(":libmeshcore"))
-
+    // **The protocol is not here any more.** This module is the Android BLE transport and the two
+    // types it needs (`MeshcoreBle`'s UUIDs and the `MeshcoreTransport` interface); the companion
+    // protocol, its frames and its session live in Rust behind `ldmux_client_*`
+    // (`docs/RADIO-PLAN.md` §8.1, entry `A2`).
+    //
     // The Java sources use androidx.annotation.NonNull/Nullable.
     api("androidx.annotation:annotation:1.9.1")
 
     // Nordic BLE: connection management, MTU negotiation, serialized writes.
     api("no.nordicsemi.android:ble:2.10.1")
 
-    testImplementation("junit:junit:4.13.2")
 }
