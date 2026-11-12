@@ -226,7 +226,8 @@ public final class AndroidBleTransport implements BleTransport {
             // fires, and the engine's frame is gone with no trace. Measured 2026-11-12: the engine
             // logged "radio first frame: 1 bytes", this method returned normally, and logcat showed
             // no `writeCharacteristic` at all.
-            Log.d(TAG, "ble send " + frame.length + "B type=" + writeType);
+            Log.d(TAG, "ble send " + frame.length + "B type=" + writeType
+                    + " to=" + rxCharacteristic.getUuid());
             writeCharacteristic(rxCharacteristic, frame, writeType)
                     .done((device) -> Log.d(TAG, "ble send ok " + frame.length + "B"))
                     .fail((device, status) -> {
@@ -259,6 +260,18 @@ public final class AndroidBleTransport implements BleTransport {
             }
             rxCharacteristic = service.getCharacteristic(RX_UUID);
             txCharacteristic = service.getCharacteristic(TX_UUID);
+            // **What the radio actually exposes, once, when the link comes up.** A companion that
+            // ignores every command while accepting every write is either bonded to a stale key or
+            // not the build this code expects, and the characteristic table is the first place to
+            // tell those apart: measured 2026-11-12 on a WIO that answered nothing.
+            StringBuilder sb = new StringBuilder("ldmux-ble chars:");
+            for (BluetoothGattCharacteristic c : service.getCharacteristics()) {
+                sb.append(' ').append(c.getUuid()).append("/0x")
+                        .append(Integer.toHexString(c.getProperties()));
+            }
+            Log.d(TAG, sb.toString());
+            Log.d(TAG, "ldmux-ble write=" + (rxCharacteristic == null ? "none" : rxCharacteristic.getUuid())
+                    + " notify=" + (txCharacteristic == null ? "none" : txCharacteristic.getUuid()));
             return rxCharacteristic != null && txCharacteristic != null;
         }
 
