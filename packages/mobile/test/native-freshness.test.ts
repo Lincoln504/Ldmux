@@ -68,14 +68,80 @@ const NOT_IN_TERMINAL_LIB = new Set([
 ]);
 
 /** The libraries Gradle will package, one per ABI. */
-function packagedLibs(): string[] {
+function packagedLibs(name = "libldmux_terminal.so"): string[] {
   if (!existsSync(JNI_LIBS)) return [];
   const out: string[] = [];
   for (const abi of readdirSync(JNI_LIBS)) {
-    const so = join(JNI_LIBS, abi, "libldmux_terminal.so");
+    const so = join(JNI_LIBS, abi, name);
     if (existsSync(so)) out.push(so);
   }
   return out;
+}
+
+const SESSION_LIBS = packagedLibs("libldmux_session.so");
+
+/**
+ * Every file `libldmux_session.so` is compiled from: the Rust session stack and its JNI shim.
+ *
+ * The three crates are the whole static archive — `ldmux-session-ffi` links `ldmux-session`,
+ * which links `ldmux-mesh` — so a `.rs` or `Cargo.toml` anywhere under them is a build input.
+ *
+ * What is **not** here, and why: the workspace `Cargo.toml` and `Cargo.lock`. Both do change the
+ * artefact (a profile or lockfile bump rebuilds it), but both also change on almost every
+ * unrelated commit in this repository — a daemon dev-dependency bump rewrites the lockfile. A
+ * check that fired on those would be a check somebody disables, which is worse than one that is
+ * narrow about the crate that owns the library.
+ */
+function sessionSources(): string[] {
+  const out = [
+    join(NATIVE, "ldmux_session.h"),
+    join(NATIVE, "ldmux_session_jni.c"),
+  ];
+  const workspaceRoot = join(ROOT, "..", ".."); // ROOT is packages/mobile
+  for (const crate of ["mesh", "session", "session-ffi"]) {
+    const dir = join(workspaceRoot, "crates", crate);
+    if (!existsSync(dir)) continue;
+    for (const entry of readdirSync(dir, { recursive: true }) as string[]) {
+      if (!entry.endsWith(".rs") && basename(entry) !== "Cargo.toml") continue;
+      out.push(join(dir, entry));
+    }
+    out.push(join(dir, "Cargo.toml"));
+  }
+  return out.filter((f) => existsSync(f));
+}
+
+const SESSION_SOURCES = sessionSources();
+
+/**
+ * What Kotlin asks the JVM to look up, derived from the Kotlin file rather than restated.
+ *
+ * The JNI name is `Java_` + the package with dots for underscores + `_` + the declaring class
+ * or object + `_` + the method, so both halves come from the declaration itself. Deriving them
+ * is the point: the previous version of this file hardcoded `Java_dev_ldmux_` for a package that
+ * is `io.ldmux`, so the check reported every symbol missing and taught nobody anything.
+ *
+ * The object is required to be top-level and unique, because a member object or a second `extern`
+ * holder in the same file would need a different mangling and this would silently check the
+ * wrong one.
+ */
+function jniDeclarations(ktPath: string): { prefix: string; names: string[] } {
+  const kt = readFileSync(ktPath, "utf8");
+  const pkg = /^package\s+([\w.]+)\s*$/m.exec(kt)?.[1];
+  assert.ok(pkg, `${ktPath} declares no package, so its JNI symbols cannot be named`);
+  const holders = [...kt.matchAll(/^object\s+(\w+)\b/gm)].map((m) => m[1]);
+  assert.equal(
+    holders.length,
+    1,
+    `${ktPath} must hold its external funs in exactly one top-level object, because the JNI ` +
+      `symbol name is built from that object and nothing else. Found: ${holders.join(", ") || "none"}`,
+  );
+  // `external fun takeClipboard(handle: Long): ByteArray?` -> takeClipboard
+  const names = [...kt.matchAll(/\bexternal\s+(?:override\s+)?fun\s+(\w+)\s*\(/g)].map((m) => m[1]);
+  assert.ok(
+    names.length > 0,
+    `${ktPath} declares no external funs, so a symbol check against it would pass by being blind`,
+  );
+  return { prefix: `Java_${pkg.replace(/\./g, "_")}_${holders[0]}_`, names };
 }
 
 const SOURCES = nativeSources();
@@ -189,43 +255,118 @@ test("the packaged .so records the engine pin and API level it was built from", 
   assert.ok(fields["api-level"], "no api-level was recorded by the build");
 });
 
-test("every native method Kotlin declares is defined in the packaged .so", () => {
-  if (LIBS.length === 0) return;
-
-  const ktPath = join(
-    ROOT,
-    "composeApp",
-    "src",
-    "androidMain",
-    "kotlin",
-    "io",
-    "ldmux",
-    "mobile",
-    "term",
-    "NativeTerminal.kt",
+/** The symbols a shared library defines, as `nm -D` reports them. */
+function definedSymbols(lib: string): Set<string> {
+  return new Set(
+    execFileSync("nm", ["-D", "--defined-only", lib], { encoding: "utf8" })
+      .split("\n")
+      .map((l) => l.trim().split(/\s+/)[2])
+      .filter(Boolean),
   );
-  assert.ok(existsSync(ktPath), "NativeTerminal.kt is where the native methods live");
-  const kt = readFileSync(ktPath, "utf8");
+}
 
-  // `external fun takeClipboard(handle: Long): ByteArray?` -> takeClipboard
-  const declared = [...kt.matchAll(/\bexternal\s+fun\s+(\w+)\s*\(/g)].map((m) => m[1]);
-  assert.ok(declared.length > 0, "no external funs found, so this check is blind");
+const TERMINAL_KT = join(
+  ROOT,
+  "composeApp",
+  "src",
+  "androidMain",
+  "kotlin",
+  "io",
+  "ldmux",
+  "mobile",
+  "term",
+  "NativeTerminal.kt",
+);
+const SESSION_KT = join(
+  ROOT,
+  "composeApp",
+  "src",
+  "androidMain",
+  "kotlin",
+  "io",
+  "ldmux",
+  "mobile",
+  "mesh",
+  "NativeMeshSession.kt",
+);
+
+test("every native method Kotlin declares is defined in libldmux_terminal.so", () => {
+  if (LIBS.length === 0) return;
+  assert.ok(existsSync(TERMINAL_KT), "NativeTerminal.kt is where the terminal methods live");
+  const { prefix, names } = jniDeclarations(TERMINAL_KT);
 
   for (const lib of LIBS) {
-    const defined = new Set(
-      execFileSync("nm", ["-D", "--defined-only", lib], { encoding: "utf8" })
-        .split("\n")
-        .map((l) => l.trim().split(/\s+/)[2])
-        .filter(Boolean),
-    );
-    for (const name of declared) {
-      // The JNI mangling for dev.ldmux.mobile.term.NativeTerminal.<name>.
-      const symbol = `Java_dev_ldmux_mobile_term_NativeTerminal_${name}`;
+    const defined = definedSymbols(lib);
+    for (const name of names) {
       assert.ok(
-        defined.has(symbol),
-        `${symbol} is declared by Kotlin but not defined in ${lib}. ` +
+        defined.has(prefix + name),
+        `${prefix}${name} is declared by Kotlin but not defined in ${lib}. ` +
           `The library is stale or the JNI glue did not compile: nix develop .#mobile -c scripts/build-libghostty-vt.sh`,
       );
     }
   }
+});
+
+// `libldmux_session.so` is the second library, built by `native/build-session.sh` from the Rust
+// session stack. Until this block existed it had no check at all: it could be a week old, wrap a
+// `crates/session` that has since changed, and Gradle would package it without a word. That is the
+// same class of failure the terminal test above exists for, and the radio path fails exactly this
+// way — silently, at the first call, on a device.
+test("every packaged libldmux_session.so is newer than the Rust it wraps", () => {
+  if (SESSION_LIBS.length === 0) return; // nothing built yet; nothing to be stale
+  assert.ok(
+    SESSION_SOURCES.length > 0,
+    "no sources found for libldmux_session.so, so this check would pass by checking nothing",
+  );
+
+  // Timestamps only, deliberately: unlike the terminal library there is no build stamp to compare
+  // against, and inventing one would mean either teaching `build-session.sh` a new duty or
+  // keeping a hash list here that the build does not write. A stale library is the failure this
+  // catches, and mtime is enough for that as long as the comparison names every input.
+  const newest = SESSION_SOURCES.map((s) => ({ s, t: statSync(s).mtimeMs })).sort((a, b) => b.t - a.t)[0];
+
+  for (const lib of SESSION_LIBS) {
+    assert.ok(
+      statSync(lib).mtimeMs >= newest.t,
+      `${lib} is older than ${newest.s}, so it does not contain the current session code. ` +
+        `Rebuild with: packages/mobile/native/build-session.sh android`,
+    );
+  }
+});
+
+test("every native method NativeMeshSession declares is defined in libldmux_session.so", () => {
+  if (SESSION_LIBS.length === 0) return;
+  assert.ok(existsSync(SESSION_KT), "NativeMeshSession.kt is where the session methods live");
+  const { prefix, names } = jniDeclarations(SESSION_KT);
+
+  for (const lib of SESSION_LIBS) {
+    const defined = definedSymbols(lib);
+    for (const name of names) {
+      assert.ok(
+        defined.has(prefix + name),
+        `${prefix}${name} is declared by Kotlin but not defined in ${lib}. ` +
+          `The library is stale or the JNI glue did not compile: packages/mobile/native/build-session.sh android`,
+      );
+    }
+  }
+});
+
+test("the session shim exports the name NativeMeshSession.kt asks for", () => {
+  // The artefact test above can only fail once somebody rebuilds. This one reads the shim source,
+  // so a rename in either place is caught on the next `npm test` rather than on the next build —
+  // and a mismatch here is an `UnsatisfiedLinkError` at the first radio call on a device.
+  const { prefix } = jniDeclarations(SESSION_KT);
+  const shim = readFileSync(join(NATIVE, "ldmux_session_jni.c"), "utf8");
+  const macro = /^#define\s+JNI\(name\)\s+([A-Za-z0-9_]+)##name\s*$/m.exec(shim)?.[1];
+  assert.ok(
+    macro,
+    "native/ldmux_session_jni.c must define `JNI(name)` as `<class-prefix>##name`, so the exported " +
+      "symbols can be derived from the Kotlin declaration instead of being spelled twice",
+  );
+  assert.equal(
+    macro,
+    prefix,
+    `native/ldmux_session_jni.c exports ${macro}* but ${SESSION_KT} will look up ${prefix}*. ` +
+      `One of the two was renamed and the other was not, which is a link failure at the first call.`,
+  );
 });

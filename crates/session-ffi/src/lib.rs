@@ -258,7 +258,16 @@ pub unsafe extern "C" fn ldmux_initiator_finish(
         let Some(m2) = (unsafe { bytes(msg2, msg2_len) }) else {
             return LDMUX_ERR_NULL;
         };
-        let est = match boxed.0.finish(m2) {
+        // An answer may carry a trailing `tx_nonce` (`crates/session/src/bootstrap.rs`), which is
+        // there so a repeated copy survives the mesh's dedup ring. The Noise content is the
+        // `MSG2_CONTENT_LEN` bytes in front of it, and both lengths are accepted so a host that has
+        // not adopted the nonce yet, and a phone that has, still complete a handshake.
+        let content = if m2.len() == ldmux_session::bootstrap::MSG2_NONCED_LEN {
+            &m2[..ldmux_session::bootstrap::MSG2_CONTENT_LEN]
+        } else {
+            m2
+        };
+        let est = match boxed.0.finish(content) {
             Ok(e) => e,
             Err(e) => return hs_err(e),
         };

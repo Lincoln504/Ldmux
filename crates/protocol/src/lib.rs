@@ -69,15 +69,105 @@ pub fn clamp_pane_size(cols: u64, rows: u64) -> (u64, u64) {
 pub mod base64;
 pub mod frames;
 pub mod keeper;
-pub mod keeper_call;
 pub mod mesh_term;
 pub mod messages;
 pub mod net;
 pub mod pairing;
-pub mod paths;
 pub mod rpc;
-pub mod socket;
 pub mod utf8;
+
+// Host-only modules: every one of these needs a filesystem, a uid or a Unix socket, which is
+// `tokio` and `nix`, which Android does not have. `ldmux-session-ffi` links this crate with
+// `default-features = false` so `libldmux_session.so` carries the wire and nothing else
+// (`docs/RADIO-PLAN.md` §8.1, `crates/protocol/Cargo.toml`).
+//
+// `paths` is gated whole rather than split. Its module doc calls the `*_from` functions pure cores
+// and the `resolve_*` wrappers the readers of the environment, but two of the cores are not pure:
+// `state_dir_from` asks the kernel for the uid (`nix::unistd::getuid`) to build the per-uid `/tmp`
+// fallback, and `default_shell` reads the passwd entry (`nix::unistd::User::from_uid`). A split
+// would therefore keep a build that cannot call `getuid`, cannot name a shell and has no filesystem
+// to resolve a path in, holding half a module; and `persist_dir_from` reaches the uid through
+// `state_dir_from` from inside what looks like a pure core, so the seam is not where the doc says
+// it is. Nothing that builds without `host-ipc` resolves a path: the phone is handed its
+// credentials in its pairing code.
+#[cfg(feature = "host-ipc")]
+pub mod keeper_call;
+#[cfg(feature = "host-ipc")]
+pub mod paths;
+#[cfg(feature = "host-ipc")]
+pub mod socket;
+
+#[cfg(test)]
+mod manifest_tests {
+    /// The manifest as text, so this reads the file the build reads rather than a copy of it.
+    fn manifest() -> String {
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
+            .expect("crates/protocol/Cargo.toml must be readable from its own test")
+    }
+
+    /// The `k = v` lines of one manifest section, without the section header.
+    ///
+    /// Deliberately not a TOML parse: a test that needed a parser would need a dependency the
+    /// crate does not have, and both facts below are single lines in one of these sections.
+    fn section<'a>(manifest: &'a str, name: &str) -> Vec<&'a str> {
+        let header = format!("[{name}]");
+        let mut lines = manifest.lines().skip_while(|l| l.trim() != header);
+        if lines.next().is_none() {
+            return Vec::new();
+        }
+        lines
+            .take_while(|l| !l.trim_start().starts_with('['))
+            .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+            .collect()
+    }
+
+    #[test]
+    fn tokio_and_nix_are_optional_so_the_phone_can_link_this_crate() {
+        // `ldmux-session-ffi` builds this crate with `default-features = false` and links it into
+        // `libldmux_session.so` for Android. `tokio` and `nix` in the unconditional dependency list
+        // would put a Unix-socket reactor and a uid lookup into that library, which the NDK cannot
+        // link — so this is the line that keeps the radio path buildable on a phone at all.
+        let manifest = manifest();
+        let deps = section(&manifest, "dependencies");
+        for name in ["tokio", "nix"] {
+            let line = deps
+                .iter()
+                .find(|l| l.trim_start().starts_with(&format!("{name} =")))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{name} is no longer a dependency of ldmux-protocol. This crate is linked \
+                         into the phone's libldmux_session.so, so removing it here has to be \
+                         matched by removing every `#[cfg(feature = \"host-ipc\")]` that assumed it."
+                    )
+                });
+            assert!(
+                line.contains("optional = true"),
+                "{name} must stay `optional = true` in crates/protocol/Cargo.toml. Without that it \
+                 is compiled into libldmux_session.so for Android, which has neither a Unix socket \
+                 nor a uid, and the phone build fails to link."
+            );
+        }
+    }
+
+    #[test]
+    fn host_ipc_is_the_default_so_no_host_binary_lost_a_module() {
+        // The daemon, the keeper, the CLI and the attach client all resolve paths and call the
+        // keeper over a Unix socket. If `host-ipc` left the default set, every one of them would
+        // stop compiling — which is the safe direction of failure, but it has to be a decision
+        // rather than an accident, so the default is asserted here.
+        let manifest = manifest();
+        let mut features = section(&manifest, "features");
+        features.retain(|l| l.trim_start().starts_with("default ="));
+        let default = features
+            .first()
+            .expect("crates/protocol/Cargo.toml must declare `default` in its [features] section");
+        assert!(
+            default.contains("host-ipc"),
+            "`host-ipc` must stay in the default feature set: it is what gives the daemon, the \
+             keeper, the CLI and the attach client their Unix sockets and path resolution."
+        );
+    }
+}
 
 #[cfg(test)]
 mod size_tests {

@@ -113,21 +113,29 @@ internal const val LAUNCHER_TRIES = 300
 internal const val LAUNCHER_RETRY_MS = 400L
 
 /**
- * How long the app may be off screen before this phone lets go of the shell it is showing.
+ * The shell a rebuilt or resumed connection should come back to.
  *
- * **A claim means "this screen is showing that shell"**, and the desktop window that was displaced
- * sits on "press r to take back" for as long as the claim lives. The tailnet route drops the page
- * (and the claim) the moment the app leaves the screen, because its re-attach costs nothing. On
- * this route a detach is a record and coming back is an attach plus a full screen, so an immediate
- * release would make every glance at another app cost the airtime of a session — and a phone is
- * glanced at constantly.
+ * **The one rule, and it is a pure function so it can be tested without a screen.** The id had a
+ * single value for two years — the empty string — because nothing ever assigned it, and three
+ * things depended on it going the other way: a rebuilt connection re-attaches it (one record
+ * instead of a list and a tap), a platform release comes back to it, and the surface is keyed on it
+ * so one shell's rows are never drawn under another's name.
  *
- * Ten seconds is a glance and not a use: past it, the shell is nobody's here, and the desk gets it
- * back without a keystroke. The long absence is a different mechanism ([AppLifecycle]'s release
- * grace closes the whole connection), so this only decides who the shell belongs to, never whether
- * the link is up.
+ * The failure it caused is worse than a lost place. Leaving the app for ten seconds released the
+ * claim and cleared the mirror while the screen still believed it was attaching to a shell, so the
+ * return found no id, asked for nothing, and sat on "asking host for the shell" with no way out
+ * but leaving the screen. With the id kept, the return re-attaches the shell it was on.
+ *
+ * [attached] is what the link says it is on, which is the truth once an attach is answered;
+ * [onList] is the user standing on the launcher, which is the only place the place is given up.
+ * [previous] survives the moment between opening a shell and the host's answer, which is exactly
+ * when a rebuild can happen.
  */
-internal const val CLAIM_RELEASE_MS = 10_000L
+internal fun resumeShellFor(attached: String?, onList: Boolean, previous: String): String = when {
+    onList -> ""
+    attached != null -> attached
+    else -> previous
+}
 
 /**
  * How long the measured grid must stop moving before it is sent to the host.
@@ -343,31 +351,6 @@ fun MeshTerminalScreen(
             attempt += 1
         } else ended = true
     }
-    // **The claim follows the screen, on this route too.**
-    //
-    // The desk window that this phone displaced is told to wait for `r`; it comes back by itself
-    // only when the shell has no holder left. Nothing here released one, so a phone left in a
-    // pocket kept the shell until the whole connection was torn down minutes later — the operator's
-    // report was a desktop that stayed on "press r to take back" after the phone had stopped
-    // looking at it. `claimGivenUp` is what tells the return to take it again: arriving is the
-    // consent (ADR-0010), the same rule the tailnet route applies.
-    var claimGivenUp by remember(conn) { mutableStateOf(false) }
-    LaunchedEffect(AppLifecycle.foreground) {
-        if (!AppLifecycle.foreground) {
-            delay(CLAIM_RELEASE_MS)
-            // Still away: this phone is not using the shell, so the desk may.
-            if (!AppLifecycle.foreground) {
-                claimGivenUp = conn.driver.releaseShell()
-            }
-        } else if (claimGivenUp) {
-            claimGivenUp = false
-            // The page keeps its picture while the claim is gone, so a return re-attaches rather
-            // than landing on the list. A desk window that took the shell meanwhile answers
-            // `held`, and the screen's own take-back is then the choice it has always been.
-            val id = resumeShell
-            if (!showList && id.isNotEmpty()) conn.driver.open(id)
-        }
-    }
     DisposableEffect(conn) {
         // **A long stay off screen is not a pause the link survives.** The tailnet route lets go of
         // its shells after the platform's grace and reconnects on return; this route now does the
@@ -464,6 +447,23 @@ fun MeshTerminalScreen(
         }
     }
     val shells by conn.driver.shells.collectAsState()
+    // **Which shell this screen is on, kept where a rebuild can read it.** One rule, in one place
+    // ([resumeShellFor]), driven by the link's own idea of what is attached. Assigning it here
+    // rather than at each of the three call sites that open a shell is what makes `create` and a
+    // page switch work without a fourth and fifth copy of the same line.
+    //
+    // **The ten-second claim release is gone.** It released the shell when the app left the screen
+    // — a `Detach`, the mirror dropped, and the page still in `Attached` with nothing to attach —
+    // so a return could not find the shell it had just let go of and sat on "asking host for the
+    // shell" until the app was force-stopped. A claim means "this screen is showing that shell",
+    // and the page *is* still showing it: a glance at another app is not a decision to give the
+    // shell away. The desk is not stranded either — the host expires a claim whose phone has gone
+    // (`LINK_GIVE_UP_MS` closes the connection, and a platform release takes the whole link), and
+    // the tailnet route's own rule is that leaving the *shell* is the act that releases it, which
+    // here is the launcher button and the page close.
+    LaunchedEffect(shells.current, showList) {
+        resumeShell = resumeShellFor(shells.current, showList, resumeShell)
+    }
     // The marks the host replayed with this attach: drawn beside the rows, gone once the shell is
     // opened. An empty map is "nothing to say", which is what a host below version 9 always means.
     val marks by conn.driver.marks.collectAsState()
@@ -846,6 +846,14 @@ fun MeshTerminalScreen(
     var drawnForOpen by remember { mutableStateOf<String?>(null) }
     /** The last grid the surface measured, so a keyboard transition can re-assert it. */
     var lastGrid by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    /**
+     * The newest grid the surface reported, before the keyboard gate decides whether it is the one.
+     *
+     * Held beside [lastGrid] rather than inside the surface's callback because the gate waits, and a
+     * coroutine cannot `remember` anything: what it must fit is the newest measurement, not the one
+     * that started the wait.
+     */
+    var measuredGrid by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     LaunchedEffect(shells.current, source.heldScreenWaiting) {
         val id = shells.current ?: return@LaunchedEffect
         if (drawnForOpen == id || !source.heldScreenWaiting) return@LaunchedEffect
@@ -1217,11 +1225,13 @@ fun MeshTerminalScreen(
                         // [IME_WAIT_MS] bounds the wait so a keyboard that never appears cannot
                         // leave the host at the pty's old size for ever.
                         val opened = TimeSource.Monotonic.markNow()
+                        // **The newest measurement, not the one this callback was given.** The gated
+                        // coroutine below waits for the keyboard and then fits the pty, and the grid
+                        // it must fit is whatever the surface measured last — not the keyboard-DOWN
+                        // size that started the wait. Capturing `c` and `r` sent the stale number
+                        // every time the wait had actually waited for something.
                         source.onGrid = grid@{ c, r ->
-                            lastGrid = c to r
-                            // Remembered past the process, so a cold start can state it too: see
-                            // `LdmuxConfig.meshLastGrid`.
-                            onGridMeasured(c, r)
+                            measuredGrid = c to r
                             // **Leaving is not a resize.** The list shrinks the layout, the surface
                             // reports the smaller grid, and the pending job then sent a `Resize`
                             // for a shell this screen had just let go of — which the host applied
@@ -1251,12 +1261,18 @@ fun MeshTerminalScreen(
                                             snapshotFlow { imeUp }.first { it }
                                         }
                                     }
-                                } else {
-                                    conn.driver.setGrid(c, r)
-                                    return@launch
+                                    delay(GRID_SETTLE_MS)
                                 }
-                                delay(GRID_SETTLE_MS)
-                                conn.driver.setGrid(c, r)
+                                // **Recorded only here, and only after the gate.** `lastGrid` is
+                                // what the next attach states and `meshLastGrid` is what the next
+                                // cold start states, so a keyboard-DOWN measurement written into
+                                // either of them outlives the moment it was wrong: the shell is
+                                // then fitted to a pane the user never saw, and the phone's own
+                                // `GridPlacement` draws 32 rows of grid in a 19-row viewport.
+                                val latest = measuredGrid ?: (c to r)
+                                lastGrid = latest
+                                onGridMeasured(latest.first, latest.second)
+                                conn.driver.setGrid(latest.first, latest.second)
                             }
                         }
                         onDispose {

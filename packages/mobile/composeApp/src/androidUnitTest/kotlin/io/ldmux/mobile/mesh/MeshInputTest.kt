@@ -293,10 +293,15 @@ class MeshInputTest {
     }
 
     @Test
-    fun `the local echo shows characters, a line end, a tab and an erase, and nothing else`() {
+    fun `the local echo shows characters, a line-end glyph, a tab glyph and an erase, and nothing else`() {
         // What the fake draws has to be characters a terminal can show. A named key the shell
         // interprets — an arrow, Escape, C-c — renders as nothing, because painting one would
         // invent an effect the shell has not run. They are counted instead.
+        //
+        // **The drawn draft is glyphs, not control characters.** It is written into a live engine,
+        // and a `\n` on the last row scrolls that engine, so the screen the operator is reading
+        // moved out from under their typing before the command had even been sent. `⏎` and `⇥` say
+        // the same thing and cannot scroll anything; the erase still erases.
         val handle = MeshTerminalHandle(MeshInputBatcher(), { 0L })
         handle.sendText("ls")
         handle.sendKey("Enter")
@@ -309,7 +314,16 @@ class MeshInputTest {
         handle.sendKey("Up")
         handle.sendKey("C-c")
         handle.refreshPending()
+        // The characters, byte-faithful: what will be sent, plus the keys that have a visible
+        // effect. `ls`, a line end, `a`, a tab, and two backspaces.
         assertEquals("ls\r\na\t\b \b", handle.echoText)
+        // And **the draft drawn on the row** is where a line end becomes a glyph, because a raw one
+        // scrolls the live screen (MeshScreenBytes.draftEcho).
+        // The tab stays as a character and the second backspace is what removes it from the draft,
+        // so the picture is the line end's glyph and the text before it.
+        val drawn = draftEcho(handle.echoText, 0, 40)
+        assertEquals("ls${ENTER_GLYPH}a", drawn)
+        assertTrue(drawn.none { it.code < 0x20 }, "nothing drawn can move the screen")
         // Four characters ("ls" and "a\t") and four keys (Enter, BSpace, Up, C-c).
         assertEquals("4 characters and 4 keys", handle.heldSummary)
     }

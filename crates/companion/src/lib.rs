@@ -19,6 +19,8 @@
 //!   builds for a send (`[0x3E][path byte][path][record]`).
 //! - [`session`] — one command at a time, with a deadline, and pushes kept apart
 //!   from replies.
+//! - [`window`] — the host's answer contract for that one-command window: which codes
+//!   complete which command, read from the firmware's own dispatch.
 //!
 //! Everything here is synchronous on purpose. The protocol is a serial
 //! conversation with one question in flight; an async wrapper would add a state
@@ -29,6 +31,7 @@ pub mod codec;
 pub mod framing;
 pub mod link;
 pub mod session;
+pub mod window;
 
 pub use codec::{
     APP_TARGET_VERSION, AdvertPath, DeviceInfo, FloodScope, KNOWN_SCOPE_TAGS, PacketView,
@@ -45,3 +48,4 @@ pub use codec::{
 pub use framing::{FrameReader, MAX_PAYLOAD, encode};
 pub use link::{ByteLink, MemoryLink, SerialLink};
 pub use session::{Companion, SessionError, error_meaning};
+pub use window::HOST_COMMANDS;

@@ -1542,7 +1542,13 @@ mod tests {
             .await
             .expect("message 2")
             .expect("open");
-        let mut phone = ldmux_session::Session::new(init.finish(&m2).unwrap(), 172, 0).unwrap();
+        let mut phone = ldmux_session::Session::new(
+            init.finish(&m2[..ldmux_session::bootstrap::MSG2_CONTENT_LEN])
+                .unwrap(),
+            172,
+            0,
+        )
+        .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while runtime.snapshot().session.state != "established" {
             assert!(Instant::now() < deadline, "never established");
@@ -1682,7 +1688,13 @@ mod tests {
             .await
             .expect("the daemon answers message 1")
             .expect("the carrier is open");
-        let mut phone = ldmux_session::Session::new(init.finish(&m2).unwrap(), 172, 0).unwrap();
+        let mut phone = ldmux_session::Session::new(
+            init.finish(&m2[..ldmux_session::bootstrap::MSG2_CONTENT_LEN])
+                .unwrap(),
+            172,
+            0,
+        )
+        .unwrap();
         let established = Instant::now() + Duration::from_secs(5);
         while runtime.snapshot().session.state != "established" {
             assert!(Instant::now() < established, "the session never established");

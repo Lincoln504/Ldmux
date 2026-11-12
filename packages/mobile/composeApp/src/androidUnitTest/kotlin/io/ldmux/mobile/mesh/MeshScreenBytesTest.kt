@@ -1,5 +1,6 @@
 package io.ldmux.mobile.mesh
 
+import io.ldmux.mobile.term.displayWidthOf
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -89,7 +90,91 @@ class MeshScreenBytesTest {
     }
 
     @Test
-    fun `characters outside the basic plane are kept whole and count once toward the grid`() {
-        assertEquals("\uD83D\uDE00\uD83D\uDE00b", cleanRow("\uD83D\uDE00\uD83D\uDE00bcd", 3))
+    fun `characters outside the basic plane are kept whole`() {
+        // A surrogate pair is one character and must never be split: half of one is not text.
+        val out = cleanRow("\uD83D\uDE00x", 4)
+        assertEquals("\uD83D\uDE00x", out)
+        assertEquals(3, out.length, "the pair survives as two UTF-16 units")
+    }
+
+    @Test
+    fun `a wide character costs two cells, which is what keeps a row inside the grid`() {
+        // Counting code points let a row of ideographs reach the grid one cell too wide, and with
+        // autowrap off the last cell was then overwritten on top of itself. Cells, not characters:
+        // four cells hold two ideographs, and the third does not fit and is left out whole.
+        assertEquals("\u4F60\u597D", cleanRow("\u4F60\u597D\u4E16", 4))
+        assertEquals("\u4F60", cleanRow("\u4F60\u597D\u4E16", 3), "a wide glyph is never cut in half")
+        // An emoji takes two cells for the same reason.
+        assertEquals("\uD83D\uDE00", cleanRow("\uD83D\uDE00\uD83D\uDE00bcd", 3))
+    }
+
+    @Test
+    fun `a combining mark takes no cell at all`() {
+        // "e" + combining acute is one cell, so a two-cell row holds two of them.
+        val composed = "e\u0301e\u0301e\u0301"
+        assertEquals("e\u0301e\u0301", cleanRow(composed, 2))
+    }
+
+    // ── the unsent draft, drawn on the row the cursor is on ────────────────
+
+    @Test
+    fun `a draft's line ends and tabs are glyphs, never control characters`() {
+        // The reason this function exists: a `\n` written into the engine on the last row scrolls
+        // the whole screen, so the operator's typing pushed the shell's own output up a line before
+        // the command had been sent.
+        assertEquals("ls${ENTER_GLYPH}", draftEcho("ls\r\n", 0, 20))
+        assertEquals("5${TAB_GLYPH}x", draftEcho("5\tx", 0, 20))
+        assertTrue(draftEcho("a\nb", 0, 20).none { it.code < 0x20 })
+    }
+
+    @Test
+    fun `a draft longer than the row keeps its end and says that the front is cut`() {
+        // 20 columns, cursor at column 0, so 20 cells are available and one of them is the ellipsis.
+        val draft = (1..120).map { ('a'.code + it % 26).toChar() }.joinToString("")
+        val drawn = draftEcho(draft, 0, 20)
+        assertEquals(20, displayWidthOf(drawn), "exactly the room there is")
+        assertTrue(drawn.startsWith(ELLIPSIS), "the front is what was dropped")
+        assertEquals(draft.takeLast(19), drawn.drop(1), "the end of the draft is what stays visible")
+    }
+
+    @Test
+    fun `the window starts at the cursor, not at column zero`() {
+        // The echo is written where the engine's cursor already is, so a prompt of 12 cells leaves
+        // 8 on the row. Short enough, and it is drawn as it is with no ellipsis at all.
+        assertEquals("abcdef", draftEcho("abcdef", 12, 20))
+        val drawn = draftEcho("abcdefghijkl", 12, 20)
+        assertEquals(8, displayWidthOf(drawn), "eight cells are left, and the ellipsis spends one")
+        assertEquals(ELLIPSIS + "fghijkl", drawn)
+    }
+
+    @Test
+    fun `a window never splits a wide glyph, even when the room is odd`() {
+        val drawn = draftEcho("\u4F60\u597D\u4E16\u754C", 0, 5)
+        // 5 cells: the ellipsis plus two ideographs is 5, so it keeps the last two whole ones.
+        assertEquals(ELLIPSIS + "\u4E16\u754C", drawn)
+        assertEquals(5, displayWidthOf(drawn))
+    }
+
+    @Test
+    fun `a backspace in the draft erases the cell before it`() {
+        assertEquals("a", draftEcho("ab\b \b", 0, 20), "the b, the space and the second backspace")
+        // And it cannot erase past the start of the draft.
+        assertEquals("", draftEcho("\b\b", 0, 20))
+    }
+
+    @Test
+    fun `a draft cannot carry an escape of its own`() {
+        // The draft is a paste's text; a hostile `ESC[2J` in it would clear the phone's copy of the
+        // host's screen, and an OSC 52 would reach the clipboard hook.
+        val drawn = draftEcho("a\u001b]52;c;ZXZpbA==\u0007b", 0, 40)
+        assertEquals("a]52;c;ZXZpbA==b", drawn)
+    }
+
+    @Test
+    fun `nothing visible draws nothing at all`() {
+        assertEquals("", draftEcho("", 0, 20))
+        // A lone arrow key renders as nothing (MeshInput shares that decision), and an empty echo
+        // must leave the engine's pen alone rather than open and close a faint run for no text.
+        assertEquals("", draftEcho("\u0001\u0002", 0, 20))
     }
 }

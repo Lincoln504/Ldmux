@@ -5,9 +5,20 @@ edition = "2024"
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "The shared vocabulary of the radio route: the carrier seam, the record limits and the radio state. Carries no radio knowledge."
+description = "The shared vocabulary of the radio route: the carrier seam, the record limits, the radio state, and the airtime arithmetic both ends budget against. Carries no device knowledge."
+
+[features]
+# The simulated mesh. It is a test instrument, so it is off by default and must never reach a
+# shipping binary by accident — but it lives in this crate because it models this crate's own wire,
+# and a copy anywhere else would drift from it.
+sim = []
 
 [dependencies]
+# The deduplication ring and the packet identity: SHA-256 is what MeshCore itself hashes with
+# (`Packet::calculatePacketHash`), so the simulator's duplicate suppression is the firmware's, not an
+# approximation of it. Pure Rust, and already in the tree through `ldmux-session` and
+# `ldmux-companion`, so this adds no compiled C and no new licence.
+sha2 = "0.10"
 
 [lints]
 workspace = true

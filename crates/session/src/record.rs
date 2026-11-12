@@ -29,7 +29,22 @@ pub const OVERHEAD: usize = CLEAR_HEADER + INNER_HEADER + TAG;
 /// Application bytes in a record of the carrier's ceiling.
 pub const APPLICATION_BYTES: usize = RECORD_MAX - OVERHEAD;
 
-pub const KIND_TRANSPORT: u8 = 0x13;
+/// The transport record's kind for a record the **phone** sends.
+///
+/// Defined in [`crate::direction`] as [`KIND_UP`](crate::direction::KIND_UP), because a record's
+/// direction is a fact the filter needs before it decrypts anything. This alias is what every caller
+/// that predates the direction split uses, and it is the same byte: one definition, two names.
+///
+/// A host's record opens with [`KIND_DOWN`](crate::direction::KIND_DOWN) instead. Both are transport
+/// records and both open here; the split exists so that a half-duplex radio cannot mistake its own
+/// transmission come back off a repeater for the peer's (see [`crate::direction`]).
+pub use crate::direction::KIND_UP as KIND_TRANSPORT;
+
+/// Whether `kind` is one of the two transport record kinds this layer opens.
+#[must_use]
+pub const fn is_record_kind(kind: u8) -> bool {
+    kind == crate::direction::KIND_UP || kind == crate::direction::KIND_DOWN
+}
 
 /// Application bytes in a record of `record_limit` bytes (the size `BIND_OK` advertised).
 #[must_use]
@@ -121,9 +136,49 @@ pub struct Opened {
     pub counter: u32,
 }
 
-/// Encrypt one record. `record_limit` is the size the host (or the radio) allows for one record.
+/// Encrypt one record the **phone** sends. `record_limit` is the size the carrier allows.
+///
+/// A host's record must open with [`crate::direction::KIND_DOWN`], so a host calls [`seal_as`]; this
+/// form is kept for the callers that predate the direction split and is exactly `seal_as` with the
+/// phone's kind.
+///
+/// # Errors
+///
+/// [`RecordError::TooLong`] when the payload does not fit, [`RecordError::SealFailed`] on a key or
+/// nonce fault, [`RecordError::CounterExhausted`] when the 32-bit counter is spent.
 pub fn seal(
     transport: &StatelessTransportState,
+    index: u8,
+    counter: u32,
+    flags: u8,
+    shell: u8,
+    app: &[u8],
+    record_limit: usize,
+) -> Result<Vec<u8>, RecordError> {
+    seal_as(
+        transport,
+        KIND_TRANSPORT,
+        index,
+        counter,
+        flags,
+        shell,
+        app,
+        record_limit,
+    )
+}
+
+/// Encrypt one record under a chosen transport kind.
+///
+/// # Errors
+///
+/// The same as [`seal`].
+// Eight parameters, and every one of them is a field of the record being built: the transport kind,
+// the session index, the counter, the two inner header bytes, the payload and the ceiling. Folding
+// them into a struct would only move the same eight values into a struct literal at each call site.
+#[allow(clippy::too_many_arguments)]
+pub fn seal_as(
+    transport: &StatelessTransportState,
+    kind: u8,
     index: u8,
     counter: u32,
     flags: u8,
@@ -150,7 +205,7 @@ pub fn seal(
         .map_err(|_| RecordError::SealFailed)?;
     ct.truncate(n);
     let mut out = Vec::with_capacity(CLEAR_HEADER + ct.len());
-    out.push(KIND_TRANSPORT);
+    out.push(kind);
     out.push(index);
     out.extend_from_slice(&counter.to_le_bytes());
     out.extend_from_slice(&ct);
@@ -165,7 +220,7 @@ pub fn open(
     window: &mut ReplayWindow,
     record: &[u8],
 ) -> Result<Opened, RecordError> {
-    if record.len() < OVERHEAD || record[0] != KIND_TRANSPORT {
+    if record.len() < OVERHEAD || !is_record_kind(record[0]) {
         return Err(RecordError::Malformed);
     }
     if record[1] != index {
@@ -245,11 +300,16 @@ mod tests {
     /// that heuristic. This test is what keeps a future record kind from quietly joining the set.
     #[test]
     fn the_record_kind_cannot_be_mistaken_for_a_media_packet() {
-        for routed_away in [0x53u8, 0x56, 0x57, 0x72] {
-            assert_ne!(
-                KIND_TRANSPORT, routed_away,
-                "a record beginning {routed_away:#04x} would be routed to the second radio profile"
-            );
+        for kind in [KIND_TRANSPORT, crate::direction::KIND_DOWN] {
+            assert!(is_record_kind(kind));
+            for routed_away in [0x53u8, 0x56, 0x57, 0x72] {
+                assert_ne!(
+                    kind, routed_away,
+                    "a record beginning {routed_away:#04x} would be routed to the second radio profile"
+                );
+            }
         }
+        assert!(!is_record_kind(crate::direction::KIND_MSG1));
+        assert!(!is_record_kind(0x00));
     }
 }

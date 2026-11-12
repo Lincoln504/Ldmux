@@ -50,6 +50,11 @@ class MeshTermDriverTest {
         override suspend fun refreshRoute() {
             routeRefreshes++
         }
+        /** Every `sessionUp` the driver stated, in order, so the link's own contract is checkable. */
+        val sessionUp = ArrayList<Boolean>()
+        override fun sessionUp(established: Boolean) {
+            sessionUp += established
+        }
     }
 
     /** What the driver queued, and what it was told to deliver. */
@@ -446,6 +451,32 @@ class MeshTermDriverTest {
 
     private fun stream(vararg m: TermMessage): ByteArray = m.flatMap { it.encode().toList() }.toByteArray()
     private fun data(vararg m: TermMessage) = Received.Data(listOf(Delivered(0, stream(*m))))
+
+    /**
+     * **The link is told when the session is up and when it is gone, because only the driver knows.**
+     *
+     * The carrier's flood budget is refilled while a session is established and parked at its burst
+     * otherwise: it is what paces a terminal so it cannot turn every record into a broadcast. The
+     * signal was never sent with `true` anywhere, so the bucket sat full for the life of the app and
+     * metered nothing, and the only evidence was a link that flooded as readily as it sent direct.
+     */
+    @Test
+    fun the_link_is_told_when_a_session_starts_and_when_it_ends(): Unit = runBlocking {
+        val d = driver()
+        d.start()
+        assertEquals(listOf<Boolean>(), gw.sessionUp, "a handshake is not a session")
+        d.onRecord(byteArrayOf(0x12, 0x00, 0x01))
+        assertEquals(listOf(true), gw.sessionUp, "the session the answer finished is the link's to know")
+
+        // And the other end of it: a session the host stopped answering is gone, and the budget must
+        // go back to the carrier's own cheap-attempt rule.
+        sess.health = SessionHealth(failed = true, peerClosed = false, needsRekey = false, pending = 3, dropped = 0)
+        d.tick()
+        assertEquals(listOf(true, false), gw.sessionUp, "a dead session says so")
+
+        // Two states, never a stream of repeats: the carrier's bucket is not a counter.
+        assertEquals(2, gw.sessionUp.size)
+    }
 
     private suspend fun deliver(d: MeshTermDriver, vararg m: TermMessage) {
         sess.nextReceive = data(*m)

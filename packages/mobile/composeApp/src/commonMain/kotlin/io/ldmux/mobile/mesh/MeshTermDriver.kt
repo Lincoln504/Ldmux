@@ -801,6 +801,9 @@ class MeshTermDriver(
             Blame.Route -> true
             Blame.RouteUnlessDirect -> (gateway.routeHops ?: 0) > 0
         }
+        // The other end of the `true` above: with no session there is nothing for the flood
+        // budget to pace, and the carrier's cheap-attempt rule is the one that applies.
+        gateway.sessionUp(false)
         gateway.forgetRoute(blame = lostRoute)
         forgetMarkPage()
         terminalView = MeshTermView.LinkDown(state)
@@ -915,6 +918,12 @@ class MeshTermDriver(
                 publish(); return@withLock
             }
             session = s
+            // **The link is told, because only the driver knows it.** The carrier's flood budget
+            // is refilled while a session is up and parked at its burst otherwise, and it decides
+            // which carrier a record may use; `sessionUp` was never called with `true` anywhere,
+            // so the bucket sat at its four tokens for the life of the app and paced nothing — a
+            // terminal could flood every record it sent.
+            gateway.sessionUp(true)
             sessionLimit = gateway.uplinkRecordMax
             // **The first retransmission covers the whole path.** Six airtimes per hop is
             // MeshCore's own direct-send budget; a flat six is right for a neighbour and too short
@@ -1675,31 +1684,6 @@ class MeshTermDriver(
         get() = (pick == Pick.Attached || pick == Pick.Probing) && mirror.profile == null &&
             terminalView == null && session != null
 
-    /**
-     * Let the shell go while keeping the session.
-     *
-     * The tailnet launcher lets a shell go when its page closes, and the host then gives the shell
-     * back to whoever held it. The mesh route kept the attach while its list was on screen, so a
-     * desk window stayed locked out and its pty stayed at the phone's width after the user had
-     * stopped looking at it. A `Detach` releases the shell and the host restores the grid the phone
-     * displaced; the session itself stays, which is what keeps the next open free of a handshake.
-     */
-    suspend fun releaseShell(): Boolean = lock.withLock {
-        if (session == null || terminalView != null) return@withLock false
-        if (attachedId == null && pick != Pick.Attached) return@withLock false
-        queue(TermMessage.Detach); pump()
-        // The list is about to arrive; it must not take the shell straight back.
-        listHoldsNothing = true
-        attachedId = null
-        // **The picture stays and the mirror goes.** The page keeps the last frame it painted (a
-        // claim released because the app left the screen is not a reason to blank a shell the user
-        // is coming back to), but the rows are no longer the host's idea of this phone's screen, so
-        // the re-attach has to start from a full one.
-        mirror = RowMirror(); held.clear(); lastEpoch = null; painted = false; resyncing = false
-        publishShells(); publish()
-        true
-    }
-
     /** Leave: tell the host, close the session once everything is acknowledged, free the native handle. */
     suspend fun detach() = lock.withLock {
         val s = session
@@ -1709,6 +1693,7 @@ class MeshTermDriver(
         }
         handshake?.abandon(); handshake = null
         s?.close(); session = null
+        gateway.sessionUp(false)
         if (terminalView == null) terminalView = MeshTermView.Idle
         publish()
     }

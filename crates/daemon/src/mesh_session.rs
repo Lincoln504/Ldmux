@@ -21,8 +21,9 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use ldmux_session::arq::{Delivered, Limits, Stats};
+use ldmux_session::bootstrap::{AnswerCache, Answered};
 use ldmux_session::record::RecordError;
-use ldmux_session::handshake::{self, HandshakeError, Keypair, PairingEntry, Responder};
+use ldmux_session::handshake::{self, Keypair, PairingEntry, Responder};
 use ldmux_session::{Inbound, Sealed, Session};
 
 /// Records an accepted handshake before it is answered.
@@ -96,6 +97,8 @@ pub struct SessionHost {
     /// Records this end opened successfully, which is how a session shows it is carrying.
     records_in: u64,
     responder: Responder,
+    /// What this end already answered, so a repeated initiation costs an answer and nothing else.
+    answers: AnswerCache,
     pairing: PairingEntry,
     persist: Persister,
     session: Option<Session>,
@@ -128,6 +131,7 @@ impl SessionHost {
     ) -> Self {
         Self {
             responder: Responder::new(static_key),
+            answers: AnswerCache::plan_default(),
             pairing,
             persist,
             airtime_ms,
@@ -191,7 +195,15 @@ impl SessionHost {
     /// taken, and a record still in flight under the old key fails its tag rather than opening.
     pub fn on_record(&mut self, now_ms: u64, wall_ms: u64, record: &[u8]) {
         match record.first().copied() {
-            Some(handshake::KIND_MSG1) => self.on_handshake(wall_ms, now_ms, record),
+            // One initiation, whole or in two parts. Both forms are the phone's, and both are
+            // answered by the same idempotent cache (`RC-5`).
+            Some(handshake::KIND_MSG1 | ldmux_session::direction::KIND_MSG1_FRAG) => {
+                self.on_handshake(wall_ms, now_ms, record);
+            }
+            // The host originates both of these, so hearing one is this end's own transmission
+            // coming back off a repeater. Named rather than falling through, because "ignored by
+            // direction" and "a kind we do not know" are different facts about the link.
+            Some(handshake::KIND_MSG2 | ldmux_session::direction::KIND_NEED_HANDSHAKE) => {}
             Some(ldmux_session::record::KIND_TRANSPORT) => {
                 let Some(session) = self.session.as_mut() else {
                     // Transport data with no session: stale after a restart. Not an error
@@ -279,37 +291,73 @@ impl SessionHost {
         updated.pinned = None;
         (self.persist)(&updated)?;
         self.pairing = updated;
+        // A new grant is a new pin, so what was answered under the old one must not be replayed
+        // back into a session. Clearing here is what makes "unpair, then pair again" clean.
+        self.answers.clear();
         Ok(())
     }
 
+    /// Answer one initiation, of either form, from the cache that makes it idempotent.
+    ///
+    /// **A repeated initiation is an answer, not a session.** Three copies of one `msg1` used to
+    /// build three sessions with three indices, three outboxes cleared and three `fsync`s, so the
+    /// phone and the host agreed on a session only when the arrival order happened to line up — and
+    /// when it did not, every record the phone sent was refused by index or by tag (`RC-5`). The
+    /// cache answers a repeat with the same answer it gave the first time, and nothing else changes:
+    /// no session built, no index advanced, no outbox cleared, nothing written to disk.
+    ///
+    /// It also carries the two things a repeated initiation must never do: end a live session (an
+    /// older initiation is refused as superseded) and amplify (one answer per peer per
+    /// `ANSWER_RATE_MS`).
     fn on_handshake(&mut self, wall_ms: u64, now_ms: u64, msg1: &[u8]) {
         let index = self.next_index;
-        let accepted =
-            match self
-                .responder
-                .accept(std::slice::from_ref(&self.pairing), wall_ms, msg1, index)
-            {
-                Ok(a) => a,
-                Err(e) => {
-                    self.refused += 1;
-                    self.last_error = Some(format!("handshake refused: {}", describe(e)));
-                    return;
-                }
-            };
+        let answered = self.answers.answer(
+            &self.responder,
+            std::slice::from_ref(&self.pairing),
+            index,
+            now_ms,
+            wall_ms,
+            msg1,
+        );
+        let answered = match answered {
+            Ok(a) => a,
+            Err(refusal) => {
+                self.refused += 1;
+                self.last_error = Some(format!("handshake refused: {}", refusal.describe()));
+                return;
+            }
+        };
+        let (reply, accepted) = match answered {
+            Answered::Cached { reply } => {
+                // The live session stands and its answer is re-sent with a fresh nonce: the copy
+                // before this one may have been lost, and one record is what a retry costs.
+                self.outbox.push_back(reply);
+                return;
+            }
+            Answered::Held => return,
+            Answered::Fresh {
+                reply,
+                established,
+                remote_static,
+                timestamp_ms,
+                pairing,
+                ..
+            } => (
+                reply,
+                (established, remote_static, timestamp_ms, pairing),
+            ),
+        };
+        let (established, remote_static, timestamp_ms, pairing) = accepted;
         let mut updated = self.pairing.clone();
-        updated.pinned = Some(accepted.remote_static);
-        updated.last_timestamp_ms = accepted.timestamp_ms;
+        updated.pinned = Some(remote_static);
+        updated.last_timestamp_ms = timestamp_ms;
         if let Err(e) = (self.persist)(&updated) {
             self.refused += 1;
             self.last_error = Some(format!("handshake refused: could not record it ({e})"));
             return;
         }
-        match Session::with_airtime(
-            accepted.established,
-            self.record_limit,
-            now_ms,
-            self.airtime_ms,
-        ) {
+        debug_assert_eq!(pairing, 0, "one pairing file, so the only match is index 0");
+        match Session::with_airtime(*established, self.record_limit, now_ms, self.airtime_ms) {
             Ok(session) => {
                 // **A replaced session says how long it lived.** The phone re-handshakes for two very
                 // different reasons — it lost a record or it decided the link was dead — and the
@@ -328,7 +376,7 @@ impl SessionHost {
                 self.pairing = updated;
                 self.session = Some(session);
                 self.outbox.clear();
-                self.outbox.push_back(accepted.reply);
+                self.outbox.push_back(reply);
                 self.next_index = self.next_index.wrapping_add(1).max(1);
                 self.handshakes += 1;
                 self.last_error = None;
@@ -499,17 +547,6 @@ impl SessionHost {
             budget_stalls: stats.budget_stalls,
             last_error: self.last_error.clone(),
         }
-    }
-}
-
-fn describe(e: HandshakeError) -> &'static str {
-    match e {
-        HandshakeError::Malformed => "malformed",
-        HandshakeError::BadFilter => "unknown or wrong pre-shared key",
-        HandshakeError::Stale => "timestamp outside the window (is the phone's clock right?)",
-        HandshakeError::Replay => "replayed or out-of-order timestamp",
-        HandshakeError::PinMismatch => "a different phone key presented the pairing's key",
-        HandshakeError::Crypto => "cryptographic failure",
     }
 }
 
@@ -767,7 +804,9 @@ mod tests {
             },
         );
         assert_eq!(out.len(), 1, "the reply goes out with no budget at all");
-        assert_eq!(out[0].len(), 50);
+        // The answer carries a trailing nonce so a retried copy is not dropped as a duplicate; the
+        // Noise content is the 50 bytes in front of it.
+        assert_eq!(out[0].len(), ldmux_session::bootstrap::MSG2_NONCED_LEN);
         assert!(!h.wants_poll(), "and nothing is left waiting");
 
         // Data, by contrast, is still gated: with the reply gone and no budget, the session record
@@ -943,7 +982,13 @@ mod tests {
             },
         );
         assert_eq!(reply.len(), 1, "the handshake reply is the only record");
-        let mut sender = Session::new(init.finish(&reply[0]).unwrap(), 172, 0).unwrap();
+        let mut sender = Session::new(
+            init.finish(&reply[0][..ldmux_session::bootstrap::MSG2_CONTENT_LEN])
+                .unwrap(),
+            172,
+            0,
+        )
+        .unwrap();
         sender.send(3, b"hello").unwrap();
         let records = sender
             .poll(
@@ -979,8 +1024,11 @@ mod tests {
         // The phone's timer fires: a second msg1, twelve hours later (the timestamp window
         // rejects a repeat of the first) and from the same key.
         let later = WALL + 12 * 60 * 60 * 1000;
+        // Twelve hours later on both clocks: the monotonic one is what the answer rate is measured
+        // against, and a second handshake is well past that window.
+        let later_now = 12 * 60 * 60 * 1000;
         let (_i2, m2) = Initiator::start(&phone, &gw_pub, &PSK, later).unwrap();
-        h.on_record(0, later, &m2);
+        h.on_record(later_now, later, &m2);
         assert_eq!(h.handshakes, 2, "the second handshake was accepted");
         assert!(h.established());
         assert_eq!(h.outbox.len(), 1, "and answered, with the old reply cleared");

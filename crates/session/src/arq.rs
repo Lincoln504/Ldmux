@@ -1,5 +1,13 @@
 //! Ordering, acknowledgement and bounded retransmission, above the AEAD record.
 //!
+//! **Superseded by [`crate::transaction`].** This layer is an ordered byte stream, so the only way to
+//! retransmit is by sequence number, and a record that no longer fitted a narrowed carrier had to be
+//! split mid-flight — the head re-sealed under the same `seq`, the tail pushed back to the front
+//! (`session.rs:259-271`, the `requeue_remainder` path below). When the original arrived and its
+//! acknowledgement did not, the peer's bytes were delivered twice and out of order, which is `RC-7`:
+//! "typed, pressed sync, went blank". It is kept only because the daemon's mesh loop still drives it;
+//! it is deleted at the same time as that loop, when `crate::transaction` takes over.
+//!
 //! A pure state machine: no sockets, no clock, no randomness. Time is an argument (`now_ms`,
 //! any monotonic millisecond count), and everything it wants to send is *returned* by
 //! [`Arq::poll`], never sent. That is what makes "no silent retry storm" provable.

@@ -46,8 +46,10 @@ use snow::{Builder, HandshakeState, StatelessTransportState};
 use zeroize::Zeroize;
 
 pub const SUITE: &str = "Noise_IKpsk2_25519_ChaChaPoly_SHA256";
-pub const KIND_MSG1: u8 = 0x11;
-pub const KIND_MSG2: u8 = 0x12;
+/// The record kinds this module reads and writes are defined once, in [`crate::direction`], which is
+/// also the filter that decides which end may send one. Re-exported here because a handshake is what
+/// they were written for and every caller already names them by this path.
+pub use crate::direction::{KIND_MSG1, KIND_MSG2};
 pub const MSG1_LEN: usize = 121;
 pub const MSG2_LEN: usize = 50;
 pub const FILTER_TAG: usize = 16;

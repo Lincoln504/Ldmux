@@ -444,6 +444,11 @@ class MeshTerminalHandle(
      *    correctly (a carriage move and an erase);
      *  - everything else — arrows, `Escape`, `C-c`, `Home`, `End` — renders as **nothing**.
      *
+     * **These are the characters, not the picture.** How they are drawn is [draftEcho]'s job, and
+     * it is the one that turns a line end into `⏎`: written raw into a live engine, a `\n` on the
+     * last row scrolls the screen and the operator's own screen moves out from under their typing.
+     * Keeping this function byte-faithful is what lets that decision live in one place.
+     *
      * That last line is the honest one. An arrow key sent to a shell is a request the shell
      * interprets: `Up` may recall history, `Left` may move the prompt's cursor, and `C-c` may
      * cancel the line. The emulator has no shell in it, so painting any of those locally would

@@ -532,9 +532,10 @@ class MeshTerminalSource(
      *
      * Two deliberate limits:
      *
-     *  - **Autowrap is off while the echo is written.** A long line that wrapped would scroll the
-     *    screen, and a row pushed into the local scrollback by a fake is history that never
-     *    happened. With DECAWM off the text stops at the last column instead.
+     *  - **Autowrap is off while the echo is written, and the draft is cut to the cells that are
+     *    left on this row.** A wrapped line would scroll the screen, and a row pushed into the local
+     *    scrollback by a fake is history that never happened; a draft written past the last column
+     *    overwrote that column on top of itself. [draftEcho] windows it instead.
      *  - **Nothing is echoed while the view is parked in history** ([MeshHistory.offset]). The
      *    user is reading rows above the live screen; typing into the middle of them would be a
      *    fake of the wrong screen.
@@ -543,41 +544,13 @@ class MeshTerminalSource(
      */
     fun echoHeld(text: String) {
         // Remembered, not just drawn: [paint] puts it back on the host's next screen, so a repaint
-        // while text is still held does not erase the text the bar is still counting. Sanitised
-        // here, because the same text goes into an engine that executes escape sequences and a
-        // paste is a stranger's bytes — the host's rows are cleaned by [meshScreenBytes], and the
-        // echo path has no such filter of its own.
-        echoText = echoSafe(text)
+        // while text is still held does not erase the text the bar is still counting. Remembered
+        // **as it is**, because turning it into cells needs the row and the width it will be drawn
+        // at, and those are known at paint time and not before ([draftEcho]). Nothing here is a
+        // safety filter: that lives in [draftEcho] too, which is the one thing that writes the
+        // draft into an engine that executes escape sequences.
+        echoText = text
         paint()
-    }
-
-    /**
-     * [text] with every character an engine would treat as a control removed, except the four the
-     * echo produces deliberately.
-     *
-     * `\r`, `\n`, `\t` and `\b` are the echo's own vocabulary ([MeshTerminalHandle.echoText]
-     * builds them for Enter, Tab and Backspace), so they stay. Everything else — C0, DEL, C1 — goes:
-     * a pasted `ESC[2J` would otherwise clear the phone's copy of the host's screen, and a pasted
-     * OSC 52 would reach the clipboard hook. The next paint would heal it, which is why this is
-     * display corruption rather than a leak; it is still corruption, and one dropped byte is a
-     * smaller lie than a repaint.
-     */
-    private fun echoSafe(text: String): String {
-        if (text.none { it.code < 0x20 || it.code == 0x7f || it.code in 0x80..0x9f }) return text
-        val sb = StringBuilder(text.length)
-        var i = 0
-        while (i < text.length) {
-            val c = text[i]
-            when {
-                c == '\r' || c == '\n' || c == '\t' || c == '\b' -> { sb.append(c); i++ }
-                c.code < 0x20 || c.code == 0x7f || c.code in 0x80..0x9f -> i++
-                c.isHighSurrogate() && i + 1 < text.length && text[i + 1].isLowSurrogate() -> {
-                    sb.append(c).append(text[i + 1]); i += 2
-                }
-                else -> { sb.append(c); i++ }
-            }
-        }
-        return sb.toString()
     }
 
     /** Draw the live screen, or the history window at [offset] rows above it. */
@@ -600,10 +573,18 @@ class MeshTerminalSource(
                 // provisional text looks provisional. That is the one thing a fake must never be —
                 // mistakable for the shell's own output, which is what the same characters will
                 // look like when the send comes back.
-                val payload = "\u001b[?7l\u001b[2m" + echoText + "\u001b[22m\u001b[?7h"
-                val held = payload.encodeToByteArray()
-                e.write(held, held.size)
-                echoing = true
+                //
+                // **[draftEcho] decides the cells, and it can decide them as empty.** A draft with
+                // nothing visible in it (a lone arrow key) draws nothing at all, and writing the
+                // escape pair around an empty string would leave the engine in the faint pen for
+                // nothing.
+                val drawn = draftEcho(echoText, screen.cursorX, cols)
+                if (drawn.isNotEmpty()) {
+                    val payload = "\u001b[?7l\u001b[2m" + drawn + "\u001b[22m\u001b[?7h"
+                    val held = payload.encodeToByteArray()
+                    e.write(held, held.size)
+                    echoing = true
+                }
             }
         } else {
             val window = screen.copy(

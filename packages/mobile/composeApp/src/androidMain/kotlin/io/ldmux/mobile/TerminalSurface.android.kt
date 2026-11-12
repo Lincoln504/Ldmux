@@ -251,7 +251,18 @@ actual fun TerminalSurfaceFor(
     val metrics = painter.metrics
     // The render transform and the touch hit-test are the same geometry, so it
     // is computed once, here, and both read it (term/GridPlacement.kt).
-    val placement = remember(frame?.cols, frame?.rows, metrics.width, metrics.height, viewport) {
+    // **The cursor's row is part of the placement.** A grid taller than the viewport is clipped
+    // rather than scaled, and a bottom anchor alone hides the cursor whenever a program put it
+    // somewhere other than the last row (`term/GridPlacement.kt`). Keyed on it because moving the
+    // cursor is what can now move the grid.
+    val placement = remember(
+        frame?.cols,
+        frame?.rows,
+        frame?.cursorY,
+        metrics.width,
+        metrics.height,
+        viewport,
+    ) {
         placeGrid(
             cellWidth = metrics.width,
             cellHeight = metrics.height,
@@ -259,6 +270,7 @@ actual fun TerminalSurfaceFor(
             rows = frame?.rows ?: 0,
             viewportWidth = viewport.width.toFloat(),
             viewportHeight = viewport.height.toFloat(),
+            cursorRow = frame?.cursorY ?: 0,
         )
     }
     val currentPlacement by rememberUpdatedState(placement)
@@ -897,6 +909,10 @@ actual fun TerminalSurfaceFor(
                         when (op) {
                             is InputOp.Keys -> for (name in op.names) controller.sendKey(name)
                             is InputOp.Text -> controller.sendText(op.value)
+                            // Through the paste path, so a program that asked for bracketed paste
+                            // gets the markers and a shell does not run the first line of a
+                            // paragraph before the rest is visible.
+                            is InputOp.Paste -> controller.paste(op.value)
                         }
                     }
                     // What the IME already reported, and not one character more.

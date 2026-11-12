@@ -20,6 +20,7 @@ class InputDeltaTest {
             when (it) {
                 is InputOp.Keys -> it.names.joinToString(",", prefix = "key:")
                 is InputOp.Text -> "text:${it.value}"
+                is InputOp.Paste -> "paste:${it.value}"
             }
         }
 
@@ -80,10 +81,14 @@ class InputDeltaTest {
 
     @Test
     fun text_is_split_around_the_keys_inside_it() {
-        assertEquals(
-            listOf("text:a", "key:Enter", "text:b", "key:Tab", "text:c"),
-            ops("", "a\nb\tc"),
-        )
+        // A tab is still a key inside a line: it must reach the pane as Tab so completion and a
+        // program's own bindings see a real TAB, and so it can never be predicted locally.
+        assertEquals(listOf("text:a", "key:Tab", "text:c"), ops("", "a\tc"))
+        // **But a line end with text after it is not a key.** This exact string used to read as
+        // `text:a`, `key:Enter`, `text:b`, `key:Tab`, `text:c` — five sends, and over the radio five
+        // records a half-duplex repeater collides. It arrived as one change, so it is one paste, and
+        // a paste is the only shape that can carry a block of lines without running them.
+        assertEquals(listOf("paste:a\nb\tc"), ops("", "a\nb\tc"))
     }
 
     @Test
@@ -116,6 +121,51 @@ class InputDeltaTest {
         assertEquals(listOf("text:ab"), ops("", "ab"))
         // A whole burst in one change is text; nothing is deleted, so nothing is a key.
         assertTrue(inputOpsFor("", "abcdefghij").all { it is InputOp.Text })
+        // And a burst with a line end in it is the one shape that is a paste, whatever produced it:
+        // a paste is defined by carrying text across lines, not by where it came from.
+        assertTrue(inputOpsFor("", "a\nb").all { it is InputOp.Paste })
+    }
+
+    // ── a block of text is a paste, not a run of Enter keys ─────────────────
+    //
+    // The IME reports a paste as one change to the field, and the delta used to walk it a character
+    // at a time and turn every line end into an `Enter` key. On the radio route that ran the first
+    // line of a paragraph as a command, one record per line, before the user had seen the rest; on
+    // the tailnet route it broke bracketed paste for the same reason.
+
+    @Test
+    fun a_two_line_paste_is_one_paste_and_no_enter_keys() {
+        val read = ops("", "echo one\necho two")
+        assertEquals(listOf("paste:echo one\necho two"), read)
+        assertTrue(read.none { it.startsWith("key:Enter") }, "a pasted line end is not a keypress")
+        // The bound of the rule, stated once: text after a line end is what makes a change a paste.
+        // One line and its terminator is still typing, because a program with bracketed paste would
+        // otherwise be left with the line sitting unexecuted in its prompt.
+        assertEquals(listOf("text:ls", "key:Enter"), ops("", "ls\n"))
+    }
+
+    @Test
+    fun a_three_line_paste_keeps_every_newline() {
+        assertEquals(
+            listOf("paste:a\nb\nc"),
+            ops("", "a\nb\nc"),
+        )
+    }
+
+    @Test
+    fun a_single_newline_is_still_the_enter_key() {
+        // The IME's own Enter arrives as one character appended to the field. It is a keypress and
+        // must reach the pane as one, so a program's own bindings see a real Return.
+        assertEquals(listOf("key:Enter"), ops("", "\n"))
+        assertEquals(listOf("key:Enter"), ops("", "\r"))
+    }
+
+    @Test
+    fun a_crlf_paste_does_not_become_a_double_line_end() {
+        // A clipboard on a platform that writes CRLF would otherwise paste a blank line between
+        // every line: the host turns each `\n` into a carriage return for a pane without bracketed
+        // paste, so `\r\n` arrives as two line ends.
+        assertEquals(listOf("paste:a\nb\nc"), ops("", "a\r\nb\r\nc"))
     }
 
     @Test

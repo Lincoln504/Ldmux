@@ -108,9 +108,19 @@ internal fun rowAfterScroll(row: Int, step: Int): Int = row - step
  * Flush to the top-left when it fits. (This line said "centred" until 2026-09-27 —
  * the KDoc of a behaviour the body no longer had, left behind describing it, six
  * lines above the comment explaining why centring was removed.) When it does not fit
- * it is pinned to the bottom-left so the shell's prompt stays on screen — the
- * overflowing case is a font change or a rotation whose resize has not landed yet,
- * and the bottom row is the one holding the cursor.
+ * it is pinned to the bottom-left, so the shell's prompt stays on screen.
+ *
+ * **[cursorRow] is the row the user cannot afford to lose, and the bottom is only a
+ * preference.** Overflow is what happens between a font change or a rotation and the
+ * resize that answers it, and pinning to the bottom *by itself* is only right while the
+ * cursor happens to be on the last row — which is the prompt case and the reason the rule
+ * was written. A full-screen program puts the cursor wherever it likes: 46 rows of pane in
+ * a 19-row viewport, anchored at the bottom, draws rows 27..45 and hides a cursor sitting on
+ * row 5. So the window keeps the bottom anchor and slides down — showing later rows — just
+ * far enough to contain the cursor's row, and never further.
+ *
+ * Columns get no such treatment. `dx` is always 0 because column 0 is where a shell's line
+ * starts and every row is addressed from it; a horizontal slide would move the prompt.
  */
 fun placeGrid(
     cellWidth: Float,
@@ -119,16 +129,23 @@ fun placeGrid(
     rows: Int,
     viewportWidth: Float,
     viewportHeight: Float,
+    cursorRow: Int,
 ): GridPlacement {
-    val gridW = cellWidth * cols
     val gridH = cellHeight * rows
     // Flush to the top-left. Centring was inherited from a general-purpose placer
     // and it is wrong for a terminal in a way that is measurable: the leftover is
     // under one cell, but splitting it in two puts a black band on *both* edges
-    // instead of one, and the text no longer starts where the corner is. When the
-    // grid is larger than the viewport it is pinned to the bottom, because that is
-    // where the prompt and the cursor are and they are what you cannot lose.
+    // instead of one, and the text no longer starts where the corner is.
     val dx = 0f
-    val dy = if (gridH <= viewportHeight) 0f else viewportHeight - gridH
+    if (gridH <= viewportHeight || cellHeight <= 0f) {
+        return GridPlacement(dx, 0f, cellWidth, cellHeight, cols, rows)
+    }
+    // The rows the viewport can hold, and the first row of the bottom-anchored window — the
+    // placement the prompt case wants. A cursor above that window slides it down by exactly the
+    // rows between them, so the bottom anchor survives whenever it is already valid.
+    val visible = floor(viewportHeight / cellHeight).toInt().coerceIn(1, rows)
+    val bottomFirst = rows - visible
+    val first = minOf(bottomFirst, cursorRow.coerceIn(0, rows - 1))
+    val dy = (viewportHeight - gridH) + (bottomFirst - first) * cellHeight
     return GridPlacement(dx, dy, cellWidth, cellHeight, cols, rows)
 }

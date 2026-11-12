@@ -335,6 +335,7 @@ name = "ldmux-companion"
 version = "0.1.0"
 dependencies = [
  "hmac",
+ "ldmux-mesh",
  "libc",
  "nix",
  "sha2",
@@ -378,6 +379,9 @@ dependencies = [
 [[package]]
 name = "ldmux-mesh"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "ldmux-protocol"
