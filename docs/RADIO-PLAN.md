@@ -678,6 +678,34 @@ the six are implemented with tests, and `open` requires the phone's grid. The ge
 costs: **a new layer is not complete when it speaks the protocol; it is complete when it covers the
 features the old one shipped.**
 
+### 12.7d AR-13 — the pipe it was supposed to have was still holding the protocol
+
+**Found by the survey `AR-12` demands, before a line of the rewire was written.** `A2` says the
+phone's BLE layer is a pipe: it writes frames and feeds notifications back. The survey of all 31
+`MeshTerminalScreen` members found a fourth gap that no protocol work would have closed —
+`AndroidRadioLink` still **owns radio management**: `APP_START`, `SELF_INFO`, `STATUS`, the preset,
+device info and route reads. The settings screens call it directly for scanning and applying a
+tuple.
+
+That has two consequences, and both are architectural rather than cosmetic:
+
+- **`AndroidRadioLink` cannot be deleted**, so the protocol survives in Kotlin whatever the terminal
+  path does;
+- the terminal path would take the radio while the settings screens kept a second owner of one GATT
+  link, and a second owner sending commands outside the engine's FIFO is `RC-2` with a different
+  name.
+
+*Disposition:* **S5b-0** moves radio management into the engine — `ldmux_client_radio` for the last
+`SELF_INFO`/`STATUS` reading, `ldmux_client_route` for hops/proven/fresh/carriage,
+`blind_asks`/`route_answered` on `ClientStats`, the preset and device info through the engine, and
+`RadioLease` moving to `AndroidBlePipe` so one owner still asks another app to yield (ADR-0036).
+Every one of those commands goes through the same `CompanionFifo` the records use.
+
+Two smaller things the same survey caught, both worth keeping: `hopsNow()` feeds
+`answerDeadlineMs(HISTORY_WAIT_MS, hops())`, so without a route fact the up-key loses a page that was
+still arriving on a long route; and `marks` needs **no** request at all, because a `Marks` answer
+rides the `List` reply.
+
 ### 12.8 Findings index
 
 | Id | Finding | Severity | Disposition |
@@ -694,6 +722,7 @@ features the old one shipped.**
 | AR-10 | a flood arrival is a `REQ` carrying `LDMR`, not a `RAW_CUSTOM`; a payload-type classifier drops every flooded record | **defect (silent loss)** | **fixed:** classify by the `LDMR` magic inside the packet payload |
 | AR-11 | the transport swap cannot precede the phone, and has no `Link` to preserve | **plan correction** | **fixed in the plan:** S6, after S4 and S5 |
 | AR-12 | the client engine lacked six shipped features, and `open` sent a zero grid (a fixed defect reintroduced) | **defect (silent regression)** | **fixed:** the six are implemented and tested; capability surveys are now part of a stage's definition of done |
+| AR-13 | the BLE pipe still owned radio management, so `AndroidRadioLink` could not die and one GATT link would have had two owners | **architecture** | **S5b-0:** radio management moves into the engine, through the same command FIFO, with the lease on the pipe |
 | AR-11 | the transport swap cannot precede the phone, and has no `Link` to preserve | **plan correction** | **fixed in the plan:** S6 (§10a) is one stage — transport and bridge together, after S4/S5 — because `Link`'s page byte is a frame-loop fact that every v15 message already carries as a field |
 
 ### 10a. S6 scope: the host transport and the bridge are one stage
