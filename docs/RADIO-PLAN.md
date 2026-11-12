@@ -728,6 +728,23 @@ top of every pass. `Emu::drop` also only sets it when the handle is the last one
 The test is un-ignored and is the proof: eight cycles, zero threads left, pty count back to its
 baseline.
 
+### 12.7f AR-15 — the branch is mid-cutover, and the radio route does not work until S6 lands
+
+**Stated plainly because it is the one thing a reader must know before running this branch on a
+radio.** S5b moved the app onto the engine and version 15; the daemon still runs the ARQ
+byte-stream and the frame loop. A phone and a host on this branch therefore speak **different**
+transports: the app sends `KIND_UP` transactions, the daemon expects ARQ-framed records with a
+page byte. Neither end can parse the other.
+
+Every test passes because both sides are tested against their own model. That is the same shape as
+`AR-1` — a green tree proving two disjoint stacks — now with the extra hazard that the two are
+supposed to be *one* stack.
+
+*Disposition:* **do not deploy this branch's radio route**; the tailnet route is unaffected. S6
+(§10a) is what closes it, and it is one change for a reason: the transport swap and the v15
+dispatch are each useless without the other. The work is scoped, the deletions are measured, and
+nothing in it is a design question any more.
+
 ### 12.8 Findings index
 
 | Id | Finding | Severity | Disposition |
@@ -746,6 +763,7 @@ baseline.
 | AR-12 | the client engine lacked six shipped features, and `open` sent a zero grid (a fixed defect reintroduced) | **defect (silent regression)** | **fixed:** the six are implemented and tested; capability surveys are now part of a stage's definition of done |
 | AR-13 | the BLE pipe still owned radio management, so `AndroidRadioLink` could not die and one GATT link would have had two owners | **architecture** | **S5b-0:** radio management moves into the engine, through the same command FIFO, with the lease on the pipe |
 | AR-14 | a killed keeper session could keep its pty master (2 of 8, permanent) | **defect (leak)** | **fixed:** the emulator thread now stops on a flag set by the session's last drop, not on a channel disconnect that could be missed |
+| AR-15 | the branch is mid-cutover: the app speaks the transaction transport and the daemon speaks ARQ, so the radio route does not work | **cutover hazard** | **open, and stated:** do not deploy the radio route from this branch; S6 is one change for a reason |
 | AR-11 | the transport swap cannot precede the phone, and has no `Link` to preserve | **plan correction** | **fixed in the plan:** S6 (§10a) is one stage — transport and bridge together, after S4/S5 — because `Link`'s page byte is a frame-loop fact that every v15 message already carries as a field |
 
 ### 10a. S6 scope: the host transport and the bridge are one stage
