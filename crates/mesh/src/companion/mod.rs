@@ -11,7 +11,10 @@
 //! names an opcode — the command table, the framing, the read loop — stays with the crate that owns
 //! a radio, because the host and the phone issue different commands.
 
+pub mod build;
 pub mod fifo;
+pub mod framing;
+pub mod push;
 
 pub use fifo::{
     Answer, CommandId, CommandSpec, CompanionFifo, DEFAULT_DRAIN_MS, DEFAULT_TIMEOUT_MS, Entry,

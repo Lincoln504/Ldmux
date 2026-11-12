@@ -135,26 +135,42 @@ pub mod commands {
 /// (`MyMesh.cpp:1028-1031`, `:435`, `:548`).
 pub const APP_TARGET_VERSION: u8 = 3;
 
+/// The shared packet builders, from `ldmux-mesh`.
+///
+/// They live there because the phone composes the same packets over BLE and cannot link a host
+/// crate (`docs/RADIO-PLAN.md` §8.1). Every function and constant below re-exports or delegates to
+/// them, so there is one implementation of each wire rule in the tree.
+use ldmux_mesh::companion::build;
+
 /// Header byte for a raw custom packet sent DIRECT: `route = 2`,
 /// `payload_type = 15` (RAW_CUSTOM), version 0. Identical to the phone's
 /// `RAW_CUSTOM_DIRECT_HEADER`.
-pub const RAW_CUSTOM_DIRECT_HEADER: u8 = 0x3E;
+pub use ldmux_mesh::companion::build::RAW_CUSTOM_DIRECT_HEADER;
 
 /// The path byte a flooded packet carries.
 pub const PATH_FLOOD: u8 = 0xFF;
 
-/// Build the path byte for a direct packet: hash width in the top two bits, hop
-/// count in the low six. `hash_size` is 1..=3: the two bits can name 4, and the firmware reserves
-/// that width for the future (`Packet::isValidPathLen`, `src/Packet.cpp:13-18`).
+/// Build the path byte for a direct packet: hash width in the top two bits, hop count in the low six.
+///
+/// **Re-exported from `ldmux-mesh`**, which owns the builders because the phone composes the same
+/// packets over BLE (`docs/RADIO-PLAN.md` §8.1). The error is mapped to this crate's own so that
+/// every existing caller keeps the type it matched on.
+///
+/// # Errors
+///
+/// [`CodecError::BadHashSize`] or [`CodecError::TooManyHops`].
 pub fn path_byte(hash_size: u8, hops: u8) -> Result<u8, CodecError> {
-    // 4 is reserved for the future (`Packet::isValidPathLen`, `src/Packet.cpp:13-18`).
-    if !(1..=3).contains(&hash_size) {
-        return Err(CodecError::BadHashSize(hash_size));
+    build::path_byte(hash_size, hops).map_err(build_err)
+}
+
+/// This crate's error for a build failure, so the shared builders report as they always did.
+fn build_err(e: build::BuildError) -> CodecError {
+    match e {
+        build::BuildError::BadHashSize(n) => CodecError::BadHashSize(n),
+        build::BuildError::TooManyHops(n) => CodecError::TooManyHops(n),
+        build::BuildError::RaggedPath { len, hash } => CodecError::RaggedPath { len, hash },
+        build::BuildError::TooLong { len, max } => CodecError::TooLong { len, max },
     }
-    if hops > 0x3F {
-        return Err(CodecError::TooManyHops(hops));
-    }
-    Ok(((hash_size - 1) << 6) | hops)
 }
 
 /// The largest packet a `CMD_SEND_RAW_PACKET` frame may carry.
@@ -164,7 +180,7 @@ pub fn path_byte(hash_size: u8, hops: u8) -> Result<u8, CodecError> {
 /// of those bytes, so the packet itself gets 174. A longer frame is **truncated** by the serial
 /// reader (`checkRecvFrame`, `ArduinoSerialInterface.cpp:56-59`), which turns an oversized record
 /// into a parse failure rather than a send, so the limit has to be exact here.
-pub const PACKET_MAX: usize = 174;
+pub use ldmux_mesh::companion::build::PACKET_MAX;
 
 /// The firmware's own path ceiling, in bytes (`MAX_PATH_SIZE`, `src/MeshCore.h:22`).
 ///
@@ -172,7 +188,7 @@ pub const PACKET_MAX: usize = 174;
 /// with a longer path is dropped by every receiver while this end believes it was sent. The hop
 /// count alone cannot catch it: 63 one-byte hops fit the encoded byte, and 63 three-byte hops are
 /// 189 bytes.
-pub const MAX_PATH_SIZE: usize = 64;
+pub use ldmux_mesh::companion::build::MAX_PATH_SIZE;
 
 /// Build a raw direct packet around `record`.
 ///
@@ -182,37 +198,7 @@ pub const MAX_PATH_SIZE: usize = 64;
 /// rather than a caller's mistake. A packet over [`PACKET_MAX`] would be truncated by the firmware's
 /// serial reader, and refusing it here names the fault at its source.
 pub fn build_raw_direct(hash_size: u8, path: &[u8], record: &[u8]) -> Result<Vec<u8>, CodecError> {
-    // 4 is reserved for the future and `Packet::isValidPathLen` refuses it (`src/Packet.cpp:13-18`),
-    // so a path built at that width would be dropped by every receiver.
-    if !(1..=3).contains(&hash_size) {
-        return Err(CodecError::BadHashSize(hash_size));
-    }
-    if !path.len().is_multiple_of(usize::from(hash_size)) {
-        return Err(CodecError::RaggedPath {
-            len: path.len(),
-            hash: hash_size,
-        });
-    }
-    // **A path longer than the firmware can hold is refused here.** 63 three-byte hops fit the
-    // encoded length byte and are 189 bytes, which `isValidPathLen` rejects, so the packet would
-    // be sent, dropped by every receiver, and reported as a link that carries nothing.
-    if path.len() > MAX_PATH_SIZE {
-        return Err(CodecError::TooLong {
-            len: path.len(),
-            max: MAX_PATH_SIZE,
-        });
-    }
-    let total = 2 + path.len() + record.len();
-    if total > PACKET_MAX {
-        return Err(CodecError::TooLong { len: total, max: PACKET_MAX });
-    }
-    let encoded = path_byte(hash_size, (path.len() / hash_size as usize) as u8)?;
-    let mut out = Vec::with_capacity(2 + path.len() + record.len());
-    out.push(RAW_CUSTOM_DIRECT_HEADER);
-    out.push(encoded);
-    out.extend_from_slice(path);
-    out.extend_from_slice(record);
-    Ok(out)
+    build::raw_direct(hash_size, path, record).map_err(build_err)
 }
 
 /// Header byte for a flooded packet whose payload is a *route request*: `route = 1` (FLOOD),
@@ -234,7 +220,7 @@ pub fn build_raw_direct(hash_size: u8, path: &[u8], record: &[u8]) -> Result<Vec
 /// machine's local mesh 2026-11-08: adverts arrive at 4, 5, 6 and **8** hops, while `REQ` floods
 /// arrive at 18-29 hops. Two radios more than eight hops apart therefore cannot exchange adverts at
 /// all, so a route learned only from adverts is unreachable at city distance.
-pub const ROUTE_FLOOD_HEADER: u8 = 0x01;
+pub use ldmux_mesh::companion::build::ROUTE_FLOOD_HEADER;
 
 /// The four bytes that mark a flooded **route request**.
 pub const ROUTE_REQUEST_MAGIC: &[u8; 4] = b"LDRQ";
@@ -250,7 +236,7 @@ pub const ROUTE_REPLY_MAGIC: &[u8; 4] = b"LDRR";
 pub const ROUTE_TRANSPORT_FLOOD: u8 = 0x00;
 
 /// Header byte for a scoped route request: `route = 0` (TRANSPORT_FLOOD), `payload_type = 0` (REQ).
-pub const ROUTE_FLOOD_SCOPED_HEADER: u8 = 0x00;
+pub use ldmux_mesh::companion::build::ROUTE_FLOOD_SCOPED_HEADER;
 
 /// A flood scope: the operator's region name and the 16-byte key its packets are proved with.
 ///
@@ -321,18 +307,7 @@ impl FloodScope {
 /// to forward. That is also why this must be computed over exactly the bytes that go on the air.
 #[must_use]
 pub fn transport_code(key: &[u8; 16], payload_type: u8, payload: &[u8]) -> u16 {
-    use hmac::Mac as _;
-    let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(key)
-        .expect("HMAC accepts a key of any length");
-    mac.update(&[payload_type]);
-    mac.update(payload);
-    let bytes = mac.finalize().into_bytes();
-    let code = u16::from_le_bytes([bytes[0], bytes[1]]);
-    match code {
-        0 => 1,
-        0xFFFF => 0xFFFE,
-        other => other,
-    }
+    build::transport_code(key, payload_type, payload)
 }
 
 /// Parse `RESP_CODE_DEFAULT_FLOOD_SCOPE`: the radio's default flood scope, or `Some(None)` when the
@@ -641,7 +616,7 @@ pub fn build_route_request_with_nonce(
 /// when the direct path is absent. The record is sealed with the session's own AEAD, so a flood is
 /// no less private: any repeater that forwards it can read none of it, exactly as it cannot read
 /// the payload of a direct record it forwards.
-pub const RECORD_FLOOD_MAGIC: &[u8; 4] = b"LDMR";
+pub use ldmux_mesh::companion::build::RECORD_FLOOD_MAGIC;
 
 /// A session record as a flood: header, path byte, then
 /// `[dest hash][source hash][magic][nonce][record]`.
@@ -657,34 +632,15 @@ pub fn build_record_flood_in_scope(
     nonce: &[u8; 4],
     record: &[u8],
 ) -> Result<Vec<u8>, CodecError> {
-    if !(1..=3).contains(&hash_size) {
-        return Err(CodecError::BadHashSize(hash_size));
-    }
-    let mut payload = Vec::with_capacity(2 + RECORD_FLOOD_MAGIC.len() + 4 + record.len());
-    payload.push(peer_key[0]);
-    payload.push(own_key[0]);
-    payload.extend_from_slice(RECORD_FLOOD_MAGIC);
-    payload.extend_from_slice(nonce);
-    payload.extend_from_slice(record);
-    let mut out = Vec::with_capacity(6 + payload.len());
-    match scope {
-        None => out.push(ROUTE_FLOOD_HEADER),
-        Some(scope) => {
-            out.push(ROUTE_FLOOD_SCOPED_HEADER);
-            let code = transport_code(&scope.key, 0, &payload);
-            out.extend_from_slice(&code.to_le_bytes());
-            out.extend_from_slice(&0u16.to_le_bytes());
-        }
-    }
-    out.push(path_byte(hash_size, 0)?);
-    out.extend_from_slice(&payload);
-    if out.len() > PACKET_MAX {
-        return Err(CodecError::TooLong {
-            len: out.len(),
-            max: PACKET_MAX,
-        });
-    }
-    Ok(out)
+    build::record_flood(
+        hash_size,
+        peer_key,
+        own_key,
+        scope.map(|s| &s.key),
+        nonce,
+        record,
+    )
+    .map_err(build_err)
 }
 
 /// A flooded session record addressed to this radio, and the path it arrived by.

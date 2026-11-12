@@ -380,6 +380,7 @@ dependencies = [
 name = "ldmux-mesh"
 version = "0.1.0"
 dependencies = [
+ "hmac",
  "sha2",
 ]
 
@@ -414,6 +415,7 @@ name = "ldmux-session-ffi"
 version = "0.1.0"
 dependencies = [
  "ldmux-mesh",
+ "ldmux-protocol",
  "ldmux-session",
 ]
 

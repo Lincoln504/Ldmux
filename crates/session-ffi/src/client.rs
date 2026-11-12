@@ -1,0 +1,960 @@
+//! The C ABI over `ldmux_session::client`: the phone's whole radio route, behind a handle.
+//!
+//! Header: `packages/mobile/native/ldmux_client.h`, which is the contract; read it for ownership
+//! rules. This module adds no protocol of its own — it names [`Client`]'s operations in C, copies
+//! what the caller asked for into buffers the caller owns, and nothing else.
+//!
+//! **Pull only.** The engine never calls into the caller. Kotlin hands bytes in
+//! (`ldmux_client_on_ble_rx`), drains frames out (`ldmux_client_poll`), drains what happened
+//! (`ldmux_client_poll_event`), and sets one timer from `ldmux_client_next_deadline`. There are no
+//! upcalls, so no `AttachCurrentThread` and no thread of our own (`docs/RADIO-PLAN.md` §8.1).
+//!
+//! **One handle, one caller.** The handles are not thread safe; the caller serialises calls on one
+//! handle, exactly as the session ABI in `lib.rs` requires.
+
+use std::collections::VecDeque;
+use std::future::Future;
+use std::pin::pin;
+use std::task::{Context, Poll, Waker};
+
+use ldmux_mesh::carrier::{Carrier, Event};
+use ldmux_mesh::companion::build as packets;
+use ldmux_mesh::error::MeshError;
+use ldmux_mesh::route::Carriage;
+use ldmux_protocol::mesh_term::{self, Message};
+use ldmux_session::client::{Client, ClientConfig, ClientError, ClientEvent, PageMirror};
+use ldmux_session::endpoint::{ArrivalInfo, CarriageSink};
+use ldmux_session::handshake::Keypair;
+
+use crate::{
+    LDMUX_ERR_ARG, LDMUX_ERR_BUFFER, LDMUX_ERR_NULL, LDMUX_ERR_NOT_OPEN, LDMUX_OK, guard,
+};
+
+/// One page's screen, as the caller reads it.
+///
+/// The rows are fetched one at a time with [`ldmux_client_mirror_line`], because a row is variable
+/// length and a C struct cannot own it.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct LdmuxMirror {
+    /// Whether there is a screen to draw at all.
+    pub painted: u8,
+    /// The grid the host painted, in cells.
+    pub cols: u8,
+    /// Rows in the grid, which is how many rows [`ldmux_client_mirror_line`] answers for.
+    pub rows: u8,
+    /// The cursor's column.
+    pub cursor_x: u8,
+    /// The cursor's row.
+    pub cursor_y: u8,
+    /// A full-screen program owns the pane.
+    pub alternate: u8,
+    /// The shell's process exited.
+    pub dead: u8,
+    /// The pane had stopped changing when this screen was captured; clear means a mid-state.
+    pub settled: u8,
+    /// `1` when `applied_status` is meaningful for this screen.
+    pub has_applied: u8,
+    /// What the host did with the command this screen answers: `mesh_term::applied`.
+    pub applied_status: u8,
+    /// The identity of this screen; a `base_id` diff names the screen it was cut against.
+    pub snapshot_id: u32,
+    /// The absolute line number of row 0.
+    pub first_line: u32,
+}
+
+/// The zero event: what `ldmux_client_poll_event` reports when it has nothing, and the value every
+/// field starts at.
+impl Default for LdmuxClientEvent {
+    fn default() -> Self {
+        Self {
+            kind: 0,
+            shell_len: 0,
+            shell: [0; 64],
+            value: 0,
+            snapshot_id: 0,
+            has_applied: 0,
+            applied_status: 0,
+            settled: 0,
+            cols: 0,
+            rows: 0,
+            text_len: 0,
+        }
+    }
+}
+
+/// One thing the app has to draw or say.
+///
+/// `kind` says which fields mean anything, and whether the text buffer carries bytes:
+///
+/// | kind | name | fields | text |
+/// |---|---|---|---|
+/// | 1 | `ATTACHED` | `cols`, `rows` | — |
+/// | 2 | `SETTLED` | `snapshot_id`, `settled`, `has_applied`, `applied_status` | — |
+/// | 3 | `HELD` | — | — |
+/// | 4 | `CLOSED` | `value` = the reason (`mesh_term::closed`) | a `Closed` message |
+/// | 5 | `SESSIONS` | `value` = 1 when it is the last page | a `Sessions` message |
+/// | 6 | `MARKS` | `value` = 1 when it is the last page | a `Marks` message |
+/// | 7 | `HISTORY` | `value` = 1 when it is the last page | a `HistoryPage` message |
+///
+/// The four message kinds are the wire bytes of the message the host sent, so the caller decodes
+/// them with the decoder it already has. A second encoding for one fact would be a second thing to
+/// get wrong.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LdmuxClientEvent {
+    /// Which event this is; see the table above.
+    pub kind: u8,
+    /// The shell, when the event names one.
+    pub shell_len: u8,
+    /// The shell's id, `shell_len` bytes of it.
+    pub shell: [u8; 64],
+    /// A number whose meaning depends on `kind`.
+    pub value: u32,
+    /// The screen's identity, for `SETTLED`.
+    pub snapshot_id: u32,
+    /// `1` when `applied_status` is meaningful, for `SETTLED`.
+    pub has_applied: u8,
+    /// What the host did with the command, for `SETTLED`: `mesh_term::applied`.
+    pub applied_status: u8,
+    /// Whether the pane had settled, for `SETTLED`.
+    pub settled: u8,
+    /// The grid, for `ATTACHED`.
+    pub cols: u8,
+    /// Rows, for `ATTACHED`.
+    pub rows: u8,
+    /// Bytes written to the caller's text buffer.
+    pub text_len: u32,
+}
+
+/// What the client needs to start.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LdmuxClientConfig {
+    /// The host radio's static public key: what an initiation is addressed to.
+    pub peer_static: [u8; 32],
+    /// The pairing's pre-shared key.
+    pub psk: [u8; 32],
+    /// The phone's own static private key.
+    pub local_private: [u8; 32],
+    /// The phone's own static public key.
+    pub local_public: [u8; 32],
+    /// Bytes per hop the mesh's paths use, 1..=3.
+    pub path_width: u8,
+    /// The spreading factor, for the SNR margin table (7..=12); 0 leaves the default.
+    pub sf: u8,
+    /// How many hops a flood is expected to reach, which prices the flood's path; 0 leaves the
+    /// default.
+    pub flood_reach_hops: u8,
+    /// How many pages the operator may open; 0 leaves the default.
+    pub max_open_pages: u8,
+    /// One full record's airtime, in milliseconds, at the radio's own tuple.
+    pub airtime_ms: f32,
+    /// The flood scope's 16-bit transport code, or zero for unscoped.
+    pub scope: u16,
+}
+
+/// The client's own counters, for a log that has to say what happened.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct LdmuxClientStats {
+    /// Records the engine handed to the radio.
+    pub records_sent: u64,
+    /// Records the radio handed up.
+    pub records_received: u64,
+    /// Commands submitted.
+    pub commands_sent: u64,
+    /// Refreshes sent.
+    pub fetches_sent: u64,
+    /// Screens applied to a page.
+    pub snapshots_applied: u64,
+    /// Screens refused because they named a base the mirror never held.
+    pub snapshots_refused: u64,
+    /// Handshakes accepted.
+    pub sessions_established: u64,
+    /// Retry rungs spent.
+    pub rungs_used: u64,
+}
+
+/// Event kinds, as `LdmuxClientEvent::kind`.
+pub const LDMUX_EV_ATTACHED: u8 = 1;
+/// A screen arrived for a page.
+pub const LDMUX_EV_SETTLED: u8 = 2;
+/// Another client holds the shell.
+pub const LDMUX_EV_HELD: u8 = 3;
+/// The host ended this client's view of the shell.
+pub const LDMUX_EV_CLOSED: u8 = 4;
+/// One page of the shell list.
+pub const LDMUX_EV_SESSIONS: u8 = 5;
+/// One page of the marks the host holds.
+pub const LDMUX_EV_MARKS: u8 = 6;
+/// One page of scrollback.
+pub const LDMUX_EV_HISTORY: u8 = 7;
+
+/// The most bytes a shell id may be, which is `mesh_term::MAX_SELECTOR`.
+pub const LDMUX_SHELL_MAX: usize = 40;
+
+/// A `send` item that is written as it is.
+pub const LDMUX_ITEM_TEXT: u8 = 0;
+/// The same bytes, marked as a paste so the host wraps them for the pane's bracketed-paste mode.
+pub const LDMUX_ITEM_PASTE: u8 = 1;
+
+/// A phone's radio route, from connect to screen.
+pub struct LdmuxClient {
+    client: Client,
+    /// Frames waiting to be written to the BLE characteristic.
+    out: VecDeque<Vec<u8>>,
+    /// Events taken from the engine and not yet handed to the caller.
+    pending: VecDeque<Ready>,
+    /// What the carrier composes a packet from.
+    link: LinkSettings,
+}
+
+/// One event, already encoded, so a caller whose buffer was too small loses nothing.
+struct Ready {
+    event: ClientEvent,
+    value: u32,
+    text: Vec<u8>,
+}
+
+/// The fixed facts a packet is built from.
+#[derive(Clone, Copy)]
+struct LinkSettings {
+    peer_key: [u8; 32],
+    own_key: [u8; 32],
+    hash_size: u8,
+    scope: Option<[u8; 16]>,
+}
+
+/// The carrier the engine drives: it builds each record into a frame and queues it.
+///
+/// There is no radio here. The caller owns the BLE characteristic, so "send" means "make the frame
+/// the caller will write", which is what keeps the engine free of I/O and the ABI pull-only.
+struct FrameSink {
+    out: VecDeque<Vec<u8>>,
+    link: LinkSettings,
+    carriage: Option<Carriage>,
+    nonce: u32,
+}
+
+impl Carrier for FrameSink {
+    async fn send_record(&mut self, _seq: u8, record: &[u8]) -> Result<(), MeshError> {
+        let Some(carriage) = self.carriage.take() else {
+            // A send whose carriage was never named is a bug in the caller, and guessing (flood,
+            // say) would spend twenty times the airtime on a mistake nobody would see.
+            return Err(MeshError::Unsupported(
+                "a record was handed to the radio with no carriage".to_owned(),
+            ));
+        };
+        // A fresh nonce per transmission: the firmware's duplicate table hashes the packet, so a
+        // retransmission carrying the same four bytes would be swallowed at the first repeater.
+        self.nonce = self.nonce.wrapping_add(0x9E37_79B9).max(1);
+        let nonce = self.nonce.to_le_bytes();
+        let packet = match &carriage {
+            Carriage::Direct { path } => packets::raw_direct(self.link.hash_size, path, record),
+            Carriage::Flood => packets::record_flood(
+                self.link.hash_size,
+                &self.link.peer_key,
+                &self.link.own_key,
+                self.link.scope.as_ref(),
+                &nonce,
+                record,
+            ),
+        };
+        let packet = packet.map_err(|e| MeshError::Unsupported(e.to_string()))?;
+        let frame = packets::send_raw_frame(&packet).map_err(|e| MeshError::Unsupported(e.to_string()))?;
+        self.out.push_back(frame);
+        Ok(())
+    }
+
+    async fn recv(&mut self) -> Result<Event, MeshError> {
+        // The engine is fed arrivals through `on_record`, not by polling a radio, so this is never
+        // reached. Saying so is better than returning a fabricated event.
+        Err(MeshError::Unsupported(
+            "this carrier is fed by the caller, not read".to_owned(),
+        ))
+    }
+}
+
+impl CarriageSink for FrameSink {
+    async fn set_carriage(&mut self, carriage: &Carriage) -> Result<(), MeshError> {
+        self.carriage = Some(carriage.clone());
+        Ok(())
+    }
+}
+
+/// Run a future that never really waits.
+///
+/// The sink above resolves on its first poll, so `Pending` means a bug rather than a wait. There is
+/// deliberately no executor: the engine is synchronous state, and an executor would be a runtime the
+/// phone's library does not have.
+fn block_on<F: Future>(future: F) -> F::Output {
+    let mut future = pin!(future);
+    let mut cx = Context::from_waker(Waker::noop());
+    // One poll, and no loop: the sink resolves immediately by construction, so a `Pending` here is a
+    // bug rather than a wait, and spinning on it would hang the caller's frame instead of saying so.
+    match future.as_mut().poll(&mut cx) {
+        Poll::Ready(value) => value,
+        Poll::Pending => panic!("the phone's carrier never waits, so this is a bug"),
+    }
+}
+
+fn client_err(e: &ClientError) -> i32 {
+    use ldmux_session::transaction::BeginError;
+    match e {
+        ClientError::TooManyPages { .. } => crate::LDMUX_ERR_TOO_MANY_PAGES,
+        ClientError::AlreadyOpen(_) => crate::LDMUX_ERR_ALREADY_OPEN,
+        ClientError::NoPage(_) => crate::LDMUX_ERR_NO_PAGE,
+        ClientError::Encode(_) => crate::LDMUX_ERR_DECODE,
+        ClientError::Begin(BeginError::TooLarge) => crate::LDMUX_ERR_TOO_LONG,
+        ClientError::Begin(_) => crate::LDMUX_ERR_QUEUE_FULL,
+    }
+}
+
+/// A caller-supplied shell id, refused unless it is a non-empty UTF-8 string of at most
+/// [`LDMUX_SHELL_MAX`] bytes.
+///
+/// SAFETY (callers): `p` points to `len` readable bytes.
+unsafe fn shell<'a>(p: *const u8, len: usize) -> Option<&'a str> {
+    if len == 0 || len > LDMUX_SHELL_MAX || p.is_null() {
+        return None;
+    }
+    // SAFETY: non-null, and the caller promised `len` readable bytes.
+    let bytes = unsafe { std::slice::from_raw_parts(p, len) };
+    std::str::from_utf8(bytes).ok()
+}
+
+/// Copy `src` into the caller's buffer, reporting the length needed even when it does not fit.
+fn put(src: &[u8], out: *mut u8, cap: usize, out_len: *mut usize) -> i32 {
+    if out_len.is_null() || (out.is_null() && cap != 0) {
+        return LDMUX_ERR_NULL;
+    }
+    // SAFETY: out_len is non-null and the caller promised it is writable.
+    unsafe { *out_len = src.len() };
+    if src.len() > cap {
+        return LDMUX_ERR_BUFFER;
+    }
+    if !src.is_empty() {
+        // SAFETY: `out` is non-null with `cap >= src.len()` writable bytes.
+        unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), out, src.len()) };
+    }
+    LDMUX_OK
+}
+
+/// Call `f` on the handle behind `c`, containing a panic.
+unsafe fn with_client(c: *mut LdmuxClient, f: impl FnOnce(&mut LdmuxClient) -> i32) -> i32 {
+    guard(|| {
+        if c.is_null() {
+            return LDMUX_ERR_NULL;
+        }
+        // SAFETY: non-null, from `ldmux_client_new`, not freed (free nulls the caller's slot), and
+        // the caller serialises calls on one handle (header).
+        f(unsafe { &mut *c })
+    })
+}
+
+/// Turn one `ClientEvent` into the value the caller reads, and the bytes it carries.
+fn encode_event(event: &ClientEvent) -> Ready {
+    let mut ready = Ready {
+        event: event.clone(),
+        value: 0,
+        text: Vec::new(),
+    };
+    let message = match event {
+        ClientEvent::Closed { reason } => {
+            ready.value = u32::from(*reason);
+            Some(Message::Closed { reason: *reason })
+        }
+        ClientEvent::Sessions { last, entries } => {
+            ready.value = u32::from(*last);
+            Some(Message::Sessions {
+                last: *last,
+                // Every entry carries all of it: the decoder filled these in from the wire, and a
+                // re-encode that dropped a field would tell the app less than the host did.
+                cwd: true,
+                origin: true,
+                owner: true,
+                shell: true,
+                entries: entries.clone(),
+            })
+        }
+        ClientEvent::Marks {
+            first,
+            last,
+            entries,
+        } => {
+            ready.value = u32::from(*last);
+            Some(Message::Marks {
+                first: *first,
+                last: *last,
+                entries: entries.clone(),
+            })
+        }
+        ClientEvent::History { from, last, older, lines } => {
+            ready.value = u32::from(*last);
+            Some(Message::HistoryPage {
+                from: *from,
+                last: *last,
+                older: *older,
+                lines: lines.clone(),
+            })
+        }
+        ClientEvent::Attached { .. } | ClientEvent::Settled { .. } | ClientEvent::Held { .. } => None,
+    };
+    if let Some(message) = message {
+        // A message that will not encode cannot happen for one this crate decoded, and losing the
+        // event silently would be worse than dropping the bytes: the struct fields still say what
+        // happened.
+        ready.text = message.encode().unwrap_or_default();
+    }
+    ready
+}
+
+/// Fill the caller's event struct from one event and its encoded text.
+fn fill(ready: &Ready, text_len: u32) -> LdmuxClientEvent {
+    let mut out = LdmuxClientEvent {
+        value: ready.value,
+        text_len,
+        ..LdmuxClientEvent::default()
+    };
+    let set_shell = |out: &mut LdmuxClientEvent, shell: &str| {
+        let bytes = shell.as_bytes();
+        let n = bytes.len().min(out.shell.len());
+        out.shell[..n].copy_from_slice(&bytes[..n]);
+        out.shell_len = u8::try_from(n).unwrap_or(0);
+    };
+    match &ready.event {
+        ClientEvent::Attached { shell, cols, rows } => {
+            out.kind = LDMUX_EV_ATTACHED;
+            out.cols = *cols;
+            out.rows = *rows;
+            set_shell(&mut out, shell);
+        }
+        ClientEvent::Settled {
+            shell,
+            snapshot_id,
+            applied,
+            settled,
+        } => {
+            out.kind = LDMUX_EV_SETTLED;
+            out.snapshot_id = *snapshot_id;
+            out.settled = u8::from(*settled);
+            if let Some(applied) = applied {
+                out.has_applied = 1;
+                out.applied_status = applied.status;
+            }
+            set_shell(&mut out, shell);
+        }
+        ClientEvent::Held { shell } => {
+            out.kind = LDMUX_EV_HELD;
+            set_shell(&mut out, shell);
+        }
+        ClientEvent::Closed { .. } => out.kind = LDMUX_EV_CLOSED,
+        ClientEvent::Sessions { .. } => out.kind = LDMUX_EV_SESSIONS,
+        ClientEvent::Marks { .. } => out.kind = LDMUX_EV_MARKS,
+        ClientEvent::History { .. } => out.kind = LDMUX_EV_HISTORY,
+    }
+    out
+}
+
+/// Build a client from `config` and write the handle to `out`.
+///
+/// # Errors
+///
+/// [`LDMUX_ERR_NULL`] for a null argument, [`LDMUX_ERR_ARG`] for key material that is not a usable
+/// point (an all-zero scalar, say), [`LDMUX_ERR_PANIC`] for a panic inside.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_client_new(
+    config: *const LdmuxClientConfig,
+    out: *mut *mut LdmuxClient,
+) -> i32 {
+    guard(|| {
+        if config.is_null() || out.is_null() {
+            return LDMUX_ERR_NULL;
+        }
+        // SAFETY: non-null, and the header promises one readable config.
+        let cfg = unsafe { *config };
+        if cfg.path_width == 0 || cfg.path_width > 3 {
+            return LDMUX_ERR_ARG;
+        }
+        let local = Keypair::from_parts(cfg.local_private, cfg.local_public);
+        let mut config = ClientConfig::new(cfg.peer_static, cfg.psk)
+            .with_path_width(cfg.path_width)
+            .with_airtime_ms(f64::from(cfg.airtime_ms));
+        if (7..=12).contains(&cfg.sf) {
+            config = config.with_sf(cfg.sf);
+        }
+        if cfg.flood_reach_hops > 0 {
+            config = config.with_flood_reach_hops(cfg.flood_reach_hops);
+        }
+        if cfg.max_open_pages > 0 {
+            config = config.with_max_open_pages(usize::from(cfg.max_open_pages));
+        }
+        if cfg.scope != 0 {
+            config = config.with_scope(Some(cfg.scope));
+        }
+        let handle = Box::new(LdmuxClient {
+            client: Client::new(config, local),
+            out: VecDeque::new(),
+            pending: VecDeque::new(),
+            link: LinkSettings {
+                peer_key: cfg.peer_static,
+                own_key: cfg.local_public,
+                hash_size: cfg.path_width,
+                // A scoped flood needs the region's 16-byte **key**, which is not the 16-bit code
+                // the config carries: the code is an HMAC *of* the key. So an unscoped send is the
+                // only one this ABI can compose, and the caller that wants a scope passes it in
+                // `ldmux_client_set_scope`. See the header.
+                scope: None,
+            },
+        });
+        // SAFETY: `out` is non-null and writable.
+        unsafe { *out = Box::into_raw(handle) };
+        LDMUX_OK
+    })
+}
+
+/// Destroy a client and null the caller's slot. A second destroy is a no-op.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_client_free(c: *mut *mut LdmuxClient) {
+    let _ = guard(|| {
+        if c.is_null() {
+            return LDMUX_ERR_NULL;
+        }
+        // SAFETY: `c` points at a handle slot the caller owns.
+        let raw = unsafe { *c };
+        if !raw.is_null() {
+            // SAFETY: non-null, from `ldmux_client_new`, and nulled below so it is freed once.
+            drop(unsafe { Box::from_raw(raw) });
+            // SAFETY: the slot is writable.
+            unsafe { *c = std::ptr::null_mut() };
+        }
+        LDMUX_OK
+    });
+}
+
+/// Start an attempt at the host. `wall_ms` is the phone's wall clock, which the handshake stamps.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_client_connect(c: *mut LdmuxClient, now_ms: u64, wall_ms: u64) -> i32 {
+    // SAFETY: see `with_client`.
+    unsafe {
+        with_client(c, |h| match h.client.connect(now_ms, wall_ms) {
+            Ok(()) => LDMUX_OK,
+            Err(e) => crate::hs_err(e),
+        })
+    }
+}
+
+/// Whether an L3 session is established.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_client_established(c: *mut LdmuxClient) -> i32 {
+    // SAFETY: see `with_client`.
+    unsafe { with_client(c, |h| i32::from(h.client.established())) }
+}
+
+/// Tell the engine how many records the radio says are left this hour.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_client_set_records_left(c: *mut LdmuxClient, left: u32) -> i32 {
+    // SAFETY: see `with_client`.
+    unsafe {
+        with_client(c, |h| {
+            h.client.set_records_left(u8::try_from(left).unwrap_or(u8::MAX));
+            LDMUX_OK
+        })
+    }
+}
+
+/// Hand one BLE notification to the engine.
+///
+/// Returns `1` when the frame carried a session record that was offered to the link, `0` when it
+/// carried nothing of ours (an advert, a route request, a stranger's channel traffic), or a
+/// negative error.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_client_on_ble_rx(
+    c: *mut LdmuxClient,
+    frame: *const u8,
+    len: usize,
+    now_ms: u64,
+) -> i32 {
+    // SAFETY: see `with_client`; the caller promised `len` readable bytes at `frame`.
+    unsafe {
+        with_client(c, |h| {
+            if len == 0 || frame.is_null() {
+                return LDMUX_ERR_ARG;
+            }
+            // SAFETY: non-null with `len` readable bytes.
+            let bytes = unsafe { std::slice::from_raw_parts(frame, len) };
+            let Some(arrival) = ldmux_mesh::companion::push::classify(bytes) else {
+                return 0;
+            };
+            let info = if arrival.flood {
+                ArrivalInfo::flood(arrival.path.clone(), arrival.path_width, arrival.snr_db())
+            } else if arrival.hops() == 0 {
+                ArrivalInfo::direct(arrival.snr_db())
+            } else {
+                ArrivalInfo::in_transit(arrival.hops(), arrival.snr_db())
+            };
+            h.client.on_record(&arrival.record, &info, now_ms, now_ms);
+            1
+        })
+    }
+}
+
+/// Write **at most one** frame to `out` and its length to `out_len`.
+///
+/// Returns `1` when a frame was written, `0` when there is nothing to send, or a negative error. A
+/// `cap` too small writes nothing, keeps the frame for the next call, and reports the length it
+/// needed in `out_len`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_client_poll(
+    c: *mut LdmuxClient,
+    now_ms: u64,
+    out: *mut u8,
+    cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    // SAFETY: see `with_client`.
+    unsafe {
+        with_client(c, |h| {
+            if out_len.is_null() {
+                return LDMUX_ERR_NULL;
+            }
+            let mut sink = FrameSink {
+                out: std::mem::take(&mut h.out),
+                link: h.link,
+                carriage: None,
+                nonce: 1,
+            };
+            let polled = block_on(h.client.poll(now_ms, &mut sink));
+            h.out = sink.out;
+            if let Err(e) = polled {
+                return match e {
+                    MeshError::Closed => LDMUX_ERR_NOT_OPEN,
+                    _ => LDMUX_ERR_ARG,
+                };
+            }
+            let Some(frame) = h.out.front().cloned() else {
+                // SAFETY: out_len is non-null.
+                unsafe { *out_len = 0 };
+                return 0;
+            };
+            let rc = put(&frame, out, cap, out_len);
+            if rc == LDMUX_OK {
+                h.out.pop_front();
+                return 1;
+            }
+            // Too small a buffer keeps the frame: dropping it here would lose a record.
+            rc
+        })
+    }
+}
+
+/// When the caller should look again even if nothing arrives: `1` and `*out` set, or `0`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_client_next_deadline(c: *mut LdmuxClient, out: *mut u64) -> i32 {
+    // SAFETY: see `with_client`.
+    unsafe {
+        with_client(c, |h| {
+            if out.is_null() {
+                return LDMUX_ERR_NULL;
+            }
+            match h.client.next_deadline_ms() {
+                Some(deadline) => {
+                    // SAFETY: `out` is non-null and writable.
+                    unsafe { *out = deadline };
+                    1
+                }
+                None => 0,
+            }
+        })
+    }
+}
+
+/// Open a page for `shell`. The answer is a `Snapshot`, which arrives as `SETTLED`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_client_open(
+    c: *mut LdmuxClient,
+    shell_bytes: *const u8,
+    shell_len: usize,
+    now_ms: u64,
+) -> i32 {
+    // SAFETY: see `with_client`; `shell()` checks the pointer and length.
+    unsafe {
+        with_client(c, |h| {
+            let Some(id) = shell(shell_bytes, shell_len) else {
+                return LDMUX_ERR_ARG;
+            };
+            match h.client.open(id, now_ms) {
+                Ok(()) => LDMUX_OK,
+                Err(e) => client_err(&e),
+            }
+        })
+    }
+}
+
+/// Let go of `shell`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_client_close(
+    c: *mut LdmuxClient,
+    shell_bytes: *const u8,
+    shell_len: usize,
+) -> i32 {
+    // SAFETY: see `with_client`; `shell()` checks the pointer and length.
+    unsafe {
+        with_client(c, |h| {
+            let Some(id) = shell(shell_bytes, shell_len) else {
+                return LDMUX_ERR_ARG;
+            };
+            match h.client.close(id) {
+                Ok(()) => LDMUX_OK,
+                Err(e) => client_err(&e),
+            }
+        })
+    }
+}
+
+/// Send one item to `shell` as a single command. The op id is written to `op_id` when it is not
+/// null.
+///
+/// `kind` is [`LDMUX_ITEM_TEXT`] or [`LDMUX_ITEM_PASTE`]; a key that is not text (an `Enter`, a
+/// `C-c`) is sent as a paste whose bytes are the key's escape sequence, because the host writes a
+/// paste through the pane's own bracketed-paste mode.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_client_send(
+    c: *mut LdmuxClient,
+    shell_bytes: *const u8,
+    shell_len: usize,
+    kind: u8,
+    items: *const u8,
+    items_len: usize,
+    cols: u8,
+    rows: u8,
+    now_ms: u64,
+    op_id: *mut u32,
+) -> i32 {
+    // SAFETY: see `with_client`; `shell()` and the slice below check their arguments.
+    unsafe {
+        with_client(c, |h| {
+            let Some(id) = shell(shell_bytes, shell_len) else {
+                return LDMUX_ERR_ARG;
+            };
+            if items_len == 0 || items.is_null() {
+                return LDMUX_ERR_ARG;
+            }
+            // SAFETY: non-null with `items_len` readable bytes.
+            let bytes = unsafe { std::slice::from_raw_parts(items, items_len) }.to_vec();
+            let item = match kind {
+                LDMUX_ITEM_TEXT => mesh_term::SendItem::Text(bytes),
+                LDMUX_ITEM_PASTE => mesh_term::SendItem::Paste(bytes),
+                _ => return LDMUX_ERR_ARG,
+            };
+            match h.client.send(id, &[item], cols, rows, now_ms) {
+                Ok(id) => {
+                    if !op_id.is_null() {
+                        // SAFETY: the caller said `op_id`, when non-null, is a writable `u32`.
+                        unsafe { *op_id = id };
+                    }
+                    LDMUX_OK
+                }
+                Err(e) => client_err(&e),
+            }
+        })
+    }
+}
+
+/// Ask for `shell`'s screen again, at the grid the phone draws with. **Spends no draft.**
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_client_fetch(
+    c: *mut LdmuxClient,
+    shell_bytes: *const u8,
+    shell_len: usize,
+    cols: u8,
+    rows: u8,
+    now_ms: u64,
+) -> i32 {
+    // SAFETY: see `with_client`; `shell()` checks the pointer and length.
+    unsafe {
+        with_client(c, |h| {
+            let Some(id) = shell(shell_bytes, shell_len) else {
+                return LDMUX_ERR_ARG;
+            };
+            match h.client.fetch(id, cols, rows, now_ms) {
+                Ok(()) => LDMUX_OK,
+                Err(e) => client_err(&e),
+            }
+        })
+    }
+}
+
+/// Ask which shells the host is running. The answer is one or more `SESSIONS` events.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_client_list(c: *mut LdmuxClient, now_ms: u64) -> i32 {
+    // SAFETY: see `with_client`.
+    unsafe {
+        with_client(c, |h| match h.client.list(now_ms) {
+            Ok(()) => LDMUX_OK,
+            Err(e) => client_err(&e),
+        })
+    }
+}
+
+/// Read one page's screen into `out`.
+///
+/// Returns `1` when the shell is open, `0` when it is not, or a negative error. A page that is open
+/// but has no screen yet reports `painted = 0`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_client_mirror(
+    c: *mut LdmuxClient,
+    shell_bytes: *const u8,
+    shell_len: usize,
+    out: *mut LdmuxMirror,
+) -> i32 {
+    // SAFETY: see `with_client`; `shell()` checks the pointer and length.
+    unsafe {
+        with_client(c, |h| {
+            if out.is_null() {
+                return LDMUX_ERR_NULL;
+            }
+            let Some(id) = shell(shell_bytes, shell_len) else {
+                return LDMUX_ERR_ARG;
+            };
+            let Some(mirror) = h.client.mirror(id) else {
+                return 0;
+            };
+            // SAFETY: `out` is non-null and writable; the struct is plain data.
+            unsafe { *out = mirror_of(mirror) };
+            1
+        })
+    }
+}
+
+/// Copy one row of a page's screen into `out`, and its length to `out_len`.
+///
+/// Returns `1` when the row exists, `0` when it does not, or [`LDMUX_ERR_BUFFER`] with the length it
+/// needed in `out_len`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_client_mirror_line(
+    c: *mut LdmuxClient,
+    shell_bytes: *const u8,
+    shell_len: usize,
+    row: u32,
+    out: *mut u8,
+    cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    // SAFETY: see `with_client`; `shell()` checks the pointer and length.
+    unsafe {
+        with_client(c, |h| {
+            if out_len.is_null() {
+                return LDMUX_ERR_NULL;
+            }
+            let Some(id) = shell(shell_bytes, shell_len) else {
+                return LDMUX_ERR_ARG;
+            };
+            let Some(mirror) = h.client.mirror(id) else {
+                return 0;
+            };
+            let Some(line) = mirror.lines.get(usize::try_from(row).unwrap_or(usize::MAX)) else {
+                // SAFETY: out_len is non-null.
+                unsafe { *out_len = 0 };
+                return 0;
+            };
+            match put(line.as_bytes(), out, cap, out_len) {
+                LDMUX_OK => 1,
+                other => other,
+            }
+        })
+    }
+}
+
+/// One event, or `0` when there is none.
+///
+/// For a kind that carries a message (`CLOSED`, `SESSIONS`, `MARKS`, `HISTORY`) the wire bytes go to
+/// `text`; a `cap` too small writes nothing, keeps the event for the next call, and reports the
+/// length it needed in `text_len`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_client_poll_event(
+    c: *mut LdmuxClient,
+    out: *mut LdmuxClientEvent,
+    text: *mut u8,
+    cap: usize,
+    text_len: *mut usize,
+) -> i32 {
+    // SAFETY: see `with_client`.
+    unsafe {
+        with_client(c, |h| {
+            if out.is_null() || text_len.is_null() {
+                return LDMUX_ERR_NULL;
+            }
+            if h.pending.is_empty() {
+                for event in h.client.take_events() {
+                    h.pending.push_back(encode_event(&event));
+                }
+            }
+            let Some(ready) = h.pending.front() else {
+                // SAFETY: text_len is non-null.
+                unsafe { *text_len = 0 };
+                return 0;
+            };
+            let rc = put(&ready.text, text, cap, text_len);
+            if rc != LDMUX_OK {
+                // Too small a buffer keeps the event: a fact the app has not drawn is not ours to
+                // drop.
+                return rc;
+            }
+            // SAFETY: `out` is non-null and writable; `text_len` was set by `put`.
+            let written = unsafe { *text_len };
+            let filled = fill(ready, u32::try_from(written).unwrap_or(u32::MAX));
+            // SAFETY: `out` is non-null and writable.
+            unsafe { *out = filled };
+            h.pending.pop_front();
+            1
+        })
+    }
+}
+
+/// The client's own counters.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ldmux_client_stats(c: *mut LdmuxClient, out: *mut LdmuxClientStats) -> i32 {
+    // SAFETY: see `with_client`.
+    unsafe {
+        with_client(c, |h| {
+            if out.is_null() {
+                return LDMUX_ERR_NULL;
+            }
+            let stats = h.client.stats();
+            let link = h.client.link_stats();
+            let filled = LdmuxClientStats {
+                records_sent: link.records_sent,
+                records_received: link.records_received,
+                commands_sent: stats.commands_sent,
+                fetches_sent: stats.fetches_sent,
+                snapshots_applied: stats.snapshots_applied,
+                snapshots_refused: stats.snapshots_refused,
+                sessions_established: link.sessions_established,
+                rungs_used: link.rungs_used,
+            };
+            // SAFETY: `out` is non-null and writable; the struct is plain data.
+            unsafe { *out = filled };
+            LDMUX_OK
+        })
+    }
+}
+
+/// The screen, as plain data.
+fn mirror_of(mirror: &PageMirror) -> LdmuxMirror {
+    LdmuxMirror {
+        painted: u8::from(mirror.painted()),
+        cols: mirror.cols,
+        rows: mirror.rows,
+        cursor_x: mirror.cursor.0,
+        cursor_y: mirror.cursor.1,
+        alternate: u8::from(mirror.alternate),
+        dead: u8::from(mirror.dead),
+        settled: u8::from(mirror.settled),
+        has_applied: u8::from(mirror.applied.is_some()),
+        applied_status: mirror.applied.map(|a| a.status).unwrap_or(0),
+        snapshot_id: mirror.snapshot_id,
+        first_line: mirror.first_line,
+    }
+}

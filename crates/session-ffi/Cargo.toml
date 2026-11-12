@@ -16,6 +16,10 @@ crate-type = ["staticlib", "rlib"]
 [dependencies]
 ldmux-session = { path = "../session" }
 ldmux-mesh = { path = "../mesh" }
+# The terminal protocol, for the client engine's messages and the events it hands back. **With no
+# default features**: this is the half of `ldmux-protocol` that owns no `tokio`, no `nix` and no
+# Unix socket, which is what keeps this library linkable into Android (`docs/RADIO-PLAN.md` §8.1).
+ldmux-protocol = { path = "../protocol", default-features = false }
 
 [lints]
 workspace = true

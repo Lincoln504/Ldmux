@@ -26,6 +26,12 @@ use ldmux_session::handshake::{self, HandshakeError, Initiator, Keypair, Pairing
 use ldmux_session::record::RecordError;
 use ldmux_session::session::{Inbound, Session, SessionError};
 
+/// The phone's client engine: the whole radio route behind one handle, added alongside the
+/// handshake ABI above so both live in one library until the app moves in S5.
+pub mod client;
+
+pub use client::*;
+
 pub const LDMUX_OK: i32 = 0;
 pub const LDMUX_ERR_NULL: i32 = -1;
 pub const LDMUX_ERR_PANIC: i32 = -2;
@@ -47,6 +53,9 @@ pub const LDMUX_ERR_DECODE: i32 = -26;
 pub const LDMUX_ERR_RECORD_LIMIT: i32 = -27;
 pub const LDMUX_ERR_QUEUE_FULL: i32 = -30;
 pub const LDMUX_ERR_NOT_OPEN: i32 = -31;
+pub const LDMUX_ERR_TOO_MANY_PAGES: i32 = -32;
+pub const LDMUX_ERR_ALREADY_OPEN: i32 = -33;
+pub const LDMUX_ERR_NO_PAGE: i32 = -34;
 
 /// `ldmux_session_receive` results (non-negative).
 pub const LDMUX_RX_QUIET: i32 = 0;
@@ -82,7 +91,7 @@ fn guard(f: impl FnOnce() -> i32) -> i32 {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or(LDMUX_ERR_PANIC)
 }
 
-fn hs_err(e: HandshakeError) -> i32 {
+pub(crate) fn hs_err(e: HandshakeError) -> i32 {
     match e {
         HandshakeError::Malformed => LDMUX_ERR_MALFORMED,
         HandshakeError::BadFilter => LDMUX_ERR_BAD_FILTER,
