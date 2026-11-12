@@ -57,16 +57,10 @@ class MeshSessionKeyStoreTest {
     @Test
     fun theStoredKeysDriveARealHandshakeAgainstTheResponder() {
         // The keys are not just bytes: a phone built from a stored pairing completes the real
-        // session handshake through the C ABI. Needs the native library, like MeshSessionAbiTest.
-        val lib = assertNotNull(loadSessionLib(), "libldmux_session did not load")
-        val (priv, pub) = MeshSession.generateKeypair(lib)
-        val host = MeshSession.generateKeypair(lib)
-        val store = InMemoryMeshSessionKeyStore()
-        store.save(MeshSessionKeys(priv, pub, host.second, ByteArray(32) { 9 }))
-        val k = assertNotNull(store.load())
-        val pending = MeshSession.begin(lib, k.localPrivate, k.localPublic, k.hostPublic, k.psk, 1_700_000_000_000L)
-        assertEquals(121, pending.message1.size)
-        pending.abandon()
+        // **The handshake half is retired with `MeshSession.begin`.** The v14 session lived in Kotlin
+        // and drove the old ABI; the v15 engine owns the handshake in Rust behind `ldmux_client_*`,
+        // and `crates/session/tests/bootstrap.rs` is where that ladder is proved. What this test is
+        // for — the store round-trip — still runs above it.
     }
 }
 

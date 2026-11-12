@@ -111,17 +111,10 @@ class RadioRouteTest {
         assertArrayEquals(byteArrayOf(0xAA.toByte(), 0xBB.toByte()), path.path())
     }
 
-    @Test
-    fun `the route hint is the marker and the radio's key, and nothing else`() {
-        val key = ByteArray(32) { (it + 1).toByte() }
-        val hint = RouteHint.record(key)
-        assertNotNull(hint)
-        assertEquals(RouteHint.LENGTH, hint!!.size)
-        assertArrayEquals(RouteHint.MAGIC, hint.copyOfRange(0, 4))
-        assertArrayEquals(key, hint.copyOfRange(4, 36))
-        assertNull("a key that is not a public key names nothing", RouteHint.record(ByteArray(31)))
-        assertNull(RouteHint.record(ByteArray(33)))
-    }
+    // **The route-hint test is retired with `RouteHint`.** The v14 phone taught the host its return
+    // path with a 36-byte "here is my radio key" record (`LDRH`); v15 has no prerequisite before
+    // `msg1`, because the bootstrap *is* the discovery (`docs/RADIO-PLAN.md` §5.1, `RC-1`). The
+    // subject ceased to exist, so the assertion has nothing left to assert.
 
     @Test
     fun `a heard route beats a stored contact route, and an empty source never takes one away`() {

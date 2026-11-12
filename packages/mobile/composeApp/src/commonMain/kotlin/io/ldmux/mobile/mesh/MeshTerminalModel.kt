@@ -126,3 +126,34 @@ data class MeshShells(val entries: List<SessionEntry>, val current: String?)
  * refused here and reported to the caller.
  */
 enum class InputOutcome { Accepted, NotLive, QueueFull, TooLong, Empty }
+
+/**
+ * What the link has actually done, in one sentence.
+ *
+ * The engine counts three things the sentence is made of — rungs spent, rungs spent while no path
+ * was held, and whether the mesh answered one of those — so this says what the v14 driver said
+ * without re-deriving it from a second set of counters.
+ */
+internal fun linkEffortLine(rungs: Int, routeRequests: Int, answered: Boolean): String = buildString {
+    append(rungs)
+    append(if (rungs == 1) " try" else " tries")
+    if (routeRequests > 0) {
+        append(" · ")
+        append(routeRequests)
+        append(if (routeRequests == 1) " route request" else " route requests")
+        append(if (answered) ", answered" else ", no answer from the mesh")
+    }
+}
+
+/**
+ * How long a wait for something that crosses the mesh gets, before the route is added to it.
+ *
+ * **A wait that crosses repeaters is a function of how far it crosses.** One record each way on a
+ * twenty-hop route takes a minute, and a flat deadline declared an answer lost while it was still
+ * travelling — the up key then asked again into a link already carrying the first request.
+ */
+internal fun answerDeadlineMs(base: Long, hops: Int?): Long =
+    base + (hops ?: 0).toLong() * HOP_ALLOWANCE_MS
+
+/** What one hop adds to a wait: a record's forward delay and the retransmit window behind it. */
+private const val HOP_ALLOWANCE_MS = 2_000L

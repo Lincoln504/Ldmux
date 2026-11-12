@@ -118,14 +118,9 @@ class MeshStandaloneTest {
         }
     }
 
-    @Test
-    fun `the radio gateway maps one send and exposes the record ceiling`() = runBlocking<Unit> {
-        val radio = FakeRadio()
-        val gateway = MeshRadioGateway(radio)
-        assertEquals(172, gateway.uplinkRecordMax)
-        assertEquals(MeshSendOutcome.SentDirect, gateway.send(ByteArray(4)).outcome)
-        assertEquals(1, radio.sends)
-    }
+    // **The gateway test is retired with `MeshRadioGateway`.** The v14 driver spoke to a `RadioLink`
+    // through a `GatewayPort`; the v15 engine owns the carrier in Rust (`crates/daemon/src/
+    // mesh_carrier.rs`), so there is no gateway object left on this side to map a send.
 
     @Test
     fun `the preset is one tuple with a path-hash width`() {

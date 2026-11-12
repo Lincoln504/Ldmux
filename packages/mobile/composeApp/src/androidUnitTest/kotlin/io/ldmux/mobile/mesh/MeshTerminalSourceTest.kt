@@ -5,6 +5,7 @@ import io.ldmux.mobile.term.TerminalFrame
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -21,17 +22,17 @@ class MeshTerminalSourceTest {
     private class TestClock { var now: Long = 1_000 }
     private var clock = TestClock()
 
-    private fun source(): Triple<MeshTerminalSource, MeshTerminalHandle, MeshInputBatcher> {
-        val b = MeshInputBatcher()
-        val h = MeshTerminalHandle(b, clock = { clock.now })
-        return Triple(MeshTerminalSource(h, now = { clock.now }), h, b)
+    private fun source(): Triple<MeshTerminalSource, MeshTerminalHandle, MeshDraft> {
+        val d = MeshDraft()
+        val h = MeshTerminalHandle(d, clock = { clock.now })
+        return Triple(MeshTerminalSource(h, now = { clock.now }), h, d)
     }
 
     @Test
-    fun `a tap on the cursor's line walks the cursor with named keys, through the batcher`() {
+    fun `a tap on the cursor's line walks the cursor with named keys, into the draft`() {
         val (s, _, b) = source()
         assertTrue(s.tapOn(frame(cursorX = 10, cursorY = 5), col = 7, row = 5))
-        val keys = b.pending.filterIsInstance<MeshOut.Keys>().flatMap { it.names }
+        val keys = b.peek().filterIsInstance<DraftItem.Keys>().flatMap { it.names }
         assertEquals(List(3) { "Left" }, keys)
     }
 
@@ -201,64 +202,6 @@ class MeshTerminalSourceTest {
         assertEquals("history has a gap here", s.scrollNotice)
     }
 
-    /// **`show` on a frozen view ends after the screen it asked for.**
-    ///
-    /// The wait exists so the host's release can deliver the newest screen. Ending it on quiet
-    /// instead leaves it running for ever on a shell that keeps printing, and the host goes on
-    /// drawing: measured 2026-11-09 as 7 records in 12 s on a pane printing every two seconds.
-    @Test
-    fun `a show ends its wait on the first screen and the view freezes again`() {
-        val (s, _, _) = source()
-        s.setPublicChannel(true)
-        s.show(screenOf(1, "$ one", "$ "), "aa11")
-        assertFalse(s.awaitingSync, "a frozen view is not waiting for anything")
-
-        s.sync()
-        assertTrue(s.awaitingSync, "the release is owed a screen")
-
-        // The screen the release asked for.
-        s.show(screenOf(2, "$ one", "$ two", "$ "), "aa11")
-        assertFalse(s.awaitingSync, "one screen is the whole answer to show")
-
-        // And the freeze resumes at the same grid: the next screen is kept, not drawn.
-        s.show(screenOf(3, "$ one", "$ two", "$ three"), "aa11")
-        assertTrue(s.pullHeld(), "the newest screen was kept, waiting for a show")
-    }
-
-    /// **`show` asks the host for one frame instead of releasing the freeze.**
-    ///
-    /// Three records a press was the old shape: `Hold{off}`, the frame, `Hold{on}`. A frozen view
-    /// that asks for the screen gets exactly that and stays frozen — one record out, the difference
-    /// back — so the press costs two.
-    @Test
-    fun `a show asks for one frame and keeps the freeze`() {
-        val (s, _, b) = source()
-        s.setPublicChannel(true)
-        s.show(screenOf(1, "$ one", "$ "), "aa11")
-        var asked = 0
-        s.onWantScreen = { asked++ }
-        assertFalse(s.sync(), "nothing to send, so the press sends nothing typed")
-        assertEquals(1, asked, "the press asks the host to draw the shell once")
-        assertTrue(s.awaitingSync, "and the view follows the one screen that answers it")
-        assertFalse(s.awaitingAnswer, "no answer is owed, because nothing was sent")
-        assertTrue(b.isEmpty, "no keystroke was queued by the press")
-    }
-
-    /// **A frozen view does not walk its cursor**, because the cursor it draws is not where the
-    /// shell's is, and the keys would queue invisibly until a `show` flushed them all at once.
-    @Test
-    fun `a tap queues no keys while the view is frozen`() {
-        val (s, _, b) = source()
-        s.setPublicChannel(true)
-        s.show(screenOf(1, "$ one", "$ "), "aa11")
-        assertTrue(b.isEmpty)
-
-        // The cursor is at the end of the second row; a tap on the far right of it would walk right.
-        val drew = s.tapCell(20, 1)
-        assertFalse(drew, "a frozen view takes no cursor walk")
-        assertTrue(b.isEmpty, "and nothing is queued for the next show")
-    }
-
     /// **A lost request expires, so the up key never goes dead.**
     ///
     /// One request in flight at a time, or a fast press would queue a record per press. But a
@@ -309,19 +252,6 @@ class MeshTerminalSourceTest {
     }
 
     @Test
-    fun `show on a frozen view unfreezes it so the host draws again`() {
-        val (s, _, b) = source()
-        s.setPublicChannel(true)
-        s.show(MeshScreen(listOf("$ one", "$ "), 2, 1, alternate = false, dead = false, epoch = 1, cols = 20), "aa11")
-        assertTrue(s.hasScreen, "the first screen paints")
-        assertTrue(b.isEmpty, "nothing was typed")
-
-        assertFalse(s.sync(), "nothing to send, so the press does not send")
-        assertTrue(s.awaitingSync, "but the view follows the host again, which is what releases the hold")
-        assertFalse(s.awaitingAnswer, "and the bar does not claim an answer is owed")
-    }
-
-    @Test
     fun `nothing to scroll before a screen arrives, and the measured grid goes out as a resize request`() {
         val (s, _, _) = source()
         assertEquals(0, s.scrollBy(-5))
@@ -342,7 +272,7 @@ class MeshTerminalSourceTest {
 
     /**
      * **A key sent while reading history returns the view to the live screen.** The key bars used
-     * to call the page's batcher directly, so Esc/Tab/Ctrl-c/arrows went to the live prompt while
+     * to call the page's input directly, so Esc/Tab/Ctrl-c/arrows went to the live prompt while
      * the user was looking at rows above it and saw nothing happen — the same defect fixed on the
      * tailnet (RELEASE-AUDIT 9.14). The bars now go through the source, whose `sendKey` follows the
      * input, and this is the difference between the two paths.
@@ -356,70 +286,96 @@ class MeshTerminalSourceTest {
         assertEquals(1, s.scrolledRows)
         s.sendKey("Escape")
         assertEquals(0, s.scrolledRows, "sending a key is typing, and typing returns to live")
-        assertTrue(b.pending.isNotEmpty(), "the key still reaches the batcher")
+        assertFalse(b.isEmpty, "the key still reaches the draft")
     }
 
-    /// **A newly opened shell paints its first screen, in batch mode, with no timer and no tap.**
-    ///
-    /// The hold draws a screen only when nothing has been painted; it used to judge that over the
-    /// source's whole life, so a previous shell's last screen made the next shell's first screen
-    /// "not the first" and it was held. On a public channel the first full screen takes longer than
-    /// the 1.5 s timer that was papering over this, so the page stayed blank until a refresh.
+    // ── the v15 batch model: one draft, one command, two controls ───────────────────────────
+
+    /**
+     * **A send is one command, and the draft leaves whole.** The old model queued pieces and let a
+     * pump send them one record at a time; v15 puts the entire draft on the air in one message, so
+     * what matters is that the source hands the items over in composition order and clears them
+     * only after the engine took them (`docs/RADIO-PLAN.md` §6.1, `RC-8`).
+     */
     @Test
-    fun `the first screen of a newly opened shell is drawn, not held`() {
-        val (s, _, _) = source()
-        s.setPublicChannel(true)
-        s.show(MeshScreen(listOf("shell A"), 0, 0, alternate = false, dead = false, epoch = 1, cols = 20), "aa11")
-        // The frozen view holds the second screen of the shell already on screen.
-        s.show(MeshScreen(listOf("shell A again"), 0, 0, alternate = false, dead = false, epoch = 2, cols = 20), "aa11")
-        assertTrue(s.heldScreenWaiting, "a frozen view holds the shell it is already showing")
-        // A different shell is a new screen, and it is the first screen of that shell.
-        s.show(MeshScreen(listOf("shell B"), 0, 0, alternate = false, dead = false, epoch = 1, cols = 20), "bb22")
-        assertFalse(s.heldScreenWaiting, "the new shell must not inherit the old one's hold")
+    fun `send hands the whole draft over once and takes the state to waiting`() = kotlinx.coroutines.runBlocking {
+        val (s, h, d) = source()
+        h.sendText("ls -la")
+        h.sendKey("Enter")
+        var sent: List<DraftItem>? = null
+        s.onSend = { items -> sent = items; true }
+        assertTrue(s.send())
+        val items = assertNotNull(sent)
+        assertEquals(2, items.size, "the text and its Enter are one command: {items}")
+        assertTrue(items[0] is DraftItem.Text)
+        assertTrue(items[1] is DraftItem.Keys)
+        assertTrue(d.isEmpty, "the draft is spent once the engine took it")
+        assertEquals(BatchState.Waiting, s.batchState)
     }
 
-    /// **Leaving the page drops the screens the hold kept back.** They are the answer to a sync made
-    /// on that page; returning to it must not draw a screen kept by a visit that is over, for the
-    /// same reason the typing that caused it is dropped.
+    /** A refused send leaves the draft alone: a failure must not look like a sent command. */
     @Test
-    fun `discarding held screens clears the pending screen`() {
-        val (s, _, _) = source()
-        s.setPublicChannel(true)
-        s.show(MeshScreen(listOf("first"), 0, 0, alternate = false, dead = false, epoch = 1, cols = 20), "aa11")
-        s.show(MeshScreen(listOf("held"), 0, 0, alternate = false, dead = false, epoch = 2, cols = 20), "aa11")
-        assertTrue(s.heldScreenWaiting, "the frozen view holds the second screen")
-        s.discardHeldScreens()
-        assertFalse(s.heldScreenWaiting, "nothing is waiting once the page is left")
+    fun `a refused send keeps every keystroke`() = kotlinx.coroutines.runBlocking {
+        val (s, h, d) = source()
+        h.sendText("rm -rf /tmp/x")
+        s.onSend = { false }
+        assertFalse(s.send())
+        assertFalse(d.isEmpty, "the operator's text survives a refusal")
+        assertEquals(BatchState.Idle, s.batchState)
     }
 
-    /// **A sync opens the view just long enough to see the answer.** The wait ends on the first
-    /// screen that arrives — normally the host echoing what was sent — and the answer follows in
-    /// more screens, which were frozen. Measured on the device: `pwd`, enter, sync, and the bar said
-    /// "view 2 behind" over a screen with no output; the user had to press `show` for the result of
-    /// a command they had already sent.
+    /** **`refresh` never spends the draft.** Looking at a shell cannot run what is typed in it. */
     @Test
-    fun `the screens after a sync are drawn, and the freeze returns once the shell goes quiet`() {
-        val (s, _, b) = source()
-        s.setPublicChannel(true)
-        s.show(MeshScreen(listOf("first"), 0, 0, alternate = false, dead = false, epoch = 1, cols = 20), "aa11")
-        s.show(MeshScreen(listOf("frozen"), 0, 0, alternate = false, dead = false, epoch = 2, cols = 20), "aa11")
-        assertTrue(s.heldScreenWaiting, "the view is frozen before the sync")
-        // Typing makes `sync` a send rather than a show, which arms the window.
-        b.appendText("pwd".encodeToByteArray(), clock.now)
-        assertTrue(s.sync(), "there was text to send")
-        // The drain finishes, which is what opens the window: mid-send a screen is the pty's
-        // reaction to a partial command and is held on purpose.
-        s.syncDrained()
-        s.show(MeshScreen(listOf("echo"), 0, 0, alternate = false, dead = false, epoch = 3, cols = 20), "aa11")
-        assertFalse(s.heldScreenWaiting, "the answer must be drawn, not held")
-        s.show(MeshScreen(listOf("/tmp"), 0, 0, alternate = false, dead = false, epoch = 4, cols = 20), "aa11")
-        assertFalse(s.heldScreenWaiting, "and so must the rest of the answer")
-        // **The wait ends when the shell is quiet, not when the first screen lands.** The echo, the
-        // output and the prompt after it all draw; then, with nothing arriving for a round trip,
-        // the view freezes again — which is what keeps batch mode a mode rather than live.
-        clock.now += PublicChannelHold.QUIET_MS
-        assertTrue(s.settleIfQuiet(), "the shell has gone quiet, so the answer is finished")
-        s.show(MeshScreen(listOf("later"), 0, 0, alternate = false, dead = false, epoch = 5, cols = 20), "aa11")
-        assertTrue(s.heldScreenWaiting, "after the answer the view freezes again")
+    fun `refresh asks for the screen and leaves the draft untouched`() {
+        val (s, h, d) = source()
+        h.sendText("pass")
+        var asked = 0
+        s.onRefresh = { asked++ }
+        s.refresh()
+        assertEquals(1, asked)
+        assertFalse(d.isEmpty, "a refresh must not spend what is typed")
+        assertEquals(BatchState.Idle, s.batchState, "and it is not a send, so nothing is owed")
+    }
+
+    /**
+     * **The answer ends the wait, and "done" is not for ever.** The host's own `Settled` is the only
+     * honest end: a timer that decided would either cut a slow answer off or leave "waiting" over a
+     * screen the operator is already reading.
+     */
+    @Test
+    fun `the answer settles the bar and the clock returns it to the draft`() = kotlinx.coroutines.runBlocking {
+        val (s, h, _) = source()
+        h.sendText("pwd")
+        s.onSend = { true }
+        assertTrue(s.send())
+        assertEquals(BatchState.Waiting, s.batchState)
+        s.answered()
+        assertEquals(BatchState.Settled, s.batchState)
+        clock.now += SETTLED_SHOW_MS + 1
+        s.batchTick()
+        assertEquals(BatchState.Idle, s.batchState, "done is a moment, not a state")
+    }
+
+    /**
+     * **A wait that crosses repeaters is sized by the route.** A flat deadline declared an answer
+     * lost while it was still travelling, so the deadline grows with the hops asked of the source.
+     */
+    @Test
+    fun `a wait with no answer goes late, and the route buys it time`() = kotlinx.coroutines.runBlocking {
+        var hops: Int? = null
+        val d = MeshDraft()
+        val h = MeshTerminalHandle(d, clock = { clock.now })
+        val s = MeshTerminalSource(h, now = { clock.now }, hops = { hops })
+        h.sendText("ls")
+        s.onSend = { true }
+        assertTrue(s.send())
+        // Past the base deadline, but a twenty-hop route buys forty more seconds.
+        hops = 20
+        clock.now += ANSWER_WAIT_MS + 1
+        s.batchTick()
+        assertEquals(BatchState.Waiting, s.batchState, "twenty hops is forty more seconds of wait")
+        clock.now += 20 * 2_000L
+        s.batchTick()
+        assertEquals(BatchState.NoAnswer, s.batchState, "and past that it is late")
     }
 }

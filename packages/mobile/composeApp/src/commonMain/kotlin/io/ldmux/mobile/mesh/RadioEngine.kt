@@ -1,6 +1,9 @@
 package io.ldmux.mobile.mesh
 
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.StateFlow
 
 /**
@@ -117,7 +120,9 @@ interface RadioEngine {
     /**
      * Send one command: the whole draft as a single message.
      *
-     * [kind] is [ClientCode.ITEM_TEXT], [ClientCode.ITEM_PASTE] or [ClientCode.ITEM_KEYS]; the
+     * [kind] is [ClientCode.ITEM_STREAM] for a composed draft — which is what a command with more
+     * than one item uses, so `ls -la` and its `Enter` are one message — or one of
+     * [ClientCode.ITEM_TEXT], [ClientCode.ITEM_PASTE], [ClientCode.ITEM_KEYS] for a single item. The
      * answer is at most one [ClientEvent.Settled] carrying what the host did with it.
      */
     suspend fun send(
@@ -196,6 +201,110 @@ enum class EngineLink {
  */
 expect fun radioEngine(creds: MeshCredentials, address: String): RadioEngine?
 
+/**
+ * The engine on a build that has no native library in it.
+ *
+ * **Not a stub of a missing feature — the feature is reported missing.** `ldmux_client_*` is a
+ * shared object that Gradle packages; a build without it (a desktop JVM test, an ABI that was not
+ * shipped) cannot talk to a radio at all, and `radioEngine` says so by returning null. The screen
+ * already draws that as `LinkDown(NeedsRadio)`, so what it needs is an engine that *reports* the
+ * absence rather than one that throws.
+ */
+object UnavailableRadioEngine : RadioEngine {
+    private val down = MutableStateFlow(EngineLink.RadioMissing)
+    private val nothing = MutableStateFlow<RadioStatus>(RadioStatus.UNKNOWN)
+    private val unknown = MutableStateFlow(Route.UNKNOWN)
+    private val falseFlow = MutableStateFlow(false)
+
+    override val linkUp: StateFlow<Boolean> = falseFlow.asStateFlow()
+    override val linkState: StateFlow<EngineLink> = down.asStateFlow()
+    override val problem: StateFlow<String?> =
+        MutableStateFlow("this build has no radio library").asStateFlow()
+    override val isOpen: Boolean get() = false
+    override val radio: StateFlow<RadioStatus> = nothing.asStateFlow()
+    override val route: StateFlow<Route> = unknown.asStateFlow()
+    override val events: Flow<ClientEvent> = emptyFlow()
+
+    override suspend fun start() {}
+    override suspend fun connect(nowMs: Long, wallMs: Long): Int = ClientCode.ERR_NULL
+    override suspend fun established(): Boolean = false
+    override suspend fun setPreset(
+        freqKhz: Int,
+        bwHz: Int,
+        sf: Int,
+        cr: Int,
+        pathWidth: Int,
+        powerDbm: Int,
+    ): Int = ClientCode.ERR_NULL
+    override suspend fun setScope(key: ByteArray): Int = ClientCode.ERR_NULL
+    override suspend fun setRecordsLeft(left: Int) {}
+    override suspend fun open(shell: String, cols: Int, rows: Int, nowMs: Long): Int = ClientCode.ERR_NULL
+    override suspend fun closePage(shell: String): Int = ClientCode.ERR_NULL
+    override suspend fun end(shell: String, nowMs: Long): Int = ClientCode.ERR_NULL
+    override suspend fun createShell(cwd: String, nowMs: Long): Int = ClientCode.ERR_NULL
+    override suspend fun takeover(shell: String, nowMs: Long): Int = ClientCode.ERR_NULL
+    override suspend fun makeLive(shell: String, nowMs: Long): Int = ClientCode.ERR_NULL
+    override suspend fun history(shell: String, from: Int, rows: Int, nowMs: Long): Int = ClientCode.ERR_NULL
+    override suspend fun list(nowMs: Long): Int = ClientCode.ERR_NULL
+    override suspend fun send(
+        shell: String,
+        text: ByteArray,
+        kind: Int,
+        cols: Int,
+        rows: Int,
+        nowMs: Long,
+    ): Int = ClientCode.ERR_NULL
+    override suspend fun fetch(shell: String, cols: Int, rows: Int, nowMs: Long): Int = ClientCode.ERR_NULL
+    override suspend fun mirror(shell: String): ClientMirror? = null
+    override suspend fun mirrorLine(shell: String, row: Int): ByteArray? = null
+    override suspend fun stats(): ClientStats? = null
+    override suspend fun nextDeadline(): Long? = null
+    override fun onNotification(frame: ByteArray) {}
+    override fun close() {}
+}
+
+/**
+ * A draft's items as the ABI carries them: `[kind][len u16 LE][bytes]` for text and pastes, the
+ * `Keys` form for names.
+ *
+ * **The same bytes `mesh_term`'s `Send` carries**, decoded there by `decode_item_stream`, so an item
+ * means one thing on both sides. It lives here because this file already owns the ABI's vocabulary
+ * (`ClientCode`, the mirrors of `ldmux_client.h`), and a second encoder somewhere else is how a
+ * command came to be several messages.
+ */
+object ItemStream {
+    private const val TEXT = 0x01
+    private const val PASTE = 0x02
+    private const val KEYS = 0x03
+
+    fun encode(items: List<DraftItem>): ByteArray {
+        val out = ArrayList<Byte>(64)
+        for (item in items) when (item) {
+            is DraftItem.Text -> putRun(out, TEXT, item.bytes)
+            is DraftItem.Paste -> putRun(out, PASTE, item.bytes)
+            is DraftItem.Keys -> {
+                if (item.names.isEmpty()) continue
+                out.add(KEYS.toByte())
+                out.add(item.names.size.toByte())
+                for (name in item.names) {
+                    val bytes = name.encodeToByteArray()
+                    out.add(bytes.size.toByte())
+                    for (b in bytes) out.add(b)
+                }
+            }
+        }
+        return ByteArray(out.size) { out[it] }
+    }
+
+    private fun putRun(out: ArrayList<Byte>, tag: Int, bytes: ByteArray) {
+        if (bytes.isEmpty()) return
+        out.add(tag.toByte())
+        out.add((bytes.size and 0xFF).toByte())
+        out.add(((bytes.size shr 8) and 0xFF).toByte())
+        for (b in bytes) out.add(b)
+    }
+}
+
 /** Status codes, exactly as `ldmux_client.h` defines them. */
 object ClientCode {
     const val OK = 0
@@ -225,6 +334,8 @@ object ClientCode {
      * read, so the phone sends names rather than escape sequences it would have to guess.
      */
     const val ITEM_KEYS = 2
+    /** A whole command: an item stream, so `ls -la` and its `Enter` are one message. */
+    const val ITEM_STREAM = 3
 
     /** What the sentence for a failed call should say. */
     fun word(code: Int): String = when (code) {

@@ -588,125 +588,71 @@ enum class RadioSendResult(val outcome: MeshSendOutcome) {
 class RadioLinkException(val state: MeshLinkState, message: String) : Exception(message)
 
 /**
- * The driver's `GatewayPort` over a [RadioLink].
+ * One connection from the mesh screen: the engine, and the driver that translates it.
  *
- * The gateway protocol's sequence number and `SEND_RESULT` were a loopback
- * detail. A radio answers OK/ERR for the command, so there is no meaningful
- * sequence; the ARQ above this sees one result per send and owns delivery.
- */
-class MeshRadioGateway(private val link: RadioLink) : GatewayPort {
-    override suspend fun refreshRoute() = link.refreshRoute()
-    override fun forgetRoute(blame: Boolean) = link.forgetRoute(blame)
-
-    override val state: StateFlow<MeshLinkState> = link.state
-    override val status: StateFlow<MeshStatus?> = link.status
-    override val problem: String? get() = link.lastProblem.value
-    override val received: Flow<ByteArray> = link.received
-    override val uplinkRecordMax: Int get() = link.uplinkRecordMax
-    override val routeHops: Int? get() = link.routeHops
-    override val routeFresh: Boolean get() = link.routeFresh()
-    override val meshReach: Int get() = link.meshReach()
-    override fun sessionUp(established: Boolean) = link.sessionUp(established)
-    override val radioPublicKey: ByteArray? get() = link.radioPublicKey
-
-    override suspend fun send(record: ByteArray): MeshSendResult =
-        MeshSendResult(0, link.send(record).outcome)
-
-}
-
-/**
- * One connection from the mesh screen: open the BLE radio, then drive the L3
- * session. A failed connect carries its own state into the driver, so the
- * screen shows "radio unavailable" rather than a generic handshake timeout.
+ * **The radio's whole protocol is behind `RadioEngine`** — the handshake, the carrier choice, the
+ * transactions, the frames — so this class owns no protocol either. It builds the engine for this
+ * plan, hands it to `MeshEngineDriver`, and closes it. `docs/RADIO-PLAN.md` §7, `AR-13`.
+ *
+ * One connection per plan: the draft and the picture are the screen's, and the engine's identity
+ * (the session keys, the radio's address) is the plan's, so a rebuilt plan is a rebuilt link.
  */
 class MeshRadioConnection(
-    private val link: RadioLink,
     private val creds: MeshCredentials,
-    private val lib: SessionLib,
+    private val address: String,
     private val selector: String,
-    /** The grid to state on the attach this connection makes for itself; see `MeshTermDriver`. */
+    /** The grid to state on the first page; see `MeshEngineDriver`. */
     grid: Pair<Int, Int>? = null,
 ) {
     private val origin = TimeSource.Monotonic.markNow()
     private val clock: () -> Long = { origin.elapsedNow().inWholeMilliseconds }
 
     /**
-     * The radio this connection owns, for the two facts the screen needs about it and nothing
-     * else: its own `SELF_INFO` (which channel it is really on) and its device info. The driver
-     * sends through the same object; this is a read-only window onto it, not a second owner.
+     * The engine this connection drives.
+     *
+     * A build with no native library gets [UnavailableRadioEngine], which reports the absence as
+     * `RadioMissing` — the same `LinkDown(NeedsRadio)` state a phone with no radio chosen has, because
+     * it is the same cure: there is no radio to talk to.
      */
-    val radio: RadioLink get() = link
+    private val engine: RadioEngine = radioEngine(creds, address) ?: UnavailableRadioEngine
 
-    val driver = MeshTermDriver(
-        gateway = MeshRadioGateway(link),
-        begin = {
-            MeshSession.begin(
-                lib,
-                creds.keys.localPrivate,
-                creds.keys.localPublic,
-                creds.keys.hostPublic,
-                creds.keys.psk,
-                Clock.System.now().toEpochMilliseconds(),
-                // The session's retries follow the radio's own airtime: 69 ms at the bench preset,
-                // 553 ms at 62.5 kHz, and longer again behind a repeater. From SELF_INFO, because
-                // that is what the radio is actually tuned to rather than what was asked for.
-                link.selfInfo.value?.let { info ->
-                    RadioAirtime.timeOnAirMs(
-                        RadioPreset(
-                            info.frequencyMhz,
-                            info.bandwidthKhz,
-                            info.spreadingFactor,
-                            info.codingRate,
-                            info.txPowerDbm,
-                        ),
-                        MeshRecordLimits.MAX,
-                    )
-                } ?: 0.0,
-            )
-        },
-        selector = selector,
+    /**
+     * The radio's own readings, for the two facts the screen needs and nothing else: which channel
+     * it is really on (to classify the tuple) and what one exchange costs on this route.
+     */
+    val radio: StateFlow<RadioStatus> get() = engine.radio
+
+    /** The route to the host, for the history deadline and the bar's evidence line. */
+    val route: StateFlow<Route> get() = engine.route
+
+    val driver = MeshEngineDriver(
+        engine = engine,
         clock = clock,
+        // The handshake's timestamp only has to agree with the host's within its window, so the
+        // wall clock is read here and nowhere else.
+        wall = { Clock.System.now().toEpochMilliseconds() },
+        selector = selector,
         initialGrid = grid,
     )
 
-    /**
-     * The host said the pane has stopped changing, forwarded from the driver.
-     *
-     * The screen wires this to its hold, so a sync's wait ends when the answer ends instead of on
-     * a local quiet timer.
-     */
+    /** The host said the pane stopped changing, forwarded from the driver. */
     var onIdle: (() -> Unit)?
         get() = driver.onIdle
         set(value) { driver.onIdle = value }
 
     private var released = false
 
-    suspend fun run() {
-        try {
-            link.connect()
-            driver.run()
-        } catch (e: RadioLinkException) {
-            // The link's sentence, not just its category: "Bluetooth is off" and "the radio did
-            // not finish its contact query" are both `RadioUnavailable`, and they are cured by
-            // two different actions.
-            driver.onGatewayState(e.state, e.message)
-        }
-    }
+    /** Run the driver's loop until the caller cancels it. */
+    suspend fun run() = driver.run()
 
-    /** Ownership release only. The link stays up across a driver rebuild. */
+    /** Close the engine, the lease and the loop. Idempotent. */
     fun close() {
         if (released) return
         released = true
-        link.release()
+        driver.close()
     }
 }
 
-/**
- * The platform's radio link, or null when this build has no BLE support.
- *
- * Android returns [RadioLink]; a future iOS build returns null until its
- * MeshCore transport exists.
- */
 expect fun meshRadioLink(address: String, hostKey: ByteArray): RadioLink?
 
 /** A link that exists only so the common screen can compile where no radio is built. */

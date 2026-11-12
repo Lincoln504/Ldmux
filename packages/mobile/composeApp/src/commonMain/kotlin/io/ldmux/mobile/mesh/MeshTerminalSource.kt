@@ -42,11 +42,17 @@ import io.ldmux.mobile.appLog
  * is a few dozen screens, far past what anyone reads back through on a radio. */
 private const val MESH_HISTORY_MAX = 2_000
 
-/** How quiet the shell has to be for a synced answer to count as finished. */
-internal const val SYNC_SETTLE_MS = 900L
+/**
+ * How long a command's answer may take before the bar says it is late.
+ *
+ * Before the route is added to it ([answerDeadlineMs]), and a floor rather than a measurement: a
+ * direct answer on a neighbour arrives in a second, and one across twenty hops takes a minute. The
+ * line reports lateness; it never cancels the wait, because the answer is still coming.
+ */
+internal const val ANSWER_WAIT_MS = 20_000L
 
-/** The longest a sync can hold the view open, however talkative the program is. */
-internal const val SYNC_DRAW_MAX_MS = 8_000L
+/** How long "done" stays on the bar after the answer arrived, before it reads the draft again. */
+internal const val SETTLED_SHOW_MS = 2_500L
 
 class MeshTerminalSource(
     private val input: MeshTerminalHandle,
@@ -68,24 +74,6 @@ class MeshTerminalSource(
      */
     private val hops: () -> Int? = { null },
 ) : TerminalSource, TerminalHandle by input {
-
-    /**
-     * While a synced answer is arriving, the view follows it.
-     *
-     * The wait for an answer ends on the first screen that arrives, which is normally the host
-     * echoing what was sent. The *answer* follows in more screens, and those were frozen — so a
-     * synced command printed its result into a frozen view and the user had to press `show` to see
-     * the outcome of a command they had already sent. Measured on the device, 2026-11-06: `pwd`,
-     * enter, sync, and the bar read "view 2 behind" over a screen with no output.
-     *
-     * **The window is idle-based, not a fixed wait.** Every screen that arrives while it is open
-     * pushes the deadline out by [SYNC_SETTLE_MS], so the view follows the answer until the shell
-     * stops talking and then freezes again by itself — no fixed delay is ever waited for, and a
-     * slow answer is not cut off. [SYNC_DRAW_MAX_MS] is the ceiling, so a program that talks for
-     * ever (a build log) cannot hold the view open against the mode's purpose.
-     */
-    private var drawThroughUntil: Long = 0
-    private var drawThroughCeiling: Long = 0
 
     private var engine: TerminalEngine? = null
     private var cols = 0
@@ -123,221 +111,122 @@ class MeshTerminalSource(
     private val _frame = MutableStateFlow<TerminalFrame.Frame?>(null)
     override val frame: StateFlow<TerminalFrame.Frame?> = _frame
 
-    /**
-     * Public-channel mode: input waits on the phone and the view does not follow the host.
-     *
-     * The state is [PublicChannelHold]'s, because the rule is "may this screen be drawn now", and
-     * that question has no engine in it. This source is the only thing that consults it, and the
-     * screen is the only thing that turns it on or asks it to sync. See ADR-0026.
-     */
-    private val hold = PublicChannelHold()
-
-    /** The newest screen the host sent while the view was frozen. */
-    private var pendingScreen: MeshScreen? = null
-
-    /** A held echo is currently drawn on top of the host's screen. */
+    /** A draft echo is currently drawn on top of the host's screen. */
     private var echoing: Boolean = false
 
     /**
-     * The held text as it should be echoed, kept so a repaint can put it back.
+     * The draft as it should be echoed, kept so a repaint can put it back.
      *
-     * Empty when nothing is held. Without this the echo lasted only until the next paint: press
-     * sync with a command still queued behind one in flight, and the answer's repaint erased the
-     * text while the bar went on counting it — text the screen no longer showed and the user
-     * could not see to correct. Now every paint writes "the host's screen, plus what is still
-     * held", which is the same invariant [echoHeld] states, just also true after a repaint.
+     * Empty when nothing is typed. Without this the echo lasted only until the next paint: the
+     * answer's repaint erased the text while the bar went on counting it — text the screen no longer
+     * showed and the user could not see to correct. Now every paint writes "the host's screen, plus
+     * what is still typed", which is the same invariant [echoHeld] states, just also true after a
+     * repaint.
      */
     private var echoText: String = ""
 
     /**
-     * The screen [MeshHistory] was last fed as "the new one", so a run of screens held while the
-     * view was frozen is noted once each instead of being skipped (frozen screens were never
-     * noted) or double-noted (the pull notes the same pair [show] just did).
+     * The screen [MeshHistory] was last fed as "the new one", so a screen that arrives twice is
+     * noted once.
      */
     private var notedScreen: MeshScreen? = null
 
-    /** The mode is engaged: typing is held and the view is frozen until a sync. */
-    val publicChannel: Boolean get() = hold.on
+    /** What this page's command is doing, for the bar. */
+    private var state: BatchState by mutableStateOf(BatchState.Idle)
 
-    /** A sync is out and its answer has not arrived: the view follows incoming screens. */
-    val awaitingSync: Boolean get() = hold.awaiting
+    /** When the last command went out, so lateness is measured from the press. */
+    private var sentAt: Long = 0
 
-    /**
-     * A press that actually sent something is waiting for its answer.
-     *
-     * What the bar may claim. A `show` press with an empty buffer unfreezes the view but owes no
-     * answer, so "sent · …" about it would be a control describing a send that never
-     * happened.
-     */
-    val awaitingAnswer: Boolean get() = hold.awaiting && hold.waitingOnSend
+    /** When "done" stops being shown. */
+    private var settledUntil: Long = 0
+
+    /** What this page's command is doing, for the bar. */
+    internal val batchState: BatchState get() = state
 
     /**
      * Whether a screen has been drawn at all.
      *
-     * Before the first paint there is nothing to freeze, and the first paint has to arrive: the host
-     * is not asked to hold until this is true.
+     * Before the first paint the page is blank, and the screen says so rather than drawing an empty
+     * engine: the surface has nothing to show until the host's first screen arrives.
      */
     val hasScreen: Boolean get() = last != null
 
     /**
-     * A screen the hold is keeping back, waiting for something to release it.
+     * Send the draft: **one command, one message**, and the answer is one screen.
      *
-     * The bar draws it as "output waiting · show": without that line the two states a `show` press
-     * can be in (nothing new was sent, or a newer screen is held) read the same, so the one press
-     * that would reveal a command's output had nothing advertising it.
+     * Returns false when there was nothing typed or the engine refused the send, in which case the
+     * draft is untouched — a refused command is still the operator's text, and dropping it would
+     * make a failure look like a successful send.
      */
-    val heldScreenWaiting: Boolean get() = pendingScreen != null
-
-    /** When the last sync was pressed, on the same clock this class reads. */
-    val pressedAt: Long get() = hold.pressedAt
-
-    /** The deadline passed and the bar should say so. Cleared by the answer or by the next press. */
-    val answerOverdue: Boolean get() = hold.reported
-
-    /**
-     * The buffer is being drained: the pump may send right now.
-     *
-     * True only from the sync press until the buffer is empty. [awaitingSync] stays true after
-     * that, while the answer is on its way — and typing during that wait is held, because "no
-     * data is sent live" does not pause just because a send is in flight.
-     */
-    val flushingHeld: Boolean get() = hold.flushing
-
-    /** Screens the host sent while the view was frozen; the newest is what a pull shows. */
-
-    /**
-     * How many syncs have been pressed. The screen keys its answer deadline on this rather than on
-     * [awaitingSync]: a Boolean that stays true cannot restart a deadline when the user presses
-     * sync again, so a second press 15 s into a 20 s wait would inherit 5 s of clock it did not earn.
-     */
-    val syncSeq: Int get() = hold.seq
-
-    /**
-     * Turn the mode on or off. Turning it off draws whatever the host sent meanwhile, so leaving
-     * the mode never leaves a stale screen claiming to be live.
-     */
-    fun setPublicChannel(on: Boolean) {
-        if (on == hold.on) return
-        hold.set(on)
-        if (!on) pullHeld()
-    }
-
-    /**
-     * The sync button's action. True when something is waiting and the pump must flush it; false
-     * when nothing was waiting, in which case the newest held screen is drawn now.
-     *
-     * The return value is informational: the pump polls its gate every 120 ms while the mode is
-     * on, so nothing has to be woken. The bar reads the same facts it does (`flushing`, `awaiting`)
-     * and the deadline is [syncSeq].
-     *
-     * It cannot be a synchronous request and answer: sending queues records on the link and the
-     * host's answer arrives as its next `Commit`, so the answer to "did it work" is "the next
-     * screen". The screen's own deadline is what stops a wait nobody will answer.
-     */
-    fun sync(): Boolean {
-        val pending = input.hasPending
-        // Nothing typed and no screen held: the view is already the newest the host sent, so there
-        // is nothing to send and nothing to show. Starting a wait here would be a wait for an
-        // answer that cannot come, and the deadline would report a failure that did not happen.
-        if (!pending && pendingScreen == null) {
-            // **"Show me the shell now", even when nothing is held.** The host is not drawing a
-            // frozen view (see the hold effect), so a `show` with nothing typed has to *release*
-            // it or the button does nothing at all: measured 2026-11-09, `show` on a batch shell
-            // never refreshed the screen, because with the hold there is never a pending screen to
-            // draw. Releasing lets the host send the difference, which is usually nothing — and
-            // that is the correct answer when the screen is already current.
-            if (hold.on && last != null) {
-                // **"Show me the shell" is one record out and the difference back.** The host keeps
-                // holding and draws once, so this is `Resync` alone — no release, no re-hold, and no
-                // state on this side that can disagree with the host's. It used to be three records
-                // a press: `Hold{off}`, the frame, `Hold{on}`.
-                hold.sync(pending = false, nowMs = now())
-                onWantScreen?.invoke()
-                return false
-            }
-            // Nothing to send, nothing held and nothing to release: a wait left over from an
-            // earlier press must end here, or the bar would describe a wait the button cannot act
-            // on.
-            hold.settle()
+    suspend fun send(): Boolean {
+        val items = input.draft.peek()
+        if (items.isEmpty()) return false
+        val send = onSend ?: return false
+        state = BatchState.Sending
+        refreshed()
+        if (!send(items)) {
+            state = BatchState.Idle
             return false
         }
-        // **A press is not typing.** The batcher's windows coalesce keystrokes; the press that
-        // ends the composition should leave now, not one window later.
-        if (pending) input.flushNow()
-        if (hold.sync(pending, now())) {
-            drawThroughUntil = now() + SYNC_SETTLE_MS
-            drawThroughCeiling = now() + SYNC_DRAW_MAX_MS
-            return true
-        }
-        // "Show": draw the newest held screen and end the wait — the user asked to see the shell,
-        // not to wait for an answer to a send that did not happen.
-        pullHeld()
-        return false
+        // **Taken only after the engine accepted it.** A send that throws or refuses leaves the
+        // draft where it was, so the press can be repeated without retyping.
+        input.draft.clear()
+        input.refreshPending()
+        sentAt = now()
+        state = BatchState.Waiting
+        return true
     }
 
     /**
-     * Drop everything held and every rendering of it (the screen going away).
+     * Ask for the screen again. **Never touches the draft**, so looking at a shell can never run
+     * what is typed in it.
+     */
+    fun refresh() {
+        onRefresh?.invoke()
+    }
+
+    /**
+     * The host answered: its screen arrived.
      *
-     * Held text is the one plaintext this app keeps, and in manual-sync mode it can sit for
-     * minutes. Persistence was never the risk (nothing is saved); surviving in the background was.
+     * Called from the answer event, not from a timer. A `Settled` is the host's own word that the
+     * pane stopped changing, which is the only honest end for "waiting for the answer".
+     */
+    fun answered() {
+        if (state == BatchState.Waiting || state == BatchState.NoAnswer) {
+            state = BatchState.Settled
+            settledUntil = now() + SETTLED_SHOW_MS
+        }
+    }
+
+    /**
+     * Advance the bar's clock: a wait that has gone on too long is late, and "done" is not for ever.
+     *
+     * Called on the screen's tick. Both transitions are statements about time, not about the air, so
+     * neither needs an event to trigger it.
+     */
+    fun batchTick() {
+        val t = now()
+        when (state) {
+            BatchState.Waiting -> {
+                if (t - sentAt > answerDeadlineMs(ANSWER_WAIT_MS, hops())) state = BatchState.NoAnswer
+            }
+            BatchState.Settled -> {
+                if (t > settledUntil) state = BatchState.Idle
+            }
+            else -> {}
+        }
+    }
+
+    /**
+     * Drop everything typed and every rendering of it (the screen going away).
+     *
+     * What is typed is the one plaintext this app keeps, and it can sit for minutes on a slow link.
+     * Persistence was never the risk (nothing is saved); surviving in the background was.
      */
     fun scrub() = input.scrub()
 
-    /**
-     * The pump found nothing left to send.
-     *
-     * If a sync was in flight and the host's answer already arrived during the drain, it was held
-     * (see [PublicChannelHold.acceptScreen]) — and this is where "send what is held, then show the
-     * shell's view" is actually honoured: the send finished, so the answer is now drawn. Without
-     * it the answer sat in [pendingScreen] until the user pressed the button again.
-     */
-    fun syncDrained() {
-        val wasFlushing = hold.drained()
-        // **The window opens when the send completes, not when the button was pressed.** Draining a
-        // multi-record command takes seconds on this link, and during the drain screens are held on
-        // purpose (they are the pty's reaction to a partial command). Arming the window at the press
-        // spent its life on the drain and closed it just as the answer began to arrive.
-        if (wasFlushing) drawThroughUntil = now() + SYNC_SETTLE_MS
-        if (!hold.awaiting) return
-        // **The answer that arrived during the drain is the answer.** It used to be drawn with the
-        // wait deliberately kept (`drawHeldKeepingWait`), on the reasoning that the wait ends with
-        // the *next* screen — which is true on a shell that keeps printing and false on every shell
-        // that then sits still. On an idle shell no further screen ever came, so the bar said
-        // "waiting for the answer" over a screen the user was already looking at, and the only way
-        // out was pressing `show`. The send is complete and its answer is here: end the wait.
-        // The timeout path keeps its old behaviour, because there the answer genuinely has not
-        // arrived.
-        if (!pullHeld()) drawHeldKeepingWait()
-    }
-
-    /**
-     * The wait's deadline passed with no answer: draw what is held and say so.
-     *
-     * **The wait survives it.** Drawing what is held does not end the wait, because the answer to a
-     * sync is "the next screen the host sends" and a slow answer is the normal answer on this link.
-     * Clearing the wait here meant the late answer was *held* and the user pressed the button again
-     * — the press they had already made, spent on nothing. The bar says "no answer · …" until the
-     * answer arrives, and the answer is drawn when it does.
-     */
-    fun syncTimedOut(): Boolean {
-        if (!hold.timedOut()) return false
-        drawHeldKeepingWait()
-        return true
-    }
-
-    /**
-     * Draw the newest held screen without ending the wait.
-     *
-     * The difference from [pullHeld] is one flag: [PublicChannelHold.painted] ends the wait, and a
-     * paint that happens *while* waiting (a drain finishing, a deadline passing) must not, or the
-     * answer that follows is held instead of drawn.
-     */
-    private fun drawHeldKeepingWait(): Boolean {
-        val held = pendingScreen ?: return false
-        pendingScreen = null
-        applyScreen(held)
-        return true
-    }
+    /** The bar's status line is drawn from this; reading the draft recomposes only the bar. */
+    private fun refreshed() = input.refreshPending()
 
     /**
      * Why a scroll did nothing, while it is worth saying.
@@ -379,106 +268,28 @@ class MeshTerminalSource(
      * thread (the engine is single-threaded). The same screen twice is skipped, because a repaint
      * costs a frame decode and nothing changed.
      *
+     * **There is no freeze any more.** The old model had to decide whether a screen "may be drawn
+     * now", because the host streamed and the operator had asked to be left alone. In v15 the host
+     * sends one screen per command, so every screen that arrives is the answer to a press that was
+     * made: it is drawn. `docs/RADIO-PLAN.md` §7.
+     *
      * A grid that changes size (the host re-described its terminal) is a new engine: the old one's
      * cells are the wrong shape, and a selection into them would mean nothing.
      */
     fun show(screen: MeshScreen, shell: String? = null) {
         if (screen.cols <= 0 || screen.lines.isEmpty()) return
-        // One shell's rows are never drawn under another's name, and a new shell starts unpainted.
+        // One shell's rows are never drawn under another's name, and a new shell starts blank.
         if (shell != null && shell != drawnShell) {
             forgetScreen()
             drawnShell = shell
         }
-        // The hold decides whether this screen may be drawn. While frozen the newest screen is
-        // kept rather than drawn, so a sync shows the shell as it is now and not a replay of what
-        // was typed. Nothing else about the link changes: the driver keeps polling and the
-        // session keeps its acks, because a frozen view is a view and not a dead link.
-        // **"Painted" means painted into the engine in front of the user, not "at some point".**
-        // A grid change (the host fitting the pty to the keyboard) builds a new engine and blanks
-        // the surface, so the screen that follows has nothing behind it — yet `last` was still set
-        // from the previous engine, the hold called it "not the first screen", and the page stayed
-        // empty until a sync. Measured 2026-11-06: the first screen drew at 80x24, the fit
-        // re-described the terminal as 46x19, and every screen after that was held.
-        val rebuilt = engine == null || screen.cols != cols || screen.lines.size != rows
-        // A sync opens the view until the answer stops arriving: the answer is not one screen.
-        val t = now()
-        val open = t < drawThroughUntil && t < drawThroughCeiling
-        if (open) drawThroughUntil = minOf(t + SYNC_SETTLE_MS, drawThroughCeiling)
-        // **A drain is not overridden by the window.** Mid-send, a screen is the pty's reaction to a
-        // partial command; drawing it would show half a command's output as if it were the answer,
-        // which is the invariant `acceptScreen` states and the window must not quietly break.
-        val accepting = open && !hold.flushing
-        // **While a sync's answer is arriving, the view follows it.** `awaiting` stays true until the
-        // shell has been quiet for a round trip ([settleIfQuiet]), so the echo, the command's output
-        // and the prompt after it all draw — instead of only the first, with the rest held behind a
-        // `show` press. A drain still overrides this: mid-send a screen is a partial command's
-        // reaction, not the answer.
-        val answering = hold.awaiting && !hold.flushing
-        val accept = answering || accepting || hold.acceptScreen(painted = last != null && !rebuilt)
-        // Which shell a screen belongs to, and whether the hold took it, is the one fact that
-        // decides whether a freshly opened shell paints. Logged at the decision, because the two
-        // plausible causes (a stale `painted`, a shell id that never changed) look identical from
-        // the outside — both produce a blank page and a bar counting held screens.
-        appLog("mesh show shell=$shell drawn=$drawnShell painted=${last != null} held=${!accept}")
-        if (!accept) {
-            // **A screen held is a screen not noted, and that loses scrollback.** The rows that
-            // left while the view was frozen are the same rows the host numbered, so they are
-            // history whether or not the screen was drawn: a build log watched through a freeze
-            // must scroll back to its beginning afterwards. [notedScreen] chains the pairs so each
-            // one is noted exactly once, and the pull that draws the newest notes its own pair.
-            history.note(notedScreen ?: last, screen)
-            notedScreen = screen
-            pendingScreen = screen
-            return
-        }
-        pendingScreen = null
         applyScreen(screen)
-        hold.drawn(now())
-        hold.painted()
     }
 
     /**
-     * Forget the screens the hold kept back, without drawing them.
-     *
-     * The held screen is the answer to something that happened on **this page**: a sync waiting
-     * for its answer, or a shell's output piling up while the view was frozen. Leaving the page
-     * ends the question, so returning to it must not resume a count of "view N behind" from a
-     * visit that is over — the same rule as the typing that went with it.
+     * Forget the screen: the engine and its frame go, so the surface draws nothing until the next
+     * [show]. Used when the page changed, so one shell's rows are never drawn under another's name.
      */
-    /**
-     * End a sync's wait when the shell has gone quiet, and report whether it did.
-     *
-     * Called on a short tick by the screen while a wait is running. This is what turns "waiting for
-     * the answer" off on an idle shell that has finished answering — without it the bar kept saying
-     * the wait was on, or the view froze mid-answer and needed `show`.
-     */
-    fun settleIfQuiet(): Boolean = hold.settleIfQuiet(now())
-
-    /** The host said the pane has stopped changing: see [PublicChannelHold.answered]. */
-    fun answered(): Boolean = hold.answered()
-
-    fun discardHeldScreens() {
-        pendingScreen = null
-    }
-
-    /**
-     * Draw the newest screen the host sent, without sending anything.
-     *
-     * The honest answer to "sync" when nothing is waiting: there is nothing to send, so the only
-     * thing a button can do is show what the shell last said. False when no screen is held.
-     */
-    fun pullHeld(): Boolean {
-        val held = pendingScreen ?: return false
-        pendingScreen = null
-        applyScreen(held)
-        hold.painted()
-        // **A pulled screen is a drawn screen**, and a drawn screen is the whole answer to a
-        // `show` that sent nothing: the wait ends here, so the host is re-held instead of
-        // streaming into a frozen view.
-        hold.drawn(now())
-        return true
-    }
-
     private fun applyScreen(screen: MeshScreen) {
         val c = screen.cols
         val r = screen.lines.size
@@ -616,8 +427,6 @@ class MeshTerminalSource(
 
     /** Drop the engine, the drawn screen and everything that belonged to it. */
     private fun forgetScreen() {
-        // The bar counts held screens; a page that holds none must not say it holds two.
-        hold.forget()
         engine?.close()
         engine = null
         last = null
@@ -631,9 +440,9 @@ class MeshTerminalSource(
         echoText = ""
         echoing = false
         notedScreen = null
-        // A screen from the shell that is gone is not an answer to anything: drop it so a sync
-        // does not draw the last shell's rows under the next shell's name.
-        pendingScreen = null
+        // A command's wait belongs to the page it was made on: leaving ends it, so a returning
+        // page never resumes a count from a visit that is over.
+        state = BatchState.Idle
         scrollNotice = null
     }
 
@@ -790,13 +599,15 @@ class MeshTerminalSource(
     var onWantHistory: ((Int, Int) -> Unit)? = null
 
     /**
-     * Ask the host to draw the shell once, without releasing the freeze.
+     * Wired by the screen: send this draft as one command. True when the engine took it.
      *
-     * Set by the screen to [`MeshTermDriver.showOnce`]. Batch mode's `show` press is this request and
-     * nothing else: the host answers with the difference from the screen this client holds and goes
-     * on holding, so a look costs two records instead of a release, a frame and a re-hold.
+     * The source does not know how a command reaches the air; it knows that what is typed is one, and
+     * that a refusal must leave the draft alone. `docs/RADIO-PLAN.md` §7.
      */
-    var onWantScreen: (() -> Unit)? = null
+    var onSend: (suspend (List<DraftItem>) -> Boolean)? = null
+
+    /** Wired by the screen: ask the host for this page's screen again. Never spends the draft. */
+    var onRefresh: (() -> Unit)? = null
 
     /** A history request is in flight, so an up key pressed again does not queue another. */
     private var awaitingHistory = false
@@ -912,13 +723,6 @@ class MeshTerminalSource(
 
     /** [tapCell] against a given frame, so the rule is testable without a native engine. */
     internal fun tapOn(f: TerminalFrame.Frame, col: Int, row: Int): Boolean {
-        // **A frozen view has no cursor to walk from.** The picture is the one the operator last
-        // asked for, so the cursor drawn on it is not where the shell's cursor is now: walking from
-        // it moves the real cursor to a place the operator misread. Batch mode also cannot show the
-        // result of the walk until a `show`, so the keys pile up invisibly and land all at once —
-        // measured 2026-11-09 as a screenful of `^[[D` in a shell whose loop reads no input, after a
-        // few taps were flushed by a `show` press.
-        if (hold.on && !hold.awaiting) return false
         return when (val action = planTap(col, row, f, mouseRefused = true)) {
             is TapAction.Keys -> {
                 var all = true

@@ -71,7 +71,8 @@ class MeshEngineDriver(
     private var page: String = selector
 
     /** True from the moment a page is asked for until its first screen arrives. */
-    private var attaching: Boolean = false
+    internal var attaching: Boolean = false
+        private set
 
     /** The screen applied last, so a repaint of the same one is skipped. */
     private var lastScreen: MeshScreen? = null
@@ -323,6 +324,19 @@ class MeshEngineDriver(
 
     /** One command: the whole draft as a single message. */
     suspend fun input(bytes: ByteArray): InputOutcome = send(bytes, ClientCode.ITEM_TEXT)
+
+    /**
+     * The draft as **one** command.
+     *
+     * The items go to the engine as an item stream, which the library decodes with the same function
+     * the wire uses and folds into a single `T_SEND`. Sending the text and its `Enter` as two calls
+     * would be two messages — `RC-8` — which is the whole reason this member exists rather than the
+     * screen calling [input] and [keys] in turn.
+     */
+    suspend fun sendDraft(items: List<DraftItem>): Boolean {
+        if (items.isEmpty()) return false
+        return send(ItemStream.encode(items), ClientCode.ITEM_STREAM) == InputOutcome.Accepted
+    }
 
     /** Key names, single-space separated, encoded by the host for the pane's live modes. */
     suspend fun keys(names: List<String>): InputOutcome =

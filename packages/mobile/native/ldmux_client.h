@@ -71,6 +71,11 @@ typedef struct LdmuxClient LdmuxClient;
  * `C-c`). The engine encodes them for the pane's live cursor-key and Kitty mode, which only the
  * host can read, so the phone sends names rather than escape sequences it would have to guess. */
 #define LDMUX_ITEM_KEYS 2
+/* A whole command: an item stream, `[kind u8][len u16 LE][bytes]...` for text and pastes and the
+ * Keys form for names — the same bytes mesh_term's `Send` carries. Use this whenever a command has
+ * more than one item; sending a draft's text and its Enter as two calls is two messages, which is
+ * RC-8 (docs/RADIO-PLAN.md §12). */
+#define LDMUX_ITEM_STREAM 3
 
 /* Event kinds, as LdmuxClientEvent.kind. */
 #define LDMUX_EV_ATTACHED 1
@@ -282,11 +287,13 @@ int32_t ldmux_client_open(LdmuxClient *c, const uint8_t *shell, size_t shell_len
 /* Let go of `shell`. */
 int32_t ldmux_client_close(LdmuxClient *c, const uint8_t *shell, size_t shell_len);
 
-/* Send one item to `shell` as a single command, and write its operation id to `*op_id` when `op_id`
- * is not null. The answer is one LDMUX_EV_SETTLED carrying what the host did with it.
+/* Send one command to `shell`, and write its operation id to `*op_id` when `op_id` is not null. The
+ * answer is one LDMUX_EV_SETTLED carrying what the host did with it.
  *
- * `kind` is LDMUX_ITEM_TEXT for text typed at a prompt, or LDMUX_ITEM_PASTE for anything that must
- * not run as it arrives (a multi-line paste, and a key's own escape sequence). */
+ * `kind` is LDMUX_ITEM_TEXT for text typed at a prompt, LDMUX_ITEM_PASTE for anything that must not
+ * run as it arrives (a multi-line paste), LDMUX_ITEM_KEYS for key names, or LDMUX_ITEM_STREAM for a
+ * composed draft — which is what a command with more than one item uses, so that `ls -la` and its
+ * Enter are ONE message. */
 int32_t ldmux_client_send(LdmuxClient *c, const uint8_t *shell, size_t shell_len, uint8_t kind,
                           const uint8_t *items, size_t items_len, uint8_t cols, uint8_t rows,
                           uint64_t now_ms, uint32_t *op_id);

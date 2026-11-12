@@ -585,3 +585,84 @@ fn a_preset_write_is_one_command_and_leaves_what_it_was_not_told() {
         );
     }
 }
+
+/// **A composed draft is one command, so it is one message.**
+///
+/// The ABI used to carry exactly one item per call, which meant a draft's text and its `Enter`
+/// were two messages — `RC-8`, moved one layer down from where it was fixed. `LDMUX_ITEM_STREAM`
+/// hands the library the whole item stream and it folds the lot into one `T_SEND`.
+///
+/// That the stream decodes is what this proves at the boundary; that the decoded items become one
+/// message is `Client::send`'s own contract, pinned in
+/// `the_abi_item_stream_is_the_wire_s_item_stream`. A stream with no page is the cheapest way to
+/// say "these bytes decoded": the answer is the *page* error, not the *argument* error.
+#[test]
+fn an_item_stream_is_one_command_and_a_broken_one_is_refused_whole() {
+    let cfg = config();
+    let h = Handle::new(&cfg);
+
+    // `Text("ls -la")` then `Keys(["Enter"])`, exactly as `mesh_term` writes them.
+    let mut stream = vec![0x01u8, 6, 0];
+    stream.extend_from_slice(b"ls -la");
+    stream.extend_from_slice(&[0x03, 1, 5]);
+    stream.extend_from_slice(b"Enter");
+    let mut op = 0u32;
+    // SAFETY: the handle is live, `stream` is readable for its length, `op` is writable.
+    let rc = unsafe {
+        ldmux_client_send(
+            h.0,
+            b"ab12cd34".as_ptr(),
+            8,
+            LDMUX_ITEM_STREAM,
+            stream.as_ptr(),
+            stream.len(),
+            46,
+            19,
+            NOW,
+            &mut op,
+        )
+    };
+    assert_eq!(
+        rc, LDMUX_ERR_NO_PAGE,
+        "a valid item stream did not decode: the answer should be about the page, not the argument"
+    );
+
+    // A `Text` whose length runs past the buffer is refused whole: half a command runs part of what
+    // the operator wrote, which is worse than a refusal.
+    let broken = [0x01u8, 9, 0, b'x'];
+    // SAFETY: the same live handle, readable for its length.
+    let rc = unsafe {
+        ldmux_client_send(
+            h.0,
+            b"ab12cd34".as_ptr(),
+            8,
+            LDMUX_ITEM_STREAM,
+            broken.as_ptr(),
+            broken.len(),
+            46,
+            19,
+            NOW,
+            &mut op,
+        )
+    };
+    assert_eq!(rc, LDMUX_ERR_ARG, "a malformed item stream was not refused");
+
+    // An unknown tag is refused for the same reason.
+    let unknown = [0x7fu8];
+    // SAFETY: the same live handle.
+    let rc = unsafe {
+        ldmux_client_send(
+            h.0,
+            b"ab12cd34".as_ptr(),
+            8,
+            LDMUX_ITEM_STREAM,
+            unknown.as_ptr(),
+            unknown.len(),
+            46,
+            19,
+            NOW,
+            &mut op,
+        )
+    };
+    assert_eq!(rc, LDMUX_ERR_ARG);
+}

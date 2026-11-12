@@ -279,6 +279,13 @@ pub const LDMUX_ITEM_PASTE: u8 = 1;
 /// `C-c`). The engine encodes them for the pane's live cursor-key and Kitty mode, which only the
 /// host can read, so the phone sends names rather than escape sequences it would have to guess.
 pub const LDMUX_ITEM_KEYS: u8 = 2;
+/// A whole command: an **item stream**, `[kind u8][len u16 LE][bytes]...` for text and pastes and
+/// the `Keys` form for names — the same bytes `mesh_term`'s `Send` carries, so the phone builds an
+/// item stream once and the library folds it into one message.
+///
+/// Use this whenever a command has more than one item. Sending a draft's text and its `Enter` as
+/// two `LDMUX_ITEM_*` calls is two messages, which is `RC-8` (`docs/RADIO-PLAN.md` §12).
+pub const LDMUX_ITEM_STREAM: u8 = 3;
 
 /// A phone's radio route, from connect to screen.
 pub struct LdmuxClient {
@@ -717,12 +724,13 @@ pub unsafe extern "C" fn ldmux_client_close(
     }
 }
 
-/// Send one item to `shell` as a single command. The op id is written to `op_id` when it is not
-/// null.
+/// Send one command to `shell`. The op id is written to `op_id` when it is not null.
 ///
-/// `kind` is [`LDMUX_ITEM_TEXT`] or [`LDMUX_ITEM_PASTE`]; a key that is not text (an `Enter`, a
-/// `C-c`) is sent as a paste whose bytes are the key's escape sequence, because the host writes a
-/// paste through the pane's own bracketed-paste mode.
+/// `kind` is [`LDMUX_ITEM_TEXT`], [`LDMUX_ITEM_PASTE`], [`LDMUX_ITEM_KEYS`] or
+/// [`LDMUX_ITEM_STREAM`]. **`LDMUX_ITEM_STREAM` is what a composed draft uses**: the buffer is an
+/// item stream (`[kind u8][len u16 LE][bytes]...`, and the `Keys` form for names), decoded by
+/// `mesh_term::decode_item_stream` — the same function the wire uses — and sent as **one** message.
+/// Anything else would put a command's text and its `Enter` in two messages, which is `RC-8`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ldmux_client_send(
     c: *mut LdmuxClient,
@@ -762,6 +770,24 @@ pub unsafe extern "C" fn ldmux_client_send(
                         return LDMUX_ERR_ARG;
                     }
                     mesh_term::SendItem::Keys(names)
+                }
+                LDMUX_ITEM_STREAM => {
+                    // The same decoder the wire uses, so an item means one thing on both sides.
+                    match mesh_term::decode_item_stream(&bytes) {
+                        Ok(items) => {
+                            return match h.client.send(id, &items, cols, rows, now_ms) {
+                                Ok(id) => {
+                                    if !op_id.is_null() {
+                                        // SAFETY: the caller said `op_id` is a writable `u32`.
+                                        unsafe { *op_id = id };
+                                    }
+                                    LDMUX_OK
+                                }
+                                Err(e) => client_err(&e),
+                            };
+                        }
+                        Err(_) => return LDMUX_ERR_ARG,
+                    }
                 }
                 _ => return LDMUX_ERR_ARG,
             };

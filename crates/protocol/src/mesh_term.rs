@@ -1193,6 +1193,35 @@ fn valid_key_name(name: &str) -> bool {
     !name.is_empty() && name.bytes().all(|b| (0x21..=0x7e).contains(&b))
 }
 
+/// The item stream of a [`Message::Send`], on its own.
+///
+/// **The bytes a `Send` carries and the bytes the C ABI carries are these bytes**, produced by one
+/// function, so a phone that builds an item stream for the ABI and the host that decodes it inside
+/// a `Send` cannot disagree about what an item is. That matters because a command is one message:
+/// a second encoder is how `RC-8` came back the first time.
+pub fn encode_item_stream(items: &[SendItem]) -> Result<Vec<u8>, EncodeError> {
+    if items.is_empty() || items.len() > MAX_SEND_ITEMS {
+        return Err(EncodeError::Empty);
+    }
+    let mut out = Vec::new();
+    for item in items {
+        encode_send_item(&mut out, item)?;
+    }
+    Ok(out)
+}
+
+/// The inverse of [`encode_item_stream`]; every byte is consumed, so a trailing fragment is
+/// malformed rather than silently dropped.
+///
+/// # Errors
+///
+/// [`DecodeError::Malformed`] for a stream that is not a valid sequence of items — an unknown tag,
+/// a length that runs past the buffer, an empty item, or more than [`MAX_SEND_ITEMS`] of them.
+pub fn decode_item_stream(bytes: &[u8]) -> Result<Vec<SendItem>, DecodeError> {
+    let mut rest = bytes;
+    decode_send_items(&mut rest, DecodeError::Malformed(T_SEND))
+}
+
 /// One item of a [`Message::Send`], written as `tag | payload`.
 fn encode_send_item(out: &mut Vec<u8>, item: &SendItem) -> Result<(), EncodeError> {
     match item {
@@ -4328,6 +4357,47 @@ mod tests {
             bytes.len()
         );
         assert_eq!(one(&bytes), m);
+    }
+
+    /// **The item stream the C ABI carries is the bytes the wire carries.**
+    ///
+    /// The phone builds a draft's items once and hands them to `ldmux_client_send` as
+    /// `LDMUX_ITEM_STREAM`; the library decodes them with [`decode_item_stream`] and folds them into
+    /// one `T_SEND`. That is only true while the two encoders are one encoder, so this pins it:
+    /// what [`encode_item_stream`] produces is exactly the body a `Send` puts its items in, and it
+    /// decodes back to the same items in the same order.
+    #[test]
+    fn the_abi_item_stream_is_the_wire_s_item_stream() {
+        let items = vec![
+            SendItem::Text(b"ls -la".to_vec()),
+            SendItem::Keys(vec!["Enter".into()]),
+            SendItem::Paste(b"one\ntwo".to_vec()),
+        ];
+        let stream = encode_item_stream(&items).unwrap();
+        let bytes = command(items.clone()).encode().unwrap();
+        // The items are the message's tail: the header before them is the tag, the op id, the chunk
+        // pair, the snapshot id, the grid and flags, the shell, and the stream's own length.
+        assert!(
+            bytes.ends_with(&stream),
+            "a Send's item body is not the ABI's item stream: {bytes:?} does not end with {stream:?}"
+        );
+        assert_eq!(decode_item_stream(&stream).unwrap(), items);
+    }
+
+    /// A stream that is not a sequence of items is refused whole: half a command is a command that
+    /// runs part of what the operator wrote.
+    #[test]
+    fn a_malformed_item_stream_is_refused_rather_than_partly_read() {
+        // A `Text` whose length runs past the buffer.
+        assert!(decode_item_stream(&[0x01, 0x05, 0x00, b'a']).is_err());
+        // An unknown tag.
+        assert!(decode_item_stream(&[0x7f]).is_err());
+        // An empty item.
+        assert!(decode_item_stream(&[0x01, 0x00, 0x00]).is_err());
+        // Nothing at all.
+        assert!(decode_item_stream(&[]).is_err());
+        // And an empty list is refused on the way out, so a command that says nothing is not built.
+        assert!(encode_item_stream(&[]).is_err());
     }
 
     /// The items arrive in the order they were composed, and the kinds stay distinct: a paste is

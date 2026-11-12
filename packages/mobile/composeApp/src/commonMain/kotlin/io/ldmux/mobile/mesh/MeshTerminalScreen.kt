@@ -263,12 +263,13 @@ fun MeshTerminalScreen(
     // rebuild, and that is exactly the value that must survive it.
     var resumeShell by remember(plan) { mutableStateOf("") }
     val conn = remember(plan, attempt) {
-        val link = meshRadioLink(plan.radioAddress, plan.creds.hostRadio) ?: UnsupportedRadioLink()
-        link.setBudgetMode(if (config.meshOpenAirtime) RadioBudgetMode.Open else RadioBudgetMode.Metered)
+        // **The engine needs no link object.** Its address and keys are the plan's, and the pipe
+        // inside it owns the GATT connection and the lease (`AR-13`).
+        //
         // **The resume attach states the grid too.** It happens inside `connect`, before any
         // surface has measured anything here: without this the host painted the desk's pane and
         // then the phone's, which is the cost this whole path exists to avoid.
-        MeshRadioConnection(link, plan.creds, plan.lib, resumeShell, rememberedGridOf(config))
+        MeshRadioConnection(plan.creds, plan.radioAddress, resumeShell, rememberedGridOf(config))
     }
     // **A connection that ended is rebuilt, not left dead.** `run` returns when the transport
     // stopped carrying records - a radio that went quiet, a socket the host stopped answering on.
@@ -423,8 +424,8 @@ fun MeshTerminalScreen(
     // useless in the field: the phone had spent its whole hour (`0 records left`), so nothing it
     // sent could reach the host and no retry could change that. The radio's own status carries the
     // count, so the wait line can say which of the two it is.
-    val radioStatus by conn.radio.status.collectAsState()
-    val spent = radioStatus?.opsLeftThisHour == 0
+    val radioStatus by conn.radio.collectAsState()
+    val spent = radioStatus.opsLeft == 0
     // **A connection that came up resets the ladder, whatever page it landed on.** This reset keyed
     // on `Live` alone, which is the state of a *shell*: a rebuild that succeeded and showed the
     // launcher (`Listing`), the picker or an empty host left the count where it was, so the next
@@ -469,123 +470,66 @@ fun MeshTerminalScreen(
     val marks by conn.driver.marks.collectAsState()
     val origin = remember { TimeSource.Monotonic.markNow() }
     val clock: () -> Long = { origin.elapsedNow().inWholeMilliseconds }
-    // **The input queue belongs to the connection, the picture does not.** Carrying a batcher across a
-    // rebuild re-delivers text that the old session had already accepted: measured 2026-11-01, a
-    // single `input text` came out as `yhgecho dsh9 > /tmpmecho dsh9 > /tmp/meshin9` in the shell -
-    // the tail of the old queue prepended to the new one. Typed text is addressed to one session and
-    // one sequence space, so it dies with it; only the frame below survives, because a picture has no
-    // addressee.
-    val batcher = remember(conn) { MeshInputBatcher() }
-    val handle = remember(conn) { MeshTerminalHandle(batcher, clock) }
+    // **The draft belongs to the connection, the picture does not.** Carrying a draft across a
+    // rebuild would re-send text the old session had already taken: typed text is addressed to one
+    // session and one sequence space, so it dies with it; only the frame below survives, because a
+    // picture has no addressee.
+    val draft = remember(conn) { MeshDraft() }
+    val handle = remember(conn) { MeshTerminalHandle(draft, clock) }
     val source = remember(conn) {
         MeshTerminalSource(handle, now = clock, hops = { conn.driver.hopsNow() })
     }
-    // **The wait ends when the host says the answer ended.** One `Commit` with the idle flag is
-    // the exact end of a burst; the four-second quiet timer in the hold stays as the fallback for a
-    // host that does not send it.
     DisposableEffect(conn, source) {
+        // **The wait ends when the host says the answer ended.** A `Settled` is the host's own word
+        // that the pane stopped changing, which is the only honest end for "waiting for the answer".
         conn.onIdle = { source.answered() }
         // **The scroll pad's up key asks the host for the page above.** The keeper holds the pane's
         // history and the link carries only the live screen, so a shell joined late — or printed
-        // while the view was frozen — has rows this client cannot have. The request names the
-        // absolute line above the oldest row it holds, so a page joins what it has.
+        // while the phone was away — has rows this client cannot have.
         conn.driver.onHistoryPage = { page -> source.prependHistory(page) }
         source.onWantHistory = { from, rows -> scope.launch { conn.driver.wantHistory(from, rows) } }
-        source.onWantScreen = { scope.launch { conn.driver.showOnce() } }
+        // **One command is one message.** The draft goes to the engine in composition order and the
+        // engine folds it into one `T_SEND`; two calls would be two messages, which is `RC-8`.
+        source.onSend = { items -> conn.driver.sendDraft(items) }
+        // `Refresh` asks for the screen and never touches the draft, so looking at a shell cannot
+        // run what is typed in it.
+        source.onRefresh = { scope.launch { conn.driver.resync() } }
         onDispose {
             conn.onIdle = null
             conn.driver.onHistoryPage = null
             source.onWantHistory = null
-            source.onWantScreen = null
+            source.onSend = null
+            source.onRefresh = null
         }
     }
-    // **A shell that was just opened shows itself, without a timer.** This used to be a 1.5 s
-    // `LaunchedEffect` that pulled the held screen, and it was a workaround: the real cause was
-    // that the hold judged "has anything been painted" over the source's whole life, so a new
-    // shell's first screen was held as if it were the second. On a public channel a full screen
-    // takes longer than 1.5 s, so the timer fired on nothing and the page stayed blank anyway.
-    // `MeshTerminalSource.show` now knows which shell it is drawing and treats the first screen of
-    // a new one as first, so opening a shell paints with no timer and no button.
+    // **A shell that was just opened shows itself, without a timer.** `MeshTerminalSource.show`
+    // knows which shell it is drawing, so the first screen of a new one paints at once.
 
     DisposableEffect(source) {
         onDispose { source.close() }
     }
-    // **Held text does not outlive the screen.** The batcher keeps what the user typed in plain
-    // heap memory until it is sent, which in manual-sync mode can be minutes. Leaving the app
-    // backgrounded it there, and an Android recents thumbnail or a heap dump would show a password
-    // that was never sent. The keys are encrypted at rest; the text waiting to be typed into a
-    // shell should not survive the screen at all.
+    // **What is typed does not outlive the screen.** The draft keeps the operator's text in plain
+    // heap memory until it is sent. Leaving the app backgrounded it there, and an Android recents
+    // thumbnail or a heap dump would show a password that was never sent.
     DisposableEffect(source) {
         val remove = AppLifecycle.onBackground { source.scrub() }
         onDispose { remove() }
     }
-    val pump = remember(conn) { MeshInputPump(batcher, { out ->
-        when (out) {
-            is MeshOut.Text -> conn.driver.input(out.bytes)
-            is MeshOut.Keys -> conn.driver.keys(out.names)
-        }
-    }, clock) }
 
-    // Moves what the user typed to the driver. The poll is never coarser than the batcher's own
-    // windows (`IDLE_MS`, `MAX_HOLD_MS`), and a step never sends more than one record.
-    //
-    // **This loop is the only sender**, so it is also where public-channel mode holds: while the
-    // mode is on and no sync is waiting, the loop reads what is waiting and sends nothing. Typing
-    // still accumulates in the batcher, in order, keys and all — and the bar over the terminal
-    // shows it, so "held" is a visible state rather than a silent one. A sync clears the gate for
-    // exactly as long as it takes to drain, and the answer arrives as the host's next screen.
-    LaunchedEffect(conn) {
-        while (true) {
-            handle.refreshPending()
-            // The gate is `flushingHeld`, not `awaitingSync`: the wait for the host's answer can
-            // last seconds, and typing during it must still be held. A single flag would send
-            // everything typed while the answer was on its way.
-            if (source.publicChannel && !source.flushingHeld) {
-                // **Flush, then wait for the gate instead of polling it.** A held view still owes
-                // acks, retries and whatever a press queued; and a 120 ms poll put up to that much
-                // delay on the first record of every sync while waking the CPU four times a second
-                // for a gate that changes only when the user presses.
-                conn.driver.flush()
-                snapshotFlow { source.flushingHeld }.first { it }
-                continue
-            }
-            val step = pump.step()
-            handle.refreshPending()
-            // The drain is over when nothing is left, whatever the step said about windows.
-            if (!handle.hasPending) source.syncDrained()
-            when (step) {
-                PumpStep.Sent -> {}
-                PumpStep.Waiting -> delay(150)
-                PumpStep.Blocked -> delay(150)
-                PumpStep.Idle -> {
-                    // **An idle terminal does not poll.** This waited 50 ms (and refined that to as
-                    // little as 10) for ever, so a page nobody was typing into woke the CPU twenty
-                    // to a hundred times a second to look at an empty buffer — a real battery cost
-                    // on a phone, and it did it while the operator was reading. With nothing held
-                    // and nothing being sent there is nothing to look at: wait for the buffer to
-                    // change instead, which is exactly the next keystroke or sync.
-                    if (!handle.hasPending) {
-                        snapshotFlow { handle.pendingLabel }.first { it.isNotEmpty() }
-                        continue
-                    }
-                    val due = batcher.nextDueMs()
-                    delay(if (due == null) 50L else (due - clock()).coerceIn(10L, 50L))
-                }
-            }
+    // **The bar's clock.** Two things about a send are statements about time and not about the air:
+    // a wait that has gone on too long is late, and "done" is not for ever. Ticking only while one
+    // of them is true is what keeps an idle page from waking the CPU at all.
+    LaunchedEffect(source, source.batchState) {
+        while (source.batchState == BatchState.Waiting || source.batchState == BatchState.Settled) {
+            delay(250)
+            source.batchTick()
         }
     }
 
-    // **Public-channel mode is forced on a public channel** (ADR-0026): a tuple other operators'
-    // radios share means every keystroke is a broadcast, so held input is the only supported way
-    // to type there. On a private tuple the mode is the user's choice. `meshPublicChannel` is a
-    // fact derived from the radio's own tuple; unknown reads as public, because that is the safe
-    // reading.
-    // **The mode is the config's, not the screen's.** It is chosen in Settings beside the channel
-    // (a public channel forces it), so this effect is the only place the source learns it, and it
-    // re-runs when the setting changes without rebuilding the connection.
-    LaunchedEffect(conn, config.meshHoldsInput) {
-        source.setPublicChannel(config.meshHoldsInput)
-    }
+    // **Batch is the only input mode on the radio, so there is nothing to switch on.** v15 has one
+    // command per press (`docs/RADIO-PLAN.md` §7); the `live` mode the old protocol offered is gone
+    // with the `Input` message that carried one keystroke at a time. `config.meshHoldsInput` is
+    // therefore no longer consulted here, and the bar is always drawn.
 
     // **The tuple is read from the radio, so the answer is a fact and not a default.** It used to
     // be written only by the radio dialog, which meant an install that never opened that dialog
@@ -599,24 +543,11 @@ fun MeshTerminalScreen(
     // airtime is a property of the preset, and it is the only way to turn "28 hops" into seconds.
     var measuredPreset by remember(conn) { mutableStateOf<io.ldmux.mobile.mesh.RadioPreset?>(null) }
     LaunchedEffect(conn) {
-        conn.radio.selfInfo.collect { info ->
-            if (info == null) return@collect
-            val preset = RadioPreset(
-                frequencyMhz = info.frequencyMhz,
-                bandwidthKhz = info.bandwidthKhz,
-                spreadingFactor = info.spreadingFactor,
-                codingRate = info.codingRate,
-                txPowerDbm = info.txPowerDbm,
-                // The channel is four fields and path width is not one of them, so the firmware's
-                // stamp width cannot change this answer; 1 stands in for "not read here".
-                pathHashSize = 1,
-            )
+        conn.radio.collect { status ->
+            // The engine's status carries the tuple the radio reports in `SELF_INFO`, which is what
+            // it is really tuned to rather than what was asked for.
+            val preset = status.preset ?: return@collect
             measuredPreset = preset
-            // **The typing window follows the record the link can actually carry.** A 100 ms
-            // pause is one record on a 75 ms bench tuple and a wasted record on the public preset,
-            // where a record is 602.6 ms: `pace` sets both windows to one airtime (floored, so a
-            // fast link keeps its old feel).
-            batcher.pace(RadioAirtime.timeOnAirMs(preset, MeshTerm.RECORD_PAYLOAD + 29))
             val public = isPublicChannel(preset)
             if (public != classifiedNow) onRadioClassified(public)
         }
@@ -625,22 +556,8 @@ fun MeshTerminalScreen(
     // The local echo: what is held is drawn at the cursor of the host's last screen, so typing
     // looks like typing. It is rebuilt from the host's screen on every change (see `echoHeld`),
     // so backspace, a line end and a long line cannot make it drift from what it is a fake of.
-    LaunchedEffect(source, handle.echoText, source.publicChannel) {
-        if (source.publicChannel) source.echoHeld(handle.echoText) else source.echoHeld("")
-    }
-
-    // **A frozen view is a screen nobody reads, so the host is told to stop drawing it.** Batch
-    // mode freezes the picture between presses and the host went on building a frame a second for a
-    // phone that kept the newest and dropped the rest: on a shell printing a build log that is the
-    // hour's allowance spent on a picture in a drawer. Released whenever the view is following an
-    // answer (a sync, or `show`), and only after the first screen: before that there is nothing to
-    // hold and the first paint has to arrive.
-    //
-    // **A `show` press does not release it.** A look is a `Resync`, which the host answers with one
-    // frame and then keeps holding; releasing and re-holding cost three records for the same look.
-    // A press that *sent* text does release, because that answer arrives over several seconds.
-    LaunchedEffect(source.publicChannel, source.awaitingAnswer, source.hasScreen) {
-        conn.driver.setHold(source.publicChannel && !source.awaitingAnswer && source.hasScreen)
+    LaunchedEffect(source, handle.echoText) {
+        source.echoHeld(handle.echoText)
     }
 
     // A sync whose answer never comes must not leave the screen frozen with no word about it: the
@@ -663,38 +580,6 @@ fun MeshTerminalScreen(
         }
     }
 
-    // **Keyed on the press count, not on "a wait is running".** It used to be keyed on
-    // `awaitingSync`, which the deadline's own action sets to false — so the notice was written
-    // into a state change that re-keyed the effect, whose first line nulled the notice. The message
-    // the ADR promises was rendered for at most one frame. A Boolean also cannot express "the user
-    // pressed sync again", so a second press 15 s into a 20 s wait inherited 5 s of clock it had not
-    // earned. A count restarts the deadline on every press and nothing else.
-    // **The wait ends when the shell goes quiet, not when the first screen lands.** A short tick
-    // checks whether the answer has stopped arriving; until it has, the view keeps drawing and the
-    // bar keeps saying it is waiting.
-    LaunchedEffect(source.awaitingSync) {
-        while (source.awaitingSync) {
-            delay(300)
-            source.settleIfQuiet()
-        }
-    }
-    LaunchedEffect(source.syncSeq) {
-        if (source.syncSeq == 0) return@LaunchedEffect
-        // What is left of the deadline, not a fresh one: re-entering the page must not give the
-        // wait another 20 s, and a press 15 s into a previous wait must not inherit a clock it did
-        // not earn.
-        val elapsed = clock() - source.pressedAt
-        val left = SYNC_ANSWER_TIMEOUT_MS - elapsed
-        if (left <= 0) {
-            source.syncTimedOut()
-            return@LaunchedEffect
-        }
-        delay(left)
-        // Reports through the bar's own status line ("no answer · direct · nothing back yet")
-        // rather than a notice over the terminal: the row is where the mode speaks, and the answer
-        // that arrives late is still drawn when it arrives.
-        source.syncTimedOut()
-    }
     // **Held text belongs to one shell.** A switch clears the screen, and the buffer would go to the
     // shell the user switched *to* — text typed for one shell, sent into another, without a press
     // being repeated. Discarded rather than sent, and said so for a few seconds. Keyed on the shell
@@ -705,8 +590,8 @@ fun MeshTerminalScreen(
         val now = shells.current ?: return@LaunchedEffect
         if (heldFor != null && heldFor != now) {
             if (handle.hasPending) {
-                handle.discardHeld()
-                syncNotice = "held text discarded: shell changed"
+                handle.scrub()
+                syncNotice = "typed text discarded: shell changed"
             }
             // One shell's rows are never under another's name: the engine and its scrollback go
             // when the shell does. Here rather than on `ProfileMissing`, which a rotation also
@@ -843,7 +728,6 @@ fun MeshTerminalScreen(
     // is the request to see it, and the freeze exists for typing, of which a new shell has none. It
     // is drawn when the screen actually arrives — keyed on the hold, not on a timer, because a timer
     // fires before the first screen on a slow channel and then never fires again.
-    var drawnForOpen by remember { mutableStateOf<String?>(null) }
     /** The last grid the surface measured, so a keyboard transition can re-assert it. */
     var lastGrid by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     /**
@@ -854,14 +738,8 @@ fun MeshTerminalScreen(
      * that started the wait.
      */
     var measuredGrid by remember { mutableStateOf<Pair<Int, Int>?>(null) }
-    LaunchedEffect(shells.current, source.heldScreenWaiting) {
-        val id = shells.current ?: return@LaunchedEffect
-        if (drawnForOpen == id || !source.heldScreenWaiting) return@LaunchedEffect
-        if (handle.hasPending) return@LaunchedEffect
-        source.pullHeld()
-        drawnForOpen = id
-    }
-    LaunchedEffect(shells.current) { drawnForOpen = null }
+    // **A newly opened shell paints itself.** There is no held screen to pull any more: the host
+    // sends one screen per press, and the first one of a new page is drawn when it arrives.
     // **Entering the list ends whatever was typed for the shell that was on screen.** One rule, on
     // the one thing every way in has in common: the buffer is text for a shell, meaningless from the
     // list, and keeping it forced the list to display a shell's private buffer (reported
@@ -870,8 +748,7 @@ fun MeshTerminalScreen(
         if (!showList) return@LaunchedEffect
         // Both directions. What was typed for the shell goes, and so do the screens the hold kept
         // back: they were the answer to a sync on a page the user has now left.
-        if (handle.hasPending) handle.discardHeld()
-        source.discardHeldScreens()
+        if (handle.hasPending) handle.scrub()
         // And what the page was saying about them: a notice about this shell's buffer must not
         // greet the next shell the user opens.
         syncNotice = null
@@ -905,7 +782,7 @@ fun MeshTerminalScreen(
     // the screen — reported 2026-11-06 as the prompt pushed above the visible top while the keyboard
     // was up. Re-asking is free when the host already agrees (the driver compares the reported grid
     // against the wanted one), and costs one record when it does not.
-    LaunchedEffect(imeUp, config.meshHoldsInput) {
+    LaunchedEffect(imeUp) {
         delay(GRID_SETTLE_MS)
         // **Leaving is not a resize.** The list closes the keyboard, this effect fires, and the
         // grid it re-asserts is for a shell `openList()` has just released — which the host
@@ -1068,32 +945,28 @@ fun MeshTerminalScreen(
     // screen's own layout: above the key pad in portrait, at the foot of the side panel in
     // landscape. It used to be a card floating over the bottom-right of the terminal, which covered
     // the shell's last line and its cursor — the two things a terminal is read for.
-    // **The row exists only in batch mode.** In live mode there is nothing to hold and
-    // nothing to release, so a sync button would be a control for a mode that is not running —
-    // and the mode is not switched from here any more: it is a property of the link, set in
-    // Settings beside the channel. What is left in the terminal is the one control the mode
-    // needs, and it is drawn in every state of that mode (dimmed when it cannot act).
-    val barRow: (@Composable (Modifier) -> Unit)? = if (config.meshHoldsInput) {
-        { m ->
-            PublicChannelBar(
-                evidence = {
-                    val hops = conn.driver.hopsNow()
-                    linkEvidenceText(
-                        hops,
-                        conn.driver.answeredAgoMs(),
-                        exchangeMs(hops, measuredPreset),
-                    )
-                },
-                summary = handle.heldSummary,
-                awaiting = source.awaitingAnswer,
-                reported = source.answerOverdue,
-                flushing = source.flushingHeld,
-                held = source.heldScreenWaiting,
-                onSync = { source.sync() },
-                modifier = m,
-            )
-        }
-    } else null
+    // **The row is always drawn, because batch is the only input mode on the radio.** In v15 a
+    // command is one message however long it is, so there is no live mode to switch to and nothing
+    // to hold: `send` puts the draft on the air and `refresh` asks for the screen. The old bar's
+    // eleven states were the freeze, the drain and the queue, and all three are gone
+    // (`docs/RADIO-PLAN.md` §7).
+    val barRow: (@Composable (Modifier) -> Unit)? = { m ->
+        BatchBar(
+            evidence = {
+                val hops = conn.driver.hopsNow()
+                linkEvidenceText(
+                    hops,
+                    conn.driver.answeredAgoMs(),
+                    exchangeMs(hops, measuredPreset),
+                )
+            },
+            summary = handle.heldSummary,
+            state = source.batchState,
+            onSend = { scope.launch { source.send() } },
+            onRefresh = { source.refresh() },
+            modifier = m,
+        )
+    }
 
     Column(Modifier.fillMaxSize().background(Bg).safeDrawingPadding().imePadding()) {
         if (holding) {
@@ -1318,23 +1191,11 @@ fun MeshTerminalScreen(
                                 WaitingLine(
                                     "waiting for shell screen",
                                     attemptNo,
-                                    // **The bar owns the link evidence in batch mode.** One fact,
-                                    // one place: with the batch row on screen it already says what
-                                    // the link has answered, and repeating it here is the same
-                                    // sentence twice on one page. In live mode there is no bar, so
-                                    // this line is the only place the evidence can be said.
-                                    evidence = if (config.meshHoldsInput) {
-                                        null
-                                    } else {
-                                        {
-                                            val hops = conn.driver.hopsNow()
-                                            linkEvidenceText(
-                                                hops,
-                                                conn.driver.answeredAgoMs(),
-                                                exchangeMs(hops, measuredPreset),
-                                            )
-                                        }
-                                    },
+                                    // **The bar owns the link evidence.** One fact, one place: the
+                                    // batch row is always on screen, and it already says what the
+                                    // link has answered, so repeating it here would be the same
+                                    // sentence twice on one page.
+                                    evidence = null,
                                 )
                             }
                         }
@@ -1362,11 +1223,8 @@ fun MeshTerminalScreen(
                             // The refusal drops the whole keystroke and sends nothing, so a
                             // notice that says "sync to send" over an empty buffer names a button
                             // that does nothing. Say what there is to do in each state.
-                            handle.overflow && source.publicChannel && handle.hasPending ->
-                                Notice("too much held: sync to send", ok = false)
-                            handle.overflow && source.publicChannel ->
-                                Notice("input refused: held text at limit", ok = false)
-                            handle.overflow -> Notice("too much typed: wait for send", ok = false)
+                            handle.overflow ->
+                                Notice("input refused: the command is at its limit", ok = false)
                             // **A link that stopped carrying looked live for twenty seconds.** The
                             // driver's own verdict is the silence rule; this is the same silence
                             // said earlier, and only while something is still owed — an idle shell
