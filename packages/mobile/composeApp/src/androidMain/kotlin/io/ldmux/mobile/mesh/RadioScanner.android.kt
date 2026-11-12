@@ -17,7 +17,7 @@ import android.os.Handler
 import android.os.Looper
 import io.ldmux.mobile.AndroidApp
 import io.ldmux.mobile.appLog
-import io.iotone.meshcore.MeshcoreBle
+import io.ldmux.mobile.ble.BleScan
 import java.lang.ref.WeakReference
 import java.util.UUID
 
@@ -39,7 +39,7 @@ actual object RadioScanner {
     private const val REQ_RADIO = 0x2a
     private const val SCAN_MS = 8_000L
 
-    private val serviceUuid: UUID = UUID.fromString(MeshcoreBle.SERVICE_UUID)
+    private val serviceUuid: UUID = UUID.fromString(BleScan.SERVICE_UUID)
     private val main = Handler(Looper.getMainLooper())
     private var host: WeakReference<Activity>? = null
     private var pending: ((RadioScanResult) -> Unit)? = null

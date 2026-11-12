@@ -20,8 +20,10 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "ldmux-mobile"
-include(":composeApp", ":libmeshcore-android")
+include(":composeApp", ":ble")
 
-// Vendored from meshmore-sns at 7386999; see vendor/README.md. Only the BLE transport is left:
-// the companion protocol it used to carry is in Rust now (`docs/RADIO-PLAN.md` §8.1).
-project(":libmeshcore-android").projectDir = file("vendor/libmeshcore-android")
+// The BLE transport: GATT connection, MTU, serialized writes and the scanner's UUIDs. **No
+// protocol** — the companion commands, frames and session are Rust behind `ldmux_client_*`
+// (`docs/RADIO-PLAN.md` §8.1, `A2`). Originally vendored from meshmore-sns at 7386999; what is
+// left is the part Android owns.
+project(":ble").projectDir = file("ble")

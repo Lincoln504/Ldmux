@@ -1,6 +1,6 @@
 // Copyright (c) 2026 IoTone, Inc.
 // SPDX-License-Identifier: MIT
-package io.iotone.meshcore.android;
+package io.ldmux.mobile.ble;
 
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
@@ -17,8 +17,8 @@ import androidx.annotation.Nullable;
 import java.io.IOException;
 import java.util.UUID;
 
-import io.iotone.meshcore.MeshcoreBle;
-import io.iotone.meshcore.transport.MeshcoreTransport;
+// `BleScan` lives in this package.
+// `BleTransport` lives in this package.
 import no.nordicsemi.android.ble.BleManager;
 import no.nordicsemi.android.ble.observer.ConnectionObserver;
 
@@ -27,7 +27,7 @@ import no.nordicsemi.android.ble.observer.ConnectionObserver;
  * backed by the Nordic Android BLE Library ({@code no.nordicsemi.android:ble}).
  *
  * <p>The MeshCore companion link uses a Nordic-UART-style BLE service
- * (UUIDs in {@link MeshcoreBle}): the app <em>writes</em> command frames
+ * (UUIDs in {@link BleScan}): the app <em>writes</em> command frames
  * to the RX characteristic and <em>subscribes</em> to notifications on
  * the TX characteristic — one write and one notification = one complete
  * protocol frame.</p>
@@ -36,18 +36,18 @@ import no.nordicsemi.android.ble.observer.ConnectionObserver;
  * than extending it directly. This avoids conflicts with the several
  * {@code final} methods on {@link BleManager} ({@code isConnected()},
  * {@code close()}) that would shadow the identically-named
- * {@link MeshcoreTransport} interface methods.</p>
+ * {@link BleTransport} interface methods.</p>
  *
  * <h3>Usage</h3>
  * <pre>{@code
  * AndroidBleTransport transport = new AndroidBleTransport(context);
- * MeshcoreSession session = new MeshcoreSession("MyApp", transport, listener);
+ * BleTransport transport = new AndroidBleTransport(context, listener);
  * transport.connectToDevice(device);   // scanning is the caller's job
  * }</pre>
  *
  * <p>All callbacks are dispatched on the Android main thread.</p>
  */
-public final class AndroidBleTransport implements MeshcoreTransport {
+public final class AndroidBleTransport implements BleTransport {
 
     /** Requested MTU — fits any MeshCore frame with room to spare. */
     private static final int PREFERRED_MTU = 256;
@@ -56,11 +56,11 @@ public final class AndroidBleTransport implements MeshcoreTransport {
     private static final int MIN_MTU = 176 + 3;
 
     private static final UUID SERVICE_UUID =
-            UUID.fromString(MeshcoreBle.SERVICE_UUID);
+            UUID.fromString(BleScan.SERVICE_UUID);
     private static final UUID RX_UUID =
-            UUID.fromString(MeshcoreBle.RX_CHARACTERISTIC_UUID);
+            UUID.fromString(BleScan.RX_CHARACTERISTIC_UUID);
     private static final UUID TX_UUID =
-            UUID.fromString(MeshcoreBle.TX_CHARACTERISTIC_UUID);
+            UUID.fromString(BleScan.TX_CHARACTERISTIC_UUID);
 
     private volatile Listener frameListener;
     private final Manager manager;
@@ -76,7 +76,7 @@ public final class AndroidBleTransport implements MeshcoreTransport {
     }
 
     // -------------------------------------------------------------------------
-    // MeshcoreTransport
+    // BleTransport
     // -------------------------------------------------------------------------
 
     @Override
@@ -331,7 +331,7 @@ public final class AndroidBleTransport implements MeshcoreTransport {
                     });
             // This is the readiness point. onDeviceReady() runs when
             // initialize() returns, before bonding, MTU and notifications have
-            // completed, and MeshcoreSession sends APP_START on that signal.
+            // completed, and the engine sends APP_START on that signal.
             enableNotifications(txCharacteristic)
                     .done((device) -> notifyConnectionChanged(true))
                     .fail((device, status) -> {

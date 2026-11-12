@@ -49,7 +49,7 @@ class AndroidRadioEngine(
     private val address: String,
     creds: MeshCredentials?,
     airtimeMs: Float = AIRTIME_MS,
-    transport: io.iotone.meshcore.transport.MeshcoreTransport? = null,
+    transport: io.ldmux.mobile.ble.BleTransport? = null,
 ) : RadioEngine {
 
     private val _linkUp = MutableStateFlow(false)

@@ -4,8 +4,8 @@ import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.content.Context
-import io.iotone.meshcore.android.AndroidBleTransport
-import io.iotone.meshcore.transport.MeshcoreTransport
+import io.ldmux.mobile.ble.AndroidBleTransport
+import io.ldmux.mobile.ble.BleTransport
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -55,9 +55,9 @@ class AndroidBlePipe(
      * radio audit spent its length deleting.
      */
     onState: (EngineLink) -> Unit = {},
-    transport: MeshcoreTransport? = null,
+    transport: BleTransport? = null,
 ) {
-    private val ble: MeshcoreTransport = transport ?: AndroidBleTransport(
+    private val ble: BleTransport = transport ?: AndroidBleTransport(
         requireNotNull(context) { "a pipe with no transport needs a Context to build one" },
     )
 
@@ -98,7 +98,7 @@ class AndroidBlePipe(
         private set
 
     init {
-        ble.setListener(object : MeshcoreTransport.Listener {
+        ble.setListener(object : BleTransport.Listener {
             override fun onFrame(frame: ByteArray) {
                 // A push that arrives mid-write is still a push: the radio answers asynchronously,
                 // and holding it back would stall the engine's own FIFO for the whole write time.

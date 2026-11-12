@@ -28,8 +28,6 @@ plugins {
     id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
 }
 
-// libmeshcore lives next door — composite build so :libmeshcore resolves
 // locally (no publish step needed between changes to the two modules).
-includeBuild("../libmeshcore")
 
-rootProject.name = "libmeshcore-android"
+rootProject.name = "ble"

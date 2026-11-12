@@ -1,6 +1,6 @@
 // Copyright (c) 2026 IoTone, Inc.
 // SPDX-License-Identifier: MIT
-package io.iotone.meshcore.transport;
+package io.ldmux.mobile.ble;
 
 import java.io.IOException;
 
@@ -9,7 +9,7 @@ import java.io.IOException;
  *
  * <p>This library is transport-free: the concrete BLE implementation
  * (Android BLE + the Nordic-UART-style service, see
- * {@link io.iotone.meshcore.MeshcoreBle}) or a serial/TCP bridge lives
+ * {@link BleScan}) or a serial/TCP bridge lives
  * in the consuming application. Tests feed bytes directly.</p>
  *
  * <p>Contract:</p>
@@ -28,11 +28,11 @@ import java.io.IOException;
  * types) keeps the contract implementable on every Android API level
  * and trivially adaptable to coroutines/RxJava/executors.</p>
  */
-public interface MeshcoreTransport {
+public interface BleTransport {
 
     /**
      * Receiver of transport events. Implementations should hand frames
-     * to {@link io.iotone.meshcore.codec.MeshcoreFrameCodec#decode(byte[])}.
+     * to the Rust companion codec (`crates/mesh/src/companion/framing.rs`).
      */
     interface Listener {
 
@@ -47,7 +47,7 @@ public interface MeshcoreTransport {
          * The link state changed.
          *
          * @param connected {@code true} = ready to
-         *                  {@link MeshcoreTransport#send(byte[])}
+         *                  {@link BleTransport#send(byte[])}
          */
         void onConnectionChanged(boolean connected);
     }

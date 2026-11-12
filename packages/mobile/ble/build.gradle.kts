@@ -3,7 +3,7 @@ plugins {
 }
 
 android {
-    namespace = "io.iotone.meshcore.android"
+    namespace = "io.ldmux.mobile.ble"
 
     compileSdk = 37
     defaultConfig {
@@ -26,7 +26,7 @@ android {
 
 dependencies {
     // **The protocol is not here any more.** This module is the Android BLE transport and the two
-    // types it needs (`MeshcoreBle`'s UUIDs and the `MeshcoreTransport` interface); the companion
+    // types it needs (`BleScan`'s UUIDs and the `BleTransport` interface); the companion
     // protocol, its frames and its session live in Rust behind `ldmux_client_*`
     // (`docs/RADIO-PLAN.md` §8.1, entry `A2`).
     //

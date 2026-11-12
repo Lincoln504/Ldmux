@@ -1,6 +1,6 @@
 package io.ldmux.mobile.mesh
 
-import io.iotone.meshcore.transport.MeshcoreTransport
+import io.ldmux.mobile.ble.BleTransport
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -14,14 +14,14 @@ import kotlin.test.assertTrue
  * mock, which is the thing this design exists to avoid.
  */
 class AndroidBlePipeTest {
-    private class FakeTransport : MeshcoreTransport {
-        var sink: MeshcoreTransport.Listener? = null
+    private class FakeTransport : BleTransport {
+        var sink: BleTransport.Listener? = null
         val written = ArrayList<ByteArray>()
         var ready = true
         var closeCount = 0
         var failNextWrite = false
 
-        override fun setListener(listener: MeshcoreTransport.Listener?) {
+        override fun setListener(listener: BleTransport.Listener?) {
             sink = listener
         }
 

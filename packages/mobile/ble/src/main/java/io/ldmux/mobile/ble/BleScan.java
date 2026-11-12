@@ -1,6 +1,6 @@
 // Copyright (c) 2026 IoTone, Inc.
 // SPDX-License-Identifier: MIT
-package io.iotone.meshcore;
+package io.ldmux.mobile.ble;
 
 /**
  * BLE transport identifiers (Nordic-UART-style service used by the
@@ -14,11 +14,11 @@ package io.iotone.meshcore;
  *
  * <p>This library is transport-free — these UUIDs are published so an
  * Android (or other) BLE layer can locate the service and wire a
- * {@link io.iotone.meshcore.transport.MeshcoreTransport}.</p>
+ * {@link BleTransport}.</p>
  */
-public final class MeshcoreBle {
+public final class BleScan {
 
-    private MeshcoreBle() {
+    private BleScan() {
         // Static constants only.
     }
 

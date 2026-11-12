@@ -37,10 +37,10 @@ case "$cmd" in
   install)
     native "$@"; gradle_in_mobile :composeApp:assembleDebug
     adb install -r "$mobile/composeApp/build/outputs/apk/debug/composeApp-debug.apk" ;;
-  # **The vendored decoder's own suite runs too.** Its frames are the wire contract — a wrong opcode or
-  # a length byte read as a count is a link that never comes up — and until this line existed nothing
-  # ran those tests at all. `libmeshcore-android`'s unit tests need an Android toolchain for its test
-  # variant and are not part of this gate; the app's own suite covers the same decoders from above.
+  # **The app's suite only.** The wire contract moved to Rust, where `cargo test` exercises it
+  # against a simulated mesh; the `:ble` module is transport with no tests that need an Android
+  # toolchain, and the app's own suite drives it through a fake. The decoders this gate used to
+  # cover here are `crates/protocol`'s now.
   test) gradle_in_mobile :composeApp:testDebugUnitTest ;;
   # The only artifacts Play accepts. They fail, loudly and early, when the signing inputs
   # are absent: an unsigned bundle is rejected at upload, which is a worse place to learn it.

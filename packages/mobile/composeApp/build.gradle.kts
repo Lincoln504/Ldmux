@@ -34,7 +34,7 @@ kotlin {
             implementation(libs.ktor.client.okhttp)
             // The pairing scanner (ADR-0017): no camera permission, Play services' own UI.
             implementation(libs.play.services.code.scanner)
-            implementation(project(":libmeshcore-android"))
+            implementation(project(":ble"))
         }
         // The frame decoder is pure Kotlin on purpose: the wire format between
         // the JNI shim and the renderer is the one thing that silently rots when

@@ -1,6 +1,6 @@
 package io.ldmux.mobile.mesh
 
-import io.iotone.meshcore.transport.MeshcoreTransport
+import io.ldmux.mobile.ble.BleTransport
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
@@ -33,11 +33,11 @@ class AndroidRadioEngineTest {
      * It reports itself connected immediately, because a fake link that needed a GATT handshake
      * would be testing Android's Bluetooth stack rather than this seam.
      */
-    private class FakeTransport : MeshcoreTransport {
-        private var listener: MeshcoreTransport.Listener? = null
+    private class FakeTransport : BleTransport {
+        private var listener: BleTransport.Listener? = null
         val written = mutableListOf<ByteArray>()
 
-        override fun setListener(listener: MeshcoreTransport.Listener) {
+        override fun setListener(listener: BleTransport.Listener) {
             this.listener = listener
         }
 
