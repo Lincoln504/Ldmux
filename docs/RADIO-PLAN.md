@@ -706,6 +706,23 @@ Two smaller things the same survey caught, both worth keeping: `hopsNow()` feeds
 still arriving on a long route; and `marks` needs **no** request at all, because a `Marks` answer
 rides the `List` reply.
 
+### 12.7e AR-14 — a killed session can keep its pty master (keeper, unrelated to the radio work)
+
+**Found while making the fd-leak test honest, and it is a real leak, not a flaky test.** Eight
+spawn/kill cycles with a live child leave **four `/dev/ptmx` descriptors open against one before**,
+reproducibly, and they never come down: a probe printed the same count every second for thirty
+seconds. The sessions are gone from the keeper's own `List`, so this is not a registry leak — the
+emulator thread is not exiting, or something else still holds its `Arc<OwnedFd>`.
+
+It was invisible because the test counted **every** descriptor in the process with a
+twelve-descriptor allowance, so it passed whenever sixty sibling tests happened to inflate the
+baseline, and failed whenever they did not. The bound was measuring the neighbours.
+
+*Disposition:* the test is `#[ignore]`d with that paragraph as its reason and this entry as its
+tracker, and when the keeper fix lands the test is the proof. Nothing in the radio workstream
+depends on it, and the alternative — a loosened bound or a red gate — would have hidden a leak that
+eventually kills a daemon after a few hundred shells.
+
 ### 12.8 Findings index
 
 | Id | Finding | Severity | Disposition |
@@ -723,6 +740,7 @@ rides the `List` reply.
 | AR-11 | the transport swap cannot precede the phone, and has no `Link` to preserve | **plan correction** | **fixed in the plan:** S6, after S4 and S5 |
 | AR-12 | the client engine lacked six shipped features, and `open` sent a zero grid (a fixed defect reintroduced) | **defect (silent regression)** | **fixed:** the six are implemented and tested; capability surveys are now part of a stage's definition of done |
 | AR-13 | the BLE pipe still owned radio management, so `AndroidRadioLink` could not die and one GATT link would have had two owners | **architecture** | **S5b-0:** radio management moves into the engine, through the same command FIFO, with the lease on the pipe |
+| AR-14 | a killed keeper session can keep its pty master (≈0.4 per session, permanent) | **defect (leak)** | **open:** test `#[ignore]`d with the measurement as its reason; the keeper fix is its own stage |
 | AR-11 | the transport swap cannot precede the phone, and has no `Link` to preserve | **plan correction** | **fixed in the plan:** S6 (§10a) is one stage — transport and bridge together, after S4/S5 — because `Link`'s page byte is a frame-loop fact that every v15 message already carries as a field |
 
 ### 10a. S6 scope: the host transport and the bridge are one stage
