@@ -541,7 +541,7 @@ impl<L: ByteLink> Companion<L> {
     /// Used to tell "a late answer to an earlier command" (keep it, it is a fact about the radio)
     /// from "the firmware is speaking a protocol this client does not know" (a real framing fault).
     fn is_known_response(code: u8) -> bool {
-    matches!(
+        matches!(
             code,
             codes::OK
                 | codes::SELF_INFO
@@ -558,10 +558,6 @@ impl<L: ByteLink> Companion<L> {
     }
 
 
-/// The next asynchronous frame, if one arrives within `timeout`.
-    ///
-    /// Pushes are the receive log (`0x88`) and the advert/ack/status family. A
-    /// caller that only wants packets calls this in a loop and ignores the rest.
     /// Whether a frame is waiting to be read, so a caller can ask before adding work.
     ///
     /// **A serial command and an inbound packet share one port.** Polling the radio's stats while a
@@ -572,6 +568,10 @@ impl<L: ByteLink> Companion<L> {
         !self.pending.is_empty()
     }
 
+    /// The next asynchronous frame, if one arrives within `timeout`.
+    ///
+    /// Pushes are the receive log (`0x88`) and the advert/ack/status family. A caller that only
+    /// wants packets calls this in a loop and ignores the rest.
     pub fn next_push(&mut self, timeout: Duration) -> Result<Option<Vec<u8>>, SessionError> {
         let deadline = Instant::now() + timeout;
         loop {
