@@ -19,6 +19,8 @@
 //! - [`endpoint`]: the state machine that composes all of the above for one end of the link — the
 //!   carriage chosen before a record is sealed, the route updated only after a record authenticates,
 //!   and one place for the bootstrap, the transactions and the deadlines.
+//! - [`client`]: the phone's whole app protocol in one value — pages, screens and the answers to
+//!   commands — so the app stops reimplementing the protocol in Kotlin (`docs/RADIO-PLAN.md` `A2`).
 //!
 //! [`session::Session`] composes [`record`] and [`arq`] over an [`handshake::Established`] keypair;
 //! [`transaction::TransactionLayer`] is the layer a caller should reach for instead.
@@ -26,6 +28,7 @@
 
 pub mod arq;
 pub mod bootstrap;
+pub mod client;
 pub mod direction;
 pub mod endpoint;
 pub mod handshake;
@@ -33,6 +36,9 @@ pub mod record;
 pub mod session;
 pub mod transaction;
 
+pub use client::{
+    Applied, Client, ClientConfig, ClientError, ClientEvent, ClientStats, MAX_OPEN_PAGES, PageMirror,
+};
 pub use direction::{Arrival, Side, Verdict, admit};
 pub use endpoint::{ArrivalInfo, CarriageSink, EndpointConfig, RadioEndpoint, Role};
 pub use handshake::{Established, HandshakeError, Initiator, Keypair, PairingEntry, Responder};

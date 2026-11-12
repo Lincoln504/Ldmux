@@ -9,6 +9,16 @@ description = "The L3 end-to-end session over the mesh link: Noise IKpsk2, the r
 
 [dependencies]
 ldmux-mesh = { path = "../mesh" }
+# The terminal protocol, for [`crate::client`] — the phone's side of the radio route. This used to be
+# a test-only dependency, on the reasoning that the session layer should not learn what it carries.
+# The client engine is the exception that reasoning did not anticipate: it is the value the app
+# holds, so it speaks the protocol the app speaks, and giving it a home in this crate is what stops
+# the phone reimplementing the protocol in Kotlin (`docs/RADIO-PLAN.md` §8.1, `A2`).
+#
+# `default-features = false` is load-bearing: it is the half of `ldmux-protocol` that owns no
+# `tokio`, no `nix` and no Unix socket, so this crate stays hour-pure and still links into
+# `libldmux_session.so`. The host's half stays out of the phone's library.
+ldmux-protocol = { path = "../protocol", default-features = false }
 # ADR-0023: the Noise implementation, without its `std` feature so that the C-backed `ring`
 # resolver is not pulled in. Only the RustCrypto resolver pieces the suite needs.
 snow = { version = "0.10", default-features = false, features = ["use-chacha20poly1305", "use-sha2", "use-curve25519", "use-getrandom"] }
@@ -19,11 +29,6 @@ zeroize = "1"
 
 [dev-dependencies]
 serde_json = "1"
-# The `payload_fits` proof: the wire's own limits must fit inside this crate's transport, and the
-# two live in crates that deliberately cannot see each other. A test dependency, never a runtime one
-# -- `ldmux-session` must not learn the terminal protocol, and `ldmux-protocol` must not learn the
-# session.
-ldmux-protocol = { path = "../protocol" }
 # The simulated mesh, for the tests that must produce a repeater's echo rather than assert about a
 # record this file built. `sim` is off in the shipped dependency: a radio-facing build has no
 # simulator in it.
