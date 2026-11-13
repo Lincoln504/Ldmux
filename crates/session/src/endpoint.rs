@@ -353,6 +353,10 @@ pub struct Stats {
     pub acks_staged: u64,
     /// Transport records that arrived while this end held no session.
     pub records_without_a_session: u64,
+    /// The kind and length of the last record this end admitted, in decimal: `22` is `0x16`, a
+    /// downlink part, and a 34-byte one is a bare transaction header, which is an acknowledgement.
+    pub last_admitted_kind: u8,
+    pub last_admitted_len: u16,
     /// Parts that arrived again, which is routine on a mesh that forwards every copy.
     pub duplicate_parts: u64,
     /// The last record refused by the record layer, as a stable code (`RecordError::code`).
@@ -1674,6 +1678,8 @@ impl RadioEndpoint {
             }
         };
         self.stats.records_admitted += 1;
+        self.stats.last_admitted_kind = record.first().copied().unwrap_or(0);
+        self.stats.last_admitted_len = u16::try_from(record.len()).unwrap_or(u16::MAX);
         self.last_admitted_ms = Some(now_ms);
         // Only now, with the tag verified, may a route be called proven. A direct arrival that
         // finished its path is the one shape that proves anything.

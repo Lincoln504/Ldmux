@@ -759,6 +759,53 @@ should be re-derived from it rather than from the table above.
 what it saves is fan-out — a flood costs every repeater in range a transmission, a direct packet costs
 one per hop. That is why the route request matters at range even though it cannot improve delivery.
 
+### 12.7b-3 AR-17 — intentionality: what the refactor meant to do, and where the intent itself was wrong
+
+**Written 2026-11-13**, after the operator's correction that **no version has ever worked at range** —
+the old stack carried a shell only when the repeaters were in the same room. This section judges the
+decisions, not the bugs; the bugs are in §12.8 and the arithmetic is AR-16.
+
+**What the old stack did.** It asked for a route with a flooded `LDRQ`, took the `LDRR` reply's chain,
+and sent the session over that path with a byte-stream ARQ. In one room that gave one request, one
+reply, and a session on the first handshake (`RELEASE-AUDIT.md` 6.41), and a command's output came
+back (17.60). At range it never worked, and the reason is now visible: the route request was only
+ever exercised across one or two hops, the ARQ's ceiling was below its own first rung (6.177), and
+nothing in the design accounted for the loss product over 14–35 hops (AR-16).
+
+**What the refactor intended.** Replace the byte-stream ARQ with a message-oriented transaction layer
+(ADR-0039), move the protocol out of Kotlin into Rust (A2 there), give the radio one carrier
+abstraction, and route by advert path instead of by request (`ADR-0030`, `ADR-0032`, `ADR-0035`).
+
+**Where the intent itself was wrong — four decisions, not bugs:**
+
+1. **The route request was deleted on a false premise.** `RADIO-PLAN.md:157` justified it: the phone
+   sends "only `msg1`, which both discovers the route and initiates the handshake in a single round
+   trip". A flood's chain teaches the **receiver** the road back, and `learn()` runs on arrivals, so
+   the sender learns nothing from its own transmission. The plan removed the only mechanism that
+   could carry a route past the advert cap, and recorded the removal as a simplification.
+2. **The advert path was assumed sufficient without checking the cap.** A repeater drops an advert at
+   `flood_max_advert`, 8 by default (`examples/simple_repeater/MyMesh.cpp:972`,
+   `src/helpers/RoutingPolicy.h:16-22`), against a 14–35 hop mesh. The replacement could not reach
+   the distance the requirement is about, and no audit checked the constant.
+3. **The airtime budget of the requirement was never stated**, so no decision was ever measured
+   against it. AR-16 now says a 12-hop screen update at 10 % loss is about seven records and a 30-hop
+   one is about forty-seven: the design was chosen without that number on the page.
+4. **The reachability claim was written before the delivery path was read.** AR-10 first said a flood
+   "has no delivery path at all", which is false (`src/Dispatcher.cpp:199`, `MyMesh.cpp:291-297`), and
+   that false premise then justified the answer's carriage order and the flood fallback's status.
+
+**The meta-pattern, and it is the one to keep:** the plan reasoned from our own abstractions — route
+table, carriers, proofs, a simulated mesh — instead of from the firmware's behaviour and the airtime
+arithmetic. The simulator encoded the same assumptions, so it could not falsify them. Every field
+failure of 2026-11-12/13 was an assumption the simulator shared, which is why the gate was green
+throughout a period in which the product never worked at range.
+
+**What follows for the way this is worked on.** A claim about the firmware is checked against the
+firmware before it becomes a design input. A requirement that depends on a physical quantity states
+the quantity and its arithmetic. A change that removes a capability says which capability replaces it
+and measures that the replacement reaches the same distance. And the in-room case runs on every
+change, because a regression gate that never exercises the working path is not a gate.
+
 ### 12.7c AR-12 — the engine shipped without six features the route already had, and reintroduced a fixed defect
 
 **Found by refusing to rewire, then by a survey I should have asked for at the start of the stage.**
