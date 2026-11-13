@@ -1290,12 +1290,12 @@ fn a_record_that_will_not_open_drops_the_session_and_asks_again() {
         run.phone.stats()
     );
     assert!(
-        !run.phone.established(),
-        "the phone kept a session it can no longer read: {:?}",
+        run.phone.established(),
+        "one unopenable record threw away a working session: {:?}",
         run.phone.stats()
     );
 
-    // And it recovers: a new attempt, a new answer, a working session.
+    // And the working session keeps working: the peer's next record is opened and delivered.
     run.run_until(300_000, 500, |run| run.phone.established());
     assert!(
         run.phone.established(),

@@ -318,8 +318,17 @@ class AndroidRadioEngine(
             }
             if (closed) return
             val progressed = pump(c)
-            val deadline = c.nextDeadline()
-            val wait = deadline?.let { (it - wallNow()).coerceAtLeast(0) } ?: NEVER_MS
+            // **A frame the link refused is a deadline of its own.** It was taken out of the engine,
+            // so no engine deadline covers it: with the wait derived from the engine's clock the loop
+            // blocked on `queue.receive()` until the next status poll, path ask or bootstrap rung —
+            // minutes, holding a record the caller had already been told was sent. Measured on the
+            // phone 2026-11-13: `parts=2` and `backlog=0` with not one part frame ever written.
+            val wait = if (pendingFrame != null) {
+                keptFrameRetryMs
+            } else {
+                val deadline = c.nextDeadline(wallNow())
+                deadline?.let { (it - wallNow()).coerceAtLeast(0) } ?: NEVER_MS
+            }
             if (wait == 0L) {
                 // **A deadline that has passed is not a reason to spin.** With the link down the
                 // engine's bootstrap rung deadline never advances (nothing is transmitted, so
@@ -360,9 +369,15 @@ class AndroidRadioEngine(
             }
             val frame = pendingFrame ?: break
             if (!pipe.write(frame)) {
-                if (!loggedWriteRefusal) {
-                    loggedWriteRefusal = true
-                    io.ldmux.mobile.appLog("radio write refused: link not ready")
+                // **Not once, for ever.** A one-shot line hid every refusal after the first, and a
+                // refused frame is exactly what a stalled link looks like from inside: the frame is
+                // kept and retried, so silence here is silence about a record that never went out.
+                writeRefusals += 1
+                if (writeRefusals == 1 || writeRefusals % 100 == 0) {
+                    io.ldmux.mobile.appLog(
+                        "radio write refused: link not ready (${writeRefusals}x, " +
+                            "frame ${frame.size} bytes held)",
+                    )
                 }
                 break
             }
@@ -392,8 +407,11 @@ class AndroidRadioEngine(
                         "commands=${s.commandsSent} lists=${s.listsSent} " +
                         "admitted=${s.admitted} echo=${s.selfEcho} transit=${s.inTransit} " +
                         "hs=${s.handshakeRefused} unknown=${s.unknownDownlink} " +
-                        "kind=${s.unknownKind} bad=${s.badRecord} " +
-                        "snapshots=${s.snapshotsApplied}",
+                        "kind=${s.unknownKind} bad=${s.badRecord} sid=${s.sessionIndex} " +
+                        "snapshots=${s.snapshotsApplied} parts=${s.partsSent} acks=${s.acksSent} " +
+                        "queued=${s.radioRecords} radioAnswered=${s.radioAnswered} " +
+                        "radioExpired=${s.radioExpired} backlog=${s.radioBacklog} " +
+                        "readyFrames=${s.radioReady}",
                 )
             }
         }
@@ -408,11 +426,15 @@ class AndroidRadioEngine(
 
     /** When the client's counters were last written to the log, and how often they are. */
     private var loggedStatsAt = 0L
-    private val statsLogMs = 10_000L
+    private val statsLogMs = 1_000L
+
+    /** How long the loop waits before retrying a frame the link refused. */
+    private val keptFrameRetryMs = 50L
 
     /** How long the loop waits when a deadline has passed and nothing could be written. */
     private val loopFloorMs = 5L
-    private var loggedWriteRefusal = false
+    /** Frames the link refused to take, kept and retried; logged first and every hundredth. */
+    private var writeRefusals = 0L
 
     private suspend fun apply(c: RadioClient, work: Work) {
         when (work) {

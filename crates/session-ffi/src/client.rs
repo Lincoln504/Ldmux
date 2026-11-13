@@ -196,6 +196,17 @@ pub struct LdmuxClientStats {
     pub rejected_unknown_kind: u64,
     /// Records that decrypted to nothing usable.
     pub rejected_record: u64,
+    /// The live session's index, or 0 when there is none. The responder assigns it and every record
+    /// carries it, so two ends that disagree here cannot read each other at all.
+    pub session_index: u8,
+    /// Parts of messages handed to the radio, retransmissions included.
+    pub parts_sent: u64,
+    /// Standalone acknowledgements handed to the radio.
+    pub acks_sent: u64,
+    /// Commands waiting for the radio's one answer window.
+    pub radio_backlog: u32,
+    /// Frames the radio has ready for the caller to write.
+    pub radio_ready: u32,
 }
 
 /// What the phone's radio last said about itself.
@@ -731,15 +742,23 @@ pub unsafe extern "C" fn ldmux_client_poll(
 }
 
 /// When the caller should look again even if nothing arrives: `1` and `*out` set, or `0`.
+///
+/// `now_ms` is needed because a **queued command is a deadline of its own**: a record waiting for the
+/// radio's one answer window has no instant of its own and would otherwise be looked at again only
+/// when an unrelated status poll or bootstrap rung came due.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ldmux_client_next_deadline(c: *mut LdmuxClient, out: *mut u64) -> i32 {
+pub unsafe extern "C" fn ldmux_client_next_deadline(
+    c: *mut LdmuxClient,
+    now_ms: u64,
+    out: *mut u64,
+) -> i32 {
     // SAFETY: see `with_client`.
     unsafe {
         with_client(c, |h| {
             if out.is_null() {
                 return LDMUX_ERR_NULL;
             }
-            match h.client.next_deadline_ms() {
+            match h.client.next_deadline_ms(now_ms) {
                 Some(deadline) => {
                     // SAFETY: `out` is non-null and writable.
                     unsafe { *out = deadline };
@@ -1172,6 +1191,7 @@ pub unsafe extern "C" fn ldmux_client_stats(c: *mut LdmuxClient, out: *mut Ldmux
             let stats = h.client.stats();
             let link = h.client.link_stats();
             let radio = h.client.radio().counters();
+            let backlog = h.client.radio().backlog();
             let filled = LdmuxClientStats {
                 records_sent: link.records_sent,
                 records_received: link.records_received,
@@ -1194,6 +1214,11 @@ pub unsafe extern "C" fn ldmux_client_stats(c: *mut LdmuxClient, out: *mut Ldmux
                 lists_sent: stats.lists_sent,
                 rejected_unknown_kind: link.rejected_unknown_kind,
                 rejected_record: link.rejected_record,
+                session_index: h.client.session_index().unwrap_or(0),
+                parts_sent: stats.parts_sent,
+                acks_sent: stats.acks_sent,
+                radio_backlog: u32::try_from(backlog.0).unwrap_or(u32::MAX),
+                radio_ready: u32::try_from(backlog.1).unwrap_or(u32::MAX),
             };
             // SAFETY: `out` is non-null and writable; the struct is plain data.
             unsafe { *out = filled };

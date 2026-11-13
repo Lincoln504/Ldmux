@@ -39,7 +39,7 @@
  * partly written. */
 #define MIRROR_FIELDS 12
 #define EVENT_FIELDS 8
-#define STATS_FIELDS 21
+#define STATS_FIELDS 26
 #define RADIO_FIELDS 23
 /* name at [0, name_len), firmware at [NAME_MAX, NAME_MAX + firmware_len). */
 #define NAME_MAX 32
@@ -213,10 +213,11 @@ JNIEXPORT jint JNICALL JNI(poll)(JNIEnv *env, jclass cls, jlong handle, jlong no
   return rc;
 }
 
-JNIEXPORT jint JNICALL JNI(nextDeadline)(JNIEnv *env, jclass cls, jlong handle, jlongArray out) {
+JNIEXPORT jint JNICALL JNI(nextDeadline)(JNIEnv *env, jclass cls, jlong handle, jlong now_ms,
+                                         jlongArray out) {
   (void)cls;
   uint64_t when = 0;
-  int rc = ldmux_client_next_deadline(client_of(handle), &when);
+  int rc = ldmux_client_next_deadline(client_of(handle), (uint64_t)now_ms, &when);
   if (rc == 1) set_i64(env, out, 0, (jlong)when);
   return rc;
 }
@@ -541,5 +542,10 @@ JNIEXPORT jint JNICALL JNI(stats)(JNIEnv *env, jclass cls, jlong handle, jlongAr
   put_i64(env, out, 18, (jlong)s.lists_sent);
   put_i64(env, out, 19, (jlong)s.rejected_unknown_kind);
   put_i64(env, out, 20, (jlong)s.rejected_record);
+  put_i64(env, out, 21, (jlong)s.session_index);
+  put_i64(env, out, 22, (jlong)s.parts_sent);
+  put_i64(env, out, 23, (jlong)s.acks_sent);
+  put_i64(env, out, 24, (jlong)s.radio_backlog);
+  put_i64(env, out, 25, (jlong)s.radio_ready);
   return (*env)->ExceptionCheck(env) ? LDMUX_ERR_ARG : LDMUX_OK;
 }

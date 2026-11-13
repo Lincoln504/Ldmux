@@ -89,7 +89,7 @@ object NativeRadioClient {
     external fun poll(handle: Long, nowMs: Long, out: ByteArray, outLen: IntArray): Int
 
     /** 1 and `out[0]` = when to look again even if nothing arrives; 0 for no deadline. */
-    external fun nextDeadline(handle: Long, out: LongArray): Int
+    external fun nextDeadline(handle: Long, nowMs: Long, out: LongArray): Int
 
     // ---- pages ------------------------------------------------------------------------------
 
@@ -190,7 +190,7 @@ object NativeRadioClient {
     const val EVENT_FIELDS = 8
 
     /** How many counters [stats] writes. */
-    const val STATS_FIELDS = 21
+    const val STATS_FIELDS = 26
 
     /** How many values [radio] writes. */
     const val RADIO_FIELDS = 23
@@ -275,9 +275,9 @@ class RadioClient private constructor(private val slot: LongArray) {
     }
 
     /** When to look again even if no notification arrives, or null when there is no deadline. */
-    fun nextDeadline(): Long? {
+    fun nextDeadline(nowMs: Long): Long? {
         val out = LongArray(1)
-        return if (NativeRadioClient.nextDeadline(handle, out) == 1) out[0] else null
+        return if (NativeRadioClient.nextDeadline(handle, nowMs, out) == 1) out[0] else null
     }
 
     // ---- the phone's own radio ----------------------------------------------------------------

@@ -184,10 +184,13 @@ fn a_normal_loop_drives_a_connect_and_gets_bytes_on_the_air() {
     // A deadline the caller can set a timer from.
     let mut deadline = 0u64;
     // SAFETY: `deadline` is writable.
-    let rc = unsafe { ldmux_client_next_deadline(h.0, &mut deadline) };
+    let rc = unsafe { ldmux_client_next_deadline(h.0, NOW, &mut deadline) };
     assert!(rc == 0 || rc == 1);
     if rc == 1 {
-        assert!(deadline > NOW, "a rung deadline is in the future");
+        // **At or after now, not strictly after it.** A command waiting for the radio's one answer
+        // window is due the moment it is queued: it has no later instant of its own, and a caller
+        // that slept until the next status poll left the record unsent.
+        assert!(deadline >= NOW, "a deadline was already in the past");
     }
     // SAFETY: the handle is live and not freed.
     assert_eq!(unsafe { ldmux_client_established(h.0) }, 0);

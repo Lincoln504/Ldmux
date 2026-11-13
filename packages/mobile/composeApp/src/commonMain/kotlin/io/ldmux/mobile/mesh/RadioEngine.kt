@@ -484,6 +484,16 @@ data class ClientStats(
     val unknownKind: Long = 0,
     /** Records that decrypted to nothing usable. */
     val badRecord: Long = 0,
+    /** The live session's index, or 0 when there is none. */
+    val sessionIndex: Long = 0,
+    /** Parts handed to the radio, retransmissions included. */
+    val partsSent: Long = 0,
+    /** Standalone acknowledgements handed to the radio. */
+    val acksSent: Long = 0,
+    /** Commands waiting for the radio's one answer window. */
+    val radioBacklog: Long = 0,
+    /** Frames the radio has ready for the caller to write. */
+    val radioReady: Long = 0,
 ) {
     companion object {
         internal fun of(v: LongArray): ClientStats = ClientStats(
@@ -508,6 +518,11 @@ data class ClientStats(
             listsSent = v[18],
             unknownKind = v[19],
             badRecord = v[20],
+            sessionIndex = v[21],
+            partsSent = v[22],
+            acksSent = v[23],
+            radioBacklog = v[24],
+            radioReady = v[25],
         )
     }
 }

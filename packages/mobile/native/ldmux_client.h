@@ -189,6 +189,14 @@ typedef struct {
     uint64_t lists_sent;
     uint64_t rejected_unknown_kind;
     uint64_t rejected_record;
+    /* The live session's index, or 0 when there is none: every record carries it in the clear. */
+    uint8_t session_index;
+    /* Parts and standalone acknowledgements handed to the radio. */
+    uint64_t parts_sent;
+    uint64_t acks_sent;
+    /* Depth, not totals: commands waiting for the one answer window, and frames waiting to be written. */
+    uint32_t radio_backlog;
+    uint32_t radio_ready;
 } LdmuxClientStats;
 
 /*
@@ -311,7 +319,7 @@ int32_t ldmux_client_poll(LdmuxClient *c, uint64_t now_ms, uint8_t *out, size_t 
 
 /* When the caller should look again even if nothing arrives: 1 and *out set, or 0 for no deadline.
  * The engine never wakes the caller, so this is the only timer the app needs. */
-int32_t ldmux_client_next_deadline(LdmuxClient *c, uint64_t *out);
+int32_t ldmux_client_next_deadline(LdmuxClient *client, uint64_t now_ms, uint64_t *out);
 
 /* ---------------------------------------------------------------------------------------------
  * Pages

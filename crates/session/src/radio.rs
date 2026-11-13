@@ -243,6 +243,16 @@ impl Radio {
         self.fifo.outstanding()
     }
 
+    /// How many commands are waiting for the window, and how many frames are waiting to be written.
+    ///
+    /// **Depth, not totals.** `counters.records` says how many records were ever queued, which is
+    /// indistinguishable between a link that is sending them and one where they never leave: measured
+    /// on the phone 2026-11-13, `parts=2` with no part frame ever written to the characteristic.
+    #[must_use]
+    pub fn backlog(&self) -> (usize, usize) {
+        (self.queue.len(), self.ready.len())
+    }
+
     /// The caller's record budget, as the status reports it.
     pub fn set_ops_left(&mut self, left: u8) {
         self.status.ops_left = Some(left);
@@ -465,13 +475,31 @@ impl Radio {
     }
 
     /// When the caller should look again even if nothing arrives.
+    ///
+    /// **A queued command is itself a deadline: now.** This used to be the in-flight deadline, the
+    /// status poll and the path ask, and nothing else — so a record queued while the answer window
+    /// was momentarily closed had *no* instant to be looked at again, and the caller slept until an
+    /// unrelated deadline: five seconds before a status poll, twenty before a path ask, or a whole
+    /// bootstrap rung, which doubles from twelve seconds to two minutes. Measured on the phone
+    /// 2026-11-13: `parts` and `queued` frozen for minutes at a time with `backlog` sitting at one
+    /// or two, and not one part frame written in six minutes.
     #[must_use]
-    pub fn next_deadline_ms(&self) -> Option<u64> {
+    pub fn next_deadline_ms(&self, now_ms: u64) -> Option<u64> {
         let soonest = |a: Option<u64>, b: Option<u64>| match (a, b) {
             (Some(x), Some(y)) => Some(x.min(y)),
             (x, y) => x.or(y),
         };
-        soonest(soonest(self.fifo.deadline_ms(), self.next_poll_ms), self.next_path_ms)
+        // A frame already waiting to be written is due now; a command waiting for the window is due
+        // when the window closes or now, whichever is sooner.
+        let waiting = if self.ready.is_empty() && self.queue.is_empty() {
+            None
+        } else {
+            Some(now_ms)
+        };
+        soonest(
+            soonest(soonest(self.fifo.deadline_ms(), self.next_poll_ms), self.next_path_ms),
+            waiting,
+        )
     }
 
     /// The path an advert taught, reversed into the direction a packet travels.
@@ -490,5 +518,53 @@ impl Radio {
         if self.learned.is_none() {
             self.next_path_ms = Some(now_ms);
         }
+    }
+}
+
+#[cfg(test)]
+mod scheduling {
+    //! **A queued command is a deadline, and so is an open window.**
+    //!
+    //! The caller derives its sleep from `next_deadline_ms`. It used to be the in-flight deadline,
+    //! the status poll and the path ask alone, so a record queued while the answer window was closed
+    //! had no instant to be looked at again: the caller slept until an unrelated deadline — five
+    //! seconds before a status poll, twenty before a path ask, or a whole bootstrap rung, which doubles
+    //! from twelve seconds to two minutes. Measured on the phone 2026-11-13: `parts` and `queued`
+    //! frozen for minutes at a time, not one part frame written in six.
+
+    use super::*;
+
+    #[test]
+    fn a_queued_record_makes_now_the_next_deadline() {
+        let mut radio = Radio::new();
+        radio.pump(1_000);
+        let idle = radio.next_deadline_ms(1_000);
+        assert!(
+            idle != Some(1_000),
+            "an idle radio claimed there was work due now: {idle:?}"
+        );
+        radio.send_record(&[0x3E, 0x00, 0x15, 0x01]);
+        assert_eq!(
+            radio.next_deadline_ms(2_000),
+            Some(2_000),
+            "a queued record did not make the caller look again: {:?}",
+            radio.next_deadline_ms(2_000)
+        );
+    }
+
+    #[test]
+    fn a_record_queued_behind_a_busy_window_is_still_due() {
+        let mut radio = Radio::new();
+        radio.ask(vec![ldmux_mesh::companion::command::commands::APP_START, 0], 0);
+        radio.pump(1_000);
+        // The first command holds the window; the record waits behind it.
+        assert_eq!(radio.outstanding(), 1, "the window is not held");
+        radio.send_record(&[0x3E, 0x00, 0x15, 0x01]);
+        assert_eq!(
+            radio.next_deadline_ms(2_000),
+            Some(2_000),
+            "a record waiting for the window had no deadline: {:?}",
+            radio.next_deadline_ms(2_000)
+        );
     }
 }

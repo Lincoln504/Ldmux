@@ -745,6 +745,12 @@ impl RadioEndpoint {
         [queued, rung, tx].into_iter().flatten().min()
     }
 
+    /// The live session's index, or `None` when there is no session.
+    #[must_use]
+    pub fn session_index(&self) -> Option<u8> {
+        self.session.as_ref().map(|session| session.index)
+    }
+
     fn attempt_running(&self) -> bool {
         self.attempt.as_ref().is_some_and(|attempt| !attempt.spent())
     }
@@ -1149,11 +1155,19 @@ impl RadioEndpoint {
                 timestamp_ms,
                 ..
             }) => {
+                // **Anything queued was sealed for the session this one replaces.** The index is in
+                // the clear on every record, so a part from the old session is not merely stale, it is
+                // unopenable, and the peer must spend a refused record before it can recover: measured
+                // on the phone 2026-11-13, `sid=1` then `bad=1` then `sid=0`, once per handshake.
+                self.queue.clear();
                 self.pending_pin = Some((remote_static, timestamp_ms));
                 self.session = Some(*established);
                 self.replay = ReplayWindow::default();
                 self.counter = 0;
                 self.next_index = index.wrapping_add(1).max(1);
+                if std::env::var_os("LDMUX_LOG_SESSION").is_some() {
+                    eprintln!("ldmux: session index {index} assigned (fresh handshake)");
+                }
                 self.stats.records_admitted += 1;
                 self.stats.sessions_established += 1;
                 // The chain this initiation crossed, reversed, is the way back. It is a candidate,
@@ -1163,6 +1177,12 @@ impl RadioEndpoint {
                 Admitted::Answered { cached: false }
             }
             Ok(Answered::Cached { reply }) => {
+                if std::env::var_os("LDMUX_LOG_SESSION").is_some() {
+                    eprintln!(
+                        "ldmux: answered from the cache (a live session holds index {:?})",
+                        self.session.as_ref().map(|session| session.index)
+                    );
+                }
                 self.stats.records_admitted += 1;
                 self.stats.answers_from_cache += 1;
                 self.queue_answer(&reply, info, now_ms);
@@ -1322,19 +1342,18 @@ impl RadioEndpoint {
             Ok(opened) => opened,
             Err(e) => {
                 self.stats.rejected_record += 1;
-                // **A record this end cannot open means the session is not useful, so it is dropped
-                // and the other end is asked to handshake again.** Keeping it produced the same
-                // refusal for every later record with nothing to end it: measured on the phone
-                // 2026-11-13, `admitted=4` beside `bad=3` while the screen waited for a list the host
-                // was already answering. The host asks in the same situation; this is the phone's
-                // half of the same recovery, and without it only the host can break the deadlock.
-                self.session = None;
-                // The attempt behind that session is spent, so it has to be replaced by the ladder
-                // for a new session to exist at all: without this the phone dropped the session and
-                // then sat silent, which is the state the field log shows as a live `sessions` count
-                // and nothing else.
-                self.attempt_spent = true;
-                self.request_handshake(now_ms, wall_ms);
+                // **One unopenable record is not proof the session is dead.** A record sealed for the
+                // session this end just replaced is exactly what a peer's queue delivers after a
+                // handshake, and it is the only kind that fails while everything else works.
+                //
+                // Asking for a new handshake here looked like the cure and was the disease: a
+                // handshake needs a fresh attempt, a fresh attempt clears the session, so one stale
+                // part cost a working link. Measured 2026-11-13: `sid=1` at one sample, `sid=0` twelve
+                // seconds later, four sessions and ten rungs in three minutes, the screen never
+                // leaving "connecting". The end that *cannot read at all* is the one that asks — the
+                // host does exactly that in its own unopenable-record arm — so this end counts the
+                // refusal and keeps the session it can still use.
+                let _ = (now_ms, wall_ms);
                 return Admitted::Ignored(Rejected::Record(e));
             }
         };
@@ -1370,6 +1389,10 @@ impl RadioEndpoint {
 
     /// Emit `KIND_NEED_HANDSHAKE` when the host has no session, at most once per rate window.
     fn request_handshake(&mut self, now_ms: u64, wall_ms: u64) {
+        // A spent attempt cannot answer a new answer, so asking again needs a live one behind it.
+        if self.attempt.is_none() || !self.attempt_running() {
+            self.attempt_spent = true;
+        }
         if self.config.role != Side::Host {
             return;
         }

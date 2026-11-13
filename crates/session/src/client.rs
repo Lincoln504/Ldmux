@@ -1130,10 +1130,10 @@ impl Client {
     /// The earliest of the link's own deadlines and the radio window's, so a timer built from this
     /// never leaves a record queued behind an answer that has already arrived.
     #[must_use]
-    pub fn next_deadline_ms(&self) -> Option<u64> {
+    pub fn next_deadline_ms(&self, now_ms: u64) -> Option<u64> {
         match (
             self.endpoint.next_deadline_ms(),
-            self.radio.next_deadline_ms(),
+            self.radio.next_deadline_ms(now_ms),
         ) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -1170,6 +1170,11 @@ impl Client {
 
     /// The link's counters, for a log that has to say what the air did.
     #[must_use]
+    /// The live session's index, or `None` when there is no session.
+    pub fn session_index(&self) -> Option<u8> {
+        self.endpoint.session_index()
+    }
+
     pub fn link_stats(&self) -> &Stats {
         self.endpoint.stats()
     }
