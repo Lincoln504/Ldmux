@@ -723,6 +723,42 @@ the firmware can give one without any custom protocol — `CMD_SEND_SELF_ADVERT`
 `CMD_GET_ADVERT_PATH`, whose chain is appended per hop and must be reversed for the outbound
 direction.
 
+### 12.7b-2 AR-16 — the range arithmetic, and the product statement it forces
+
+**Measured and computed 2026-11-13, after the operator's correction that no version has ever worked
+at range.** This section exists because the plan optimised for what could be demonstrated — a link in
+one room — and never stated what the band can carry at distance.
+
+One transmission crosses `n` hops with probability `q = (1−p)^n`, where `p` is the per-hop loss, so
+the expected transmissions per delivery is `1/q`:
+
+| per-hop loss | q at 12 hops | attempts for 95 % | q at 30 hops | attempts for 95 % |
+|---|---|---|---|---|
+| 5 % | 0.54 | 5 | 0.21 | 13 |
+| 10 % | 0.28 | 9 | 0.042 | 70 |
+| 20 % | 0.069 | 42 | 0.0012 | 2500 |
+
+A screen update is a request **and** a response, so it costs `2/q` records. Airtime is the measured
+602.6 ms per full 172-byte record and the public band's 1 % hour is 36 s, which is 59.7 full records an
+hour — so a 12-hop update at 10 % loss is about seven records, or one update every seven minutes.
+**A 64-byte record is about 140 ms rather than 224 ms, because the preamble is fixed**, which is why
+small records and delta screens are worth more than any retry tuning: the same hour carries 257 of
+them instead of 59.
+
+**The product statement this forces.** Interactive typing is deliverable up to roughly twelve hops at
+10 % per-hop loss or better, where a small-record update lands in one to two minutes. At 30 hops and
+10 % loss it is about eleven minutes even with small records, and at 20 % it is hours. Beyond that the
+honest product is **store-and-forward**: send a command, read the result minutes later.
+
+**What is not yet measured, and gates every number above: the per-hop loss.** The field's SNR range
+(−6.75 to +5.5 dB against a −7.5 dB demodulation floor) implies anything from under 1 % to over 50 %.
+That measurement is the first thing a range trip should take, and every ladder and retry decision
+should be re-derived from it rather than from the table above.
+
+**A path is airtime, not reachability.** A direct send crosses the same hops and loses the same `p`;
+what it saves is fan-out — a flood costs every repeater in range a transmission, a direct packet costs
+one per hop. That is why the route request matters at range even though it cannot improve delivery.
+
 ### 12.7c AR-12 — the engine shipped without six features the route already had, and reintroduced a fixed defect
 
 **Found by refusing to rewire, then by a survey I should have asked for at the start of the stage.**
