@@ -1220,6 +1220,23 @@ impl RadioEndpoint {
                 return Admitted::Ignored(Rejected::SelfEcho);
             }
             Verdict::InTransit => {
+                // **The tag is the authority, not the path.**
+                //
+                // A direct packet with hops left is addressed to a repeater, and the transit rule
+                // exists so a node does not act on somebody else's traffic. But the path is a routing
+                // hint that can be stale, while the AEAD cannot be forged: a record that opens against
+                // this end's session is ours by definition, and refusing it because a hash was left in
+                // its path loses a record that was delivered. Measured 2026-11-13: the phone heard the
+                // host's transaction parts directly while they were addressed to a repeater, rejected
+                // every one as in transit, and never acknowledged a single part — so the shell list
+                // never crossed even though both ends held a session.
+                //
+                // Only transport records are considered: an initiation or an answer that is still
+                // travelling belongs to the road, and answering one would build a session with a peer
+                // that never asked.
+                if matches!(kind, KIND_UP | KIND_DOWN) && self.session.is_some() {
+                    return self.on_transport(record, info, now_ms, wall_ms);
+                }
                 self.stats.rejected_in_transit += 1;
                 return Admitted::Ignored(Rejected::InTransit);
             }

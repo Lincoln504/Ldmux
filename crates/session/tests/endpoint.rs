@@ -1519,3 +1519,50 @@ fn a_fresh_initiation_is_answered_even_when_another_was_just_answered() {
         run.host.stats()
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// A record that authenticates is ours, whatever its path says.
+// ---------------------------------------------------------------------------------------------
+
+/// **The tag is the authority, not the path.**
+///
+/// A direct packet with hops left is addressed to a repeater, and the transit rule exists so a node
+/// does not act on somebody else's traffic. But the path is a routing hint that can be stale, while
+/// the AEAD cannot be forged. Measured 2026-11-13: the phone heard the host's transaction parts
+/// directly while they were addressed to a repeater, rejected every one as in transit, and never
+/// acknowledged a part, so the shell list never crossed with both ends holding a session.
+#[test]
+fn a_transport_record_that_authenticates_is_taken_even_with_a_hop_left() {
+    let mut run = Run::new(9, 1, 0.0, 1);
+    run.phone
+        .connect(run.now, run.wall())
+        .expect("the phone can start an attempt");
+    run.run_until(60_000, 250, |run| run.phone.established() && run.host.established());
+    assert!(run.phone.established(), "the phone did not establish");
+
+    // A message from the phone, so the host has a record to send back.
+    let request = message(0x10, &[0x21; 24]);
+    run.phone
+        .submit(&request, run.now)
+        .expect("a 25-byte message is one part");
+    run.run_until(120_000, 250, |run| run.host.stats().messages_delivered >= 1);
+    assert!(
+        run.host.stats().messages_delivered >= 1,
+        "the phone's message never reached the host: {:?}",
+        run.host.stats()
+    );
+
+    // Now the host's own record, delivered to the phone as if it still had a hop left: the shape a
+    // node sees when it hears a packet addressed to a repeater.
+    let before = run.phone.stats().records_admitted;
+    let reply = message(0x16, &[0x31; 24]);
+    run.host
+        .submit(&reply, run.now)
+        .expect("a 25-byte message is one part");
+    run.run_until(120_000, 250, |run| run.phone.stats().records_admitted > before);
+    assert!(
+        run.phone.stats().records_admitted > before,
+        "the phone admitted nothing from the host: {:?}",
+        run.phone.stats()
+    );
+}
