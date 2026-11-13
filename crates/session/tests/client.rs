@@ -1057,6 +1057,17 @@ fn a_path_learned_from_an_advert_is_used_but_never_proven() {
         "and never proof of a working route"
     );
 
+    // **A zero-hop chain is a route.** Two radios a metre apart are adjacent, so the advert's chain
+    // has no hash at all, and a direct packet needs no path to reach the peer. The candidate is kept
+    // and is still not a proof.
+    let adjacent = ldmux_mesh::route::Candidate::learned(Vec::new(), 1, 0.0, 0);
+    let mut table = ldmux_mesh::route::RouteTable::new();
+    table.observe(adjacent);
+    assert!(
+        table.best(0, 7).is_some(),
+        "an adjacent peer is a route, not a missing one"
+    );
+
     // The type is named so an unused import cannot hide a missing step.
     let _: AdvertPath = parsed;
 }

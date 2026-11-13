@@ -543,6 +543,17 @@ fn serve<L: ByteLink>(
                 record,
                 carriage,
             }) => {
+                // **What went on the air, and by which road.** The host's half of a link that never
+                // comes up is invisible from `mesh status` alone: a reply sent along a stale path and
+                // a reply never sent look identical there, and this line is the difference.
+                eprintln!(
+                    "ldmuxd: host radio send {seq} {}B carriage={}",
+                    record.len(),
+                    match &carriage {
+                        Carriage::Direct { path } => format!("direct path={path:02x?}"),
+                        Carriage::Flood => "flood".to_string(),
+                    }
+                );
                 let outcome = transmit(&mut companion, &radio.settings, &carriage, &record);
                 radio.charge();
                 if events

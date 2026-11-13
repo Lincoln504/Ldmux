@@ -980,9 +980,11 @@ impl Client {
         let Some((path, width)) = self.radio.learned_path() else {
             return;
         };
-        if path.is_empty() {
-            return;
-        }
+        // **An empty chain is a route, not a missing one.** A flood's path grows one hash per
+        // *repeater*, so an advert heard with no hash at all crossed zero hops: the peer is
+        // adjacent, and a direct packet needs no path to reach it. This used to be discarded, which
+        // left the phone flooding at a host one metre away (`ldmr` frames in the host's receive log
+        // and nothing delivered) while a perfectly good zero-hop route sat in the radio's cache.
         if self
             .endpoint
             .route()
@@ -1019,7 +1021,13 @@ impl Client {
     ///
     /// Returns what the push or the answer did, so a caller can log it.
     pub fn on_frame(&mut self, payload: &[u8], now_ms: u64, wall_ms: u64) -> FrameOutcome {
-        if payload.first() == Some(&push::PUSH_LOG_RX_DATA) {
+        // **Every push is classified, not only the receive log.** A record delivered to this end
+        // arrives as `PUSH_CODE_RAW_DATA` (`0x84`, `MyMesh.cpp:832-853`) — the log's `0x88` is a
+        // debug tap. This checked for `0x88` alone, so a real direct record fell through to the
+        // answer path, where `0x84` settles no command and was discarded: measured 2026-11-12 with
+        // the host answering direct, the phone logged eight `ble recv 56B op=0x84` frames and its
+        // screen never left "connecting".
+        if payload.first().is_some_and(|code| *code >= 0x80) {
             return match push::classify(payload) {
                 Some(arrival) => {
                     self.radio
@@ -1357,7 +1365,7 @@ impl Client {
                 SentKind::Ack => self.stats.acks_sent += 1,
                 // The phone answers nothing and asks nothing to handshake again: those are the
                 // host's records, and counting them here would report a thing that did not happen.
-                SentKind::Answer | SentKind::AnswerTeaching | SentKind::NeedHandshake => {}
+                SentKind::Answer | SentKind::NeedHandshake => {}
             },
             Outbound::Completed { .. } => self.stats.completed += 1,
             Outbound::TimedOut { .. } => self.stats.timed_out += 1,

@@ -67,6 +67,27 @@ public final class AndroidBleTransport implements BleTransport {
         return sb.toString();
     }
 
+    /**
+     * The session record's own kind inside a send frame, or `-` when there is none.
+     *
+     * A direct packet carries the record alone after its two-byte header; a flood wraps it as
+     * `[dest][src]["LDMR"][nonce 4]`, so the record begins eight bytes past the magic. Without this
+     * a phone that sends only fragments and never a whole initiation looks like a phone that is
+     * idle.
+     */
+    private static String recordKind(byte[] frame) {
+        if (frame.length < 5) return "-";
+        int magic = -1;
+        for (int i = 0; i + 4 <= frame.length; i++) {
+            if (frame[i] == 'L' && frame[i + 1] == 'D' && frame[i + 2] == 'M' && frame[i + 3] == 'R') {
+                magic = i;
+                break;
+            }
+        }
+        int at = magic >= 0 ? magic + 8 : 4;
+        return at < frame.length ? String.format("0x%02x", frame[at] & 0xFF) : "-";
+    }
+
     /** Whether the payload carries this protocol's wrapper, the same test the host classifies by. */
     private static boolean hasLdmr(byte[] b) {
         for (int i = 0; i + 4 <= b.length; i++) {
@@ -259,6 +280,7 @@ public final class AndroidBleTransport implements BleTransport {
             Log.d(TAG, "ble send " + frame.length + "B type=" + writeType
                     + " op=0x" + Integer.toHexString(frame.length > 0 ? frame[0] & 0xFF : 0)
                     + " pkt=" + (frame.length > 2 ? hex(frame, 6) : "-")
+                    + " rid=" + recordKind(frame)
                     + " to=" + rxCharacteristic.getUuid());
             writeCharacteristic(rxCharacteristic, frame, writeType)
                     .done((device) -> Log.d(TAG, "ble send ok " + frame.length + "B"))
@@ -392,8 +414,16 @@ public final class AndroidBleTransport implements BleTransport {
                         // is the radio reporting anything it heard on the channel, and on the public
                         // tuple most of it is other operators. The `LDMR` wrapper is the only thing
                         // that says a packet is this protocol, so it is what the line reports.
+                        // **A delivered record names its own kind.** `0x84` is
+                        // `[code][snr][rssi][0xFF][record]`, and the record's first byte is the kind
+                        // the session layer decides on (msg1/msg2/part/…). Without it a phone that
+                        // receives answers and never establishes looks identical to one that
+                        // receives nothing.
                         Log.d(TAG, "ble recv " + raw.length + "B op=0x" + Integer.toHexString(op)
-                                + (op == 0x88 ? " ldmr=" + hasLdmr(raw) + " head=" + hex(raw, 12) : ""));
+                                + (op == 0x88 ? " ldmr=" + hasLdmr(raw) + " head=" + hex(raw, 12) : "")
+                                + (op == 0x84 && raw.length > 4
+                                        ? " kind=0x" + Integer.toHexString(raw[4] & 0xFF)
+                                        : ""));
                         Listener l = frameListener;
                         if (l != null) l.onFrame(raw.clone());
                     });

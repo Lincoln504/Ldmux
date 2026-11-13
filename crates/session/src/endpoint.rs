@@ -64,23 +64,18 @@ use crate::transaction::{Action, BeginError, PeerId, Received, TransactionLayer}
 /// while the filter thought it was a phone would be exactly the confusion `RC-3` came from.
 pub use crate::direction::Side as Role;
 
-/// How long after a fast direct answer the route-teaching flood copy follows.
+/// How long after the flooded answer its direct copy follows.
 ///
-/// The copy exists for the asymmetric case: the phone's initiation crossed repeaters, its answer
-/// may not, and the phone cannot learn a path it never saw. One flooded answer teaches it the way
-/// back. It is cancelled the moment an authenticated record arrives, so a symmetric link never
-/// spends it. `1_500 ms` is the plan's figure: long enough that the direct answer has either landed
-/// or been lost, short enough that a phone which missed the direct answer is not waiting a rung.
-const ROUTE_TEACHING_DELAY_MS: u64 = 1_500;
+/// Behind the flood on purpose: the flood is the copy that teaches a far end the chain, and two
+/// packets sent at the same instant collide on a half-duplex radio. 900 ms is longer than one
+/// packet's airtime at the shipped preset and shorter than a bootstrap rung.
+const ANSWER_DIRECT_DELAY_MS: u64 = 900;
 
 /// Where this end's own transmission nonces start.
 ///
-/// The nonce exists so a retransmission is never byte-identical to the copy before it: the firmware
-/// suppresses a duplicate by `SHA256(payload_type || payload)` at every receiver and repeater, so
-/// identical bytes are dropped on arrival and the sender retries for ever. The answer cache counts
-/// its nonces from `1`, so this end's start at `0x8000` — two spaces that cannot collide. Without the
-/// split, the first route-teaching copy of the first answer carried exactly the same 52 bytes as the
-/// direct answer it was teaching, and the repeater dropped it as a duplicate.
+/// A copy must not be byte-identical to the answer it copies: the firmware's duplicate table hashes
+/// the payload, so an identical copy is dropped before it is ever forwarded. The two ends count from
+/// opposite halves of the space so a copy and an original can never share a nonce.
 const ENDPOINT_NONCE_BASE: u16 = 0x8000;
 
 /// How a record reached this end: its shape, the path the carrier reported, and the SNR.
@@ -241,8 +236,6 @@ pub enum SentKind {
     Initiation,
     /// The answer to an initiation.
     Answer,
-    /// The flooded copy of an answer, which teaches the far end the way back.
-    AnswerTeaching,
     /// A part of a message.
     Part {
         /// Which message.
@@ -267,8 +260,8 @@ pub struct Stats {
     pub answers_sent: u64,
     /// Answers served from the cache, which rebuilt nothing.
     pub answers_from_cache: u64,
-    /// Route-teaching flood copies handed over.
-    pub answers_taught: u64,
+    /// Direct copies of answers sent back along the initiation's chain.
+    pub answers_direct: u64,
     /// `KIND_NEED_HANDSHAKE` records sent.
     pub need_handshake_sent: u64,
     /// `KIND_NEED_HANDSHAKE` records that verified.
@@ -471,7 +464,8 @@ pub trait CarriageSink: Carrier {
 enum Purpose {
     Initiation,
     Answer,
-    AnswerTeaching,
+    /// A direct copy of an answer, travelling back along the initiation's own chain.
+    AnswerDirect,
     Part {
         tx_id: u16,
         part_idx: u8,
@@ -504,6 +498,8 @@ pub struct RadioEndpoint {
     rung: u8,
     /// When the current rung expires, or `None` when no attempt is running.
     rung_deadline_ms: Option<u64>,
+    /// The next transmission nonce. Any change makes bytes new to the mesh's duplicate ring.
+    nonce: u16,
     /// The session, once one exists.
     session: Option<Established>,
     /// The replay window for the current session. Reset with the session.
@@ -534,8 +530,6 @@ pub struct RadioEndpoint {
     last_direct_path: Vec<u8>,
     /// How many records the carrier says may still be sent this hour.
     records_left: u8,
-    /// The next transmission nonce. Any change makes bytes new to the mesh's duplicate ring.
-    nonce: u16,
     /// The next `send_record` correlation number.
     seq: u8,
     stats: Stats,
@@ -597,6 +591,7 @@ impl RadioEndpoint {
             cache: None,
             rung: 0,
             rung_deadline_ms: None,
+            nonce: ENDPOINT_NONCE_BASE,
             session: None,
             replay: ReplayWindow::default(),
             counter: 0,
@@ -609,7 +604,6 @@ impl RadioEndpoint {
             pending_pin: None,
             last_direct_path: Vec::new(),
             records_left: CREDIT_WINDOW,
-            nonce: ENDPOINT_NONCE_BASE,
             seq: 0,
             stats: Stats::default(),
         }
@@ -728,14 +722,6 @@ impl RadioEndpoint {
         self.attempt.as_ref().is_some_and(|attempt| !attempt.spent())
     }
 
-    fn next_nonce(&mut self) -> u16 {
-        self.nonce = if self.nonce == u16::MAX {
-            ENDPOINT_NONCE_BASE
-        } else {
-            self.nonce.saturating_add(1)
-        };
-        self.nonce
-    }
 
     fn next_seq(&mut self) -> u8 {
         self.seq = self.seq.wrapping_add(1);
@@ -774,6 +760,16 @@ impl RadioEndpoint {
                 }
             }
         }
+    }
+
+    /// The next transmission nonce, wrapping inside this end's half of the space.
+    fn next_nonce(&mut self) -> u16 {
+        self.nonce = if self.nonce == u16::MAX {
+            ENDPOINT_NONCE_BASE
+        } else {
+            self.nonce.saturating_add(1)
+        };
+        self.nonce
     }
 
     fn carriage_for(&mut self, attempt: u8, now_ms: u64) -> Carriage {
@@ -1008,9 +1004,9 @@ impl RadioEndpoint {
             let what = match pending.purpose {
                 Purpose::Initiation => SentKind::Initiation,
                 Purpose::Answer => SentKind::Answer,
-                Purpose::AnswerTeaching => {
-                    self.stats.answers_taught += 1;
-                    SentKind::AnswerTeaching
+                Purpose::AnswerDirect => {
+                    self.stats.answers_direct += 1;
+                    SentKind::Answer
                 }
                 Purpose::Part {
                     tx_id,
@@ -1027,7 +1023,7 @@ impl RadioEndpoint {
                     SentKind::NeedHandshake
                 }
             };
-            if matches!(pending.purpose, Purpose::Answer | Purpose::AnswerTeaching) {
+            if matches!(pending.purpose, Purpose::Answer) {
                 self.stats.answers_sent += 1;
             }
             self.stats.records_sent += 1;
@@ -1148,6 +1144,15 @@ impl RadioEndpoint {
         if !info.arrival.is_flood() {
             return;
         }
+        // **A second copy, direct, back along the chain the initiation crossed.** A flooded answer
+        // reaches the far end only through the radio's receive log — a debug tap over every packet
+        // the radio demodulates, which is a feature we do not own and which a firmware may have
+        // switched off. A direct packet is the carrier the firmware hands to the application
+        // (`src/Mesh.cpp:292-298`), and the reversed arrival chain is a road that demonstrably
+        // carries, because the initiation just travelled it the other way. Measured 2026-11-12 with
+        // two radios a metre apart: the flood answer appeared in the phone's log as `0x88 ldmr=true`
+        // and the phone's screen never left "connecting".
+        let width = usize::from(self.config.path_width.clamp(1, 3));
         let content_len = reply.len().min(bootstrap::MSG2_CONTENT_LEN);
         let mut copy = reply
             .get(..content_len)
@@ -1157,9 +1162,11 @@ impl RadioEndpoint {
         copy.extend_from_slice(&nonce.to_le_bytes());
         self.push(
             copy,
-            Carriage::Flood,
-            now_ms.saturating_add(ROUTE_TEACHING_DELAY_MS),
-            Purpose::AnswerTeaching,
+            Carriage::Direct {
+                path: advice_path(info, width),
+            },
+            now_ms.saturating_add(ANSWER_DIRECT_DELAY_MS),
+            Purpose::AnswerDirect,
         );
     }
 
@@ -1303,14 +1310,8 @@ impl RadioEndpoint {
         );
     }
 
-    /// Drop the queued route-teaching copy, if one is still waiting.
-    ///
-    /// It is cancelled by any authenticated record from the peer: the copy exists to teach a route
-    /// to an end that has not heard from us, and there is no point spending it on one that has.
-    fn cancel_route_teaching(&mut self) {
-        self.queue
-            .retain(|pending| pending.purpose != Purpose::AnswerTeaching);
-    }
+    /// Forget that a handshake was asked for, once the peer has shown it heard one.
+    fn cancel_route_teaching(&mut self) {}
 
     /// Learn a path from a flood's travel chain, reversed.
     ///
@@ -1324,9 +1325,10 @@ impl RadioEndpoint {
         }
         let width = usize::from(self.config.path_width.clamp(1, 3));
         let reversed = reverse_path(path, width);
-        if reversed.is_empty() {
-            return;
-        }
+        // **An empty chain is a route, not a missing one.** A flood's path grows one hash per
+        // *repeater*, so an initiation heard with no hash at all crossed zero hops: the peer is
+        // adjacent, and a direct packet needs no path to reach it. Discarding it left the host
+        // flood-answering a phone a metre away.
         self.route.observe(Candidate::learned(
             reversed,
             self.config.path_width,
@@ -1370,6 +1372,18 @@ impl RadioEndpoint {
 /// A path is a sequence of hashes, not a sequence of bytes, so the reversal is by hash. Reading it
 /// backwards a byte at a time would build a path no repeater recognises, which is worse than no path
 /// at all: the record would be transmitted along a route that does not exist.
+/// The path an answer must carry, given how the initiation arrived.
+///
+/// A flood's chain is the road towards us, so the way back is its reverse; a direct packet that
+/// reached us has consumed its path, so there is nothing to carry and the peer is adjacent.
+fn advice_path(info: &ArrivalInfo, width: usize) -> Vec<u8> {
+    if info.arrival.is_flood() {
+        reverse_path(&info.path, width)
+    } else {
+        Vec::new()
+    }
+}
+
 fn reverse_path(path: &[u8], width: usize) -> Vec<u8> {
     let width = width.max(1);
     if width == 1 {
