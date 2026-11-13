@@ -566,5 +566,7 @@ JNIEXPORT jint JNICALL JNI(stats)(JNIEnv *env, jclass cls, jlong handle, jlongAr
   put_i64(env, out, 42, (jlong)s.records_refused);
   put_i64(env, out, 43, (jlong)s.pushes);
   put_i64(env, out, 44, (jlong)s.last_push_code);
+  put_i64(env, out, 45, (jlong)s.route_asks);
+  put_i64(env, out, 46, (jlong)s.route_replies);
   return (*env)->ExceptionCheck(env) ? LDMUX_ERR_ARG : LDMUX_OK;
 }

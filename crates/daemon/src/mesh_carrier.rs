@@ -219,8 +219,22 @@ struct Radio {
     ldmr: u32,
     /// Frames the packet header calls `RAW_CUSTOM` (`0x0F`): the direct carrier.
     raw_custom: u32,
+    /// **What the air is carrying, by payload type.** A radio that hears the public mesh and a
+    /// radio that hears nothing are different faults, and so are "the mesh is busy with channel
+    /// traffic" and "the mesh is quiet". The firmware's own numbering (`src/Packet.h`): 0 `REQ`,
+    /// 2 `TXT_MSG`, 4 `ADVERT`, 5 `GRP_TXT`, 8 `PATH`, 9 `TRACE`, 11 `CONTROL`, 15 `RAW_CUSTOM`.
+    by_type: [u32; 16],
     /// When to ask the peer for a route again, while none is held.
     next_route: std::time::Instant,
+    /// The current gap between route asks, doubled after each unanswered one.
+    ///
+    /// **A host that asks every twenty seconds for ever is a host flooding a public mesh.** The ask
+    /// is a 44-byte unscoped flood that every repeater in range forwards, and a phone that is off or
+    /// out of range never answers it: measured 2026-11-13, the operator's neighbours reported the
+    /// testing as breaking the mesh. The gap doubles to a ten-minute ceiling, and any record from
+    /// the peer resets it, so a link that is being worked on is asked about promptly and an absent
+    /// one costs six floods an hour.
+    route_ask_gap: std::time::Duration,
     /// The radio's own last measurement, from `GET_STATS radio`.
     ///
     /// **Absent until the radio answers, and absent is not zero.** The status used to print a
@@ -370,7 +384,9 @@ impl RadioCarrier {
             refused_len: 0,
             ldmr: 0,
             raw_custom: 0,
+            by_type: [0; 16],
             next_route: std::time::Instant::now(),
+            route_ask_gap: ROUTE_ASK_WAIT,
         };
         std::thread::Builder::new()
             .name("ldmux-mesh-carrier".to_owned())
@@ -549,8 +565,16 @@ fn serve<L: ByteLink>(
             // **What the port delivered, against what the radio heard.** `rx_air_secs` climbing
             // while `pushed` stands still is a port fault; both standing still is a radio that is
             // not demodulating. Without the pair, "the peer never sent" is an assumption.
+            let types: String = radio
+                .by_type
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| **n > 0)
+                .map(|(kind, n)| format!("{kind}:{n}"))
+                .collect::<Vec<_>>()
+                .join(",");
             eprintln!(
-                "ldmuxd: radio harvest pushed={} refused={} ldmr={} rawCustom={} (last 0x{:02x} {}B) rx_air={}s",
+                "ldmuxd: radio harvest pushed={} refused={} ldmr={} rawCustom={} types=[{types}] (last 0x{:02x} {}B) rx_air={}s",
                 radio.pushed,
                 radio.refused,
                 radio.ldmr,
@@ -573,7 +597,8 @@ fn serve<L: ByteLink>(
                 && radio.settings.peer_key.iter().any(|b| *b != 0)
                 && radio.next_route <= std::time::Instant::now()
             {
-                radio.next_route = std::time::Instant::now() + ROUTE_ASK_WAIT;
+                radio.next_route = std::time::Instant::now() + radio.route_ask_gap;
+                radio.route_ask_gap = next_route_gap(radio.route_ask_gap);
                 let nonce = fresh_nonce();
                 if let Ok(packet) = ldmux_mesh::companion::route::build_request(
                     radio.settings.hash_size,
@@ -581,7 +606,17 @@ fn serve<L: ByteLink>(
                     &radio.settings.own_key,
                     &nonce,
                 ) {
-                    let _ = companion.send_packet(&packet);
+                    // **The ask, not only the answer.** A host that asks every twenty seconds and a
+                    // host that never asks look identical from `mesh status`, and the difference is
+                    // the whole of whether a road can be found at range.
+                    match companion.send_packet(&packet) {
+                        Ok(()) => eprintln!(
+                            "ldmuxd: host asked for a route ({}B flood, peer hash {:02x})",
+                            packet.len(),
+                            radio.settings.peer_key[0]
+                        ),
+                        Err(e) => eprintln!("ldmuxd: the route ask was refused: {e:?}"),
+                    }
                 }
             }
             if last_route.is_none()
@@ -782,8 +817,12 @@ fn harvest<L: ByteLink>(
             if pushed.windows(4).any(|w| w == b"LDMR") {
                 radio.ldmr = radio.ldmr.saturating_add(1);
             }
-            if pushed.get(3).is_some_and(|h| (h >> 2) & 0x0F == 0x0F) {
-                radio.raw_custom = radio.raw_custom.saturating_add(1);
+            if let Some(header) = pushed.get(3) {
+                let kind = usize::from((header >> 2) & 0x0F);
+                radio.by_type[kind] = radio.by_type[kind].saturating_add(1);
+                if kind == 0x0F {
+                    radio.raw_custom = radio.raw_custom.saturating_add(1);
+                }
             }
             continue;
         };
@@ -805,6 +844,9 @@ fn harvest<L: ByteLink>(
                 let _ = std::fs::write(path, hex_key(&key));
             }
         }
+        // **A record from the peer is the answer to the ask, even when it is not a route reply.**
+        // The peer is there, so the next ask is worth making promptly.
+        radio.route_ask_gap = ROUTE_ASK_WAIT;
         for event in classified {
             // **A record arrival carries the two readings it can measure, never a made-up zero.**
             // The noise floor and the radio's airtime counters come from `GET_STATS`, so a record's
@@ -832,6 +874,21 @@ fn harvest<L: ByteLink>(
 /// Slower than the advert cache read beside it, because this one costs the mesh: a flood is forwarded
 /// by every repeater in range, and discovery must not compete with the data it is finding a road for.
 const ROUTE_ASK_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The gap after an unanswered ask: double, up to the ceiling.
+///
+/// A function rather than an expression so the ceiling is asserted rather than assumed: a host that
+/// asks every twenty seconds for ever is a host flooding a public mesh.
+fn next_route_gap(current: std::time::Duration) -> std::time::Duration {
+    (current * 2).min(ROUTE_ASK_MAX)
+}
+
+/// The longest gap between route asks, and the reason the gap grows at all.
+///
+/// A host with no peer still has to be able to find one, and a host that asks every twenty seconds
+/// for ever is a host flooding a public mesh. Ten minutes is six floods an hour: enough to notice a
+/// phone that comes back, quiet enough to be a neighbour.
+const ROUTE_ASK_MAX: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// One send, on the carriage the endpoint chose.
 fn transmit<L: ByteLink>(
@@ -961,6 +1018,31 @@ mod tests {
             scope: None,
             airtime_ms: Some(602.6),
         }
+    }
+
+    /// **The ask backs off, and it stops growing at the ceiling.**
+    ///
+    /// Measured 2026-11-13: the host asked every twenty seconds for as long as it ran, which is a
+    /// 44-byte unscoped flood every twenty seconds that every repeater in range forwards. The
+    /// operator's neighbours reported the testing as breaking the mesh.
+    #[test]
+    fn a_route_ask_backs_off_to_a_ceiling() {
+        let mut gap = ROUTE_ASK_WAIT;
+        let mut seen = Vec::new();
+        for _ in 0..12 {
+            gap = next_route_gap(gap);
+            seen.push(gap.as_secs());
+        }
+        assert_eq!(&seen[..4], &[40, 80, 160, 320], "the gap does not double: {seen:?}");
+        assert_eq!(
+            *seen.last().expect("twelve steps"),
+            ROUTE_ASK_MAX.as_secs(),
+            "the gap never reached the ceiling: {seen:?}"
+        );
+        assert!(
+            seen.iter().all(|s| *s <= ROUTE_ASK_MAX.as_secs()),
+            "the gap passed the ceiling: {seen:?}"
+        );
     }
 
     /// A direct packet is `[header][path][record]` with the path the endpoint named — the bytes the

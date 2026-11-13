@@ -1759,6 +1759,32 @@ fn a_list_crosses_twelve_repeaters_with_no_advert_path() {
     );
 }
 
+/// **A phone that cannot reach its host must stop flooding the mesh.**
+///
+/// The ladder used to fall back to one initiation a minute for ever. On a public mesh that is a
+/// neighbour's whole allowance, and on 2026-11-13 the operator's own neighbours reported the testing
+/// as breaking the mesh. The slow rung now doubles to a ten-minute ceiling, so thirty minutes of a
+/// link that cannot come up costs a handful of records instead of thirty.
+#[test]
+fn a_phone_that_cannot_reach_its_host_stops_flooding_the_mesh() {
+    // Every transmission is lost, so no answer can ever arrive. The ladder is the one that ships,
+    // because the number this test bounds is the number the air sees.
+    let mut run = Run::shipped(29, 1, 1.0, 1);
+    run.phone
+        .connect(run.now, run.wall())
+        .expect("the phone can start an attempt");
+    run.run_until(30 * 60_000, 1_000, |_| false);
+    let sent = run.phone.stats().initiations_sent;
+    assert!(
+        sent <= 12,
+        "the phone sent {sent} initiations in thirty minutes; the slow rung is not backing off"
+    );
+    assert!(
+        sent >= 3,
+        "the phone gave up after {sent} initiations, so a link that could come up never would"
+    );
+}
+
 /// What a flood's crossing probability actually is in the model, per hop count and loss.
 ///
 /// Printed rather than asserted: the number is the input to every ladder decision, and guessing it

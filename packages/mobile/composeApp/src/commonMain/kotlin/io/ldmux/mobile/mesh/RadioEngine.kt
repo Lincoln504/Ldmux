@@ -529,6 +529,9 @@ data class ClientStats(
     /** Every push the radio handed up, and the code of the last one. */
     val pushes: Long = 0,
     val lastPushCode: Long = 0,
+    /** Route requests this end sent, and replies it sent to the peer's requests. */
+    val routeAsks: Long = 0,
+    val routeReplies: Long = 0,
 ) {
     companion object {
         internal fun of(v: LongArray): ClientStats = ClientStats(
@@ -577,6 +580,8 @@ data class ClientStats(
             recordsRefused = v[42],
             pushes = v[43],
             lastPushCode = v[44],
+            routeAsks = v[45],
+            routeReplies = v[46],
         )
     }
 }

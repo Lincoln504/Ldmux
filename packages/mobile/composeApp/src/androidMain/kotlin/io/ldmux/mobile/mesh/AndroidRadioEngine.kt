@@ -434,6 +434,7 @@ class AndroidRadioEngine(
                         "wrongIdx=${s.wrongIndexRecords} staged=${s.acksStaged} " +
                         "noSess=${s.recordsWithoutSession} sentRefused=${s.recordsRefused} " +
                         "pushes=${s.pushes} lastPush=0x${s.lastPushCode.toString(16)} " +
+                        "routeAsks=${s.routeAsks} routeReplies=${s.routeReplies} " +
                         "last=${s.lastAdmittedKind}/${s.lastAdmittedLen}B",
                 )
             }

@@ -519,6 +519,13 @@ pub struct ClientStats {
     pub pushes: u64,
     /// The code of the last push (`0x84`, `0x88`, `0x8E`, …), 0 when none has arrived.
     pub last_push_code: u8,
+    /// Route requests this end sent, and replies it sent to the peer's requests.
+    ///
+    /// **The pair that splits "the peer never asked" from "the answer was lost".** A reply is only
+    /// sent when a request addressed to this radio arrived, so `route_replies > 0` with no route
+    /// learned at the far end means the road back is the broken half.
+    pub route_asks: u64,
+    pub route_replies: u64,
 }
 
 impl ClientStats {

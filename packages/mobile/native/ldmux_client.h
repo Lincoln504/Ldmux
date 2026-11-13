@@ -229,6 +229,11 @@ typedef struct {
      * hearing the whole public mesh and a radio hearing nothing both read zero there. */
     uint64_t pushes;
     uint8_t last_push_code;
+    /* Route requests this end sent, and replies it sent to the peer's requests. A reply is only
+     * sent when a request addressed to this radio arrived, so the pair splits "the peer never
+     * asked" from "the answer was lost". */
+    uint64_t route_asks;
+    uint64_t route_replies;
 } LdmuxClientStats;
 
 /*

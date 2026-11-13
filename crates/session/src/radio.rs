@@ -55,6 +55,15 @@ pub const PATH_ASK_MS: u64 = 5_000;
 /// the airtime a discovery may spend without competing with the data it is finding a road for.
 pub const ROUTE_ASK_MS: u64 = 20_000;
 
+/// The longest gap between route asks, and the reason the gap grows at all.
+///
+/// **A phone left on the connect screen is a phone flooding a public mesh for ever.** The ask is a
+/// small unscoped flood that every repeater in range forwards, and a host that is off never answers
+/// it: measured 2026-11-13, the operator's neighbours reported the testing as breaking the mesh. The
+/// gap doubles after each unanswered ask up to this ceiling, so an absent host costs six floods an
+/// hour instead of a hundred and eighty, and a path learned or a record heard resets it.
+pub const ROUTE_ASK_MAX_MS: u64 = 600_000;
+
 /// The name this client reports in `APP_START`. The firmware prints it and nothing else depends on
 /// it; what matters is that the frame carries *a* name (see `command::app_start`).
 pub const APP_NAME: &str = "ldmux";
@@ -222,6 +231,8 @@ pub struct Radio {
     next_path_ms: Option<u64>,
     /// When to ask the peer itself for a route, while no path is held.
     next_route_ms: Option<u64>,
+    /// The current gap between route asks, doubled after each unanswered one.
+    route_ask_gap_ms: u64,
     /// This radio's own key, which a route request carries so the peer can address its answer.
     own_key: [u8; 32],
     /// The path hash width this radio is set to, which a request and a reply must both encode with.
@@ -254,6 +265,7 @@ impl Radio {
             next_poll_ms: None,
             next_path_ms: None,
             next_route_ms: None,
+            route_ask_gap_ms: ROUTE_ASK_MS,
             own_key: [0; 32],
             hash_size: 1,
             peer_key: [0u8; 32],
@@ -432,7 +444,8 @@ impl Radio {
             // answer, so this end would flood every record for ever. The request is a flood too, but
             // a small one, and the reply carries the chain home.
             if self.next_route_ms.is_none_or(|due| now_ms >= due) {
-                self.next_route_ms = Some(now_ms.saturating_add(ROUTE_ASK_MS));
+                self.next_route_ms = Some(now_ms.saturating_add(self.route_ask_gap_ms));
+                self.route_ask_gap_ms = self.route_ask_gap_ms.saturating_mul(2).min(ROUTE_ASK_MAX_MS);
                 self.send_route_request(now_ms);
             }
         }
@@ -620,6 +633,7 @@ impl Radio {
         if self.learned.is_none() {
             self.next_path_ms = Some(now_ms);
             self.next_route_ms = Some(now_ms);
+            self.route_ask_gap_ms = ROUTE_ASK_MS;
         }
     }
 
