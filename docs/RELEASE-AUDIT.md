@@ -678,26 +678,46 @@ risk that remains. Written to be read cold, by someone who was not in the sessio
 
 ### Verified on the air
 
+**The entries below the line are from 2026-11-10 and describe the version-14 frame loop, which no
+longer exists** (`mesh profile`, `mesh commit`, `Hold`). They are kept because the radio facts in
+them are still true; the protocol facts are history.
+
+- **A route request crosses a long mesh and is answered.** The host answered `LDRQ` floods at 1, 2,
+  3, 4, 5, 6, 15, 16, 19, 20, 21 and 22 hops in one session on 2026-11-13 (`journalctl --user -u
+  ldmux`, 09:37–09:41), 98 answers in total. This is the mechanism `RADIO-PLAN.md` §12.7b-3 records
+  as deleted on a false premise and restored in `7ac0650`, and it is the only thing that can find a
+  road past the eight-hop advert cap.
+- **A version-15 session establishes and a `List` is acknowledged** at 1–2 hops (2026-11-13 09:41,
+  session index 213, `msg2` sent direct and flooded, then three 34-byte acknowledgements of the
+  phone's list request). The list was then dropped by the daemon's slot resolver — row 6.235 — which
+  is the defect that made the screen sit on "asking host for shells".
+- **The host's radio hears the public mesh continuously** and the daemon now counts it: 20–40 pushes
+  per 30 s, `rx_air` climbing, none of them `ldmux` records while the phone is not transmitting
+  (2026-11-13 11:00–11:20, the `radio harvest` line).
 - **Flooded discovery works**: a request is answered and the phone holds a route **0.5 s** later, at
   zero hops (2026-11-09, `mesh flooded reply route: 0 hop(s)`).
 - **Discovery reaches far**: the host received requests at **29 hops** and answered them
   (`journalctl --user -u ldmux`, 23:15), which is what the 64-hop `REQ` ceiling exists for.
 - **A session establishes** with one accepted handshake, and a shell attaches and paints at the
-  phone's own grid (`mesh profile 46x17` → `mesh commit full=true` 0.9 s later).
-- **The frozen view is free**: 0 records over 12 s with the shell printing.
+  phone's own grid (`mesh profile 46x17` → `mesh commit full=true` 0.9 s later). *Version 14.*
+- **The frozen view is free**: 0 records over 12 s with the shell printing. *Version 14.*
 - **One answer, two paths**: at home with both radios in one room, a single answer arrived at 0 hops
   and 5 hops, which is how a one-way link is measured rather than theorised.
 
 ### Not verified — the next range test covers these
 
-1. **A full session over more than one repeater since the `TooLong` fix.** The defect measured at
-   range was exactly this (row 6.158) and the fix is reasoned and unit-tested, not yet proven on the
-   air. **This is the first thing to watch.**
-2. **The host asking and the phone answering** (row 6.156) — the recovery after a daemon restart.
-3. **Scoped discovery on a region-scoped mesh** (row 6.154). A *private* region name cannot be
+1. **A version-15 session over more than two repeaters.** The 2026-11-13 field run reached 16
+   bootstrap rungs at 14 repeaters with no session, while the same phone's route requests crossed
+   19–22 hops in the same hour. Whether the initiation is lost, sent down a stale direct path, or
+   refused by the radio is not yet measured: the phone now counts `sentRefused`, and the host's
+   `radio harvest` line counts `ldmr`, so the next run answers it.
+2. **The list, create, attach and send flow at range** — rows 6.234–6.236 are fixed and gated, and
+   none of them has been exercised on the air.
+3. **The host asking and the phone answering** (row 6.156) — the recovery after a daemon restart.
+4. **Scoped discovery on a region-scoped mesh** (row 6.154). A *private* region name cannot be
    identified by either end, so an answer to a request under one goes out unscoped.
-4. **Route repair while moving** (row 6.163) and the failed-route memory (row 6.160).
-5. **Five open pages** (row 6.162): unit-tested, not exercised on screen.
+5. **Route repair while moving** (row 6.163) and the failed-route memory (row 6.160).
+6. **Five open pages** (row 6.162): unit-tested, not exercised on screen.
 
 ### Risks that remain
 
