@@ -348,7 +348,22 @@ impl RouteTable {
     /// is evidence about the path and not about the mesh.
     #[must_use]
     pub fn carrier_for(&self, attempt: u8, now_ms: u64, sf: u8) -> Carriage {
-        carrier_for(self.best(now_ms, sf), attempt)
+        // **A real chain beats a guessed adjacency.** A direct packet with no path reaches only the
+        // neighbours that hear it and is forwarded by none, so a wrong guess loses the record with no
+        // recovery, while a chain at least reaches its first repeater and can be corrected. "Fewest
+        // hops wins" made an unproven empty chain both the most attractive and the most fragile
+        // candidate at once: a host with `route 2 repeaters in the path` sent every transaction part
+        // `carriage=direct path=[]` at `-72 dBm` from the peer and none of them arrived (2026-11-13).
+        //
+        // The guess still gets one try when there is no chain at all, because that try is how an
+        // adjacent peer is discovered: its record comes back with its path finished and proves it.
+        let fresh = || self.candidates.iter().filter(move |c| c.is_fresh(now_ms));
+        let chain = fresh()
+            .filter(|c| !c.path().is_empty())
+            .reduce(|best, next| if ranks_before(next, best, sf) { next } else { best });
+        let proven_empty = fresh().find(|c| c.path().is_empty() && c.is_proven());
+        let usable = chain.or(proven_empty).or_else(|| self.best(now_ms, sf));
+        carrier_for(usable, attempt)
     }
 
     /// Every path held, for a status line or a test.
@@ -647,6 +662,46 @@ mod adjacency_ranking {
         assert!(
             route.candidates()[0].snr_db() == 4.0,
             "the newest reading did not replace the older one"
+        );
+    }
+}
+
+#[cfg(test)]
+mod empty_path_needs_proof {
+    //! **A learned empty chain is a guess, and the one guess that cannot be recovered.** A direct
+    //! packet with no path reaches only the neighbours that hear it and is forwarded by none.
+
+    use super::*;
+
+    #[test]
+    fn a_real_chain_beats_a_guessed_adjacency() {
+        let mut route = RouteTable::new();
+        route.observe(Candidate::learned(Vec::new(), 1, 6.0, 1_000));
+        // Alone, the guess is tried once: that try is how an adjacent peer is discovered.
+        assert_eq!(
+            route.carrier_for(1, 1_000, 7),
+            Carriage::Direct { path: Vec::new() },
+            "an adjacent guess was never tried, so adjacency could never be proven"
+        );
+        // With a real chain beside it, the chain wins: the guess cannot be recovered if it is wrong.
+        route.observe(Candidate::learned(vec![9], 1, 6.0, 1_000));
+        assert_eq!(
+            route.carrier_for(1, 1_000, 7),
+            Carriage::Direct { path: vec![9] },
+            "a guessed adjacency outranked a real chain"
+        );
+    }
+
+    #[test]
+    fn a_proven_adjacency_is_used() {
+        let mut route = RouteTable::new();
+        route.observe(Candidate::learned(Vec::new(), 1, 6.0, 1_000));
+        let witness = ProofWitness::authenticated_direct(&[], 0).expect("an empty chain proves it");
+        route.adopt_proven(&witness);
+        assert_eq!(
+            route.carrier_for(1, 1_000, 7),
+            Carriage::Direct { path: Vec::new() },
+            "a proven adjacent peer was not sent to directly"
         );
     }
 }
