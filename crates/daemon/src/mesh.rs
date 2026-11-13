@@ -955,6 +955,12 @@ where
                 s.session.state = "established";
             });
         }
+        // **Every number on the session page is the endpoint's own.** `state` and `pending` were set
+        // here and `sent`, `retransmits`, `receivedBytes`, `dropped` and `handshakes` were never
+        // assigned at all, so the page printed zeros that read as measurements — on 2026-11-13 the
+        // host reported `handshakes 0 accepted` while it was accepting one per phone rung, and
+        // `received 0 bytes` with the phone's records arriving.
+        let stats = self.endpoint.stats().clone();
         set(&self.snapshot, |s| {
             s.session.state = if self.endpoint.established() {
                 "established"
@@ -962,6 +968,20 @@ where
                 "waiting"
             };
             s.session.pending = self.endpoint.queued();
+            s.session.sent = u32::try_from(stats.records_sent).unwrap_or(u32::MAX);
+            s.session.received_bytes = stats.bytes_received;
+            s.session.retransmits = u32::try_from(stats.retransmissions).unwrap_or(u32::MAX);
+            s.session.handshakes =
+                u32::try_from(stats.sessions_established).unwrap_or(u32::MAX);
+            s.session.handshakes_refused =
+                u32::try_from(stats.rejected_handshake).unwrap_or(u32::MAX);
+            s.session.dropped = u32::try_from(
+                stats.rejected_record
+                    + stats.rejected_unknown_kind
+                    + stats.rejected_self_echo
+                    + stats.rejected_in_transit,
+            )
+            .unwrap_or(u32::MAX);
             s.bridge = self.stats;
         });
         Ok(())

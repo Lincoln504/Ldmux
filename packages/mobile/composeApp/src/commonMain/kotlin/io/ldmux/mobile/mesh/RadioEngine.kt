@@ -494,6 +494,12 @@ data class ClientStats(
     val radioBacklog: Long = 0,
     /** Frames the radio has ready for the caller to write. */
     val radioReady: Long = 0,
+    /** Records abandoned after the window accepted them. */
+    val radioMalformed: Long = 0,
+    /** Whether the radio's one answer window is held right now. */
+    val radioOutstanding: Long = 0,
+    /** How many times the caller asked the radio to make progress. */
+    val radioPumps: Long = 0,
 ) {
     companion object {
         internal fun of(v: LongArray): ClientStats = ClientStats(
@@ -523,6 +529,9 @@ data class ClientStats(
             acksSent = v[23],
             radioBacklog = v[24],
             radioReady = v[25],
+            radioMalformed = v[26],
+            radioOutstanding = v[27],
+            radioPumps = v[28],
         )
     }
 }

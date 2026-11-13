@@ -197,6 +197,10 @@ typedef struct {
     /* Depth, not totals: commands waiting for the one answer window, and frames waiting to be written. */
     uint32_t radio_backlog;
     uint32_t radio_ready;
+    /* Records abandoned after the window accepted them, the window state, and the pump count. */
+    uint64_t radio_malformed;
+    uint32_t radio_outstanding;
+    uint64_t radio_pumps;
 } LdmuxClientStats;
 
 /*

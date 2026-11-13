@@ -190,7 +190,7 @@ object NativeRadioClient {
     const val EVENT_FIELDS = 8
 
     /** How many counters [stats] writes. */
-    const val STATS_FIELDS = 26
+    const val STATS_FIELDS = 29
 
     /** How many values [radio] writes. */
     const val RADIO_FIELDS = 23

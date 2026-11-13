@@ -271,7 +271,7 @@ class AndroidRadioEngine(
 
     override suspend fun stats(): ClientStats? = post { c -> c.stats() }
 
-    override suspend fun nextDeadline(): Long? = post { c -> c.nextDeadline() }
+    override suspend fun nextDeadline(): Long? = post { c -> c.nextDeadline(wallNow()) }
 
     /**
      * A notification from the radio.
@@ -362,6 +362,20 @@ class AndroidRadioEngine(
         while (true) {
             if (pendingFrame == null && pipe.ready) {
                 pendingFrame = c.poll(wallNow())
+                // **The boundary.** Every write is logged by the transport, so a frame that is taken
+                // here and never written is otherwise invisible: three successive theories about the
+                // field failure could not be falsified because nothing named this moment.
+                pendingFrame?.let { taken ->
+                    takenFrames += 1
+                    if (takenFrames <= 20 || takenFrames % 50 == 0L) {
+                        io.ldmux.mobile.appLog(
+                            "frame taken ${taken.size}B op=0x" +
+                                taken.take(2).joinToString("") { b ->
+                                    (b.toInt() and 0xFF).toString(16).padStart(2, '0')
+                                } + " (${takenFrames} so far)",
+                        )
+                    }
+                }
                 if (pendingFrame != null && !loggedFirstFrame) {
                     loggedFirstFrame = true
                     io.ldmux.mobile.appLog("radio first frame: ${pendingFrame?.size} bytes")
@@ -373,7 +387,7 @@ class AndroidRadioEngine(
                 // refused frame is exactly what a stalled link looks like from inside: the frame is
                 // kept and retried, so silence here is silence about a record that never went out.
                 writeRefusals += 1
-                if (writeRefusals == 1 || writeRefusals % 100 == 0) {
+                if (writeRefusals == 1L || writeRefusals % 100L == 0L) {
                     io.ldmux.mobile.appLog(
                         "radio write refused: link not ready (${writeRefusals}x, " +
                             "frame ${frame.size} bytes held)",
@@ -411,7 +425,8 @@ class AndroidRadioEngine(
                         "snapshots=${s.snapshotsApplied} parts=${s.partsSent} acks=${s.acksSent} " +
                         "queued=${s.radioRecords} radioAnswered=${s.radioAnswered} " +
                         "radioExpired=${s.radioExpired} backlog=${s.radioBacklog} " +
-                        "readyFrames=${s.radioReady}",
+                        "readyFrames=${s.radioReady} malformed=${s.radioMalformed} " +
+                        "window=${s.radioOutstanding} pumps=${s.radioPumps}",
                 )
             }
         }
@@ -433,6 +448,9 @@ class AndroidRadioEngine(
 
     /** How long the loop waits when a deadline has passed and nothing could be written. */
     private val loopFloorMs = 5L
+    /** Frames taken from the engine, which is the moment a record enters the caller's hands. */
+    private var takenFrames = 0L
+
     /** Frames the link refused to take, kept and retried; logged first and every hundredth. */
     private var writeRefusals = 0L
 

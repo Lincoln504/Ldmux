@@ -166,6 +166,11 @@ pub struct RadioCounters {
     pub path_learned: u64,
     /// Commands whose deadline passed before their answer arrived.
     pub expired: u64,
+    /// How many times the caller asked the radio to make progress.
+    ///
+    /// **The counter that separates a healthy window from a dead loop.** `expired` only moves inside
+    /// `pump`, so a caller that stopped calling `pump` freezes it at zero and reads as healthy.
+    pub pumps: u64,
     /// Frames that arrived with no command outstanding, or for another command.
     pub unexpected: u64,
     /// Answers the radio refused (`RESP_CODE_ERR`).
@@ -241,6 +246,15 @@ impl Radio {
     #[must_use]
     pub fn outstanding(&self) -> usize {
         self.fifo.outstanding()
+    }
+
+    /// What the radio could not do: frames abandoned as unbuildable.
+    ///
+    /// A record that is accepted into the window and then abandoned is invisible everywhere else —
+    /// it left the queue, never reached `ready`, and its deadline is released without an expiry.
+    #[must_use]
+    pub fn malformed(&self) -> u64 {
+        self.counters.malformed
     }
 
     /// How many commands are waiting for the window, and how many frames are waiting to be written.
@@ -327,6 +341,7 @@ impl Radio {
     ///
     /// Returns the number of frames made ready.
     pub fn pump(&mut self, now_ms: u64) -> usize {
+        self.counters.pumps += 1;
         if self.fifo.expire(now_ms).is_some() {
             self.counters.expired += 1;
             self.in_flight = None;

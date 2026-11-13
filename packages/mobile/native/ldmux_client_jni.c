@@ -39,7 +39,7 @@
  * partly written. */
 #define MIRROR_FIELDS 12
 #define EVENT_FIELDS 8
-#define STATS_FIELDS 26
+#define STATS_FIELDS 29
 #define RADIO_FIELDS 23
 /* name at [0, name_len), firmware at [NAME_MAX, NAME_MAX + firmware_len). */
 #define NAME_MAX 32
@@ -547,5 +547,8 @@ JNIEXPORT jint JNICALL JNI(stats)(JNIEnv *env, jclass cls, jlong handle, jlongAr
   put_i64(env, out, 23, (jlong)s.acks_sent);
   put_i64(env, out, 24, (jlong)s.radio_backlog);
   put_i64(env, out, 25, (jlong)s.radio_ready);
+  put_i64(env, out, 26, (jlong)s.radio_malformed);
+  put_i64(env, out, 27, (jlong)s.radio_outstanding);
+  put_i64(env, out, 28, (jlong)s.radio_pumps);
   return (*env)->ExceptionCheck(env) ? LDMUX_ERR_ARG : LDMUX_OK;
 }

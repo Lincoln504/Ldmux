@@ -207,6 +207,12 @@ pub struct LdmuxClientStats {
     pub radio_backlog: u32,
     /// Frames the radio has ready for the caller to write.
     pub radio_ready: u32,
+    /// Records abandoned after the window accepted them, which is otherwise invisible.
+    pub radio_malformed: u64,
+    /// Whether the radio's one answer window is held right now.
+    pub radio_outstanding: u32,
+    /// How many times the caller asked the radio to make progress.
+    pub radio_pumps: u64,
 }
 
 /// What the phone's radio last said about itself.
@@ -1219,6 +1225,9 @@ pub unsafe extern "C" fn ldmux_client_stats(c: *mut LdmuxClient, out: *mut Ldmux
                 acks_sent: stats.acks_sent,
                 radio_backlog: u32::try_from(backlog.0).unwrap_or(u32::MAX),
                 radio_ready: u32::try_from(backlog.1).unwrap_or(u32::MAX),
+                radio_malformed: h.client.radio().malformed(),
+                radio_outstanding: u32::try_from(h.client.radio().outstanding()).unwrap_or(u32::MAX),
+                radio_pumps: radio.pumps,
             };
             // SAFETY: `out` is non-null and writable; the struct is plain data.
             unsafe { *out = filled };

@@ -281,8 +281,14 @@ pub struct Stats {
     pub sessions_established: u64,
     /// Records handed to the carrier.
     pub records_sent: u64,
+    /// Bytes of record handed to the carrier, which is what the airtime figure is made of.
+    pub bytes_sent: u64,
     /// Records that arrived and were considered.
     pub records_received: u64,
+    /// Bytes of record that arrived, whatever became of them.
+    pub bytes_received: u64,
+    /// Parts that had been on the air before, as a retransmission.
+    pub retransmissions: u64,
     /// Records that passed the direction filter and authenticated.
     pub records_admitted: u64,
     /// Records rejected as this end's own transmission.
@@ -1062,11 +1068,16 @@ impl RadioEndpoint {
                     tx_id,
                     part_idx,
                     retransmit,
-                } => SentKind::Part {
-                    tx_id,
-                    part_idx,
-                    retransmit,
-                },
+                } => {
+                    if retransmit {
+                        self.stats.retransmissions += 1;
+                    }
+                    SentKind::Part {
+                        tx_id,
+                        part_idx,
+                        retransmit,
+                    }
+                }
                 Purpose::Ack => SentKind::Ack,
                 Purpose::NeedHandshake => {
                     self.stats.need_handshake_sent += 1;
@@ -1077,6 +1088,10 @@ impl RadioEndpoint {
                 self.stats.answers_sent += 1;
             }
             self.stats.records_sent += 1;
+            self.stats.bytes_sent = self
+                .stats
+                .bytes_sent
+                .saturating_add(u64::try_from(pending.record.len()).unwrap_or(u64::MAX));
             self.stats.note_sent(&pending.carriage);
             report.push(Outbound::Sent {
                 what,
@@ -1102,6 +1117,10 @@ impl RadioEndpoint {
     ) -> Admitted {
         self.last_wall_ms = wall_ms;
         self.stats.records_received += 1;
+        self.stats.bytes_received = self
+            .stats
+            .bytes_received
+            .saturating_add(u64::try_from(record.len()).unwrap_or(u64::MAX));
         let Some(kind) = record.first().copied() else {
             return Admitted::Ignored(Rejected::UnknownKind);
         };
