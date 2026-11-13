@@ -1356,3 +1356,56 @@ fn a_foreign_record_does_not_restart_the_handshake() {
         run.phone.stats()
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// Proof needs one road in flight, not two.
+// ---------------------------------------------------------------------------------------------
+
+/// **An arrival does not say which of this end's roads it came by, so two roads prove nothing.**
+///
+/// A direct record comes back with its path finished and the companion reports no path with it, so
+/// the only thing that can be compared is what this end has just sent. Crediting the most recently
+/// queued path proved adjacency for a host that had also sent along a chain, and that host then put
+/// its parts on the air with no path at all with the peer eight repeaters away. Measured 2026-11-13:
+/// `carriage=direct path=[]` beside `route 8 repeaters in the path`, `signal -84 dBm`.
+#[test]
+fn two_direct_roads_in_flight_prove_neither() {
+    let mut run = Run::new(9, 2, 0.0, 1);
+    run.phone
+        .connect(run.now, run.wall())
+        .expect("the phone can start an attempt");
+    run.run_until(60_000, 250, |run| run.phone.established() && run.host.established());
+    assert!(run.host.established(), "the host did not establish");
+
+    // Two roads, both sent: the arrival that follows could be either, so neither may be proven.
+    run.host.observe_path(ldmux_mesh::route::Candidate::learned(
+        Vec::new(),
+        1,
+        8.0,
+        run.now,
+    ));
+    run.host.observe_path(ldmux_mesh::route::Candidate::learned(
+        vec![0x08, 0xE5],
+        1,
+        8.0,
+        run.now,
+    ));
+    let request = message(0x10, &[0x55; 20]);
+    run.phone
+        .submit(&request, run.now)
+        .expect("a message fits one part");
+    run.run_until(120_000, 250, |run| run.host.stats().messages_delivered >= 1);
+
+    let proven: Vec<_> = run
+        .host
+        .route()
+        .candidates()
+        .iter()
+        .filter(|c| c.is_proven())
+        .map(|c| c.path().to_vec())
+        .collect();
+    assert!(
+        proven.len() <= 1,
+        "more than one road was proven by a single arrival: {proven:02x?}"
+    );
+}

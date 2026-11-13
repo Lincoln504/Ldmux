@@ -201,6 +201,10 @@ typedef struct {
     uint64_t radio_malformed;
     uint32_t radio_outstanding;
     uint64_t radio_pumps;
+    /* Answers that finished a session, repeated one, or were ignored as another initiation's. */
+    uint64_t answers_finished;
+    uint64_t answers_repeated;
+    uint64_t answers_ignored;
 } LdmuxClientStats;
 
 /*

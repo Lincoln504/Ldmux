@@ -213,6 +213,10 @@ pub struct LdmuxClientStats {
     pub radio_outstanding: u32,
     /// How many times the caller asked the radio to make progress.
     pub radio_pumps: u64,
+    /// Answers that finished a session, repeated one, or were ignored as another initiation's.
+    pub answers_finished: u64,
+    pub answers_repeated: u64,
+    pub answers_ignored: u64,
 }
 
 /// What the phone's radio last said about itself.
@@ -1228,6 +1232,9 @@ pub unsafe extern "C" fn ldmux_client_stats(c: *mut LdmuxClient, out: *mut Ldmux
                 radio_malformed: h.client.radio().malformed(),
                 radio_outstanding: u32::try_from(h.client.radio().outstanding()).unwrap_or(u32::MAX),
                 radio_pumps: radio.pumps,
+                answers_finished: link.answers_finished,
+                answers_repeated: link.answers_repeated,
+                answers_ignored: link.answers_ignored,
             };
             // SAFETY: `out` is non-null and writable; the struct is plain data.
             unsafe { *out = filled };

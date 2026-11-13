@@ -426,7 +426,8 @@ class AndroidRadioEngine(
                         "queued=${s.radioRecords} radioAnswered=${s.radioAnswered} " +
                         "radioExpired=${s.radioExpired} backlog=${s.radioBacklog} " +
                         "readyFrames=${s.radioReady} malformed=${s.radioMalformed} " +
-                        "window=${s.radioOutstanding} pumps=${s.radioPumps}",
+                        "window=${s.radioOutstanding} pumps=${s.radioPumps} " +
+                        "fin=${s.answersFinished} rep=${s.answersRepeated} ign=${s.answersIgnored}",
                 )
             }
         }

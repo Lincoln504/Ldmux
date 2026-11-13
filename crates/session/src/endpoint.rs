@@ -309,6 +309,12 @@ pub struct Stats {
     pub rejected_record: u64,
     /// Records rejected by the handshake, by reason.
     pub rejected_handshake: u64,
+    /// Answers that finished a session.
+    pub answers_finished: u64,
+    /// Answers that repeated the one this attempt already finished on.
+    pub answers_repeated: u64,
+    /// Answers the attempt ignored because they were for another initiation.
+    pub answers_ignored: u64,
     /// Paths learned from a flood's reversed chain.
     pub routes_learned: u64,
     /// Paths proven by an authenticated direct arrival.
@@ -560,6 +566,16 @@ pub struct RadioEndpoint {
     /// The path our last direct record travelled out, which is the witness a zero-hop direct arrival
     /// speaks for.
     last_direct_path: Vec<u8>,
+    /// Every distinct direct path this end has sent inside [`PROVE_WINDOW_MS`], newest last.
+    ///
+    /// **Proof needs one candidate, not two.** An arrival says only that a direct record came back
+    /// with its path finished; it does not say which of the roads this end has just used it came by.
+    /// Crediting the most recently queued path therefore proved adjacency for a host that had also
+    /// sent along a chain, and that host then put its parts on the air with no path at all and a peer
+    /// eight repeaters away (measured 2026-11-13: `carriage=direct path=[]` beside `route 8
+    /// repeaters`). When more than one road is in flight the evidence is ambiguous and nothing is
+    /// proven.
+    recent_direct_paths: Vec<Vec<u8>>,
     /// When this end last sent a direct record with **no path at all**, which is the send that says
     /// the peer is adjacent.
     ///
@@ -646,6 +662,7 @@ impl RadioEndpoint {
             pending_pin: None,
             last_direct_path: Vec::new(),
             last_adjacent_send_ms: None,
+            recent_direct_paths: Vec::new(),
             records_left: CREDIT_WINDOW,
             seq: 0,
             stats: Stats::default(),
@@ -1038,6 +1055,9 @@ impl RadioEndpoint {
             } else {
                 self.last_direct_path = path.clone();
             }
+            if !self.recent_direct_paths.iter().any(|held| held == path) {
+                self.recent_direct_paths.push(path.clone());
+            }
         }
         self.queue.push_back(Pending {
             record,
@@ -1285,10 +1305,12 @@ impl RadioEndpoint {
         };
         match attempt.answer(record) {
             Ok(Answer::Finished(established)) => {
+                self.stats.answers_finished += 1;
                 self.apply_session(established, info, now_ms);
                 Admitted::AnswerAccepted { repeated: false }
             }
             Ok(Answer::Repeated) => {
+                self.stats.answers_repeated += 1;
                 // A repeat is the responder re-sending the answer it already gave. Its content is
                 // the one this attempt finished on, so it is authenticated evidence of the peer —
                 // and, when it arrived as a flood, the chain it crossed is the only route this end
@@ -1296,7 +1318,10 @@ impl RadioEndpoint {
                 self.learn(&info.arrival, &info.path, info.snr_db, now_ms);
                 Admitted::AnswerAccepted { repeated: true }
             }
-            Ok(Answer::Ignored) => Admitted::Ignored(Rejected::NotForUs),
+            Ok(Answer::Ignored) => {
+                self.stats.answers_ignored += 1;
+                Admitted::Ignored(Rejected::NotForUs)
+            }
             Err(e) => {
                 self.stats.rejected_handshake += 1;
                 // **A failed answer spends the attempt, so it must be replaced.** `snow` has
@@ -1521,10 +1546,17 @@ impl RadioEndpoint {
         // `capacity 152 B` for a phone a metre away, and every direct send followed that loop and
         // never landed. `adopt_proven` only upgrades a candidate already held, so the chain has to be
         // stated before it can be proven.
+        // **One road in flight, or nothing is proven.** See `recent_direct_paths`.
+        self.recent_direct_paths
+            .retain(|_| self.last_adjacent_send_ms.is_some() || !self.last_direct_path.is_empty());
+        let ambiguous = self.recent_direct_paths.len() > 1;
         let adjacent = path.is_empty()
             && self
                 .last_adjacent_send_ms
                 .is_some_and(|sent| now_ms.saturating_sub(sent) <= PROVE_WINDOW_MS);
+        if ambiguous {
+            return;
+        }
         if path.is_empty() && !adjacent {
             // A two-hop arrival is not evidence about a road this end did not just use.
             return;

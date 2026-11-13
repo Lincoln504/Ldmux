@@ -500,6 +500,12 @@ data class ClientStats(
     val radioOutstanding: Long = 0,
     /** How many times the caller asked the radio to make progress. */
     val radioPumps: Long = 0,
+    /** Answers that finished a session. */
+    val answersFinished: Long = 0,
+    /** Answers that repeated the one this attempt finished on. */
+    val answersRepeated: Long = 0,
+    /** Answers ignored because they were for another initiation. */
+    val answersIgnored: Long = 0,
 ) {
     companion object {
         internal fun of(v: LongArray): ClientStats = ClientStats(
@@ -532,6 +538,9 @@ data class ClientStats(
             radioMalformed = v[26],
             radioOutstanding = v[27],
             radioPumps = v[28],
+            answersFinished = v[29],
+            answersRepeated = v[30],
+            answersIgnored = v[31],
         )
     }
 }
