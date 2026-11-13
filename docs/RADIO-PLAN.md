@@ -936,6 +936,40 @@ affected. What a reader should keep from this entry is the shape of the failure 
 green, that had stopped talking to each other — because it is the one this whole plan exists to
 prevent and it happened anyway, in the two commits between the app moving and the host moving.
 
+### 12.7g AR-20 — the message boundary between the two engines had four silent drops and no test that crossed it
+
+**Found 2026-11-13 while chasing "the host acknowledges the phone's `List` and never answers it".**
+All four are now fixed (`RELEASE-AUDIT.md` 6.234–6.236); the finding is recorded because the shape
+recurs and because the fix for each was small.
+
+- **The host had a second push classifier.** `mesh_carrier::classify_push` read only the `0x88`
+  receive log and only a bare `RAW_CUSTOM` payload; the phone read the same bytes through
+  `ldmux_mesh::companion::push::classify`, which also takes a direct `0x84` arrival and a flooded
+  `LDMR` record. Measured with the host radio hearing the public mesh: 28 pushes in 45 s, every one
+  refused, `received 0 bytes`.
+- **The shared classifier was too permissive in one arm.** It took **any** `PAYLOAD_TYPE_REQ`
+  payload as a session record. `REQ` is MeshCore's own request type and the public mesh carries
+  other operators' `REQ` floods continuously, including every `ldmux` `LDRQ`. On the phone that read
+  `received=25 admitted=0` with every refusal counter at zero.
+- **The link loop dropped four requests before the service saw them.** It resolves a channel slot
+  first; `List`, `Create`, `Close` and `MakeLive` name no shell in a field and fell through the
+  catch-all. `List` is the first request a phone makes, so the launcher never left "asking host for
+  shells".
+- **A lost list answer was permanent.** The phone holds one request until its answer arrives, by
+  design; nothing cleared the flag when the answer never came.
+
+**Why no test caught any of them.** Each component had tests, and every one of those tests entered
+below the boundary that was broken. `MeshRpc` handles `List` correctly and is unit-tested doing it;
+`mesh_full_stack` exercised `Attach` and `Fetch` and never a `List`; the push classifier was tested
+on the phone's fixture and the host's copy was tested on its own. This is `AR-17`'s P4 ("a contract
+with two owners has no cross-boundary test") in its third instance on this branch, and the cheap
+answer is the one that took the longest to find: **the gate is a phone engine against the daemon's
+own loop, and the assertion is on the message the operator was waiting for.**
+
+*Disposition:* **fixed 2026-11-13**, three commits, each with a test that fails without it. The
+open question that produced the search — whether a one-part message accepted at the record layer
+ever becomes a message at the transaction layer — is answered: it does, and the loss was above it.
+
 ### 12.8 Findings index
 
 | Id | Finding | Severity | Disposition |
@@ -950,6 +984,7 @@ prevent and it happened anyway, in the two commits between the app moving and th
 | AR-8 | the client's command table is an input, not a derivation | **doc** | **fixed:** §8.1 says each side supplies its own answer table, so the S4 client engine gets the phone's rather than inheriting the host's |
 | AR-9 | a version claim stopped the frame loop for an app that cannot yet ask for its screen | **defect (would brick the app)** | **fixed:** the host keeps streaming until the phone has actually sent a `Send` or a `Fetch` |
 | AR-10 | a flood arrival is a `REQ` carrying `LDMR`, not a `RAW_CUSTOM`; a payload-type classifier drops every flooded record. **Corrected 2026-11-12:** records arrive as `0x84` (direct) or through the `0x88` receive log (flood), never as `0x8E`. **Corrected 2026-11-13:** the `0x88` push is emitted for every demodulated packet with no preference gate (`src/Dispatcher.cpp:199`, `MyMesh.cpp:291-297`), so a flood *is* delivered and the flood carrier is a real fallback | **defect (silent loss)** | **fixed:** all three push codes are classified with their own layouts (`crates/mesh/src/companion/push.rs`); advert-learned paths remain the way past one hop |
+| AR-20 | the message boundary between the two engines dropped `List`, `Create`, `Close` and `MakeLive`, the host had a second push classifier, and a lost list answer was permanent | **defect (silent loss)** | **fixed:** one classifier for both ends, the four requests reach the service, and the transaction's own end frees the next ask; each pinned by a test that fails without it (`RELEASE-AUDIT.md` 6.234–6.236, §12.7g) |
 | AR-11 | the transport swap cannot precede the phone, and has no `Link` to preserve | **plan correction** | **fixed in the plan:** S6, after S4 and S5 |
 | AR-12 | the client engine lacked six shipped features, and `open` sent a zero grid (a fixed defect reintroduced) | **defect (silent regression)** | **fixed:** the six are implemented and tested; capability surveys are now part of a stage's definition of done |
 | AR-13 | the BLE pipe still owned radio management, so `AndroidRadioLink` could not die and one GATT link would have had two owners | **architecture** | **S5b-0:** radio management moves into the engine, through the same command FIFO, with the lease on the pipe |
