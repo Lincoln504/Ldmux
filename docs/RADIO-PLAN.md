@@ -829,6 +829,24 @@ should complete the *request* when its *response* arrives, so that no standalone
 and a lost response is retried as a response. Until that exists, the standalone ack stays and costs
 what it costs; the arithmetic in AR-16 already counts it.
 
+### 12.7b-5 AR-19 — the session index must change per session, and a stable one is refused
+
+**Considered and rejected 2026-11-13.** The review recommended a stable index per peer, with the
+counter continuing across re-handshakes, to remove a round trip per re-handshake. Measured against
+the code, it removes the only signal that the peer restarted.
+
+The index is assigned per handshake, and a record carrying a different one is `WrongIndex`, which now
+drops the stale session and re-handshakes (`3bc5957`). A host restart therefore becomes visible: the
+phone sees the new index, follows it, and the exchange recovers. Make the index a function of the
+pairing and that signal disappears — the phone keeps its old session, the restarted host's counter
+begins at zero, and the first record is refused as a duplicate with nothing to recover from, which is
+the very state `3bc5957` was written to end.
+
+A stable index would need a counter that survives a restart, which means persisting it; that is more
+state, more failure modes, and it still does not detect a restart, it only tolerates one. The round
+trip is the price of the detection, and it is worth paying at range because a link that cannot tell
+the peer restarted retransmits into a session that no longer exists.
+
 ### 12.7c AR-12 — the engine shipped without six features the route already had, and reintroduced a fixed defect
 
 **Found by refusing to rewire, then by a survey I should have asked for at the start of the stage.**
