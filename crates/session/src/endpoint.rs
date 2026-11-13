@@ -500,6 +500,15 @@ pub struct RadioEndpoint {
     rung_deadline_ms: Option<u64>,
     /// The next transmission nonce. Any change makes bytes new to the mesh's duplicate ring.
     nonce: u16,
+    /// The last wall-clock time this end was told, so an attempt started from the poll loop (after a
+    /// failed answer spent the previous one) is stamped with a real time rather than an invented one.
+    last_wall_ms: u64,
+    /// Whether the last attempt was spent by a failed answer and a fresh one is owed.
+    ///
+    /// **Replacement, never creation.** `connect` is the only thing that starts a first attempt:
+    /// starting one from the poll loop made a client that had never connected transmit a whole
+    /// initiation, which the ABI test caught as a frame too large for its buffer.
+    attempt_spent: bool,
     /// The session, once one exists.
     session: Option<Established>,
     /// The replay window for the current session. Reset with the session.
@@ -592,6 +601,8 @@ impl RadioEndpoint {
             rung: 0,
             rung_deadline_ms: None,
             nonce: ENDPOINT_NONCE_BASE,
+            last_wall_ms: 0,
+            attempt_spent: false,
             session: None,
             replay: ReplayWindow::default(),
             counter: 0,
@@ -619,6 +630,7 @@ impl RadioEndpoint {
     ///
     /// [`HandshakeError`] when this end has no keypair, or when the Noise state cannot be built.
     pub fn connect(&mut self, now_ms: u64, wall_ms: u64) -> Result<(), HandshakeError> {
+        self.last_wall_ms = wall_ms;
         self.start_attempt(now_ms, wall_ms)?;
         Ok(())
     }
@@ -803,6 +815,21 @@ impl RadioEndpoint {
     fn stage_bootstrap(&mut self, now_ms: u64, report: &mut Vec<Outbound>) {
         if self.config.role != Side::Phone || self.session.is_some() {
             return;
+        }
+        // **A spent attempt is replaced, not waited out.** The only way an attempt disappears while
+        // no session exists is a failed answer, which consumed `snow`'s handshake state; the ladder
+        // then has to begin again or the phone is silent for the rest of its life.
+        if self.attempt_spent {
+            self.attempt_spent = false;
+            if self.start_attempt(now_ms, self.last_wall_ms).is_err() {
+                return;
+            }
+            // **And it waits one rung before spending air.** With the deadline set to now, a peer
+            // that answers unreadably made this end transmit a fresh initiation for every bad
+            // answer: 200 records in 200 answer steps, measured on the harness. A replacement is a
+            // retry, not a reflex, so it takes the first rung's wait like any other.
+            self.rung_deadline_ms =
+                Some(now_ms.saturating_add(bootstrap::rung_ms(1, self.config.airtime_ms)));
         }
         if !self.attempt_running() {
             return;
@@ -1050,6 +1077,7 @@ impl RadioEndpoint {
         now_ms: u64,
         wall_ms: u64,
     ) -> Admitted {
+        self.last_wall_ms = wall_ms;
         self.stats.records_received += 1;
         let Some(kind) = record.first().copied() else {
             return Admitted::Ignored(Rejected::UnknownKind);
@@ -1190,6 +1218,18 @@ impl RadioEndpoint {
             Ok(Answer::Ignored) => Admitted::Ignored(Rejected::NotForUs),
             Err(e) => {
                 self.stats.rejected_handshake += 1;
+                // **A failed answer spends the attempt, so it must be replaced.** `snow` has
+                // consumed the handshake state by the time a crypto failure returns, which is what
+                // `Attempt::answer` says in its own doc — and this arm used to leave the attempt in
+                // place anyway. Its `inner` was already taken, so from then on *every* answer,
+                // including the correct one a moment later, came back `Malformed`, and the phone sat
+                // on "connecting" for the whole ladder: measured 2026-11-12 with the host reporting
+                // `session established`, the phone logging eleven `op=0x84 kind=0x12` frames, and
+                // the screen never moving. Dropping it here lets the next rung start a fresh one,
+                // which is the cure the doc prescribes.
+                self.attempt = None;
+                self.attempt_spent = true;
+                self.rung_deadline_ms = None;
                 Admitted::Ignored(Rejected::Handshake(e))
             }
         }

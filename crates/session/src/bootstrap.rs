@@ -855,4 +855,3 @@ impl NeedHandshakeSender {
         Some(need_handshake_encode(psk, host_public, wall_ms))
     }
 }
-

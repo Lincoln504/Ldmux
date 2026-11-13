@@ -1130,3 +1130,62 @@ fn the_initiation_forms_are_the_sizes_the_plan_promises() {
     assert_eq!(MSG2_NONCED_LEN, 52);
     assert_eq!(PeerId(1), PeerId(1));
 }
+
+// ---------------------------------------------------------------------------------------------
+// A bad answer spends the attempt, and the ladder replaces it.
+// ---------------------------------------------------------------------------------------------
+
+/// **One unreadable answer must not poison the phone for the rest of its life.**
+///
+/// `Attempt::answer` consumes `snow`'s handshake state, so a crypto failure leaves the attempt
+/// unusable — its own doc says the caller must replace it. The endpoint used to count the failure and
+/// keep the attempt, so every later answer — including the correct one a moment later — came back
+/// `Malformed`, and the phone stayed on "connecting" for the whole ladder. Measured on real hardware
+/// 2026-11-12: the host reported `session established` while the phone logged eleven delivered
+/// `msg2` records and never moved.
+#[test]
+fn a_bad_answer_spends_the_attempt_and_the_ladder_replaces_it() {
+    let mut run = Run::new(9, 1, 0.0, 1);
+    run.phone
+        .connect(run.now, run.wall())
+        .expect("the phone can start an attempt");
+
+    // A record shaped like an answer that cannot authenticate: the kind byte is right, the payload
+    // is not.
+    let mut bogus = vec![0x12u8];
+    bogus.extend_from_slice(&[0xAB; 51]);
+    run.phone.on_record(
+        &bogus,
+        &ArrivalInfo::direct(0.0),
+        run.now,
+        run.wall(),
+    );
+    assert_eq!(
+        run.phone.stats().rejected_handshake,
+        1,
+        "the bogus answer was not rejected: {:?}",
+        run.phone.stats()
+    );
+
+    // **And it is not a reflex.** A replacement waits its rung, so a peer that answers unreadably
+    // cannot make this end transmit continuously: with the deadline set to now, the same harness
+    // measured 200 initiations in 200 answer steps. Nothing may be written before the rung expires.
+    let before = run.phone.stats().initiations_sent;
+    for _ in 0..2 {
+        run.step(500);
+    }
+    assert_eq!(
+        run.phone.stats().initiations_sent,
+        before,
+        "a spent attempt was replaced and transmitted in the same instant: {:?}",
+        run.phone.stats()
+    );
+
+    // The real answer must still finish, which needs a fresh attempt behind it.
+    run.run_until(300_000, 500, |run| run.phone.established());
+    assert!(
+        run.phone.established(),
+        "a rejected answer left the phone unable to accept a real one: {:?}",
+        run.phone.stats()
+    );
+}
