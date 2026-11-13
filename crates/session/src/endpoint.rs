@@ -864,6 +864,12 @@ impl RadioEndpoint {
         self.records_left = records_left;
     }
 
+    /// How many passes a message gets on the route this end holds, for a test or a status line.
+    #[must_use]
+    pub fn attempts_now(&self) -> u8 {
+        self.tx.max_attempts()
+    }
+
     /// Changes the discovery grace on a live endpoint, for a test that measures the wait itself.
     pub fn set_bootstrap_path_grace_ms(&mut self, grace_ms: u64) {
         self.config.bootstrap_path_grace_ms = grace_ms;
@@ -1767,6 +1773,33 @@ impl RadioEndpoint {
     /// crossed those repeaters in that order, and the way back is an inference about the other
     /// direction. Adopting that inference as proof is what let a sixteen-hop peer be treated as a
     /// neighbour, so [`ProofWitness`] is the only thing that may mark a path proven.
+    /// How many passes a message gets, from the route's own length.
+    ///
+    /// A pass is one crossing of the route, so the count that reaches a given confidence grows with
+    /// the hop count: `attempts = ln(0.05) / ln(1 - (1 - p)^hops)` at a per-hop loss `p`. Ten per cent
+    /// is the field's middle, which gives 5 passes at four hops, 11 at twelve, and 16 at the cap for
+    /// thirty — bounded, because airtime is the thing being spent.
+    fn attempts_for_route(&self, hops: u8) -> u8 {
+        let hops = hops.max(1);
+        // Precomputed from the formula above at p = 0.10 rather than computed here: a logarithm per
+        // record would be a floating-point call in the hot path for a number that changes only when
+        // the route does.
+        const TABLE: [u8; 33] = [
+            5, 5, 5, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 13, 14, 14, 14,
+            15, 15, 15, 16, 16, 16, 16, 16,
+        ];
+        TABLE[usize::from(hops.min(32))]
+    }
+
+    /// Point the transaction layer at the passes the current route needs.
+    fn retune_attempts(&mut self, now_ms: u64) {
+        let hops = self
+            .route
+            .best(now_ms, self.config.sf)
+            .map_or(1, Candidate::hops);
+        self.tx.set_max_attempts(self.attempts_for_route(hops));
+    }
+
     fn learn(&mut self, arrival: &Arrival, path: &[u8], snr_db: f32, now_ms: u64) {
         if !matches!(arrival, Arrival::Flood { .. }) {
             return;
@@ -1784,6 +1817,7 @@ impl RadioEndpoint {
             now_ms,
         ));
         self.stats.routes_learned += 1;
+        self.retune_attempts(now_ms);
     }
 
     /// Mark this end's last direct path proven, when a direct arrival finished its path.

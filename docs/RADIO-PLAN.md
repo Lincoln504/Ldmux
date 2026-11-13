@@ -806,6 +806,29 @@ the quantity and its arithmetic. A change that removes a capability says which c
 and measures that the replacement reaches the same distance. And the in-room case runs on every
 change, because a regression gate that never exercises the working path is not a gate.
 
+### 12.7b-4 AR-18 — the acknowledgement is already in every header, and the naive fix for it is refused
+
+**Found 2026-11-13, fixed wrongly, then reverted — recorded so the next attempt starts here.**
+
+Every part's transaction header already carries `ack_tx_id` and `ack_mask`
+(`crates/session/src/transaction.rs`, `Header`), so a reply acknowledges the request it replies to at
+no cost. But `poll` tries `readied_ack` before `take_part`, so on every request/response exchange the
+receiver sends a **standalone acknowledgement first** and then the reply that carries the same
+acknowledgement: two records for one fact, and on a screen ask the ack is a third of the answer's
+airtime.
+
+Tried: take the part first when it would carry the ack, and clear `ack_owed` when a part carries one.
+That halves the ack traffic in isolation and is pinned by a test that a reply carries the ack and no
+standalone one follows. **It broke `a_route_from_nothing_carries_a_message_and_its_answer_six_repeaters
+_away`**: preferring a part starves the acknowledgment whenever this end has outbound work of its own,
+and narrowed to "only when the part would actually carry that ack" it still did, because the peer then
+retransmits for want of an ack the next part never carried. Reverted rather than left half-right.
+
+**What it actually needs is the correlation the design does not have.** A request/response exchange
+should complete the *request* when its *response* arrives, so that no standalone ack is wanted at all
+and a lost response is retried as a response. Until that exists, the standalone ack stays and costs
+what it costs; the arithmetic in AR-16 already counts it.
+
 ### 12.7c AR-12 — the engine shipped without six features the route already had, and reintroduced a fixed defect
 
 **Found by refusing to rewire, then by a survey I should have asked for at the start of the stage.**

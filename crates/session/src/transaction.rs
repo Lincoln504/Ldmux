@@ -624,6 +624,21 @@ impl TransactionLayer {
         }
     }
 
+    /// How many passes a message currently gets.
+    #[must_use]
+    pub fn max_attempts(&self) -> u8 {
+        self.config.max_attempts
+    }
+
+    /// Sets how many passes a message gets before it is given up on.
+    ///
+    /// **The count follows the route, because a pass is one crossing.** Five passes deliver 81 % over
+    /// twelve hops at 10 % per-hop loss and only 20 % over thirty (the arithmetic is AR-16 in
+    /// `docs/RADIO-PLAN.md`), so a fixed five is a room's number applied to a county.
+    pub fn set_max_attempts(&mut self, max_attempts: u8) {
+        self.config.max_attempts = max_attempts.clamp(1, 16);
+    }
+
     /// How long a caller must leave between two parts, in milliseconds.
     ///
     /// A caller driving a real clock needs this to know when to poll again; the layer enforces the

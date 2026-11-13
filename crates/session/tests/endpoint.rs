@@ -1840,3 +1840,38 @@ fn a_repeated_initiation_is_not_answered_once_the_peer_is_using_the_session() {
         before
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// The retry count follows the route, because a pass is one crossing.
+// ---------------------------------------------------------------------------------------------
+
+/// **Five passes are a room's number.** They deliver 81 % over twelve hops at 10 % per-hop loss and
+/// 20 % over thirty (`docs/RADIO-PLAN.md`, AR-16), so the count has to follow the route.
+#[test]
+fn the_retry_count_follows_the_route() {
+    let mut run = Run::new(9, 1, 0.0, 1);
+    run.phone
+        .connect(run.now, run.wall())
+        .expect("the phone can start an attempt");
+    run.run_until(60_000, 250, |run| run.phone.established());
+    assert!(run.phone.established(), "the phone did not establish");
+    let near = run.phone.attempts_now();
+    assert!(near >= 5, "a neighbour still gets a room's five passes: {near}");
+
+    // Twelve repeaters: the route is twelve crossings, so the count grows.
+    let mut far = Run::new(17, 12, 0.0, 1);
+    far.phone
+        .connect(far.now, far.wall())
+        .expect("the phone can start an attempt");
+    far.run_until(300_000, 500, |run| run.phone.established());
+    assert!(far.phone.established(), "the phone did not establish");
+    // The route is learned from the flooded teaching copy of the answer, which follows it by design,
+    // so the count grows a moment after the session does.
+    far.run_until(60_000, 250, |run| run.phone.attempts_now() > near);
+    let distant = far.phone.attempts_now();
+    assert!(
+        distant > near,
+        "twelve hops got the same {distant} passes as one hop"
+    );
+    assert!(distant <= 16, "the count is unbounded: {distant}");
+}
