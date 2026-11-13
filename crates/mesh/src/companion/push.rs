@@ -422,3 +422,39 @@ mod tests {
         assert_eq!(classify(&push(&packet)), None);
     }
 }
+
+#[cfg(test)]
+mod a_short_downlink {
+    //! **The 34-byte downlink is the one the field never admitted.** A `Sessions` answer and every
+    //! transaction part are short, and the classifier must take them exactly as it takes a long one.
+
+    use super::*;
+
+    #[test]
+    fn a_thirty_four_byte_downlink_is_classified() {
+        // `[0x84][snr × 4][rssi][0xFF][kind][index][counter 4]…` — the shape the radio writes.
+        let mut frame = vec![PUSH_RAW_DATA, 0xF4, 0xA6, 0xFF];
+        frame.push(0x16); // KIND_DOWN
+        frame.push(0x1B); // session index
+        frame.extend_from_slice(&0u32.to_le_bytes());
+        frame.extend_from_slice(&[0x5A; 28]);
+        assert_eq!(frame.len(), 38, "a 34-byte record is a 38-byte push");
+
+        let arrival = classify(&frame).expect("a short downlink is a record");
+        assert_eq!(arrival.record.first(), Some(&0x16));
+        assert_eq!(arrival.record.len(), 34);
+        assert!(!arrival.flood);
+    }
+
+    #[test]
+    fn a_short_record_with_the_lowest_payload_type_is_classified() {
+        // The `0x00` first byte is `PAYLOAD_TYPE_REQ` in the *packet* meaning, and a record's first
+        // byte is a kind: `KIND_UP`/`KIND_DOWN` are 0x15/0x16, but a future kind must not be lost to a
+        // payload-type check that reads the record's own first byte as a packet header.
+        let mut frame = vec![PUSH_RAW_DATA, 0xF4, 0xA6, 0xFF];
+        frame.push(0x16);
+        frame.extend_from_slice(&[0x11; 33]);
+        let arrival = classify(&frame).expect("still a record");
+        assert_eq!(arrival.record.len(), 34);
+    }
+}
