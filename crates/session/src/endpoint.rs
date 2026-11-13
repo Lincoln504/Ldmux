@@ -1034,6 +1034,9 @@ impl RadioEndpoint {
         }
 
         let carriage = self.carriage_for(self.rung, now_ms);
+        // Kept before the record takes it: the rung's length depends on the carriage, and the two
+        // estimates differ by a factor of five.
+        let flooded = carriage.is_flood();
         let limit = self.budget(&carriage).usable_limit().unwrap_or(0);
         let hops = self
             .route
@@ -1068,12 +1071,19 @@ impl RadioEndpoint {
         self.stats.initiations_sent += 1;
         self.stats.rungs_used += 1;
 
+        // **The rung follows the carriage, because the firmware's two estimates differ by 5x.**
+        // A flood is re-transmitted across the whole mesh in one window and does not scale with hops
+        // (10.1 s at the shipped tuple); a direct send is serialised hop by hop and does (50.8 s at
+        // twelve hops). One number for both was 3x too long on a flood and 0.64x too short on a
+        // direct send: wasted silence one way, colliding retries the other.
         let rung_len = if self.rung >= self.config.max_rungs {
             // The last rung is the answer window: the firmware's own documented figure for a
             // multi-hop reply, rather than a smaller number a bench test happened to beat.
             bootstrap::answer_window_ms()
+        } else if flooded {
+            bootstrap::flood_rung_ms(self.config.airtime_ms)
         } else {
-            bootstrap::rung_ms(hops, self.config.airtime_ms)
+            bootstrap::direct_rung_ms(hops, self.config.airtime_ms)
         };
         self.rung_deadline_ms = Some(now_ms.saturating_add(rung_len));
         self.rung = self.rung.saturating_add(1);

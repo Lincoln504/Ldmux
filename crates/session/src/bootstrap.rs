@@ -129,6 +129,56 @@ pub fn rung_ms(hops: u8, airtime_ms: f64) -> u64 {
     ms.max(FIRST_RUNG_MIN_MS)
 }
 
+/// How long a **flood** rung waits: the firmware's own estimate for one.
+///
+/// `calcFloodTimeoutMillisFor` is `SEND_TIMEOUT_BASE_MILLIS + FLOOD_SEND_TIMEOUT_FACTOR *
+/// pkt_airtime_millis` (`examples/companion_radio/MyMesh.cpp:888-890`) and the factors are 500 ms and
+/// 16.0. **It does not scale with hops**, because a flood's forward delays are overlapped rather than
+/// serialised: the whole mesh re-transmits it in the same window.
+///
+/// Our rung waited `2 × hops × airtime × 2.25` for every carriage, which at twelve hops is 32.5 s
+/// against the firmware's 10.1 s — three times too long on a flood, so every unanswered initiation
+/// sat in silence while a retry would have been legal.
+#[must_use]
+pub fn flood_rung_ms(airtime_ms: f64) -> u64 {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let ms = (SEND_TIMEOUT_BASE_MS + FLOOD_TIMEOUT_FACTOR * airtime_ms).ceil() as u64;
+    ms.clamp(FIRST_RUNG_MIN_MS, FLOOD_TIMEOUT_MAX_MS)
+}
+
+/// How long a **direct** rung waits: the firmware's own estimate for one.
+///
+/// `calcDirectTimeoutMillisFor` is `SEND_TIMEOUT_BASE_MILLIS + (pkt_airtime_millis *
+/// DIRECT_SEND_PERHOP_FACTOR + DIRECT_SEND_PERHOP_EXTRA_MILLIS) * (path_hash_count + 1)`
+/// (`MyMesh.cpp:891-896`), with 500 ms, 6.0 and 250 ms.
+///
+/// **The `+ 1` is the last hop**, and the per-hop extra is the repeater's own forward delay allowance.
+/// Our rung was `2 × hops × airtime × 2.25`, which at twelve hops is 32.5 s against the firmware's
+/// 50.8 s: we retransmitted a direct send while the firmware still considered it in flight, spending
+/// airtime on a copy that could only collide with its original.
+#[must_use]
+pub fn direct_rung_ms(hops: u8, airtime_ms: f64) -> u64 {
+    let hops = f64::from(hops.min(PATH_HOP_MAX));
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let ms = (SEND_TIMEOUT_BASE_MS
+        + (airtime_ms * DIRECT_TIMEOUT_PER_HOP_FACTOR + DIRECT_TIMEOUT_PER_HOP_EXTRA_MS)
+            * (hops + 1.0))
+        .ceil() as u64;
+    ms.max(FIRST_RUNG_MIN_MS)
+}
+
+/// The firmware's send-timeout constants (`MyMesh.h`).
+const SEND_TIMEOUT_BASE_MS: f64 = 500.0;
+/// A flood is re-transmitted across the mesh in one window, so its timeout does not scale with hops.
+const FLOOD_TIMEOUT_FACTOR: f64 = 16.0;
+/// Six airtimes per hop, plus a repeater's forward allowance, times the hops plus the last one.
+const DIRECT_TIMEOUT_PER_HOP_FACTOR: f64 = 6.0;
+const DIRECT_TIMEOUT_PER_HOP_EXTRA_MS: f64 = 250.0;
+/// A flood rung still has a ceiling: past this, a retry is a fresh idea rather than a duplicate.
+const FLOOD_TIMEOUT_MAX_MS: u64 = 120_000;
+/// The firmware caps a path at 63 hashes, so a rung never needs to scale past it.
+const PATH_HOP_MAX: u8 = 63;
+
 /// How long the second part waits before it is sent after the first.
 ///
 /// A repeater cannot hear while it forwards, so a second packet sent into the same window is lost at
@@ -856,5 +906,43 @@ impl NeedHandshakeSender {
         }
         self.last_ms = Some(now_ms);
         Some(need_handshake_encode(psk, host_public, wall_ms))
+    }
+}
+
+#[cfg(test)]
+mod firmware_timeouts {
+    //! **The rung is the firmware's own estimate, because it is the only number the other end agrees
+    //! with.** One value for both carriages was three times too long on a flood and 0.64 times too
+    //! short on a direct send.
+
+    use super::*;
+
+    const AIRTIME: f64 = 602.6;
+
+    #[test]
+    fn a_flood_rung_does_not_scale_with_hops() {
+        // `500 + 16 × 602.6` is 10 141.6 ms — below the 12 s floor a neighbour gets, so a flood rung
+        // is the floor at this tuple, whatever the distance.
+        assert_eq!(flood_rung_ms(AIRTIME), FIRST_RUNG_MIN_MS);
+        // At a tuple where the estimate is above the floor, the estimate is what runs.
+        assert_eq!(flood_rung_ms(900.0), 14_900);
+    }
+
+    #[test]
+    fn a_direct_rung_is_the_firmwares_per_hop_estimate() {
+        // `500 + (602.6 × 6 + 250) × (12 + 1)` = 50 752.8 ms at twelve hops.
+        assert_eq!(direct_rung_ms(12, AIRTIME), 50_753);
+        // One hop is `500 + 3866 × 2` = 8 231 ms, which is below the floor a neighbour gets, so the
+        // floor is what runs; the per-hop term only shows once the route is long enough.
+        assert_eq!(direct_rung_ms(1, AIRTIME), FIRST_RUNG_MIN_MS);
+        assert_eq!(direct_rung_ms(4, AIRTIME), 19_828);
+    }
+
+    #[test]
+    fn a_direct_rung_is_much_longer_than_a_flood_rung_at_range() {
+        assert!(
+            direct_rung_ms(12, AIRTIME) > 4 * flood_rung_ms(AIRTIME),
+            "the two carriages were given the same number for a day"
+        );
     }
 }
