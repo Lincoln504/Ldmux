@@ -589,6 +589,7 @@ impl Client {
                 // is the only way a record crosses more than one hop, because the firmware never
                 // delivers a flooded plaintext record.
                 radio.set_peer_key(config.peer_static, 0);
+                radio.set_identity(own_key, config.path_width);
                 radio
             },
             link: LinkSettings {
@@ -1042,6 +1043,31 @@ impl Client {
         // answer path, where `0x84` settles no command and was discarded: measured 2026-11-12 with
         // the host answering direct, the phone logged eight `ble recv 56B op=0x84` frames and its
         // screen never left "connecting".
+        // **A route request or reply is not a session record, and it is the only way past the
+        // advert cap.** A repeater drops an advert at eight hops while a `REQ` flood travels
+        // sixty-four, so on a longer mesh the advert cache can never answer and this end would
+        // flood every record for ever. Both packets are floods, so they arrive through the receive
+        // log exactly as a flooded record does, and they are recognised by their own magic before
+        // the record layer ever sees them.
+        if let Some(packet) = payload.get(3..)
+            && payload.first() == Some(&push::PUSH_LOG_RX_DATA)
+        {
+            if let Some(request) = ldmux_mesh::companion::route::parse_request(packet, &self.link.own_key)
+            {
+                self.radio.answer_route(&request, now_ms);
+                return FrameOutcome::Ignored;
+            }
+            if let Some(reply) = ldmux_mesh::companion::route::parse_reply(packet, &self.link.peer_key) {
+                self.stats.path_learned += 1;
+                self.endpoint.observe_path(Candidate::learned(
+                    reply.path,
+                    reply.hash_size,
+                    0.0,
+                    now_ms,
+                ));
+                return FrameOutcome::Ignored;
+            }
+        }
         if payload.first().is_some_and(|code| *code >= 0x80) {
             return match push::classify(payload) {
                 Some(arrival) => {

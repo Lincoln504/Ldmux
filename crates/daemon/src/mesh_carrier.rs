@@ -222,6 +222,12 @@ struct Radio {
     window_record: Option<PathBuf>,
     /// Where the peer's radio key is remembered.
     peer_record: Option<PathBuf>,
+    /// The road a route reply taught, which is asked for while it is absent.
+    learned_route: Option<(Vec<u8>, u8)>,
+    /// Route requests answered, so the log can say the mechanism ran.
+    route_replies: u32,
+    /// When to ask the peer for a route again, while none is held.
+    next_route: std::time::Instant,
     /// The radio's own last measurement, from `GET_STATS radio`.
     ///
     /// **Absent until the radio answers, and absent is not zero.** The status used to print a
@@ -363,6 +369,9 @@ impl RadioCarrier {
             window_start: 0,
             window_record: radio.window_record,
             peer_record: radio.peer_record,
+            learned_route: None,
+            route_replies: 0,
+            next_route: std::time::Instant::now(),
         };
         std::thread::Builder::new()
             .name("ldmux-mesh-carrier".to_owned())
@@ -544,6 +553,25 @@ fn serve<L: ByteLink>(
             // had taught, and once that expired it sealed its transaction parts with a guessed empty
             // path that no repeater forwards (measured 2026-11-13: `34B carriage=direct path=[]`
             // beside `route 2 repeaters`). The ask is a local cache read, not a transmission.
+            // **And ask the peer itself, while no road is held.** A repeater drops an advert at eight
+            // hops while a `REQ` flood travels sixty-four, so on a longer mesh the cache read below
+            // can never answer and this end would flood every record for ever. The request is a small
+            // flood whose reply carries the chain home.
+            if last_route.is_none()
+                && radio.settings.peer_key.iter().any(|b| *b != 0)
+                && radio.next_route <= std::time::Instant::now()
+            {
+                radio.next_route = std::time::Instant::now() + ROUTE_ASK_WAIT;
+                let nonce = fresh_nonce();
+                if let Ok(packet) = ldmux_mesh::companion::route::build_request(
+                    radio.settings.hash_size,
+                    &radio.settings.peer_key,
+                    &radio.settings.own_key,
+                    &nonce,
+                ) {
+                    let _ = companion.send_packet(&packet);
+                }
+            }
             if last_route.is_none()
                 && radio.settings.peer_key.iter().any(|b| *b != 0)
                 && let Ok(learned) = companion.get_advert_path(&radio.settings.peer_key)
@@ -683,6 +711,44 @@ fn harvest<L: ByteLink>(
                 return Ok(());
             }
         };
+        // **A route request is answered before it is anything else.** It is a flood carrying the
+        // asker's key, so the reply goes back along the chain it crossed; a reply is the road this
+        // end was asking for. Both are `REQ` floods, so they arrive here through the receive log
+        // exactly as a flooded record does, and both are recognised by their own magic.
+        if let Some(packet) = pushed.get(3..) {
+            if let Some(request) = ldmux_mesh::companion::route::parse_request(
+                packet,
+                &radio.settings.own_key,
+            ) {
+                if let Ok(reply) = ldmux_mesh::companion::route::build_reply(
+                    &radio.settings.own_key,
+                    &request.peer_key,
+                    request.hash_size,
+                    &request.path,
+                    &request.nonce,
+                ) {
+                    let _ = companion.send_packet(&reply);
+                    radio.route_replies = radio.route_replies.saturating_add(1);
+                }
+                continue;
+            }
+            if let Some(reply) = ldmux_mesh::companion::route::parse_reply(
+                packet,
+                &radio.settings.peer_key,
+            ) {
+                radio.learned_route = Some((reply.path.clone(), reply.hash_size));
+                if events
+                    .blocking_send(Ok(Event::Route {
+                        path: reply.path,
+                        width: reply.hash_size,
+                    }))
+                    .is_err()
+                {
+                    return Err(());
+                }
+                continue;
+            }
+        }
         let Some((_record, classified, sender)) = classify_push(&pushed, &radio.settings) else {
             continue;
         };
@@ -725,6 +791,12 @@ fn harvest<L: ByteLink>(
         }
     }
 }
+
+/// How long the host waits between route requests while it holds no road.
+///
+/// Slower than the advert cache read beside it, because this one costs the mesh: a flood is forwarded
+/// by every repeater in range, and discovery must not compete with the data it is finding a road for.
+const ROUTE_ASK_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// One send, on the carriage the endpoint chose.
 fn transmit<L: ByteLink>(

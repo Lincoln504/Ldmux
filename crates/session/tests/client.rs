@@ -330,6 +330,9 @@ struct Link {
     cursor: usize,
     /// Every event the client produced, in order, so a test can look for one.
     events: Vec<ClientEvent>,
+    /// The phone's own radio key and the host's, for the tests that build route packets themselves.
+    own_key: [u8; 32],
+    peer_key: [u8; 32],
 }
 
 impl Link {
@@ -347,6 +350,8 @@ impl Link {
             phone,
             host_node,
             client: Client::new(config, phone_key),
+            own_key: phone_public,
+            peer_key: host_key.public,
             host,
             radio: FakeRadio::new(),
             now: 0,
@@ -1106,5 +1111,42 @@ fn asking_for_the_list_again_does_not_supersede_the_request_in_flight() {
         link.host.endpoint.stats().messages_delivered >= 1,
         "the one list request never reached the host: {:?}",
         link.host.endpoint.stats()
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The route request is the only way past the advert cap.
+// ---------------------------------------------------------------------------------------------
+
+/// **A repeater drops an advert at eight hops; a `REQ` flood travels sixty-four.** On a mesh longer
+/// than eight hops the advert cache can never answer, so both ends must be able to ask each other
+/// directly — and the reply must teach the asker the road the question crossed.
+#[test]
+fn a_route_request_is_answered_and_teaches_the_asker_the_road() {
+    use ldmux_mesh::companion::route::{build_reply, build_request, parse_reply};
+
+    let mut link = Link::new(41, 4, 0.0);
+    link.connect();
+
+    // The phone asks the host for a route, as it does when it holds none.
+    let asker = link.own_key;
+    let host_key = link.peer_key;
+    let request = build_request(1, &host_key, &asker, &[1, 2, 3, 4]).expect("a request");
+
+    // It crosses four repeaters, so it arrives with four hashes on it.
+    let mut arrival = request.clone();
+    arrival[1] = ldmux_mesh::companion::build::path_byte(1, 4).expect("four hops");
+    arrival.splice(2..2, [0xA1, 0xA2, 0xA3, 0xA4]);
+
+    // The host reads it and answers with the chain reversed.
+    let parsed = ldmux_mesh::companion::route::parse_request(&arrival, &host_key)
+        .expect("the host reads the request");
+    let reply = build_reply(&host_key, &parsed.peer_key, 1, &parsed.path, &parsed.nonce)
+        .expect("the host answers");
+    let learned = parse_reply(&reply, &host_key).expect("the phone reads the answer");
+    assert_eq!(
+        learned.path,
+        vec![0xA4, 0xA3, 0xA2, 0xA1],
+        "the way back is the way here in the opposite order"
     );
 }

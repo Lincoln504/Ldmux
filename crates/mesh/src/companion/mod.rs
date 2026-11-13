@@ -16,6 +16,7 @@ pub mod command;
 pub mod fifo;
 pub mod framing;
 pub mod push;
+pub mod route;
 
 pub use fifo::{
     Answer, CommandId, CommandSpec, CompanionFifo, DEFAULT_DRAIN_MS, DEFAULT_TIMEOUT_MS, Entry,

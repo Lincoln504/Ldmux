@@ -48,6 +48,13 @@ use ldmux_mesh::companion::framing;
 /// (`src/Dispatcher.cpp:199`), a setting on the *other* radio that ldmux neither sets nor reports.
 pub const PATH_ASK_MS: u64 = 5_000;
 
+/// How often this end asks the peer itself for a route, while it holds none.
+///
+/// Slower than the advert cache read beside it, because this one costs the mesh: a flood is forwarded
+/// by every repeater in range. Twenty seconds is a request a minute with the ladder on top, which is
+/// the airtime a discovery may spend without competing with the data it is finding a road for.
+pub const ROUTE_ASK_MS: u64 = 20_000;
+
 /// The name this client reports in `APP_START`. The firmware prints it and nothing else depends on
 /// it; what matters is that the frame carries *a* name (see `command::app_start`).
 pub const APP_NAME: &str = "ldmux";
@@ -172,6 +179,9 @@ pub struct RadioCounters {
     pub answered: u64,
     /// Paths learned from an advert's own route, which is what lets a record travel past one hop.
     pub path_learned: u64,
+    /// Route requests sent to the peer, and replies sent back to it.
+    pub route_asks: u64,
+    pub route_replies: u64,
     /// Commands whose deadline passed before their answer arrived.
     pub expired: u64,
     /// How many times the caller asked the radio to make progress.
@@ -204,6 +214,12 @@ pub struct Radio {
     next_poll_ms: Option<u64>,
     /// When to read the radio's advert cache again, while no path is held.
     next_path_ms: Option<u64>,
+    /// When to ask the peer itself for a route, while no path is held.
+    next_route_ms: Option<u64>,
+    /// This radio's own key, which a route request carries so the peer can address its answer.
+    own_key: [u8; 32],
+    /// The path hash width this radio is set to, which a request and a reply must both encode with.
+    hash_size: u8,
     /// The peer's public key, which is what the advert cache is asked about.
     peer_key: [u8; 32],
     /// The path an advert taught, reversed into the direction a packet travels.
@@ -231,6 +247,9 @@ impl Radio {
             status: RadioStatus::default(),
             next_poll_ms: None,
             next_path_ms: None,
+            next_route_ms: None,
+            own_key: [0; 32],
+            hash_size: 1,
             peer_key: [0u8; 32],
             learned: None,
             started: false,
@@ -332,6 +351,41 @@ impl Radio {
         self.counters.commands += 1;
     }
 
+    /// Ask the peer for a route, as a flooded request carrying this end's key.
+    fn send_route_request(&mut self, now_ms: u64) {
+        let nonce = u32::try_from(now_ms).unwrap_or(u32::MAX).to_le_bytes();
+        let Ok(packet) = ldmux_mesh::companion::route::build_request(
+            self.hash_size,
+            &self.peer_key,
+            &self.own_key,
+            &nonce,
+        ) else {
+            return;
+        };
+        self.send_record(&packet);
+        self.counters.route_asks += 1;
+    }
+
+    /// Answer a route request with the chain it crossed, reversed.
+    pub fn answer_route(
+        &mut self,
+        request: &ldmux_mesh::companion::route::RouteRequest,
+        nonce: u64,
+    ) {
+        let nonce = u32::try_from(nonce).unwrap_or(u32::MAX).to_le_bytes();
+        let Ok(packet) = ldmux_mesh::companion::route::build_reply(
+            &self.own_key,
+            &request.peer_key,
+            request.hash_size,
+            &request.path,
+            &nonce,
+        ) else {
+            return;
+        };
+        self.send_record(&packet);
+        self.counters.route_replies += 1;
+    }
+
     /// Queue one record for transmission.
     ///
     /// A record is a command (`CMD_SEND_RAW_PACKET`); it takes the same window as a status ask, for
@@ -364,6 +418,17 @@ impl Radio {
         {
             self.next_path_ms = Some(now_ms.saturating_add(PATH_ASK_MS));
             self.ask(command::get_advert_path(&self.peer_key), 0);
+            // **And ask the peer directly, because an advert cannot cross this mesh.**
+            //
+            // A repeater drops an advert at `flood_max_advert`, eight hops by default, while a `REQ`
+            // flood travels sixty-four (`examples/simple_repeater/MyMesh.cpp:972`,
+            // `src/helpers/RoutingPolicy.h:16-22`). On a longer mesh the cache read above can never
+            // answer, so this end would flood every record for ever. The request is a flood too, but
+            // a small one, and the reply carries the chain home.
+            if self.next_route_ms.is_none_or(|due| now_ms >= due) {
+                self.next_route_ms = Some(now_ms.saturating_add(ROUTE_ASK_MS));
+                self.send_route_request(now_ms);
+            }
         }
         // The readings come due again.
         if self.started && self.next_poll_ms.is_some_and(|due| now_ms >= due) {
@@ -545,7 +610,17 @@ impl Radio {
         self.peer_key = peer_key;
         if self.learned.is_none() {
             self.next_path_ms = Some(now_ms);
+            self.next_route_ms = Some(now_ms);
         }
+    }
+
+    /// Tell the radio its own key and path width, which a route request and its answer both carry.
+    ///
+    /// **Without the own key a request cannot be answered usefully**: the reply is addressed to the
+    /// asker's key, and the asker is whoever sent the request.
+    pub fn set_identity(&mut self, own_key: [u8; 32], hash_size: u8) {
+        self.own_key = own_key;
+        self.hash_size = hash_size.clamp(1, 3);
     }
 }
 
