@@ -515,6 +515,8 @@ data class ClientStats(
     val localIndex: Long = 0,
     /** Records that arrived twice, which the receive log makes routine. */
     val duplicateRecords: Long = 0,
+    /** Records for another session index: the peer re-handshook and this end followed. */
+    val wrongIndexRecords: Long = 0,
 ) {
     companion object {
         internal fun of(v: LongArray): ClientStats = ClientStats(
@@ -555,6 +557,7 @@ data class ClientStats(
             lastRefusalCounter = v[34],
             localIndex = v[35],
             duplicateRecords = v[36],
+            wrongIndexRecords = v[37],
         )
     }
 }

@@ -207,6 +207,7 @@ typedef struct {
     uint64_t answers_ignored;
     /* The last record refused by the record layer, as a stable code; 0 when none has been. */
     uint64_t duplicate_records;
+    uint64_t wrong_index_records;
     uint8_t last_record_refusal;
     /* The index and counter that record carried, and the index this end holds. */
     uint8_t last_refusal_index;

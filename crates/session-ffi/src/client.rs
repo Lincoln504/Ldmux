@@ -219,6 +219,8 @@ pub struct LdmuxClientStats {
     pub answers_ignored: u64,
     /// Records that arrived twice, which the receive log makes routine and which are not failures.
     pub duplicate_records: u64,
+    /// Records for another session index: the peer re-handshook and this end followed.
+    pub wrong_index_records: u64,
     /// The last record refused by the record layer, as a stable code; 0 when none has been.
     pub last_record_refusal: u8,
     /// The index and counter that record carried, and the index this end holds.
@@ -1244,6 +1246,7 @@ pub unsafe extern "C" fn ldmux_client_stats(c: *mut LdmuxClient, out: *mut Ldmux
                 answers_repeated: link.answers_repeated,
                 answers_ignored: link.answers_ignored,
                 duplicate_records: link.duplicate_records,
+                wrong_index_records: link.wrong_index_records,
                 last_record_refusal: link.last_record_refusal,
                 last_refusal_index: link.last_refusal_index,
                 last_refusal_counter: link.last_refusal_counter,

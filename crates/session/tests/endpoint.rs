@@ -1338,20 +1338,29 @@ fn a_record_that_will_not_open_drops_the_session_and_asks_again() {
     run.run_until(60_000, 250, |run| run.phone.established());
     assert!(run.phone.established(), "the phone did not establish");
 
-    // A record of the shape the host sends, addressed to a session this end does not hold: the
-    // header is right, the tag is not.
+    // A record of the shape the host sends, carrying a **different session index**: the peer
+    // re-handshook and this end is holding the old session.
     let mut stale = vec![0x16u8];
-    stale.extend_from_slice(&[0x5A; 33]);
+    stale.push(0x5A);
+    stale.extend_from_slice(&[0x5A; 32]);
     run.phone
         .on_record(&stale, &ArrivalInfo::direct(0.0), run.now, run.wall());
     assert!(
-        run.phone.stats().rejected_record >= 1,
+        run.phone.stats().wrong_index_records >= 1,
         "the stale record was not refused: {:?}",
         run.phone.stats()
     );
+    // **A wrong index is the peer having moved on, so this end follows.** Keeping the old session
+    // meant every later record was refused the same way and nothing recovered: measured 2026-11-13,
+    // the host on index 30 and the phone on 53, both reporting a healthy session, no record crossing.
     assert!(
-        run.phone.established(),
-        "one unopenable record threw away a working session: {:?}",
+        !run.phone.established(),
+        "the phone kept a session the peer had already replaced: {:?}",
+        run.phone.stats()
+    );
+    assert!(
+        run.phone.stats().wrong_index_records >= 1,
+        "the wrong index was not counted: {:?}",
         run.phone.stats()
     );
 
@@ -1695,4 +1704,100 @@ fn a_record_heard_twice_is_counted_as_a_duplicate_and_not_as_a_failure() {
         "a duplicate was counted as a refused record: {:?}",
         run.phone.stats()
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Range: a hop count past the advert cap, where no advert path can exist.
+// ---------------------------------------------------------------------------------------------
+
+/// **Twelve repeaters, which is past the eight-hop advert cap.**
+///
+/// A repeater drops an advert at `flood_max_advert` (8 by default, `examples/simple_repeater/
+/// MyMesh.cpp:972`, `src/helpers/RoutingPolicy.h:16-22`) while a `REQ` flood travels `flood_max`
+/// (64). So on the operator's 14–35 hop mesh the advert path cannot exist, and the only way either
+/// end learns a road is the chain a flood crossed. This test is that case: the phone establishes,
+/// asks for its shell list, and the host's answer comes back, with no advert anywhere.
+#[test]
+fn a_list_crosses_twelve_repeaters_with_no_advert_path() {
+    // **Ten per cent per hop, which is the loss the arithmetic says is survivable at this distance.**
+    // At twenty per cent a twelve-hop crossing is 6.9 % per attempt and needs about forty-two
+    // attempts, which is minutes of airtime per record — the honest verdict is that the requirement
+    // stops being met there, and `docs/RADIO-PLAN.md` records that rather than pretending otherwise.
+    let mut run = Run::new(17, 12, 0.1, 1);
+    run.phone
+        .connect(run.now, run.wall())
+        .expect("the phone can start an attempt");
+    run.run_until(600_000, 500, |run| run.phone.established() && run.host.established());
+    assert!(
+        run.phone.established(),
+        "the phone never established over twelve repeaters: {:?}",
+        run.phone.stats()
+    );
+
+    // The list request, and the host's answer.
+    let request = message(0x0E, &[0x00; 8]);
+    run.phone
+        .submit(&request, run.now)
+        .expect("a list request is one part");
+    run.run_until(600_000, 500, |run| run.host.stats().messages_delivered >= 1);
+    assert!(
+        run.host.stats().messages_delivered >= 1,
+        "the list request never reached the host over twelve repeaters: {:?}",
+        run.host.stats()
+    );
+
+    let answer = message(0x16, &[0x11; 40]);
+    run.host
+        .submit(&answer, run.now)
+        .expect("an answer is one part");
+    run.run_until(600_000, 500, |run| run.phone.stats().messages_delivered >= 1);
+    assert!(
+        run.phone.stats().messages_delivered >= 1,
+        "the host's answer never reached the phone over twelve repeaters: phone {:?} host {:?}",
+        run.phone.stats(),
+        run.host.stats()
+    );
+}
+
+/// What a flood's crossing probability actually is in the model, per hop count and loss.
+///
+/// Printed rather than asserted: the number is the input to every ladder decision, and guessing it
+/// is how a ladder gets sized for a room.
+#[test]
+fn measure_the_flood_crossing_rate() {
+    for loss in [0.0, 0.1, 0.2] {
+        for repeaters in [1usize, 4, 8, 12] {
+            let mut run = Run::new(23, repeaters, loss, 1);
+            run.phone
+                .connect(run.now, run.wall())
+                .expect("the phone can start an attempt");
+            run.run_until(30_000, 500, |run| run.host.stats().records_received > 0);
+            eprintln!(
+                "loss {loss:.2} hops {repeaters:2}: host received {} record(s) after {} initiation(s)",
+                run.host.stats().records_received,
+                run.phone.stats().initiations_sent
+            );
+        }
+    }
+}
+
+/// Why a long flood fails: the outcome histogram, not a guess.
+#[test]
+fn measure_why_a_long_flood_fails() {
+    for seed in [17u64, 23] {
+        let mut run = Run::new(seed, 12, 0.2, 1);
+        run.phone
+            .connect(run.now, run.wall())
+            .expect("the phone can start an attempt");
+        run.run_until(30_000, 500, |run| run.host.stats().records_received > 0);
+        let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for entry in run.mesh.log() {
+            *counts.entry(format!("{:?}", entry.outcome)).or_default() += 1;
+        }
+        eprintln!(
+            "seed {seed}: host received {} after {} initiations; outcomes {counts:?}",
+            run.host.stats().records_received,
+            run.phone.stats().initiations_sent
+        );
+    }
 }

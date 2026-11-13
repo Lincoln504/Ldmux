@@ -430,7 +430,8 @@ class AndroidRadioEngine(
                         "fin=${s.answersFinished} rep=${s.answersRepeated} ign=${s.answersIgnored} " +
                         "refusal=${s.lastRecordRefusal} " +
                         "refusedIdx=${s.lastRefusalIndex} refusedCtr=${s.lastRefusalCounter} " +
-                        "localIdx=${s.localIndex} dup=${s.duplicateRecords}",
+                        "localIdx=${s.localIndex} dup=${s.duplicateRecords} " +
+                        "wrongIdx=${s.wrongIndexRecords}",
                 )
             }
         }

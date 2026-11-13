@@ -75,6 +75,13 @@ fn index_from_wall(wall_ms: u64) -> u8 {
     u8::try_from((wall_ms >> 4) & 0xFF).unwrap_or(1).max(1)
 }
 
+/// How long a bootstrap waits between attempts once its fast ladder is spent.
+///
+/// **A range link needs many attempts, and the cost of waiting is one record a minute.** The fast
+/// ladder exists to catch a neighbour in seconds; this exists so a twelve-repeater route at the
+/// field's loss, where one attempt in fourteen crosses, still converges instead of stopping.
+const SLOW_RUNG_MS: u64 = 60_000;
+
 /// How long the first initiation waits for a path before falling back to a flood.
 ///
 /// Long enough for the phone's own radio to answer a cache read (`CMD_GET_ADVERT_PATH`), short enough
@@ -338,6 +345,8 @@ pub struct Stats {
     pub parts_without_a_road: u64,
     /// Records that arrived twice, which the receive log makes routine and which are not failures.
     pub duplicate_records: u64,
+    /// Records for another session index: the peer re-handshook and this end followed.
+    pub wrong_index_records: u64,
     /// The last record refused by the record layer, as a stable code (`RecordError::code`).
     pub last_record_refusal: u8,
     /// The index and counter that record carried, and the index this end holds.
@@ -1004,9 +1013,20 @@ impl RadioEndpoint {
         // The rung that just expired is the one that was sent; the next one is `self.rung`, and when
         // that is past the last, the attempt is dead.
         if self.rung > self.config.max_rungs {
+            // **The ladder slows down; it does not give up.**
+            //
+            // A rung is one attempt, and an attempt's chance of crossing is the per-hop delivery
+            // raised to the hop count. At the field's loss and a twelve-repeater route that is about
+            // seven per cent, so twelve rungs are a coin flip — and the old code then dropped the
+            // attempt and stopped, which is the "connecting for ever with nothing happening" the
+            // operator sees at range. Measured in the model 2026-11-13: twelve rungs, twelve
+            // initiations, `answers_sent: 0` on the host, `bootstrap_failures: 1`, and no session.
+            //
+            // The attempt is kept and the next rung is a slow one, so a link that needs forty
+            // attempts gets them, while the airtime cost of waiting is one record a minute.
             self.stats.bootstrap_failures += 1;
-            self.attempt = None;
-            self.rung_deadline_ms = None;
+            self.rung = 1;
+            self.rung_deadline_ms = Some(now_ms.saturating_add(SLOW_RUNG_MS));
             report.push(Outbound::BootstrapFailed {
                 rungs: self.config.max_rungs,
             });
@@ -1572,6 +1592,19 @@ impl RadioEndpoint {
                 if e == record::RecordError::Duplicate {
                     self.stats.duplicate_records += 1;
                     return Admitted::Ignored(Rejected::Duplicate);
+                }
+                // **A record for another session index means the peer has moved on, and this end
+                // must follow.** The index is assigned per handshake, so a peer that re-handshook
+                // holds a new one; keeping the old session means every later record is refused the
+                // same way and nothing recovers, because `request_handshake` was only ever called
+                // from the no-session arm. Measured 2026-11-13: the host on index 30, the phone on
+                // 53, both reporting a healthy session, and no record crossing.
+                if e == record::RecordError::WrongIndex {
+                    self.stats.wrong_index_records += 1;
+                    self.session = None;
+                    self.attempt_spent = true;
+                    self.request_handshake(now_ms, wall_ms);
+                    return Admitted::Ignored(Rejected::Record(e));
                 }
                 self.stats.rejected_record += 1;
                 self.stats.last_record_refusal = e.code();
