@@ -838,6 +838,17 @@ impl TransactionLayer {
         Some(Action::TimedOut { peer, tx_id, kind })
     }
 
+    /// Whether a message of this kind is still unacknowledged on the air.
+    ///
+    /// **A caller that asks again while one is in flight supersedes its own request.** The screen
+    /// asks for the shell list every few seconds while it waits, and every ask used to begin a new
+    /// transaction: measured 2026-11-13, forty-eight list requests in two minutes, each replacing the
+    /// last, so none completed and no list ever arrived.
+    #[must_use]
+    pub fn has_outbound_kind(&self, kind: MessageKind) -> bool {
+        self.outbound.values().any(|o| o.kind == kind)
+    }
+
     /// Whether the owed acknowledgement may go now: the message is whole, or the burst's tail has
     /// left the first repeater.
     fn readied_ack(&mut self, now_ms: u64) -> Option<Action> {

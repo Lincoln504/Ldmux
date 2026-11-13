@@ -850,6 +850,12 @@ impl RadioEndpoint {
     /// The default is the credit window. A caller that reads
     /// [`ldmux_mesh::messages::Status::ops_left_this_hour`] sets it here, and the transaction layer
     /// never gates an acknowledgement on it — an ack is the traffic that keeps the link alive.
+    /// Whether a message of this kind is still unacknowledged on the air.
+    #[must_use]
+    pub fn has_outbound(&self, kind: u8) -> bool {
+        self.tx.has_outbound_kind(crate::transaction::MessageKind(kind))
+    }
+
     pub fn set_records_left(&mut self, records_left: u8) {
         self.records_left = records_left;
     }

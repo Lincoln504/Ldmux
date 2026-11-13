@@ -549,6 +549,8 @@ pub struct LinkSettings {
 /// The phone's client: pages, screens, its own radio and the link underneath them.
 pub struct Client {
     endpoint: RadioEndpoint,
+    /// Whether a shell-list request is still waiting for its answer.
+    list_outstanding: bool,
     config: ClientConfig,
     /// The phone's own radio: one command in flight, and the last thing it said.
     radio: Radio,
@@ -606,6 +608,7 @@ impl Client {
             assembling_since: None,
             next_op: 1,
             events: Vec::new(),
+            list_outstanding: false,
             stats: ClientStats::default(),
         }
     }
@@ -892,7 +895,19 @@ impl Client {
     ///
     /// A transport refusal.
     pub fn list(&mut self, now_ms: u64) -> Result<(), ClientError> {
+        // **One list request in flight at a time.** The screen asks again every few seconds while it
+        // waits, and every ask used to begin a new transaction: measured 2026-11-13, forty-eight
+        // requests in two minutes, each replacing the last, so none completed and no list arrived.
+        // The retry is the transaction layer's job, not the screen's.
+        // **One request outstanding until its answer arrives.** The transaction completes as soon as
+        // the peer acknowledges the *request*, which is long before the list itself arrives, so the
+        // screen's retry started a new request each time: measured 2026-11-13, forty-eight in two
+        // minutes, each one arriving while the last answer was still on its way.
+        if self.list_outstanding {
+            return Ok(());
+        }
         self.submit(&Message::List, now_ms)?;
+        self.list_outstanding = true;
         self.stats.lists_sent += 1;
         Ok(())
     }
@@ -1202,6 +1217,7 @@ impl Client {
             Message::Closed { reason } => self.events.push(ClientEvent::Closed { reason }),
             Message::Created { id } => self.events.push(ClientEvent::Created { id }),
             Message::Sessions { last, entries, .. } => {
+                self.list_outstanding = false;
                 self.events.push(ClientEvent::Sessions { last, entries });
             }
             Message::Marks {

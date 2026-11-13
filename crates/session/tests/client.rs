@@ -1071,3 +1071,40 @@ fn a_path_learned_from_an_advert_is_used_but_never_proven() {
     // The type is named so an unused import cannot hide a missing step.
     let _: AdvertPath = parsed;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Asking for the list again must not replace the request already in flight.
+// ---------------------------------------------------------------------------------------------
+
+/// **The screen asks every few seconds while it waits, and each ask used to begin a new
+/// transaction.** Measured in the field on 2026-11-13: forty-eight list requests in two minutes, each
+/// superseding the last, so none completed and no list ever arrived — the phone showed "connecting"
+/// for ever with a healthy session on both ends.
+#[test]
+fn asking_for_the_list_again_does_not_supersede_the_request_in_flight() {
+    let mut link = Link::new(31, 1, 0.0);
+    link.connect();
+
+    // **The screen's retry, before any answer has had time to arrive.** That is the field case: the
+    // answer never came, and every ask started another transaction until the air was full of them.
+    for _ in 0..5 {
+        let now = link.now;
+        link.client.list(now).expect("a list request is accepted");
+    }
+    assert_eq!(
+        link.client.stats().lists_sent,
+        1,
+        "the screen's retry started {} transactions instead of one",
+        link.client.stats().lists_sent
+    );
+
+    // And the one request is what reaches the host.
+    link.run_until(300_000, 250, |link| {
+        link.host.endpoint.stats().messages_delivered >= 1
+    });
+    assert!(
+        link.host.endpoint.stats().messages_delivered >= 1,
+        "the one list request never reached the host: {:?}",
+        link.host.endpoint.stats()
+    );
+}
