@@ -64,6 +64,17 @@ use crate::transaction::{Action, BeginError, PeerId, Received, TransactionLayer}
 /// while the filter thought it was a phone would be exactly the confusion `RC-3` came from.
 pub use crate::direction::Side as Role;
 
+/// A session index that is not the one the last process used.
+///
+/// The index is a lookup key, not a sequence: nothing depends on it being small or ordered, and a
+/// value that repeats across restarts is actively harmful (see `next_index`). The wall clock is the
+/// one source of variation this crate already has — `rand` is not in its dependency allowlist, and
+/// adding one needs an ADR — and a restart cannot land on the same 16-millisecond window twice.
+fn index_from_wall(wall_ms: u64) -> u8 {
+    // Zero is reserved for "no session" in the status and in `record::open`'s caller.
+    u8::try_from((wall_ms >> 4) & 0xFF).unwrap_or(1).max(1)
+}
+
 /// How long the first initiation waits for a path before falling back to a flood.
 ///
 /// Long enough for the phone's own radio to answer a cache read (`CMD_GET_ADVERT_PATH`), short enough
@@ -582,6 +593,8 @@ pub struct RadioEndpoint {
     counter: u32,
     /// The index the next accepted initiation is answered with.
     next_index: u8,
+    /// Whether `next_index` has been taken from the clock yet, so a restart cannot reuse it.
+    index_seeded: bool,
     /// Every path this end believes reaches the peer.
     route: RouteTable,
     /// The reliable message layer.
@@ -691,7 +704,16 @@ impl RadioEndpoint {
             session: None,
             replay: ReplayWindow::default(),
             counter: 0,
+            // **A random first index, because a counter from one is reused by every restart.**
+            //
+            // The index is in the clear on every record and the peer's replay window is keyed by it, so
+            // a host that restarts and begins again at 1 hands the phone counters its window has
+            // already seen: every part is refused as a duplicate and the link carries nothing, with
+            // both ends reporting a healthy session. Measured 2026-11-13, `refusal=3` (duplicate) on
+            // the phone after a daemon restart. A random start makes a collision a 1-in-255 event
+            // rather than a certainty, and the increment keeps two sessions on one process apart.
             next_index: 1,
+            index_seeded: false,
             route: RouteTable::new(),
             tx,
             need_hs: NeedHandshakeSender::new(),
@@ -1289,6 +1311,10 @@ impl RadioEndpoint {
         let (Some(cache), Some(responder)) = (self.cache.as_mut(), self.responder.as_ref()) else {
             return Admitted::Ignored(Rejected::NotForUs);
         };
+        if !self.index_seeded {
+            self.index_seeded = true;
+            self.next_index = index_from_wall(wall_ms);
+        }
         let index = self.next_index;
         let answered = cache.answer(
             responder,

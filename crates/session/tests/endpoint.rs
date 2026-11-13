@@ -369,6 +369,25 @@ impl Run {
         }
     }
 
+    /// Restart the host: a new endpoint with the same identity, which is what a daemon restart is.
+    fn restart_host(&mut self) {
+        let (host_private, host_public) = self.host_parts;
+        let host_key = Keypair::from_parts(host_private, host_public);
+        let psk = [0x42u8; 32];
+        let phone_public = self.phone_public();
+        let config = EndpointConfig::new(ldmux_session::endpoint::Role::Host, phone_public, psk)
+            .with_path_width(1)
+            .with_airtime_ms(AIRTIME_MS)
+            .with_flood_reach_hops(4)
+            .with_pairings(vec![PairingEntry {
+                psk,
+                pinned: Some(phone_public),
+                last_timestamp_ms: 0,
+            }]);
+        self.host = RadioEndpoint::host(config, host_key);
+        self.host_port.drop_first = 0;
+    }
+
     /// Records sent by one end, for the tests that assert on what went on the air at all.
     fn sent_by(&self, from: NodeId) -> Vec<&OnAir> {
         self.on_air.iter().filter(|r| r.from == from).collect()
@@ -1564,5 +1583,40 @@ fn a_transport_record_that_authenticates_is_taken_even_with_a_hop_left() {
         run.phone.stats().records_admitted > before,
         "the phone admitted nothing from the host: {:?}",
         run.phone.stats()
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// A restarted host must not reuse the session index the phone's replay window is keyed by.
+// ---------------------------------------------------------------------------------------------
+
+/// **The index is a lookup key, and a restart that reuses it makes every record a duplicate.**
+///
+/// The peer's replay window is keyed by the index, so a host that restarts and begins again at 1
+/// hands the phone counters its window has already seen: every part is refused as a duplicate and the
+/// link carries nothing, with both ends reporting a healthy session. Measured 2026-11-13,
+/// `refusal=3` (duplicate) on the phone after a daemon restart.
+#[test]
+fn a_restarted_host_does_not_reuse_the_session_index() {
+    let mut run = Run::new(9, 1, 0.0, 1);
+    run.phone
+        .connect(run.now, run.wall())
+        .expect("the phone can start an attempt");
+    run.run_until(60_000, 250, |run| run.phone.established());
+    assert!(run.phone.established(), "the phone did not establish");
+    let first = run.phone.session_index().expect("a session index");
+
+    // The host restarts: a new endpoint with the same identity, as a daemon restart is.
+    run.restart_host();
+    run.phone
+        .connect(run.now, run.wall())
+        .expect("the phone can start a second attempt");
+    run.run_until(120_000, 250, |run| {
+        run.phone.established() && run.phone.session_index() != Some(first)
+    });
+    let second = run.phone.session_index().expect("a session index after the restart");
+    assert_ne!(
+        first, second,
+        "the restarted host reused index {first}, so the phone's replay window refuses its records"
     );
 }
