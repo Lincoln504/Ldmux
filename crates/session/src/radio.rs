@@ -504,9 +504,14 @@ impl Radio {
             (Some(x), Some(y)) => Some(x.min(y)),
             (x, y) => x.or(y),
         };
-        // A frame already waiting to be written is due now; a command waiting for the window is due
-        // when the window closes or now, whichever is sooner.
-        let waiting = if self.ready.is_empty() && self.queue.is_empty() {
+        // **A frame already waiting to be written is due now, and so is a command that could take a
+        // free window.** A command waiting behind a held window is *not* due now: the window's own
+        // deadline is already in the comparison, and saying "now" would make the caller spin at its
+        // floor for the whole of that deadline. Measured on the phone 2026-11-13: 237 pumps a second
+        // with a frame queued behind an outstanding command.
+        let waiting = if !self.ready.is_empty() {
+            Some(now_ms)
+        } else if self.queue.is_empty() || self.fifo.outstanding() != 0 {
             None
         } else {
             Some(now_ms)
@@ -580,6 +585,49 @@ mod scheduling {
             Some(2_000),
             "a record waiting for the window had no deadline: {:?}",
             radio.next_deadline_ms(2_000)
+        );
+    }
+}
+
+#[cfg(test)]
+mod no_spin {
+    //! **A command waiting behind a held window is not due now.** The window's deadline already says
+    //! when it frees; claiming "now" made the caller spin at its floor for the whole deadline.
+
+    use super::*;
+
+    #[test]
+    fn a_record_behind_a_held_window_waits_for_the_window() {
+        let mut radio = Radio::new();
+        radio.ask(vec![ldmux_mesh::companion::command::commands::APP_START, 0], 0);
+        radio.pump(1_000);
+        // The caller writes the frame the window accepted, so `ready` is empty for the rest of the test
+        // and the only thing left is the returned command waiting for its answer.
+        assert!(radio.take_frame().is_some(), "the command was not made ready");
+        assert_eq!(radio.outstanding(), 1, "the window is not held");
+        radio.send_record(&[0x3E, 0x00, 0x15, 0x01]);
+        // Asked halfway through the window's timeout: the answer is the window's deadline, not now.
+        let deadline = radio.next_deadline_ms(1_500);
+        assert_ne!(
+            deadline,
+            Some(1_500),
+            "a record behind a held window was reported due now, which spins the caller"
+        );
+        assert!(
+            deadline.is_some_and(|d| d > 1_500),
+            "the window's own deadline is the one bound: {deadline:?}"
+        );
+    }
+
+    #[test]
+    fn a_record_with_a_free_window_is_due_now() {
+        let mut radio = Radio::new();
+        radio.pump(1_000);
+        radio.send_record(&[0x3E, 0x00, 0x15, 0x01]);
+        assert_eq!(
+            radio.next_deadline_ms(2_000),
+            Some(2_000),
+            "a record with a free window is not waiting for anything"
         );
     }
 }
