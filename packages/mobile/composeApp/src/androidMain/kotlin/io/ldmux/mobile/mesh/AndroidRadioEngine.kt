@@ -372,8 +372,29 @@ class AndroidRadioEngine(
         _radio.value = c.radio()
         _route.value = c.route(wallNow())
         for (event in c.drainEvents()) {
+            // **Each event, by name.** The screen's state is a translation of these, so a screen
+            // that will not advance is either an event that never came or one the translator does
+            // not recognise; the log says which.
+            io.ldmux.mobile.appLog("event: ${event::class.simpleName}")
             _events.tryEmit(event)
             progressed = true
+        }
+        // **The client's own counters, once every few seconds.** "A record arrived and the session
+        // layer refused it" and "a record never arrived" are identical on screen and have nothing in
+        // common as faults; the log is the only place that separates them.
+        val since = wallNow()
+        if (since - loggedStatsAt >= statsLogMs) {
+            loggedStatsAt = since
+            c.stats()?.let { s ->
+                io.ldmux.mobile.appLog(
+                    "client: sessions=${s.sessionsEstablished} received=${s.recordsReceived} " +
+                        "sent=${s.recordsSent} rungs=${s.rungsUsed} " +
+                        "commands=${s.commandsSent} lists=${s.listsSent} " +
+                        "admitted=${s.admitted} echo=${s.selfEcho} transit=${s.inTransit} " +
+                        "hs=${s.handshakeRefused} unknown=${s.unknownDownlink} " +
+                        "snapshots=${s.snapshotsApplied}",
+                )
+            }
         }
         return progressed
     }
@@ -383,6 +404,10 @@ class AndroidRadioEngine(
 
     /** Each of these is logged once, so a stall cannot flood the operator's log. */
     private var loggedFirstFrame = false
+
+    /** When the client's counters were last written to the log, and how often they are. */
+    private var loggedStatsAt = 0L
+    private val statsLogMs = 10_000L
 
     /** How long the loop waits when a deadline has passed and nothing could be written. */
     private val loopFloorMs = 5L

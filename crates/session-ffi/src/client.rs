@@ -180,6 +180,18 @@ pub struct LdmuxClientStats {
     pub radio_answered: u64,
     /// Radio commands whose deadline passed before their answer arrived.
     pub radio_expired: u64,
+    /// Records this end admitted: the session layer took them.
+    pub records_admitted: u64,
+    /// Records dropped as this end's own transmission coming back.
+    pub rejected_self_echo: u64,
+    /// Records dropped because they were still in transit to another node.
+    pub rejected_in_transit: u64,
+    /// Answers dropped because the handshake refused them.
+    pub rejected_handshake: u64,
+    /// Downlinks that decrypted but did not decode as a message.
+    pub unknown_downlink: u64,
+    /// Lists this end asked for.
+    pub lists_sent: u64,
 }
 
 /// What the phone's radio last said about itself.
@@ -1170,6 +1182,12 @@ pub unsafe extern "C" fn ldmux_client_stats(c: *mut LdmuxClient, out: *mut Ldmux
                 radio_records: radio.records,
                 radio_answered: radio.answered,
                 radio_expired: radio.expired,
+                records_admitted: link.records_admitted,
+                rejected_self_echo: link.rejected_self_echo,
+                rejected_in_transit: link.rejected_in_transit,
+                rejected_handshake: link.rejected_handshake,
+                unknown_downlink: stats.unknown_downlink,
+                lists_sent: stats.lists_sent,
             };
             // SAFETY: `out` is non-null and writable; the struct is plain data.
             unsafe { *out = filled };

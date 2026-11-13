@@ -175,6 +175,18 @@ typedef struct {
     uint64_t radio_records;
     uint64_t radio_answered;
     uint64_t radio_expired;
+    /*
+     * What happened to what arrived, one counter per decision the session layer makes. They exist
+     * because "a record arrived and the session refused it" and "a record never arrived" look
+     * identical on screen: measured 2026-11-13, a phone with a live session, thirteen records
+     * received and no message in the log.
+     */
+    uint64_t records_admitted;
+    uint64_t rejected_self_echo;
+    uint64_t rejected_in_transit;
+    uint64_t rejected_handshake;
+    uint64_t unknown_downlink;
+    uint64_t lists_sent;
 } LdmuxClientStats;
 
 /*

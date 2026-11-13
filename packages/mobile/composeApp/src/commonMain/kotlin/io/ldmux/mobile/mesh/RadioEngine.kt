@@ -468,6 +468,18 @@ data class ClientStats(
     val radioRecords: Long,
     val radioAnswered: Long,
     val radioExpired: Long,
+    /** Records this end admitted: the session layer took them. */
+    val admitted: Long = 0,
+    /** Dropped as this end's own transmission coming back. */
+    val selfEcho: Long = 0,
+    /** Dropped because they were still in transit to another node. */
+    val inTransit: Long = 0,
+    /** Answers the handshake refused. */
+    val handshakeRefused: Long = 0,
+    /** Downlinks that decrypted but did not decode as a message. */
+    val unknownDownlink: Long = 0,
+    /** Lists this end asked for. */
+    val listsSent: Long = 0,
 ) {
     companion object {
         internal fun of(v: LongArray): ClientStats = ClientStats(
@@ -484,6 +496,12 @@ data class ClientStats(
             radioRecords = v[10],
             radioAnswered = v[11],
             radioExpired = v[12],
+            admitted = v[13],
+            selfEcho = v[14],
+            inTransit = v[15],
+            handshakeRefused = v[16],
+            unknownDownlink = v[17],
+            listsSent = v[18],
         )
     }
 }

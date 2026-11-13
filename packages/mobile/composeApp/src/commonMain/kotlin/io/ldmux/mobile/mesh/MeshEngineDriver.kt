@@ -401,14 +401,22 @@ class MeshEngineDriver(
     suspend fun selectShell(id: String): Boolean = open(id)
 
     /** Back to the list: end the page, then ask what is running. */
+    /**
+     * Ask the host for its shell list.
+     *
+     * **The answer is whether the request was accepted, not whether it was made.** This returned
+     * `true` unconditionally, so the screen's retry loop stopped after one attempt made before a
+     * session existed: measured on the phone 2026-11-13, `shared=1` (the handshake finished) with
+     * `commands=0` (nothing was ever asked), and the screen sat on "asking host for shells · 49 s".
+     * A refused request now says so, and the caller's loop keeps asking until the session is up.
+     */
     suspend fun launcher(): Boolean {
         if (page.isNotEmpty()) {
             engine.closePage(page)
             page = ""
         }
         _view.value = MeshTermView.Listing
-        engine.list(clock())
-        return true
+        return engine.list(clock()) == ClientCode.OK
     }
 
     suspend fun listShells() {
