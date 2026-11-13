@@ -1150,3 +1150,60 @@ fn a_route_request_is_answered_and_teaches_the_asker_the_road() {
         "the way back is the way here in the opposite order"
     );
 }
+
+/// **The phone answers a route request and adopts a route reply, through its own frame handler.**
+///
+/// Both packets arrive as the receive log's `0x88` push, because both are `REQ` floods. This is the
+/// seam that matters: the mechanism is useless if the frames are classified as session records and
+/// dropped, which is what the old 0x88-only classifier did to every real arrival.
+#[test]
+fn the_phone_answers_a_route_request_and_adopts_the_reply() {
+    use ldmux_mesh::companion::route::{build_reply, build_request, parse_reply};
+
+    let mut link = Link::new(43, 4, 0.0);
+    link.connect();
+    let (own, peer) = (link.own_key, link.peer_key);
+
+    // A request from the host, addressed to this phone, after crossing two repeaters.
+    let mut request = build_request(1, &own, &peer, &[9, 9, 9, 9]).expect("a request");
+    request[1] = ldmux_mesh::companion::build::path_byte(1, 2).expect("two hops");
+    request.splice(2..2, [0xC1, 0xC2]);
+    let mut frame = vec![ldmux_mesh::companion::push::PUSH_LOG_RX_DATA, 0xF4, 0xA6];
+    frame.extend_from_slice(&request);
+
+    // The parse is checked on its own first, so a wiring fault is not mistaken for a format fault.
+    assert!(
+        ldmux_mesh::companion::route::parse_request(&request, &own).is_some(),
+        "the request does not parse at all"
+    );
+    let now = link.now;
+    link.client.on_frame(&frame, now, link.wall());
+    assert!(
+        link.client.radio().counters().route_replies >= 1,
+        "the phone did not answer: the request never reached the radio's route handler"
+    );
+    let _ = now;
+
+    // The phone must have queued a reply, and that reply must carry the chain reversed. A queued
+    // command reaches the air on the next poll, because the radio's window is a separate step.
+    // The reply reaches the air inside `step`, which drains the engine's frames and hands them to
+    // the mesh. Its contents are pinned by `route.rs`'s own parse tests; what this test owns is that
+    // the frame handler took the request to the radio at all, which the counter above proves.
+    for _ in 0..8 {
+        link.step(250);
+    }
+
+    // And a reply from the host is adopted as the phone's road.
+    let before = link.client.stats().path_learned;
+    let answer = build_reply(&peer, &own, 1, &[0xD1], &[7, 7, 7, 7]).expect("a reply");
+    let mut frame = vec![ldmux_mesh::companion::push::PUSH_LOG_RX_DATA, 0xF4, 0xA6];
+    frame.extend_from_slice(&answer);
+    let now = link.now;
+    link.client.on_frame(&frame, now, link.wall());
+    assert!(
+        link.client.stats().path_learned > before,
+        "the reply was not adopted as a road: {:?}",
+        link.client.stats()
+    );
+    assert!(parse_reply(&answer, &peer).is_some());
+}
