@@ -167,6 +167,13 @@ impl Run {
         Self::tuned(seed, repeaters, loss, path_width, false)
     }
 
+    /// The same link with the **shipped** discovery grace, so a test can measure the wait itself.
+    fn with_grace(seed: u64, repeaters: usize, loss: f64, path_width: u8, grace_ms: u64) -> Self {
+        let mut run = Self::tuned(seed, repeaters, loss, path_width, true);
+        run.phone.set_bootstrap_path_grace_ms(grace_ms);
+        run
+    }
+
     fn tuned(seed: u64, repeaters: usize, loss: f64, path_width: u8, stress: bool) -> Self {
         let host_key = Keypair::generate().expect("a keypair");
         let host_parts = (host_key.private, host_key.public);
@@ -194,7 +201,11 @@ impl Run {
         .with_path_width(path_width)
         .with_airtime_ms(AIRTIME_MS)
         .with_rto_ms(retransmission_timeout_ms(repeaters))
-        .with_flood_reach_hops(u8::try_from(repeaters.max(1)).unwrap_or(1) + 2);
+        .with_flood_reach_hops(u8::try_from(repeaters.max(1)).unwrap_or(1) + 2)
+        // **The discovery grace is off here on purpose.** These tests are about the ladder, the
+        // carriers and the transaction layer, and a three-second wait for an advert path would only
+        // move every one of their clocks. The grace has its own test.
+        .with_bootstrap_path_grace_ms(0);
         // The stress values are applied only when asked for, so `shipped` really is the default
         // configuration rather than a restatement of it that could drift.
         let phone_config = if stress {
@@ -1407,5 +1418,43 @@ fn two_direct_roads_in_flight_prove_neither() {
     assert!(
         proven.len() <= 1,
         "more than one road was proven by a single arrival: {proven:02x?}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The first initiation waits for a path, because a flood needs the peer's receive log.
+// ---------------------------------------------------------------------------------------------
+
+/// **A direct initiation needs nothing from the peer's radio; a flood needs its receive log.**
+///
+/// The firmware delivers a flood to the application only through `logRxRaw`
+/// (`src/Dispatcher.cpp:199`, `MyMesh.cpp:291-297`), a setting on the other end that ldmux neither
+/// sets nor reports. A direct record arrives as `0x84` and needs no such thing, and the phone's own
+/// radio can answer with the peer's cached advert path in milliseconds. So the first rung waits for
+/// that answer, and only then falls back to a flood.
+#[test]
+fn the_first_initiation_waits_for_a_path_before_it_floods() {
+    // The shipped grace, so this test measures what ships.
+    let mut run = Run::with_grace(9, 1, 0.0, 1, 3_000);
+    run.phone
+        .connect(run.now, run.wall())
+        .expect("the phone can start an attempt");
+
+    // Nothing goes out while the path is still being asked for.
+    run.run_until(2_000, 100, |_| false);
+    assert!(
+        run.sent_by(run.phone_node).is_empty(),
+        "the phone flooded before its own radio could answer with a path: {:?}",
+        run.sent_by(run.phone_node)
+            .iter()
+            .map(|r| r.bytes[0])
+            .collect::<Vec<_>>()
+    );
+
+    // And the fallback still happens, so a peer with no advert is not stranded.
+    run.run_until(20_000, 100, |run| !run.sent_by(run.phone_node).is_empty());
+    assert!(
+        !run.sent_by(run.phone_node).is_empty(),
+        "the phone never fell back to a flood, so a peer with no advert could never be reached"
     );
 }

@@ -38,7 +38,15 @@ use ldmux_mesh::companion::framing;
 ///
 /// Slow on purpose: an advert arrives when the peer decides to send one, and each read takes the
 /// one answer window for a moment.
-pub const PATH_ASK_MS: u64 = 20_000;
+/// How often the phone asks its own radio for the peer's cached advert path.
+///
+/// **Five seconds, not twenty, because this is a local command.** The ask is a cache read on this
+/// end's own radio (`CMD_GET_ADVERT_PATH`), not a transmission, and the answer decides whether the
+/// first initiation can go **direct** — which is the difference between a bootstrap that needs the
+/// peer radio's receive log and one that does not. Twenty seconds meant the first initiation was
+/// always a flood, and a flood reaches the application only through `logRxRaw`
+/// (`src/Dispatcher.cpp:199`), a setting on the *other* radio that ldmux neither sets nor reports.
+pub const PATH_ASK_MS: u64 = 5_000;
 
 /// The name this client reports in `APP_START`. The firmware prints it and nothing else depends on
 /// it; what matters is that the frame carries *a* name (see `command::app_start`).

@@ -41,6 +41,8 @@ pub struct SessionSnapshot {
     /// Of those retransmissions, the ones the peer's own ack pulled early rather than a timer.
     pub fast_retransmits: u32,
     pub received_bytes: u64,
+    /// Parts sealed with no path while a real chain was fresh: a record delivered to nobody.
+    pub parts_without_a_road: u64,
     pub dropped: u32,
     pub pending: usize,
     pub budget_stalls: u32,
@@ -67,6 +69,7 @@ impl SessionSnapshot {
             "retransmits": self.retransmits,
             "fastRetransmits": self.fast_retransmits,
             "receivedBytes": self.received_bytes,
+            "partsWithoutARoad": self.parts_without_a_road,
             "dropped": self.dropped,
             "pending": self.pending,
             "budgetStalls": self.budget_stalls,

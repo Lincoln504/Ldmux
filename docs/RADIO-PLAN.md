@@ -672,7 +672,7 @@ mean.
 Pinned by `a_version_15_phone_keeps_receiving_rows_until_it_asks_for_its_screen`: rows before the
 first request, none after it.
 
-### 12.7b AR-10 — a flooded record does not arrive as the payload type its name suggests, and it has no delivery path of its own
+### 12.7b AR-10 — a flooded record does not arrive as the payload type its name suggests, and it arrives through the receive log
 
 **Found while writing the carrier's receive classifier, by a test rather than by reading.** The
 firmware flood-routes `PAYLOAD_TYPE_REQ`; a session record's flood wrapper (`LDMR`) sits **inside**
@@ -693,13 +693,21 @@ layout (`examples/companion_radio/MyMesh.cpp`):
 | `0x8E` `PUSH_CODE_CONTROL_DATA` | `[0x8E][snr×4][rssi][path_len][payload]` | a **control** packet, zero-hop and `payload[0] & 0x80` only (`Mesh.cpp:70-76`) — never a record |
 | `0x88` `PUSH_CODE_LOG_RX_DATA` | `[0x88][snr×4][rssi][whole packet]` | the receive **log**, a debug tap over every packet the radio demodulates (`:291-301`) |
 
-**A flood has no delivery path at all.** `REQ` is in the firmware's decrypt-only family
-(`Mesh.cpp:131-147`: `dest_hash`, `src_hash`, then a MAC per peer), so a plaintext `LDMR` wrapper
-inside a `REQ` fails every peer's MAC and is forwarded rather than handed up. The flood carrier
-therefore works **only through the receive log's tap**, which is a radio feature we do not own: a
-firmware with the log off, or with its `Dispatcher` hook left as the no-op it is upstream, carries
-no flood at all. The direct carrier is the only one the firmware delivers, and only while the packet
-is route-direct (`Mesh.cpp:292-298`).
+**A flood is delivered as the receive log, and that is a delivery path.** `REQ` is in the
+firmware's decrypt-only family (`Mesh.cpp:131-147`: `dest_hash`, `src_hash`, then a MAC per peer), so
+a plaintext `LDMR` wrapper inside a `REQ` fails every peer's MAC and is forwarded rather than handed
+up as a payload. It reaches the application through `PUSH_CODE_LOG_RX_DATA` instead, and that push is
+**not** a debug tap an operator has to switch on: `Dispatcher::checkRecv` calls `logRxRaw` for every
+demodulated packet (`src/Dispatcher.cpp:199`), and `MyMesh::logRxRaw` writes the frame whenever the
+serial is connected, with no preference gate (`examples/companion_radio/MyMesh.cpp:291-297`). The
+`Dispatcher.h:159` no-op is the bare-node default, which the companion radio overrides.
+
+*Corrected 2026-11-13.* This section previously said a flood had no delivery path at all and that the
+flood carrier depended on a radio feature we did not own. That was wrong, and it was load-bearing:
+it justified sending the answer direct-first as a necessity rather than as the cost decision it is,
+and it left `ADR-0037`'s flood fallback looking undeliverable when it is not. The direct carrier is
+still the cheaper one — it crosses only the repeaters in its path, while a flood costs every repeater
+in range a transmission — and it is still the one that arrives first.
 
 The classifier was written against `0x88` alone. Measured in the field on 2026-11-12, with both
 radios reading `910.525 / 62.5 / SF7 / CR5 / path 1` in one room and the phone's radio answering
@@ -817,7 +825,7 @@ prevent and it happened anyway, in the two commits between the app moving and th
 | AR-7 | `sha2` in `ldmux-mesh` without an ADR line | **process** | **fixed:** ADR-0039 gained a Dependencies section naming the crate and why the simulator must hash as the firmware does |
 | AR-8 | the client's command table is an input, not a derivation | **doc** | **fixed:** §8.1 says each side supplies its own answer table, so the S4 client engine gets the phone's rather than inheriting the host's |
 | AR-9 | a version claim stopped the frame loop for an app that cannot yet ask for its screen | **defect (would brick the app)** | **fixed:** the host keeps streaming until the phone has actually sent a `Send` or a `Fetch` |
-| AR-10 | a flood arrival is a `REQ` carrying `LDMR`, not a `RAW_CUSTOM`; a payload-type classifier drops every flooded record. **Corrected 2026-11-12:** records arrive as `0x84` (direct) or through the `0x88` receive log (flood), never as `0x8E`, and a flood has no delivery path of its own | **defect (silent loss)** | **fixed:** all three push codes are classified with their own layouts (`crates/mesh/src/companion/push.rs`); the flood carrier's dependence on the debug tap is recorded, and advert-learned paths are the open work |
+| AR-10 | a flood arrival is a `REQ` carrying `LDMR`, not a `RAW_CUSTOM`; a payload-type classifier drops every flooded record. **Corrected 2026-11-12:** records arrive as `0x84` (direct) or through the `0x88` receive log (flood), never as `0x8E`. **Corrected 2026-11-13:** the `0x88` push is emitted for every demodulated packet with no preference gate (`src/Dispatcher.cpp:199`, `MyMesh.cpp:291-297`), so a flood *is* delivered and the flood carrier is a real fallback | **defect (silent loss)** | **fixed:** all three push codes are classified with their own layouts (`crates/mesh/src/companion/push.rs`); advert-learned paths remain the way past one hop |
 | AR-11 | the transport swap cannot precede the phone, and has no `Link` to preserve | **plan correction** | **fixed in the plan:** S6, after S4 and S5 |
 | AR-12 | the client engine lacked six shipped features, and `open` sent a zero grid (a fixed defect reintroduced) | **defect (silent regression)** | **fixed:** the six are implemented and tested; capability surveys are now part of a stage's definition of done |
 | AR-13 | the BLE pipe still owned radio management, so `AndroidRadioLink` could not die and one GATT link would have had two owners | **architecture** | **S5b-0:** radio management moves into the engine, through the same command FIFO, with the lease on the pipe |

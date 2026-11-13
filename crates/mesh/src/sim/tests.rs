@@ -27,7 +27,9 @@ fn companion_repeater_companion(seed: u64) -> (VirtualMesh, NodeId, NodeId, Node
     (mesh, a, r, b)
 }
 
-/// `RC-6`: a flood longer than 173 bytes is transmitted, forwarded, heard, and never handed up.
+/// `RC-6`: a flood longer than 173 bytes is transmitted, forwarded, heard, and never handed up —
+/// because the receive log refuses the frame, not because a flood has no delivery path. A flood that
+/// fits is delivered as `0x88` (`src/Dispatcher.cpp:199`, `MyMesh.cpp:291-297`).
 ///
 /// The 162-byte record the old sender believed was legal is 174 bytes on the air unscoped
 /// (`2 + 0 path + 10 wrapper + 162`), and `MyMesh::logRxRaw` refuses the frame when

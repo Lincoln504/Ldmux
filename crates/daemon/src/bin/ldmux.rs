@@ -433,6 +433,14 @@ fn print_mesh_session(v: &serde_json::Value) {
         number("pending")
     );
     println!("  received     {} bytes", number("receivedBytes"));
+    if number("partsWithoutARoad") > 0 {
+        // A part with no path while a chain was fresh is delivered to nobody, and nothing else on this
+        // page would say so: the peer simply never answers.
+        println!(
+            "  no road      {} part(s) sent with no path while a chain was known",
+            number("partsWithoutARoad")
+        );
+    }
     if number("budgetStalls") > 0 {
         println!(
             "  held back    {} times by the airtime budget",

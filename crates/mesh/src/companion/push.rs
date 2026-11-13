@@ -35,11 +35,15 @@ use crate::budget::{FLOOD_WRAPPER, MAX_PATH_BYTES};
 pub const PAYLOAD_TYPE_RAW_CUSTOM: u8 = 0x0F;
 /// `PAYLOAD_TYPE_REQ` (`src/Packet.h:23`) — the vehicle the flood carrier rides.
 ///
-/// **The firmware never delivers it to the companion.** `REQ` is in the decrypt-only family
-/// (`Mesh.cpp:131-147`: `dest_hash`, `src_hash`, then a MAC per peer), so a plaintext `LDMR` wrapper
-/// inside it fails every peer's MAC and the packet is forwarded as a flood instead of being handed
-/// up. It is readable only through the receive log's debug tap, which is what this module calls the
-/// third push code.
+/// **The firmware never hands it up as a payload, and it is still delivered.** `REQ` is in the
+/// decrypt-only family (`Mesh.cpp:131-147`: `dest_hash`, `src_hash`, then a MAC per peer), so a
+/// plaintext `LDMR` wrapper inside it fails every peer's MAC and the packet is forwarded as a flood
+/// rather than handed up as a payload. It reaches the application through the **receive log**
+/// instead, and that is not a debug tap an operator has to switch on: `Dispatcher::checkRecv` calls
+/// `logRxRaw` for every demodulated packet (`src/Dispatcher.cpp:199`), and `MyMesh::logRxRaw` writes
+/// `PUSH_CODE_LOG_RX_DATA` whenever the serial is connected, with no preference gate
+/// (`examples/companion_radio/MyMesh.cpp:291-297`). So a flood is delivered as `0x88`, carrying the
+/// raw packet including the `LDMR` wrapper, and this module reads it there.
 pub const PAYLOAD_TYPE_REQ: u8 = 0x00;
 /// `PAYLOAD_TYPE_CONTROL` (`src/Packet.h:30`) — the only payload type the `0x8E` push reports.
 pub const PAYLOAD_TYPE_CONTROL: u8 = 0x0B;
@@ -315,10 +319,11 @@ mod tests {
 
     #[test]
     fn a_flood_is_read_from_the_receive_log_and_keeps_its_sender() {
-        // **A flood has no delivery path of its own.** The firmware never hands a plaintext `REQ`
-        // to the application (`Mesh.cpp:131-147`), so the only view of one is the receive log's
-        // debug tap — which is why this module still reads `0x88` at all, and why the flood carrier
-        // depends on a radio feature we do not own.
+        // **A flood arrives as the receive log, and that is a delivery path.** The firmware never
+        // hands a plaintext `REQ` up as a payload (`Mesh.cpp:131-147`), but `logRxRaw` runs for every
+        // demodulated packet (`src/Dispatcher.cpp:199`) and `MyMesh::logRxRaw` writes it whenever the
+        // serial is connected (`MyMesh.cpp:291-297`), so the record reaches the app as `0x88` with its
+        // wrapper intact. The flood carrier is therefore a real fallback, not a debug-only one.
         let mut peer = [0u8; 32];
         peer[0] = 0x11;
         let mut own = [0u8; 32];

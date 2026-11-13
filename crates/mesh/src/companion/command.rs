@@ -701,10 +701,10 @@ mod tests {
     /// **The phone's table is still not the host's, and the difference has moved.**
     ///
     /// It used to exclude the advert path with the reasoning that "a phone never asks for one".
-    /// That reasoning is now false: a flooded record cannot be delivered by the firmware at all, so
-    /// a path learned from an advert is the only way a phone's record travels past one hop. The
-    /// flood-scope commands stay excluded, because a phone pins its scope through the settings
-    /// screen and never reads one back.
+    /// That reasoning is false: a path learned from an advert is the only way a phone's record
+    /// travels past one hop *directly*, and a flood is a fallback that costs every repeater in range
+    /// a transmission. The flood-scope commands stay excluded, because a phone pins its scope through
+    /// the settings screen and never reads one back.
     #[test]
     fn the_phones_table_claims_the_advert_path_and_not_the_flood_scope() {
         assert!(

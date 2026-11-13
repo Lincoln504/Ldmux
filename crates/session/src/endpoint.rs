@@ -64,6 +64,12 @@ use crate::transaction::{Action, BeginError, PeerId, Received, TransactionLayer}
 /// while the filter thought it was a phone would be exactly the confusion `RC-3` came from.
 pub use crate::direction::Side as Role;
 
+/// How long the first initiation waits for a path before falling back to a flood.
+///
+/// Long enough for the phone's own radio to answer a cache read (`CMD_GET_ADVERT_PATH`), short enough
+/// that a peer with no advert still gets a flood attempt inside the first rung.
+const BOOTSTRAP_PATH_GRACE_MS: u64 = 3_000;
+
 /// The shortest gap between two handshake requests this end may send.
 ///
 /// A public mesh hands this end every accepted `RAW_CUSTOM` packet in range, most of them other
@@ -315,6 +321,8 @@ pub struct Stats {
     pub answers_repeated: u64,
     /// Answers the attempt ignored because they were for another initiation.
     pub answers_ignored: u64,
+    /// Parts sealed with no path while a real chain was fresh: a record delivered to nobody.
+    pub parts_without_a_road: u64,
     /// Paths learned from a flood's reversed chain.
     pub routes_learned: u64,
     /// Paths proven by an authenticated direct arrival.
@@ -383,6 +391,12 @@ pub struct EndpointConfig {
     pub rto_ms: u64,
     /// How many rungs a bootstrap attempt is given.
     pub max_rungs: u8,
+    /// How long the first initiation waits for a path before falling back to a flood.
+    ///
+    /// A flood reaches the application only through the peer radio's receive log, which is a setting
+    /// on the other end; a direct initiation needs nothing. Zero disables the wait, which is what a
+    /// test that is about the ladder rather than about discovery wants.
+    pub bootstrap_path_grace_ms: u64,
 }
 
 impl EndpointConfig {
@@ -407,8 +421,17 @@ impl EndpointConfig {
             max_attempts: 5,
             rto_ms: 6_000,
             max_rungs: 3,
+            bootstrap_path_grace_ms: BOOTSTRAP_PATH_GRACE_MS,
         }
     }
+
+    /// Sets how long the first initiation waits for a path before falling back to a flood.
+    #[must_use]
+    pub fn with_bootstrap_path_grace_ms(mut self, grace_ms: u64) -> Self {
+        self.bootstrap_path_grace_ms = grace_ms;
+        self
+    }
+
 
     /// Sets the radio's airtime for one full record.
     #[must_use]
@@ -532,6 +555,8 @@ pub struct RadioEndpoint {
     last_wall_ms: u64,
     /// When this end last asked the peer for a handshake, so the asking itself is rate-limited.
     last_ask_ms: Option<u64>,
+    /// When `connect` was called, so the first initiation can wait for a path.
+    connected_at_ms: Option<u64>,
     /// Whether the last attempt was spent by a failed answer and a fresh one is owed.
     ///
     /// **Replacement, never creation.** `connect` is the only thing that starts a first attempt:
@@ -575,7 +600,7 @@ pub struct RadioEndpoint {
     /// eight repeaters away (measured 2026-11-13: `carriage=direct path=[]` beside `route 8
     /// repeaters`). When more than one road is in flight the evidence is ambiguous and nothing is
     /// proven.
-    recent_direct_paths: Vec<Vec<u8>>,
+    recent_direct_paths: Vec<(Vec<u8>, u64)>,
     /// When this end last sent a direct record with **no path at all**, which is the send that says
     /// the peer is adjacent.
     ///
@@ -650,6 +675,7 @@ impl RadioEndpoint {
             last_wall_ms: 0,
             attempt_spent: false,
             last_ask_ms: None,
+            connected_at_ms: None,
             session: None,
             replay: ReplayWindow::default(),
             counter: 0,
@@ -680,6 +706,7 @@ impl RadioEndpoint {
     /// [`HandshakeError`] when this end has no keypair, or when the Noise state cannot be built.
     pub fn connect(&mut self, now_ms: u64, wall_ms: u64) -> Result<(), HandshakeError> {
         self.last_wall_ms = wall_ms;
+        self.connected_at_ms = Some(now_ms);
         self.start_attempt(now_ms, wall_ms)?;
         Ok(())
     }
@@ -760,6 +787,11 @@ impl RadioEndpoint {
     /// never gates an acknowledgement on it — an ack is the traffic that keeps the link alive.
     pub fn set_records_left(&mut self, records_left: u8) {
         self.records_left = records_left;
+    }
+
+    /// Changes the discovery grace on a live endpoint, for a test that measures the wait itself.
+    pub fn set_bootstrap_path_grace_ms(&mut self, grace_ms: u64) {
+        self.config.bootstrap_path_grace_ms = grace_ms;
     }
 
     /// When the caller should look again even if nothing arrives.
@@ -889,6 +921,22 @@ impl RadioEndpoint {
         if !self.attempt_running() {
             return;
         }
+        // **The first initiation waits for a path, briefly.**
+        //
+        // A flood is delivered to the application only through the peer radio's receive log
+        // (`src/Dispatcher.cpp:199`, `MyMesh.cpp:291-297`), which is a setting on the other end that
+        // ldmux neither sets nor reports. A direct initiation needs no such thing, and the phone's own
+        // radio can answer with the peer's cached advert path in milliseconds. So the first rung waits
+        // up to `BOOTSTRAP_PATH_GRACE_MS` for that answer, and only then falls back to a flood: the
+        // common case becomes a bootstrap that does not depend on the peer's log at all.
+        if self.rung == 1
+            && self.route.best(now_ms, self.config.sf).is_none()
+            && self
+                .connected_at_ms
+                .is_some_and(|at| now_ms.saturating_sub(at) < self.config.bootstrap_path_grace_ms)
+        {
+            return;
+        }
         let Some(deadline) = self.rung_deadline_ms else {
             return;
         };
@@ -992,6 +1040,18 @@ impl RadioEndpoint {
                         part_idx,
                         retransmit,
                     };
+                    // **A part with no path while a chain is fresh is a contradiction, and it is
+                    // silent**: the record is delivered to nobody and the peer simply never answers.
+                    if let Carriage::Direct { path } = &carriage
+                        && path.is_empty()
+                        && self
+                            .route
+                            .candidates()
+                            .iter()
+                            .any(|c| c.is_fresh(now_ms) && !c.path().is_empty())
+                    {
+                        self.stats.parts_without_a_road += 1;
+                    }
                     self.seal(bytes, purpose, carriage, at);
                 }
                 Action::StandaloneAck { bytes, .. } => {
@@ -1055,9 +1115,8 @@ impl RadioEndpoint {
             } else {
                 self.last_direct_path = path.clone();
             }
-            if !self.recent_direct_paths.iter().any(|held| held == path) {
-                self.recent_direct_paths.push(path.clone());
-            }
+            self.recent_direct_paths.retain(|(held, _)| held != path);
+            self.recent_direct_paths.push((path.clone(), at_ms));
         }
         self.queue.push_back(Pending {
             record,
@@ -1254,15 +1313,32 @@ impl RadioEndpoint {
     /// only way a phone that has never heard a flood from us learns a path at all, because the
     /// answer it receives carries no path of its own.
     fn queue_answer(&mut self, reply: &[u8], info: &ArrivalInfo, now_ms: u64) {
-        // **The direct copy goes first, and the flood follows only to teach.**
+        // **The direct copy goes first, and the flood follows to teach.**
         //
-        // A flooded plaintext record is delivered to no application on stock firmware: `REQ` is
-        // decrypted per peer and hands nothing up, so the only view of a flood is the radio's own
-        // receive log. Sending the flood first therefore sent the one copy that could arrive
-        // *second*, 900 ms later, and the field showed it: the host answered handshake indices 1 and
-        // 2 as `carriage=flood` and the phone never saw them, so it spent another rung instead of
-        // establishing (2026-11-13, `rungs=3`, `sessions=0`).
+        // Both are delivered: a direct record arrives as `0x84`, and a flood arrives as the receive
+        // log's `0x88`, which the firmware emits for every demodulated packet
+        // (`src/Dispatcher.cpp:199`, `MyMesh.cpp:291-297`). The order is about cost and latency, not
+        // about reachability: a direct packet crosses only the repeaters in its path, while a flood
+        // costs every repeater in range a transmission, and the direct copy is the one that arrives
+        // first. Measured 2026-11-13, the host answered handshake indices 1 and 2 as
+        // `carriage=flood` and the phone spent another rung instead of establishing (`rungs=3`,
+        // `sessions=0`), which is what put the direct copy first.
         let width = usize::from(self.config.path_width.clamp(1, 3));
+        // **The road the initiation crossed is a road that carried, so it becomes a candidate.**
+        // The answer is sent back along it, and every later record should follow it: without this the
+        // route table held only what a flood had taught, and a host whose initiation arrived over a
+        // five-repeater chain answered along that chain while sealing its transaction parts with an
+        // empty path — a direct packet no repeater forwards (measured 2026-11-13: `34B
+        // carriage=direct path=[]` beside `52B carriage=direct path=[10, 0c, 21, 86, e5]`).
+        let back = advice_path(info, width);
+        if !back.is_empty() {
+            self.route.observe(Candidate::learned(
+                back.clone(),
+                self.config.path_width,
+                info.snr_db,
+                now_ms,
+            ));
+        }
         let content_len = reply.len().min(bootstrap::MSG2_CONTENT_LEN);
         let mut direct = reply
             .get(..content_len)
@@ -1270,14 +1346,7 @@ impl RadioEndpoint {
             .unwrap_or_default();
         let nonce = self.next_nonce();
         direct.extend_from_slice(&nonce.to_le_bytes());
-        self.push(
-            direct,
-            Carriage::Direct {
-                path: advice_path(info, width),
-            },
-            now_ms,
-            Purpose::Answer,
-        );
+        self.push(direct, Carriage::Direct { path: back }, now_ms, Purpose::Answer);
         if !info.arrival.is_flood() {
             return;
         }
@@ -1546,9 +1615,12 @@ impl RadioEndpoint {
         // `capacity 152 B` for a phone a metre away, and every direct send followed that loop and
         // never landed. `adopt_proven` only upgrades a candidate already held, so the chain has to be
         // stated before it can be proven.
-        // **One road in flight, or nothing is proven.** See `recent_direct_paths`.
+        // **One road in flight, or nothing is proven.** See `recent_direct_paths`. The window is what
+        // makes this a statement about *now*: the predicate used to ignore its argument and be
+        // constant-true, so the list only grew and `ambiguous` became permanent after the second
+        // distinct road — which silently switched proof off for the life of the endpoint.
         self.recent_direct_paths
-            .retain(|_| self.last_adjacent_send_ms.is_some() || !self.last_direct_path.is_empty());
+            .retain(|(_, at)| now_ms.saturating_sub(*at) <= PROVE_WINDOW_MS);
         let ambiguous = self.recent_direct_paths.len() > 1;
         let adjacent = path.is_empty()
             && self

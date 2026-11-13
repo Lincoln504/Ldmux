@@ -975,6 +975,7 @@ where
                 u32::try_from(stats.sessions_established).unwrap_or(u32::MAX);
             s.session.handshakes_refused =
                 u32::try_from(stats.rejected_handshake).unwrap_or(u32::MAX);
+            s.session.parts_without_a_road = stats.parts_without_a_road;
             s.session.dropped = u32::try_from(
                 stats.rejected_record
                     + stats.rejected_unknown_kind

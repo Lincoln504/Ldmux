@@ -357,7 +357,14 @@ impl RouteTable {
         //
         // The guess still gets one try when there is no chain at all, because that try is how an
         // adjacent peer is discovered: its record comes back with its path finished and proves it.
-        let fresh = || self.candidates.iter().filter(move |c| c.is_fresh(now_ms));
+        // **The usability filter still applies.** A copy under two decibels of margin is a copy the
+        // radio nearly did not demodulate, and it is used only when nothing better is fresh — the
+        // rule `best` already enforces. These branches must not bypass it.
+        let fresh = || {
+            self.candidates
+                .iter()
+                .filter(move |c| c.is_fresh(now_ms) && c.bucket(sf) < 2)
+        };
         let chain = fresh()
             .filter(|c| !c.path().is_empty())
             .reduce(|best, next| if ranks_before(next, best, sf) { next } else { best });
