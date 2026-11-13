@@ -193,6 +193,12 @@ pub struct RadioCounters {
     pub unexpected: u64,
     /// Answers the radio refused (`RESP_CODE_ERR`).
     pub refused: u64,
+    /// **Records the radio refused to transmit** (`RESP_CODE_ERR` to `CMD_SEND_RAW_PACKET`).
+    ///
+    /// Counted apart from `refused` because it is the one refusal with no other evidence: a record
+    /// the radio would not send and a record the air swallowed produce the same silence at the far
+    /// end, and on 2026-11-13 that ambiguity was the whole of "did my phone transmit at all".
+    pub sends_refused: u64,
     /// Records handed over as `CMD_SEND_RAW_PACKET`.
     pub records: u64,
     /// Frames that were not a well-formed companion frame.
@@ -516,6 +522,9 @@ impl Radio {
         // A refusal is not a malformed answer: say which command, and keep everything else.
         if code == codes::ERROR {
             self.counters.refused += 1;
+            if opcode == command::commands::SEND_RAW_PACKET {
+                self.counters.sends_refused += 1;
+            }
             return;
         }
         let outcome = match opcode {

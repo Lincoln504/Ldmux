@@ -458,6 +458,56 @@ async fn a_list_request_that_names_no_shell_is_answered() {
     );
 }
 
+/// **The launcher's whole first exchange crosses the loop: list, then create.**
+///
+/// `Create` was dropped by the same catch-all as `List` (it names no shell either), so a phone
+/// could see the shells and never make one. Both are asserted here because both were silent.
+#[tokio::test]
+async fn a_phone_lists_the_shells_and_creates_one() {
+    let dir = Scratch::dir("ldmux-b8-create");
+    let (arc, _fk, shell) = daemon_with_shell(&dir).await;
+    let setup = SessionSetup::new(&dir, [0x5au8; 32]).expect("a session setup");
+    let host = DaemonHost(Arc::clone(&arc));
+
+    let mut stack = Stack::new(13, 2, 0.15, &setup, host);
+    stack.connect().await;
+    let now = stack.now;
+    stack.client.list(now).expect("a list is submitted");
+    stack
+        .run_until(300_000, 250, |s| {
+            s.events
+                .iter()
+                .any(|e| matches!(e, ClientEvent::Sessions { last: true, .. }))
+        })
+        .await;
+    assert!(
+        stack.events.iter().any(|e| matches!(
+            e,
+            ClientEvent::Sessions { entries, .. } if entries.iter().any(|x| x.id == shell.id)
+        )),
+        "the list answer did not name the running shell"
+    );
+
+    let now = stack.now;
+    stack.client.create("/tmp", now).expect("a create is submitted");
+    stack
+        .run_until(300_000, 250, |s| {
+            s.events
+                .iter()
+                .any(|e| matches!(e, ClientEvent::Created { .. }))
+        })
+        .await;
+    let made = stack.events.iter().find_map(|e| match e {
+        ClientEvent::Created { id } => Some(id.clone()),
+        _ => None,
+    });
+    assert!(
+        made.is_some(),
+        "the host never named the shell it made: {:?}",
+        stack.client.stats()
+    );
+}
+
 /// **A command runs once and its settled answer comes back.**
 ///
 /// The at-most-once rule is the one a lossy link makes load-bearing: a retransmitted `Send` must not

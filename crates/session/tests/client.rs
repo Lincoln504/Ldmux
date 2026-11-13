@@ -1089,6 +1089,32 @@ fn a_path_learned_from_an_advert_is_used_but_never_proven() {
 // Asking for the list again must not replace the request already in flight.
 // ---------------------------------------------------------------------------------------------
 
+/// **A radio that will not send is counted, not inferred.**
+///
+/// The firmware refuses a send while it is retuning or its store is busy, and from the far end that
+/// is identical to a record the air swallowed: silence. On 2026-11-13 the field question "did my
+/// phone transmit at all" had no answer in any counter, so the counter exists now.
+#[test]
+fn a_send_the_radio_refuses_is_counted_apart_from_one_the_air_lost() {
+    let mut link = Link::new(43, 1, 0.0);
+    link.connect();
+    link.radio.refuse_sends = true;
+    let now = link.now;
+    link.client.list(now).expect("a list request is accepted");
+    link.run_until(120_000, 250, |link| {
+        link.client.radio().counters().sends_refused > 0
+    });
+    assert!(
+        link.client.radio().counters().sends_refused > 0,
+        "the radio refused every send and nothing counted it: {:?}",
+        link.client.radio().counters()
+    );
+    assert!(
+        link.radio.transmissions.is_empty(),
+        "the fake radio refused the send and transmitted it anyway"
+    );
+}
+
 /// **An answer that never comes must not be the last word.**
 ///
 /// One request is held until its answer arrives, which is what stops the screen's retry from

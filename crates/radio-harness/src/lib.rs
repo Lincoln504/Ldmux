@@ -204,6 +204,13 @@ pub struct FakeRadio {
     pub cr: u8,
     /// How many commands it has answered, so a test can say the window moved.
     pub answered: usize,
+    /// Answer every `SEND_RAW_PACKET` with `ERR` and transmit nothing.
+    ///
+    /// **A radio that will not send is not a radio that was not asked.** The firmware refuses a
+    /// send while it is retuning or its store is busy (`RESP_CODE_DISABLED`/`ERR`), and from the far
+    /// end that is identical to a record the air swallowed. A test that can only lose records on the
+    /// air cannot express it.
+    pub refuse_sends: bool,
 }
 
 impl FakeRadio {
@@ -216,6 +223,7 @@ impl FakeRadio {
             sf: 7,
             cr: 5,
             answered: 0,
+            refuse_sends: false,
         }
     }
 
@@ -228,6 +236,9 @@ impl FakeRadio {
         match frame.first().copied() {
             // `CMD_SEND_RAW_PACKET`: `[0x41][priority][packet]`, answered `OK`.
             Some(0x41) => {
+                if self.refuse_sends {
+                    return vec![vec![0x01]];
+                }
                 if let Some((carriage, record)) = frame.get(2..).and_then(split_packet) {
                     self.transmissions.push((carriage, record));
                 }

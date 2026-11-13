@@ -217,6 +217,12 @@ typedef struct {
     uint8_t last_refusal_index;
     uint32_t last_refusal_counter;
     uint8_t local_index;
+    /* Records the radio refused to transmit (ERR to CMD_SEND_RAW_PACKET).
+     *
+     * Apart from `radio_answered` because it is the only refutation of "my phone never
+     * transmitted": a record the radio would not send and one the air swallowed are the same
+     * silence at the far end. */
+    uint64_t records_refused;
 } LdmuxClientStats;
 
 /*
