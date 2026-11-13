@@ -34,6 +34,12 @@ use ldmux_mesh::companion::command::{
 use ldmux_mesh::companion::fifo::{Answer, CommandId, CompanionFifo, Enqueue};
 use ldmux_mesh::companion::framing;
 
+/// How often the radio's advert cache is read while no path is held.
+///
+/// Slow on purpose: an advert arrives when the peer decides to send one, and each read takes the
+/// one answer window for a moment.
+pub const PATH_ASK_MS: u64 = 20_000;
+
 /// The name this client reports in `APP_START`. The firmware prints it and nothing else depends on
 /// it; what matters is that the frame carries *a* name (see `command::app_start`).
 pub const APP_NAME: &str = "ldmux";
@@ -156,6 +162,8 @@ pub struct RadioCounters {
     pub commands: u64,
     /// Commands that were answered inside their deadline.
     pub answered: u64,
+    /// Paths learned from an advert's own route, which is what lets a record travel past one hop.
+    pub path_learned: u64,
     /// Commands whose deadline passed before their answer arrived.
     pub expired: u64,
     /// Frames that arrived with no command outstanding, or for another command.
@@ -181,6 +189,12 @@ pub struct Radio {
     status: RadioStatus,
     /// When the readings are next due.
     next_poll_ms: Option<u64>,
+    /// When to read the radio's advert cache again, while no path is held.
+    next_path_ms: Option<u64>,
+    /// The peer's public key, which is what the advert cache is asked about.
+    peer_key: [u8; 32],
+    /// The path an advert taught, reversed into the direction a packet travels.
+    learned: Option<command::AdvertPath>,
     /// Whether the bring-up has been queued since the last connect.
     started: bool,
     counters: RadioCounters,
@@ -203,6 +217,9 @@ impl Radio {
             ready: VecDeque::new(),
             status: RadioStatus::default(),
             next_poll_ms: None,
+            next_path_ms: None,
+            peer_key: [0u8; 32],
+            learned: None,
             started: false,
             counters: RadioCounters::default(),
         }
@@ -245,6 +262,12 @@ impl Radio {
         self.ask(command::device_query(), 0);
         self.ask(command::get_battery_and_storage(), 0);
         self.ask(command::get_radio_stats(), 0);
+        // **An advert is how a path exists at all.** The firmware never delivers a flooded
+        // plaintext record (`companion::push`, AR-10), so a record reaches past one hop only along a
+        // path, and the mesh's own advert cache is where a path comes from. Asked once per link: the
+        // advert is a broadcast with no acknowledgement, and the cache fills a moment later.
+        self.ask(command::self_advert(true), 5_000);
+        self.next_path_ms = Some(now_ms.saturating_add(PATH_ASK_MS));
         self.next_poll_ms = Some(now_ms.saturating_add(STATUS_POLL_MS));
     }
 
@@ -256,6 +279,8 @@ impl Radio {
         self.ready.clear();
         self.status = RadioStatus::default();
         self.next_poll_ms = None;
+        self.next_path_ms = None;
+        self.learned = None;
         self.started = false;
     }
 
@@ -295,6 +320,17 @@ impl Radio {
         if self.fifo.expire(now_ms).is_some() {
             self.counters.expired += 1;
             self.in_flight = None;
+        }
+        // **The path, while there is none.** Asked on a slow cadence, because an advert arrives
+        // when a neighbour decides to send one and a cache read is a local command that costs the
+        // one answer window anyway. Once a path is held it is not asked again until the link resets.
+        if self.started
+            && self.learned.is_none()
+            && self.peer_key.iter().any(|b| *b != 0)
+            && self.next_path_ms.is_some_and(|due| now_ms >= due)
+        {
+            self.next_path_ms = Some(now_ms.saturating_add(PATH_ASK_MS));
+            self.ask(command::get_advert_path(&self.peer_key), 0);
         }
         // The readings come due again.
         if self.started && self.next_poll_ms.is_some_and(|due| now_ms >= due) {
@@ -406,6 +442,16 @@ impl Radio {
             command::commands::GET_STATS => command::parse_radio_stats(payload).map(|s| {
                 self.status.radio_stats = Some(s);
             }),
+            command::commands::GET_ADVERT_PATH => {
+                match command::parse_advert_path(payload) {
+                    Some(path) => {
+                        self.learned = Some(path);
+                        self.counters.path_learned += 1;
+                        Ok(())
+                    }
+                    None => Err(CommandError::Truncated),
+                }
+            }
             // A send's answer carries no reading: `OK` or `SENT` is the whole of it.
             _ => Ok(()),
         };
@@ -421,9 +467,28 @@ impl Radio {
     /// When the caller should look again even if nothing arrives.
     #[must_use]
     pub fn next_deadline_ms(&self) -> Option<u64> {
-        match (self.fifo.deadline_ms(), self.next_poll_ms) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
+        let soonest = |a: Option<u64>, b: Option<u64>| match (a, b) {
+            (Some(x), Some(y)) => Some(x.min(y)),
+            (x, y) => x.or(y),
+        };
+        soonest(soonest(self.fifo.deadline_ms(), self.next_poll_ms), self.next_path_ms)
+    }
+
+    /// The path an advert taught, reversed into the direction a packet travels.
+    ///
+    /// `None` until the radio has heard the peer's advert, which is what makes a record able to
+    /// cross more than one hop.
+    #[must_use]
+    pub fn learned_path(&self) -> Option<(Vec<u8>, u8)> {
+        let path = self.learned.as_ref()?;
+        Some((path.outbound(), path.hash_size))
+    }
+
+    /// Tell the radio whose advert to look for, and start asking.
+    pub fn set_peer_key(&mut self, peer_key: [u8; 32], now_ms: u64) {
+        self.peer_key = peer_key;
+        if self.learned.is_none() {
+            self.next_path_ms = Some(now_ms);
         }
     }
 }

@@ -38,7 +38,7 @@ use ldmux_mesh::carrier::{Carrier, Event};
 use ldmux_mesh::companion::build as packets;
 use ldmux_mesh::companion::push;
 use ldmux_mesh::error::MeshError;
-use ldmux_mesh::route::{Carriage, RouteTable};
+use ldmux_mesh::route::{Candidate, Carriage, RouteTable};
 use ldmux_protocol::mesh_term::{
     Decoder, EncodeError, MAX_CHUNKS, MAX_SEND_ITEMS, MarkEntry, Message, Patch, SendItem,
     SessionEntry, SnapshotAssembly, VERSION as TERMINAL_VERSION, applied, snapshot_flag,
@@ -500,6 +500,8 @@ pub struct ClientStats {
     pub snapshots_refused: u64,
     /// Bootstrap rungs sent while no usable path to the peer was held.
     ///
+    /// Paths learned from the peer's advert, which is how a record crosses more than one hop.
+    pub path_learned: u64,
     /// This is what "no route: nothing answered N request(s)" counts. There is no separate route
     /// request in this protocol — the bootstrap initiation **is** the discovery — so a rung sent
     /// blind is one attempt at finding a peer nobody has a path to yet.
@@ -579,7 +581,14 @@ impl Client {
         let endpoint = RadioEndpoint::phone(config.endpoint(), local);
         Self {
             endpoint,
-            radio: Radio::new(),
+            radio: {
+                let mut radio = Radio::new();
+                // **The radio must know whose advert to look for.** A path learned from that advert
+                // is the only way a record crosses more than one hop, because the firmware never
+                // delivers a flooded plaintext record.
+                radio.set_peer_key(config.peer_static, 0);
+                radio
+            },
             link: LinkSettings {
                 peer_key: config.peer_static,
                 own_key,
@@ -929,6 +938,7 @@ impl Client {
         // The radio's window first: a status ask or a pending record goes out before anything new is
         // decided, and a deadline that has passed is closed so the next command may run.
         self.radio.pump(now_ms);
+        self.adopt_learned_path(now_ms);
         let Self {
             endpoint,
             radio,
@@ -958,6 +968,33 @@ impl Client {
         // written once this one is answered, which is what one command in flight means.
         self.radio.pump(now_ms);
         Ok(report)
+    }
+
+    /// Adopt the path an advert taught, if the radio has one and this end does not.
+    ///
+    /// **A learned path is a candidate, never a proof.** `Candidate::learned` cannot carry a proof
+    /// by construction, and `MS`/the endpoint only proves a route from a direct arrival that
+    /// finished its path — so this makes the next transmission direct without ever claiming the
+    /// route works.
+    fn adopt_learned_path(&mut self, now_ms: u64) {
+        let Some((path, width)) = self.radio.learned_path() else {
+            return;
+        };
+        if path.is_empty() {
+            return;
+        }
+        if self
+            .endpoint
+            .route()
+            .candidates()
+            .iter()
+            .any(|c| c.path() == path.as_slice())
+        {
+            return;
+        }
+        self.stats.path_learned += 1;
+        self.endpoint
+            .observe_path(Candidate::learned(path, width, 0.0, now_ms));
     }
 
     /// Take the next frame the caller must write, if there is one.

@@ -466,6 +466,19 @@ tree or a command that was run; nothing is a plan.
   bytes are dropped" worry applies to the bootstrap's first form, not to transactions. No wrapper is
   owed on the direct carrier, which is why its budget stays `172 − path`.
 
+- **A path is the only way past one hop, and the firmware can supply it.** `CMD_SEND_SELF_ADVERT`
+  (mode 1) has the radio emit a flooded advert, and `CMD_GET_ADVERT_PATH` returns the chain that
+  advert took, in travel order **towards** us — so a sender reverses it hop group by hop group
+  (`crates/mesh/src/companion/command.rs::AdvertPath::outbound`). Both ends now ask for it: the host
+  on bring-up, the phone whenever its route table holds no candidate. A learned chain is stored as
+  `Proof::Candidate` and can never be mistaken for a proven route.
+- **The host measures its own radio.** Three status lines used to be defaults printed as readings:
+  a `0 dBm` noise floor (physically impossible), `0 s transmitted` after an hour of transmissions,
+  and "no reading yet" for a circuit that had heard 641 s of airtime. The carrier now asks
+  `GET_STATS radio` on bring-up and every fifteen seconds, the record path borrows the last measured
+  noise floor and airtime instead of publishing zeros, and the airtime line reports the radio's own
+  counter when it has one.
+
 ### Corrections the implementation forced on this document
 
 Each was found by building the thing and is now reflected in the sections above:

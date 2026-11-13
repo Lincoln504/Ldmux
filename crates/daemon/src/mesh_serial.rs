@@ -291,6 +291,15 @@ fn prepare(
     // clock at zero at boot, so `CMD_GET_ADVERT_PATH` would report route ages against the epoch and
     // every "is this path still true" question would be unanswerable. One command, best effort.
     let _ = companion.set_time(u32::try_from(unix_now()).unwrap_or(u32::MAX));
+    // **The host advertises too, and that is how the phone learns a route to it.** A record reaches
+    // past one hop only along a path: the firmware never hands a flooded plaintext record to the
+    // application (`crates/mesh/src/companion/push.rs`, AR-10), so each end needs the other's chain
+    // in its radio's advert cache. Without this the phone's `GET_ADVERT_PATH` is answered
+    // `ERR_CODE_NOT_FOUND` for ever and every record it sends is a one-hop broadcast.
+    //
+    // Best effort and once per link: an advert is a broadcast with no acknowledgement, and a radio
+    // that refuses it (a full queue) costs a route rather than the link.
+    let _ = companion.send_self_advert(true);
     // The version this sends is what the firmware latches to decide whether it emits its V3 frames
     // (`MyMesh.cpp:1028-1031`); `crates/companion` sends 3.
     let device_info = companion.device_query().map_err(session_error)?;

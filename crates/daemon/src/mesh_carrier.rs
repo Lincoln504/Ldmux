@@ -48,6 +48,13 @@ use tokio::sync::mpsc as async_mpsc;
 /// starve the other by more than a fraction of a transmission.
 const COMMAND_WAIT: Duration = Duration::from_millis(10);
 
+/// How often the host asks its own radio what it has measured.
+///
+/// **A local command, so it costs no airtime** — only a moment of the one answer window. Fifteen
+/// seconds is the phone's cadence, and the two together are what makes "is this link reaching" a
+/// measurement on both ends rather than a guess on one.
+const STATS_POLL: Duration = Duration::from_secs(15);
+
 /// How long one record's send may wait for the firmware's acknowledgement.
 ///
 /// The firmware answers from its own queue, not from the air, so this is a bound on a wedged port
@@ -215,6 +222,18 @@ struct Radio {
     window_record: Option<PathBuf>,
     /// Where the peer's radio key is remembered.
     peer_record: Option<PathBuf>,
+    /// The radio's own last measurement, from `GET_STATS radio`.
+    ///
+    /// **Absent until the radio answers, and absent is not zero.** The status used to print a
+    /// `0 dBm` noise floor and `0 s` of airtime on every record arrival, because nothing ever asked
+    /// the radio: on 2026-11-12 the CLI described a link as "over a 0 dBm noise floor", which is
+    /// physically impossible, and reported 0 s transmitted after an hour of transmissions.
+    measured: Option<ldmux_companion::codec::RadioStats>,
+    /// The battery and contact store, when a caller asks for them.
+    ///
+    /// Kept separate from [`Self::measured`] because the firmware reports a **voltage**, not a
+    /// percentage, and a percentage invented from millivolts would be a number this end made up.
+    battery: Option<ldmux_companion::codec::BatteryAndStorage>,
 }
 
 impl Radio {
@@ -224,14 +243,40 @@ impl Radio {
         let left = self
             .budget
             .map(|b| u8::try_from(b.saturating_sub(self.sent)).unwrap_or(u8::MAX));
-        let tenths = (f64::from(self.sent) * self.settings.airtime_ms.unwrap_or(0.0) / 100.0).round();
+        // **The radio's own airtime when it has been measured**, and this end's count otherwise:
+        // a meter the radio reports is the ground truth, and ldmux's count is an estimate of
+        // records × airtime that only exists because a radio may not answer.
+        let tenths = match self.measured {
+            Some(stats) => f64::from(stats.tx_air_secs) * 10.0,
+            None => {
+                (f64::from(self.sent) * self.settings.airtime_ms.unwrap_or(0.0) / 100.0).round()
+            }
+        };
         Status {
             radio_state: RadioState::Connected,
-            rssi: UNKNOWN_RSSI,
-            battery_percent: UNKNOWN_BATTERY,
+            rssi: self.measured.map_or(UNKNOWN_RSSI, |m| m.last_rssi),
+            // **The firmware reports no percentage**, only a voltage; a battery reading invented
+            // from millivolts would be a number this end made up, so the field stays unknown.
+            battery_percent: self.battery.map_or(UNKNOWN_BATTERY, |_| UNKNOWN_BATTERY),
             tx_airtime_tenths_this_hour: u16::try_from(tenths as u64).unwrap_or(u16::MAX),
             ops_left_this_hour: left,
         }
+    }
+
+    /// Publish the radio's own measurement as the link's reading.
+    ///
+    /// `from_peer` is false: this is the host's own radio reporting what *it* heard, which is the
+    /// only evidence that separates "the record is malformed" from "the radio is deaf".
+    fn report_measured(&self) -> Option<Event> {
+        let stats = self.measured?;
+        Some(Event::Signal(Signal {
+            noise_floor_dbm: stats.noise_floor_dbm,
+            rssi_dbm: Some(stats.last_rssi),
+            snr_quarter_db: stats.last_snr_quarter_db,
+            tx_air_secs: stats.tx_air_secs,
+            rx_air_secs: stats.rx_air_secs,
+            from_peer: false,
+        }))
     }
 
     /// Charge one transmitted record, and remember the hour's spend.
@@ -304,6 +349,8 @@ impl RadioCarrier {
         let (command_tx, command_rx) = channel();
         let (event_tx, event_rx) = async_mpsc::channel(64);
         let state = Radio {
+            measured: None,
+            battery: None,
             settings,
             repeat_enabled: radio.repeat_enabled,
             freq_mhz: radio.freq_mhz,
@@ -469,12 +516,26 @@ fn serve<L: ByteLink>(
     {
         return;
     }
+    // **The radio is measured, not assumed.** One poll on bring-up and then every few seconds, so
+    // `ldmux mesh status` reports the receiver's own numbers: a deaf radio shows its noise floor
+    // and "no reading yet" honestly, instead of the zeros the status used to print for everything.
+    let mut next_poll = std::time::Instant::now();
     loop {
         // **The air first.** A received frame already queued on the port would otherwise wait
         // behind this thread's own send, which is the defect that made a stats poll cost a packet.
         // A closed event channel means every caller has gone: the port is done with.
         if harvest(&mut companion, &mut radio, &events).is_err() {
             return;
+        }
+        if std::time::Instant::now() >= next_poll {
+            next_poll = std::time::Instant::now() + STATS_POLL;
+            if let Ok(stats) = companion.radio_stats() {
+                radio.measured = Some(stats);
+                if let Some(event) = radio.report_measured() {
+                    let _ = events.blocking_send(Ok(event));
+                }
+            }
+            let _ = events.blocking_send(Ok(Event::Status(radio.status())));
         }
         match commands.recv_timeout(COMMAND_WAIT) {
             Ok(Command::Send {
@@ -601,6 +662,20 @@ fn harvest<L: ByteLink>(
             }
         }
         for event in classified {
+            // **A record arrival carries the two readings it can measure, never a made-up zero.**
+            // The noise floor and the radio's airtime counters come from `GET_STATS`, so a record's
+            // `Signal` borrows the last measurement rather than publishing `0 dBm` over a link that
+            // has none: the CLI printed exactly that on 2026-11-12, and a 0 dBm noise floor is
+            // physically impossible.
+            let event = match (event, radio.measured) {
+                (Event::Signal(mut signal), Some(stats)) => {
+                    signal.noise_floor_dbm = stats.noise_floor_dbm;
+                    signal.tx_air_secs = stats.tx_air_secs;
+                    signal.rx_air_secs = stats.rx_air_secs;
+                    Event::Signal(signal)
+                }
+                (event, _) => event,
+            };
             if events.blocking_send(Ok(event)).is_err() {
                 return Err(());
             }

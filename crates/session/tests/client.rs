@@ -1015,3 +1015,48 @@ fn an_unfinished_screen_is_dropped_rather_than_blocking_the_page() {
         Some("whole")
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// A path from an advert: the only way a record crosses more than one hop.
+// ---------------------------------------------------------------------------------------------
+
+/// **A path an advert taught is a candidate, and the next transmission uses it.**
+///
+/// The firmware never delivers a flooded plaintext record (`crates/mesh/src/companion/push.rs`,
+/// AR-10), so a record reaches past one hop only along a path, and the mesh's own advert cache is
+/// where a path comes from. This proves the three steps that matter: the advert request leaves the
+/// radio, the cache's answer is reversed by hop group, and the endpoint stores it as a candidate
+/// that can never be mistaken for a proven route.
+#[test]
+fn a_path_learned_from_an_advert_is_used_but_never_proven() {
+    use ldmux_mesh::companion::command::{self, AdvertPath, parse_advert_path};
+
+    // The reverse is by hop group, which is what makes the path usable in the other direction.
+    let mut frame = vec![0x16u8];
+    frame.extend_from_slice(&0u32.to_le_bytes());
+    frame.push(((2 - 1) << 6) | 2); // two-byte hashes, two hops
+    frame.extend_from_slice(&[0x11, 0x12, 0x21, 0x22]);
+    let parsed = parse_advert_path(&frame).expect("a path frame");
+    assert_eq!(parsed.outbound(), vec![0x21, 0x22, 0x11, 0x12]);
+
+    // The requests the radio is given: an advert to emit, and a cache read for the peer's key.
+    assert_eq!(command::self_advert(true), vec![command::commands::SEND_SELF_ADVERT, 1]);
+    let key = [0x33u8; 32];
+    assert_eq!(command::get_advert_path(&key).len(), 34);
+
+    // A learned arrival is a candidate: `Candidate::learned` has no argument that grants a proof.
+    let candidate = ldmux_mesh::route::Candidate::learned(parsed.outbound(), 2, 0.0, 0);
+    assert!(!candidate.is_proven(), "an advert says where the peer was, not that a record crossed");
+
+    // And the same path, adopted into a table, is still not proven.
+    let mut table = ldmux_mesh::route::RouteTable::new();
+    table.observe(candidate);
+    assert!(table.best(0, 7).is_some(), "the path is usable");
+    assert!(
+        !table.best(0, 7).expect("a candidate").is_proven(),
+        "and never proof of a working route"
+    );
+
+    // The type is named so an unused import cannot hide a missing step.
+    let _: AdvertPath = parsed;
+}

@@ -186,12 +186,75 @@ pub const PHONE_COMMANDS: CommandSpec = CommandSpec {
         // firmware that does, and `ERR_CODE_ILLEGAL_ARG`/`ERR_CODE_TABLE_FULL` when it cannot
         // (`:2047-2060`). The errors are universal; `SENT` is the one code that has to be named.
         Entry::typed(commands::SEND_RAW_PACKET, &[codes::SENT], TRANSMIT_MS),
+        // `SEND_SELF_ADVERT` (`0x07`) → `OK`. *The phone asks too now*: an advert is how the mesh's
+        // own path cache learns where this radio is, and a learned path is the only way a record
+        // travels past one hop, because the firmware never delivers a flooded plaintext record
+        // (`crates/mesh/src/companion/push.rs`, AR-10).
+        Entry::typed(commands::SEND_SELF_ADVERT, &[codes::OK], PROMPT_MS),
+        // `GET_ADVERT_PATH` (`0x2A`) → `RESP_CODE_ADVERT_PATH` (`:1895-1915`), or `ERR_CODE_NOT_FOUND`
+        // when the radio has not heard that node recently — no route, which is not a fault.
+        Entry::typed(commands::GET_ADVERT_PATH, &[codes::ADVERT_PATH], PROMPT_MS),
         // The tuple, the power and the path width are flash writes.
         Entry::terminal(commands::SET_RADIO_PARAMS, FLASH_MS),
         Entry::terminal(commands::SET_RADIO_TX_POWER, FLASH_MS),
         Entry::terminal(commands::SET_PATH_HASH_MODE, FLASH_MS),
     ],
 };
+
+/// A route the radio's own advert cache remembers: `received_at`, the path's width, and the chain.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct AdvertPath {
+    /// The advert's own timestamp, as the firmware stored it.
+    pub received_at: u32,
+    /// Bytes per hop the path was heard with (1..=3; 4 is reserved and never parsed).
+    pub hash_size: u8,
+    /// The chain in travel order **towards this radio**, so a sender reverses it.
+    pub bytes: Vec<u8>,
+}
+
+impl AdvertPath {
+    /// The chain reversed hop group by hop group, which is the path a packet must carry to reach
+    /// the node that advertised.
+    ///
+    /// **Reversed by hop, not by byte.** A flood appends each hop's hash at the end as it travels
+    /// (`Mesh.cpp:344-357`) while a direct packet pops from the front (`removeSelfFromPath`), so the
+    /// outbound path is the arrival chain with its groups in the opposite order. Reversing bytes
+    /// instead produces a path no receiver recognises.
+    #[must_use]
+    pub fn outbound(&self) -> Vec<u8> {
+        let width = usize::from(self.hash_size.clamp(1, 3));
+        let mut out = Vec::with_capacity(self.bytes.len());
+        for hop in self.bytes.chunks(width).rev() {
+            out.extend_from_slice(hop);
+        }
+        out
+    }
+}
+
+/// Parse a `RESP_CODE_ADVERT_PATH` frame, code included (`MyMesh.cpp:1906-1912`).
+///
+/// The length byte is the firmware's own encoding (`((hash_size - 1) << 6) | hops`), not a count of
+/// bytes, so a frame whose byte count disagrees with it is refused rather than half-read.
+#[must_use]
+pub fn parse_advert_path(frame: &[u8]) -> Option<AdvertPath> {
+    if frame.first() != Some(&codes::ADVERT_PATH) {
+        return None;
+    }
+    let received_at = u32::from_le_bytes(frame.get(1..5)?.try_into().ok()?);
+    let path_byte = *frame.get(5)?;
+    let hash_size = (path_byte >> 6) + 1;
+    if hash_size == 4 {
+        return None;
+    }
+    let hops = path_byte & 0x3F;
+    let want = usize::from(hops) * usize::from(hash_size);
+    let bytes = frame.get(6..6 + want)?.to_vec();
+    Some(AdvertPath {
+        received_at,
+        hash_size,
+        bytes,
+    })
+}
 
 /// Why an answer could not be read as the report it was supposed to be.
 ///
@@ -541,6 +604,30 @@ pub fn app_start(app_name: &str) -> Vec<u8> {
     out
 }
 
+/// `CMD_SEND_SELF_ADVERT`: emit this radio's advert, flooded so repeaters forward it.
+///
+/// The firmware answers `OK` for "queued", never for "heard": an advert is a broadcast with no
+/// acknowledgement, which is why the path it teaches appears in the cache a moment later.
+#[must_use]
+pub fn self_advert(flood: bool) -> Vec<u8> {
+    vec![commands::SEND_SELF_ADVERT, u8::from(flood)]
+}
+
+/// `CMD_GET_ADVERT_PATH`: read the route a recently heard advert took.
+///
+/// The request carries the **whole** 32-byte key even though the firmware's cache is keyed by the
+/// first seven bytes: its guard is `len >= PUB_KEY_SIZE + 2` and it then compares seven bytes
+/// (`MyMesh.cpp:1895-1902`), so a short frame is answered `ERR_CODE_UNSUPPORTED_CMD` and no route
+/// is ever learned.
+#[must_use]
+pub fn get_advert_path(pub_key: &[u8; 32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2 + 32);
+    out.push(commands::GET_ADVERT_PATH);
+    out.push(0); // reserved
+    out.extend_from_slice(pub_key);
+    out
+}
+
 /// `CMD_DEVICE_QUERY`: ask what the firmware can do, latching [`APP_TARGET_VERSION`].
 #[must_use]
 pub fn device_query() -> Vec<u8> {
@@ -611,15 +698,62 @@ mod tests {
         }
     }
 
-    /// The answer table is not the host's: a phone never asks for an advert path or a flood scope,
-    /// and a table that claimed them would settle a command this end never sent (`AR-8`).
+    /// **The phone's table is still not the host's, and the difference has moved.**
+    ///
+    /// It used to exclude the advert path with the reasoning that "a phone never asks for one".
+    /// That reasoning is now false: a flooded record cannot be delivered by the firmware at all, so
+    /// a path learned from an advert is the only way a phone's record travels past one hop. The
+    /// flood-scope commands stay excluded, because a phone pins its scope through the settings
+    /// screen and never reads one back.
     #[test]
-    fn the_phones_table_does_not_claim_the_hosts_commands() {
+    fn the_phones_table_claims_the_advert_path_and_not_the_flood_scope() {
         assert!(
             PHONE_COMMANDS
                 .entry(crate::companion::command::commands::GET_ADVERT_PATH)
-                .is_none()
+                .is_some(),
+            "the path a phone learns from an advert is how it reaches past one hop"
         );
+        assert!(
+            PHONE_COMMANDS
+                .entry(crate::companion::command::commands::GET_DEFAULT_FLOOD_SCOPE)
+                .is_none(),
+            "a phone never reads a flood scope back"
+        );
+    }
+
+    #[test]
+    fn an_advert_path_reverses_into_the_path_a_packet_carries() {
+        // **Reversed by hop, not by byte.** A flood appends each hop's hash as it travels, so the
+        // chain towards us is the reverse of the chain towards the peer. One-byte hops make the two
+        // indistinguishable, which is why the three-byte case is the one that matters.
+        let frame = |width: u8, hops: &[u8]| {
+            let mut f = vec![codes::ADVERT_PATH];
+            f.extend_from_slice(&0u32.to_le_bytes());
+            f.push(((width - 1) << 6) | u8::try_from(hops.len() / usize::from(width)).unwrap());
+            f.extend_from_slice(hops);
+            f
+        };
+        let one = parse_advert_path(&frame(1, &[0xAA, 0xBB, 0xCC])).expect("one-byte hops");
+        assert_eq!(one.outbound(), vec![0xCC, 0xBB, 0xAA]);
+        let two = parse_advert_path(&frame(2, &[0x11, 0x12, 0x21, 0x22])).expect("two-byte hops");
+        assert_eq!(two.outbound(), vec![0x21, 0x22, 0x11, 0x12], "groups swapped, bytes kept");
+        let three =
+            parse_advert_path(&frame(3, &[1, 2, 3, 4, 5, 6])).expect("three-byte hops");
+        assert_eq!(three.outbound(), vec![4, 5, 6, 1, 2, 3]);
+        // A width the firmware reserves is malformed, not a path.
+        let mut bad = frame(1, &[0xAA]);
+        bad[5] = 0xC0;
+        assert_eq!(parse_advert_path(&bad), None);
+    }
+
+    #[test]
+    fn the_advert_commands_carry_what_the_firmware_reads() {
+        assert_eq!(self_advert(true), vec![commands::SEND_SELF_ADVERT, 1]);
+        assert_eq!(self_advert(false), vec![commands::SEND_SELF_ADVERT, 0]);
+        let key = [7u8; 32];
+        let frame = get_advert_path(&key);
+        assert_eq!(frame.len(), 34, "the firmware's guard is len >= PUB_KEY_SIZE + 2");
+        assert_eq!(&frame[2..], &key, "the whole key, not the seven-byte cache prefix");
     }
 
     #[test]

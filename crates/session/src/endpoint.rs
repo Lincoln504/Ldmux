@@ -671,6 +671,15 @@ impl RadioEndpoint {
         self.session.is_some()
     }
 
+    /// Adopt a path learned from the peer's advert, so the next transmission can be direct.
+    ///
+    /// **The only writer of a learned candidate.** It goes through [`RouteTable::observe`], which
+    /// stores it as `Proof::Candidate`: a path from an advert says where the peer was heard, never
+    /// that a record crossed it, so it must not be treated as proof (`RC-3`).
+    pub fn observe_path(&mut self, candidate: Candidate) {
+        self.route.observe(candidate);
+    }
+
     /// The paths this end believes it can reach the peer by.
     #[must_use]
     pub fn route(&self) -> &RouteTable {
