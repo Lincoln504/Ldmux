@@ -113,6 +113,13 @@ internal fun BatchBar(
     /** The draft, as the bar shows it: "12 characters", "2 keys and 3 characters". */
     summary: String,
     state: BatchState,
+    /**
+     * Whether the last `Refresh` was refused before it reached the air.
+     *
+     * A refusal is not silence: "no session to ask" and "asked, nothing came back" send the operator
+     * to two different places, so the bar names the first instead of showing a wait that cannot end.
+     */
+    refused: Boolean = false,
     onSend: () -> Unit,
     onRefresh: () -> Unit,
     modifier: Modifier = Modifier,
@@ -152,16 +159,18 @@ internal fun BatchBar(
         }
     }
     val said = if (evidence != null) reading() else linkEvidenceText(ticked.hops, ticked.answeredAgoMs)
-    val status = when (state) {
-        BatchState.Sending -> "sending…"
-        BatchState.Waiting -> "waiting for the answer · $said"
-        BatchState.NoAnswer -> "no answer yet · link busy or down · $said"
-        BatchState.Settled -> "done · $said"
-        BatchState.Idle -> if (summary.isEmpty()) "nothing typed" else summary
+    val status = when {
+        refused -> "refresh refused · no session to ask"
+        state == BatchState.Sending -> "sending…"
+        state == BatchState.Waiting -> "waiting for the answer · $said"
+        state == BatchState.NoAnswer -> "no answer yet · link busy or down · $said"
+        state == BatchState.Settled -> "done · $said"
+        else -> if (summary.isEmpty()) "nothing typed" else summary
     }
-    val statusColor = when (state) {
-        BatchState.Waiting, BatchState.Sending -> Warn
-        BatchState.NoAnswer -> Warn
+    val statusColor = when {
+        refused -> Warn
+        state == BatchState.Waiting || state == BatchState.Sending -> Warn
+        state == BatchState.NoAnswer -> Warn
         else -> Muted
     }
 

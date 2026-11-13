@@ -163,6 +163,7 @@ class MeshTerminalSource(
         if (items.isEmpty()) return false
         val send = onSend ?: return false
         state = BatchState.Sending
+        refreshRefused = false
         refreshed()
         if (!send(items)) {
             state = BatchState.Idle
@@ -180,10 +181,32 @@ class MeshTerminalSource(
     /**
      * Ask for the screen again. **Never touches the draft**, so looking at a shell can never run
      * what is typed in it.
+     *
+     * **The press says what it did, or it looks broken.** This used to invoke a callback and change
+     * nothing else, so on a screen that was already correct the only visible effect of pressing
+     * Refresh was none — reported as "the refresh button doesn't work like it used to". It now
+     * enters [BatchState.Waiting] like a send does, which reuses the one clock that already knows
+     * how long an answer may take: no answer turns it into [BatchState.NoAnswer] with its own
+     * sentence, and a `Settled` clears it. A refusal (no session, no allowance) clears the state
+     * and leaves [refreshRefused] set, so the bar can say why instead of pretending to work.
      */
     fun refresh() {
-        onRefresh?.invoke()
+        val ask = onRefresh ?: return
+        refreshed()
+        state = BatchState.Waiting
+        sentAt = now()
+        refreshRefused = !ask()
     }
+
+    /**
+     * Whether the last refresh was refused before it reached the air.
+     *
+     * A refusal is a fact the operator can act on (pair the host, wait for the hour's allowance),
+     * and it is not the same as "asked and no answer came", which is what [BatchState.NoAnswer]
+     * means.
+     */
+    var refreshRefused: Boolean by mutableStateOf(false)
+        private set
 
     /**
      * The host answered: its screen arrived.
@@ -213,6 +236,7 @@ class MeshTerminalSource(
             BatchState.Settled -> {
                 if (t > settledUntil) state = BatchState.Idle
             }
+            BatchState.Idle -> {}
             else -> {}
         }
     }
@@ -607,7 +631,13 @@ class MeshTerminalSource(
     var onSend: (suspend (List<DraftItem>) -> Boolean)? = null
 
     /** Wired by the screen: ask the host for this page's screen again. Never spends the draft. */
-    var onRefresh: (() -> Unit)? = null
+    /**
+     * Ask the host for the screen. Returns false when the request could not be made at all.
+     *
+     * **A Boolean, not Unit**: a refresh that never left this process and one that was answered by
+     * silence are different facts, and the bar says which.
+     */
+    var onRefresh: (() -> Boolean)? = null
 
     /** A history request is in flight, so an up key pressed again does not queue another. */
     private var awaitingHistory = false

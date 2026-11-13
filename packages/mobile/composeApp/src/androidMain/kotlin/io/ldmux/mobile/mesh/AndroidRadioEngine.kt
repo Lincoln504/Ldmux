@@ -7,6 +7,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -316,10 +317,22 @@ class AndroidRadioEngine(
                 apply(c, work)
             }
             if (closed) return
-            pump(c)
+            val progressed = pump(c)
             val deadline = c.nextDeadline()
             val wait = deadline?.let { (it - wallNow()).coerceAtLeast(0) } ?: NEVER_MS
-            if (wait == 0L) continue
+            if (wait == 0L) {
+                // **A deadline that has passed is not a reason to spin.** With the link down the
+                // engine's bootstrap rung deadline never advances (nothing is transmitted, so
+                // nothing is answered), `nextDeadline` keeps returning a time already past, and a
+                // bare `continue` re-ran this loop with no suspend at all: one core pinned for as
+                // long as the link was down mid-bootstrap. Measured on the phone 2026-11-12,
+                // `adb shell echo` took 20 s with the app running and 0.57 s with it stopped.
+                //
+                // When the last turn wrote nothing there is nothing to do until a frame arrives or
+                // a tick passes, so the loop waits a tick and re-reads the engine's deadline.
+                if (!progressed) delay(loopFloorMs)
+                continue
+            }
             // A closed queue ends the loop; a timeout is the engine's own deadline arriving.
             val next = runCatching { withTimeoutOrNull(wait) { queue.receive() } }.getOrNull()
             if (next != null) apply(c, next)
@@ -335,7 +348,8 @@ class AndroidRadioEngine(
      * frame is offered again on the next turn, which is what makes the retry the loop's rather than
      * the library's.
      */
-    private suspend fun pump(c: RadioClient) {
+    private suspend fun pump(c: RadioClient): Boolean {
+        var progressed = false
         while (true) {
             if (pendingFrame == null && pipe.ready) {
                 pendingFrame = c.poll(wallNow())
@@ -353,10 +367,15 @@ class AndroidRadioEngine(
                 break
             }
             pendingFrame = null
+            progressed = true
         }
         _radio.value = c.radio()
         _route.value = c.route(wallNow())
-        for (event in c.drainEvents()) _events.tryEmit(event)
+        for (event in c.drainEvents()) {
+            _events.tryEmit(event)
+            progressed = true
+        }
+        return progressed
     }
 
     /** The one frame the pipe would not take, kept for the next turn. */
@@ -364,6 +383,9 @@ class AndroidRadioEngine(
 
     /** Each of these is logged once, so a stall cannot flood the operator's log. */
     private var loggedFirstFrame = false
+
+    /** How long the loop waits when a deadline has passed and nothing could be written. */
+    private val loopFloorMs = 5L
     private var loggedWriteRefusal = false
 
     private suspend fun apply(c: RadioClient, work: Work) {

@@ -324,17 +324,34 @@ class MeshTerminalSourceTest {
         assertEquals(BatchState.Idle, s.batchState)
     }
 
-    /** **`refresh` never spends the draft.** Looking at a shell cannot run what is typed in it. */
+    /**
+     * **`refresh` never spends the draft, and it says what it did.**
+     *
+     * It used to leave the bar in `Idle`, which meant a press on an already-correct screen changed
+     * nothing visible — reported as "the refresh button doesn't work like it used to". It now enters
+     * `Waiting` like a send, so the same clock turns silence into `NoAnswer` with its own sentence,
+     * and the draft is still untouched.
+     */
     @Test
-    fun `refresh asks for the screen and leaves the draft untouched`() {
+    fun `refresh asks for the screen, says so, and leaves the draft untouched`() {
         val (s, h, d) = source()
         h.sendText("pass")
         var asked = 0
-        s.onRefresh = { asked++ }
+        s.onRefresh = { asked++; true }
         s.refresh()
         assertEquals(1, asked)
         assertFalse(d.isEmpty, "a refresh must not spend what is typed")
-        assertEquals(BatchState.Idle, s.batchState, "and it is not a send, so nothing is owed")
+        assertEquals(BatchState.Waiting, s.batchState, "an answer is owed, so the bar says so")
+        assertFalse(s.refreshRefused, "the request reached the engine")
+    }
+
+    /** A refresh that never left this process is a different fact from one answered by silence. */
+    @Test
+    fun `a refused refresh is named rather than shown as a wait`() {
+        val (s, _, _) = source()
+        s.onRefresh = { false }
+        s.refresh()
+        assertTrue(s.refreshRefused, "the bar can say the request was refused")
     }
 
     /**

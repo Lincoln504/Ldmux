@@ -497,9 +497,21 @@ fun MeshTerminalScreen(
         // **One command is one message.** The draft goes to the engine in composition order and the
         // engine folds it into one `T_SEND`; two calls would be two messages, which is `RC-8`.
         source.onSend = { items -> conn.driver.sendDraft(items) }
-        // `Refresh` asks for the screen and never touches the draft, so looking at a shell cannot
-        // run what is typed in it.
-        source.onRefresh = { scope.launch { conn.driver.resync() } }
+        // **`Refresh` asks for the screen, or rebuilds the link when there is no session to ask.**
+        // It never touches the draft, so looking at a shell cannot run what is typed in it. A dead
+        // link has no session to resync, and the batch bar was the only control on the terminal page
+        // — so a press there did nothing at all and the header square was the sole cure. Reported as
+        // "the refresh button doesn't work like it used to".
+        source.onRefresh = {
+            if (view is MeshTermView.Live) {
+                scope.launch { conn.driver.resync() }
+                true
+            } else {
+                // The one action that can rebuild a link: the same counter the header square uses.
+                attempt += 1
+                true
+            }
+        }
         onDispose {
             conn.onIdle = null
             conn.driver.onHistoryPage = null
@@ -625,8 +637,13 @@ fun MeshTerminalScreen(
     // only it sees both directions; it is asked on a timer rather than pushed, so an idle shell
     // (which owes nothing) costs no wakeups and says nothing. Zero means "nothing to report".
     var quietSecs by remember(conn) { mutableStateOf(0L) }
-    LaunchedEffect(conn, live != null) {
-        if (live == null) { quietSecs = 0L; return@LaunchedEffect }
+    // **Only while an answer is actually owed.** The driver's counter is time since the screen last
+    // changed, which is true of every idle prompt — so a healthy shell sitting untouched for ten
+    // seconds painted "link quiet · 10 s" in the warning colour and kept counting. What the notice
+    // means is "you asked and nothing came", which is exactly the bar's `Waiting`/`NoAnswer`.
+    val owes = source.batchState == BatchState.Waiting || source.batchState == BatchState.NoAnswer
+    LaunchedEffect(conn, live != null, owes) {
+        if (live == null || !owes) { quietSecs = 0L; return@LaunchedEffect }
         while (true) {
             delay(QUIET_POLL_MS)
             val q = conn.driver.quietForMs() ?: 0L
@@ -968,6 +985,7 @@ fun MeshTerminalScreen(
             },
             summary = handle.heldSummary,
             state = source.batchState,
+            refused = source.refreshRefused,
             onSend = { scope.launch { source.send() } },
             onRefresh = { source.refresh() },
             modifier = m,
