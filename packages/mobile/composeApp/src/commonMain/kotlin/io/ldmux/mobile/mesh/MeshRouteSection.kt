@@ -345,6 +345,15 @@ private fun MeshRadioFacts(
             summary = allowanceSeconds(preset)?.let { "on · $it s/h · this band's duty cycle" }
                 ?: "on · this band's duty cycle",
         )
+    } else if (allowanceSeconds(preset) == null) {
+        // **No allowance on this band, so a toggle could not change anything.**
+        //
+        // Both states drew the same summary — "off · no limit" — and pushed the same unmetered
+        // value, so pressing it changed neither the sentence nor the engine. Measured 2026-11-13:
+        // the operator pressed it and nothing happened. A control that cannot change its own
+        // summary is not a control, so this row states the fact instead of offering a press, which
+        // is the same shape the `mustMeter` case above already uses.
+        SettingsRow("airtime limit", summary = "off · no limit on this band")
     } else {
         SettingsToggle(
             "airtime limit",
