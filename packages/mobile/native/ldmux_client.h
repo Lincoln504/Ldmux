@@ -210,8 +210,6 @@ typedef struct {
     uint64_t wrong_index_records;
     uint64_t acks_staged;
     uint64_t records_without_a_session;
-    uint8_t last_admitted_kind;
-    uint16_t last_admitted_len;
     uint8_t last_record_refusal;
     /* The index and counter that record carried, and the index this end holds. */
     uint8_t last_refusal_index;

@@ -432,7 +432,7 @@ class AndroidRadioEngine(
                         "refusedIdx=${s.lastRefusalIndex} refusedCtr=${s.lastRefusalCounter} " +
                         "localIdx=${s.localIndex} dup=${s.duplicateRecords} " +
                         "wrongIdx=${s.wrongIndexRecords} staged=${s.acksStaged} " +
-                        "noSess=${s.recordsWithoutSession} last=${s.lastAdmittedKind}/${s.lastAdmittedLen}B",
+                        "noSess=${s.recordsWithoutSession}",
                 )
             }
         }

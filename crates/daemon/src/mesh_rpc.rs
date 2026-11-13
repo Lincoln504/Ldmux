@@ -596,13 +596,11 @@ impl MeshRpc {
 
     /// `List`: the running shells and the marks that are true now, in one reply.
     async fn list<H: MeshHost>(&mut self, host: &mut H) -> Outcome {
-        // **A failed listing must still answer.** Pending sends nothing at all, and the phone cannot
-        // tell "the host did not answer" from "there is nothing to answer with": it waits on a request
-        // the host heard and dropped. Measured 2026-11-13, a phone that had established, whose List
-        // the host acknowledged, and which then sat on "connecting" for ever because `listing()`
-        // returned None. An empty table is the honest answer — it says "no shells" rather than
-        // nothing — and the empty entry list is what makes the phone leave its waiting state.
-        let listing = host.listing().await.unwrap_or_default();
+        let Some(listing) = host.listing().await else {
+            // An empty page means "no shells are running", which is a fact; a failed call is not
+            // that fact (`mesh_bridge.rs`, `Bridge::handle`, the `Message::List` arm).
+            return Outcome::Pending;
+        };
         // **Every field, unconditionally.** `cwd`, `origin`, `owner` and `shell` were version
         // flags only because one path served version 5, 6, 7 and 10 phones at once
         // (`mesh_bridge.rs`, the `Message::List` arm); a version-15 phone reads all four.

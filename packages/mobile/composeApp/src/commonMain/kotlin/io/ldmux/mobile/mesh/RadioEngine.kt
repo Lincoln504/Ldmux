@@ -521,9 +521,6 @@ data class ClientStats(
     val acksStaged: Long = 0,
     /** Transport records that arrived while this end held no session. */
     val recordsWithoutSession: Long = 0,
-    /** The kind and length of the last record admitted. */
-    val lastAdmittedKind: Long = 0,
-    val lastAdmittedLen: Long = 0,
 ) {
     companion object {
         internal fun of(v: LongArray): ClientStats = ClientStats(
@@ -567,8 +564,6 @@ data class ClientStats(
             wrongIndexRecords = v[37],
             acksStaged = v[38],
             recordsWithoutSession = v[39],
-            lastAdmittedKind = v[40],
-            lastAdmittedLen = v[41],
         )
     }
 }

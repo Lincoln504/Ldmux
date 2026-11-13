@@ -225,9 +225,6 @@ pub struct LdmuxClientStats {
     pub acks_staged: u64,
     /// Transport records that arrived while this end held no session.
     pub records_without_a_session: u64,
-    /// The kind and length of the last record this end admitted.
-    pub last_admitted_kind: u8,
-    pub last_admitted_len: u16,
     /// The last record refused by the record layer, as a stable code; 0 when none has been.
     pub last_record_refusal: u8,
     /// The index and counter that record carried, and the index this end holds.
@@ -1256,8 +1253,6 @@ pub unsafe extern "C" fn ldmux_client_stats(c: *mut LdmuxClient, out: *mut Ldmux
                 wrong_index_records: link.wrong_index_records,
                 acks_staged: link.acks_staged,
                 records_without_a_session: link.records_without_a_session,
-                last_admitted_kind: link.last_admitted_kind,
-                last_admitted_len: link.last_admitted_len,
                 last_record_refusal: link.last_record_refusal,
                 last_refusal_index: link.last_refusal_index,
                 last_refusal_counter: link.last_refusal_counter,
