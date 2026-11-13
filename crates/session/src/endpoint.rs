@@ -64,6 +64,14 @@ use crate::transaction::{Action, BeginError, PeerId, Received, TransactionLayer}
 /// while the filter thought it was a phone would be exactly the confusion `RC-3` came from.
 pub use crate::direction::Side as Role;
 
+/// The shortest gap between two handshake requests this end may send.
+///
+/// A public mesh hands this end every accepted `RAW_CUSTOM` packet in range, most of them other
+/// applications', and each one that looks like a record would otherwise ask again: replacing the
+/// attempt each time mints a new ephemeral, so the peer's answer never matches the attempt that is
+/// live. Five seconds is under the first rung and far above the packet rate.
+const HANDSHAKE_ASK_MIN_MS: u64 = 5_000;
+
 /// How long after sending along a path a direct arrival still counts as evidence about it.
 ///
 /// A direct send is answered inside a rung, and the rung's floor is 12 s, so ten seconds covers any
@@ -516,6 +524,8 @@ pub struct RadioEndpoint {
     /// The last wall-clock time this end was told, so an attempt started from the poll loop (after a
     /// failed answer spent the previous one) is stamped with a real time rather than an invented one.
     last_wall_ms: u64,
+    /// When this end last asked the peer for a handshake, so the asking itself is rate-limited.
+    last_ask_ms: Option<u64>,
     /// Whether the last attempt was spent by a failed answer and a fresh one is owed.
     ///
     /// **Replacement, never creation.** `connect` is the only thing that starts a first attempt:
@@ -623,6 +633,7 @@ impl RadioEndpoint {
             nonce: ENDPOINT_NONCE_BASE,
             last_wall_ms: 0,
             attempt_spent: false,
+            last_ask_ms: None,
             session: None,
             replay: ReplayWindow::default(),
             counter: 0,
@@ -1408,9 +1419,30 @@ impl RadioEndpoint {
 
     /// Emit `KIND_NEED_HANDSHAKE` when the host has no session, at most once per rate window.
     fn request_handshake(&mut self, now_ms: u64, wall_ms: u64) {
-        // A spent attempt cannot answer a new answer, so asking again needs a live one behind it.
+        // **Asking again must not throw away the ephemeral the peer is answering.**
+        //
+        // A running attempt keeps its Noise content for its whole ladder, so re-sending it is the way
+        // to ask again: replacing the attempt mints a new ephemeral, the answer to the old one is then
+        // unreadable, and the two ends chase each other. Measured 2026-11-13 on a public mesh: eight
+        // rungs and seven refused answers in forty seconds, with `sessions=0`, because every
+        // unopenable record — and the public mesh delivers foreign `RAW_CUSTOM` packets with no
+        // destination check — asked again and started over.
         if self.attempt.is_none() || !self.attempt_running() {
-            self.attempt_spent = true;
+            // Only a spent attempt needs replacing, and only once per window below.
+            if self
+                .last_ask_ms
+                .is_none_or(|at| now_ms.saturating_sub(at) >= HANDSHAKE_ASK_MIN_MS)
+            {
+                self.last_ask_ms = Some(now_ms);
+                self.attempt_spent = true;
+            }
+        } else if self
+            .last_ask_ms
+            .is_none_or(|at| now_ms.saturating_sub(at) >= HANDSHAKE_ASK_MIN_MS)
+        {
+            // The attempt is live: send its content again now rather than starting a new one.
+            self.last_ask_ms = Some(now_ms);
+            self.rung_deadline_ms = Some(now_ms);
         }
         if self.config.role != Side::Host {
             return;

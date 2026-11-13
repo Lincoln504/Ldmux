@@ -1303,3 +1303,56 @@ fn a_record_that_will_not_open_drops_the_session_and_asks_again() {
         run.phone.stats()
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// Foreign traffic is not a reason to start over.
+// ---------------------------------------------------------------------------------------------
+
+/// **An unopenable record must not throw away the ephemeral the peer is answering.**
+///
+/// A public mesh hands this end every accepted `RAW_CUSTOM` packet in range, most of them other
+/// applications', because the firmware performs no destination check on that payload type. Each one
+/// used to ask for a handshake *and* mint a new ephemeral, so the peer's answer never matched the
+/// attempt that was live. Measured 2026-11-13 on the public mesh: eight rungs and seven refused
+/// answers in forty seconds with `sessions=0`.
+#[test]
+fn a_foreign_record_does_not_restart_the_handshake() {
+    let mut run = Run::new(9, 1, 0.0, 1);
+    run.phone
+        .connect(run.now, run.wall())
+        .expect("the phone can start an attempt");
+
+    // Twenty records of a kind this protocol defines and a body it cannot open: exactly what another
+    // application's traffic looks like once it passes the kind filter.
+    for step in 0..20 {
+        let mut record = vec![0x15u8];
+        record.extend_from_slice(&[0x77; 33]);
+        run.phone.on_record(
+            &record,
+            &ArrivalInfo::direct(0.0),
+            run.now + step,
+            run.wall(),
+        );
+    }
+    // Refused, and the counter that names *why* is the client's mapping of `Rejected::NoSession`:
+    // there is no session yet, so a record of a defined kind cannot be opened by definition.
+    let refused = run.phone.stats().rejected_handshake + run.phone.stats().rejected_record;
+    assert!(
+        refused >= 1,
+        "the foreign records were not refused: {:?}",
+        run.phone.stats()
+    );
+
+    run.run_until(120_000, 250, |run| run.phone.established());
+    assert!(run.phone.established(), "the phone did not establish");
+    let host = run.host.stats();
+    assert_eq!(
+        host.sessions_established, 1,
+        "foreign traffic made the host build more than one session: {host:?}"
+    );
+    assert!(
+        run.phone.stats().rungs_used <= 6,
+        "foreign traffic spent rungs: {:?}",
+        run.phone.stats()
+    );
+}
