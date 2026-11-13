@@ -968,6 +968,7 @@ where
                 "waiting"
             };
             s.session.pending = self.endpoint.queued();
+            s.uplink_record_max = Some(self.endpoint.record_limit(now_ms));
             s.session.sent = u32::try_from(stats.records_sent).unwrap_or(u32::MAX);
             s.session.received_bytes = stats.bytes_received;
             s.session.retransmits = u32::try_from(stats.retransmissions).unwrap_or(u32::MAX);
@@ -1179,11 +1180,12 @@ fn on_event(
                 s.radio_rx_secs = Some(reading.rx_air_secs);
             });
         }
-        Event::Limit { record_max, hops } => {
-            set(snapshot, |s| {
-                s.uplink_record_max = Some(record_max);
-                s.peer_hops = Some(hops);
-            });
+        Event::Limit { hops, .. } => {
+            // **The ceiling is not the carrier's to report.** It is a function of the carriage the
+            // endpoint chooses, and the carrier's arrival-based estimate disagreed with the parts it
+            // sealed (`capacity 152 B` beside `path=[]` in the field). The hop count stays useful,
+            // because it describes the arrival, and the ceiling is read from the endpoint below.
+            set(snapshot, |s| s.peer_hops = Some(hops));
         }
         // **The host adopts the road its own radio learned, exactly as the phone does.** The advert
         // chain is refreshed by the peer's adverts, so it is the durable route; a flood is the

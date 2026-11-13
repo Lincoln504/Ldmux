@@ -864,6 +864,21 @@ impl RadioEndpoint {
         self.records_left = records_left;
     }
 
+    /// The largest record this end would put on the air right now.
+    ///
+    /// **One authority for the record ceiling.** The carrier reported its own estimate of the ceiling
+    /// from the last arrival (`Event::Limit`), while the records themselves were sealed against this
+    /// budget, and the two disagreed in the field: `ldmux mesh status` printed `capacity 152 B` beside
+    /// parts sealed with an empty path. The endpoint owns the carriage, so it owns the ceiling.
+    #[must_use]
+    pub fn record_limit(&self, now_ms: u64) -> u8 {
+        let carriage = self
+            .route
+            .carrier_for(FIRST_ATTEMPT, now_ms, self.config.sf);
+        let budget = self.budget(&carriage);
+        u8::try_from(budget.usable_limit().unwrap_or_else(|| budget.limit())).unwrap_or(u8::MAX)
+    }
+
     /// How many passes a message gets on the route this end holds, for a test or a status line.
     #[must_use]
     pub fn attempts_now(&self) -> u8 {
