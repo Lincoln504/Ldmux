@@ -275,8 +275,8 @@ pub struct Stats {
     pub answers_sent: u64,
     /// Answers served from the cache, which rebuilt nothing.
     pub answers_from_cache: u64,
-    /// Direct copies of answers sent back along the initiation's chain.
-    pub answers_direct: u64,
+    /// Flooded copies of answers, sent only to teach a far end the chain it crossed.
+    pub answers_taught: u64,
     /// `KIND_NEED_HANDSHAKE` records sent.
     pub need_handshake_sent: u64,
     /// `KIND_NEED_HANDSHAKE` records that verified.
@@ -485,8 +485,8 @@ pub trait CarriageSink: Carrier {
 enum Purpose {
     Initiation,
     Answer,
-    /// A direct copy of an answer, travelling back along the initiation's own chain.
-    AnswerDirect,
+    /// A flooded copy of an answer, sent only to teach a far end the chain it crossed.
+    AnswerTeaching,
     Part {
         tx_id: u16,
         part_idx: u8,
@@ -1071,8 +1071,8 @@ impl RadioEndpoint {
             let what = match pending.purpose {
                 Purpose::Initiation => SentKind::Initiation,
                 Purpose::Answer => SentKind::Answer,
-                Purpose::AnswerDirect => {
-                    self.stats.answers_direct += 1;
+                Purpose::AnswerTeaching => {
+                    self.stats.answers_taught += 1;
                     SentKind::Answer
                 }
                 Purpose::Part {
@@ -1234,8 +1234,30 @@ impl RadioEndpoint {
     /// only way a phone that has never heard a flood from us learns a path at all, because the
     /// answer it receives carries no path of its own.
     fn queue_answer(&mut self, reply: &[u8], info: &ArrivalInfo, now_ms: u64) {
-        let carriage = self.carriage_for(FIRST_ATTEMPT, now_ms);
-        self.push(reply.to_vec(), carriage, now_ms, Purpose::Answer);
+        // **The direct copy goes first, and the flood follows only to teach.**
+        //
+        // A flooded plaintext record is delivered to no application on stock firmware: `REQ` is
+        // decrypted per peer and hands nothing up, so the only view of a flood is the radio's own
+        // receive log. Sending the flood first therefore sent the one copy that could arrive
+        // *second*, 900 ms later, and the field showed it: the host answered handshake indices 1 and
+        // 2 as `carriage=flood` and the phone never saw them, so it spent another rung instead of
+        // establishing (2026-11-13, `rungs=3`, `sessions=0`).
+        let width = usize::from(self.config.path_width.clamp(1, 3));
+        let content_len = reply.len().min(bootstrap::MSG2_CONTENT_LEN);
+        let mut direct = reply
+            .get(..content_len)
+            .map(<[u8]>::to_vec)
+            .unwrap_or_default();
+        let nonce = self.next_nonce();
+        direct.extend_from_slice(&nonce.to_le_bytes());
+        self.push(
+            direct,
+            Carriage::Direct {
+                path: advice_path(info, width),
+            },
+            now_ms,
+            Purpose::Answer,
+        );
         if !info.arrival.is_flood() {
             return;
         }
@@ -1247,21 +1269,13 @@ impl RadioEndpoint {
         // carries, because the initiation just travelled it the other way. Measured 2026-11-12 with
         // two radios a metre apart: the flood answer appeared in the phone's log as `0x88 ldmr=true`
         // and the phone's screen never left "connecting".
-        let width = usize::from(self.config.path_width.clamp(1, 3));
-        let content_len = reply.len().min(bootstrap::MSG2_CONTENT_LEN);
-        let mut copy = reply
-            .get(..content_len)
-            .map(<[u8]>::to_vec)
-            .unwrap_or_default();
-        let nonce = self.next_nonce();
-        copy.extend_from_slice(&nonce.to_le_bytes());
+        // The flood copy, behind it, for the topology that learns its chain from a flooded answer.
+        // It costs one record and cannot hurt: a far end that cannot receive floods simply ignores it.
         self.push(
-            copy,
-            Carriage::Direct {
-                path: advice_path(info, width),
-            },
+            reply.to_vec(),
+            Carriage::Flood,
             now_ms.saturating_add(ANSWER_DIRECT_DELAY_MS),
-            Purpose::AnswerDirect,
+            Purpose::AnswerTeaching,
         );
     }
 
