@@ -298,7 +298,18 @@ class MeshEngineDriver(
                 val (cols, rows) = grid ?: (0 to 0)
                 engine.open(page, cols, rows, clock())
             }
-            page.isEmpty() -> _view.value = MeshTermView.Choose(entries)
+            page.isEmpty() -> {
+                // **A list landing is an answer, and the bar has to hear it.**
+                //
+                // Refreshing on the list view set the bar waiting and nothing ever settled it: the
+                // only caller of `onIdle` was a *screen* settling, and a `Sessions` event reaches
+                // `Choose` without notifying anyone. So the list updated correctly and twenty to
+                // eighty seconds later the bar said "no answer yet · link busy or down" over a list
+                // that had arrived, and kept saying it until a shell was opened. That is the
+                // operator's "it works, but not in the UX sense".
+                _view.value = MeshTermView.Choose(entries)
+                onIdle?.invoke()
+            }
             else -> Unit
         }
     }

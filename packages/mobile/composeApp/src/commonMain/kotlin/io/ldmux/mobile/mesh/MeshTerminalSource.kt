@@ -195,7 +195,12 @@ class MeshTerminalSource(
         refreshed()
         state = BatchState.Waiting
         sentAt = now()
-        refreshRefused = !ask()
+        // **The bar settles on the answer, not on the request.** `ask()` reports whether an action
+        // was fired, and both branches fire one, so a refusal could never be true here: the field
+        // and its line in the bar were unreachable code. What settles the wait is the answer
+        // arriving, which `answered()` handles for a screen and the driver now handles for a list.
+        ask()
+        refreshRefused = false
     }
 
     /**
