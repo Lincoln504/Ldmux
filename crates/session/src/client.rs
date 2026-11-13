@@ -551,6 +551,14 @@ pub struct Client {
     endpoint: RadioEndpoint,
     /// Whether a shell-list request is still waiting for its answer.
     list_outstanding: bool,
+    /// The transaction that request was given, so a lost answer can free the next ask.
+    ///
+    /// **A flag with no way back is a screen that never asks again.** The request is held until its
+    /// answer arrives, which is what stops the screen's retry from superseding itself — but the
+    /// answer can be lost entirely (the transaction runs out of attempts while the host is busy, or
+    /// the host restarts mid-answer), and nothing else cleared the flag. The transaction layer is
+    /// the only thing that knows the answer is not coming, so it is the thing that frees the ask.
+    list_tx: Option<u16>,
     config: ClientConfig,
     /// The phone's own radio: one command in flight, and the last thing it said.
     radio: Radio,
@@ -610,6 +618,7 @@ impl Client {
             next_op: 1,
             events: Vec::new(),
             list_outstanding: false,
+            list_tx: None,
             stats: ClientStats::default(),
         }
     }
@@ -907,7 +916,7 @@ impl Client {
         if self.list_outstanding {
             return Ok(());
         }
-        self.submit(&Message::List, now_ms)?;
+        self.list_tx = Some(self.submit_tracked(&Message::List, now_ms)?);
         self.list_outstanding = true;
         self.stats.lists_sent += 1;
         Ok(())
@@ -1221,11 +1230,14 @@ impl Client {
     }
 
     fn submit(&mut self, message: &Message, now_ms: u64) -> Result<(), ClientError> {
+        self.submit_tracked(message, now_ms).map(|_tx_id| ())
+    }
+
+    /// Hand a message to the transaction layer and keep its id, for the callers that must know when
+    /// it is finished rather than only that it was accepted.
+    fn submit_tracked(&mut self, message: &Message, now_ms: u64) -> Result<u16, ClientError> {
         let bytes = message.encode().map_err(ClientError::Encode)?;
-        self.endpoint
-            .submit(&bytes, now_ms)
-            .map(|_tx_id| ())
-            .map_err(ClientError::Begin)
+        self.endpoint.submit(&bytes, now_ms).map_err(ClientError::Begin)
     }
 
     /// Decode one application message and act on it.
@@ -1244,6 +1256,7 @@ impl Client {
             Message::Created { id } => self.events.push(ClientEvent::Created { id }),
             Message::Sessions { last, entries, .. } => {
                 self.list_outstanding = false;
+                self.list_tx = None;
                 self.events.push(ClientEvent::Sessions { last, entries });
             }
             Message::Marks {
@@ -1389,6 +1402,18 @@ impl Client {
         }
     }
 
+    /// The list transaction ended without its answer: free the next ask.
+    ///
+    /// A request whose answer is lost must not hold the flag for the life of the session, because
+    /// the launcher's only way to ask is the same flag. Every other transaction ending is somebody
+    /// else's business.
+    fn list_finished(&mut self, tx_id: u16) {
+        if self.list_tx == Some(tx_id) {
+            self.list_tx = None;
+            self.list_outstanding = false;
+        }
+    }
+
     fn note(&mut self, outbound: &Outbound, now_ms: u64) {
         match outbound {
             Outbound::Sent { what, .. } => match what {
@@ -1415,8 +1440,14 @@ impl Client {
                 SentKind::Answer | SentKind::NeedHandshake => {}
             },
             Outbound::Completed { .. } => self.stats.completed += 1,
-            Outbound::TimedOut { .. } => self.stats.timed_out += 1,
-            Outbound::Superseded { .. } => self.stats.superseded += 1,
+            Outbound::TimedOut { tx_id } => {
+                self.stats.timed_out += 1;
+                self.list_finished(*tx_id);
+            }
+            Outbound::Superseded { tx_id } => {
+                self.stats.superseded += 1;
+                self.list_finished(*tx_id);
+            }
             Outbound::BootstrapFailed { .. } => self.stats.bootstrap_failures += 1,
         }
     }

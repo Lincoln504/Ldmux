@@ -333,6 +333,10 @@ struct Link {
     /// The phone's own radio key and the host's, for the tests that build route packets themselves.
     own_key: [u8; 32],
     peer_key: [u8; 32],
+    /// Drop everything the host would put on the air. A lossy link is the normal case at range, and
+    /// a test that can only lose records on the way *to* the host cannot express "the answer never
+    /// came back".
+    mute_host: bool,
 }
 
 impl Link {
@@ -357,6 +361,7 @@ impl Link {
             now: 0,
             cursor: 0,
             events: Vec::new(),
+            mute_host: false,
         }
     }
 
@@ -397,7 +402,10 @@ impl Link {
         for (carriage, bytes) in out {
             self.transmit(self.phone, &carriage, &bytes);
         }
+        // A muted host still writes its answers, and they are thrown away: the point is that the air
+        // lost them, not that the host stopped deciding.
         let out: Vec<Vec<u8>> = self.host.port.out.drain(..).collect();
+        let out: Vec<Vec<u8>> = if self.mute_host { Vec::new() } else { out };
         let carriage = self.host.port.carriage.clone();
         for bytes in out {
             self.transmit(self.host_node, &carriage, &bytes);
@@ -1080,6 +1088,54 @@ fn a_path_learned_from_an_advert_is_used_but_never_proven() {
 // ---------------------------------------------------------------------------------------------
 // Asking for the list again must not replace the request already in flight.
 // ---------------------------------------------------------------------------------------------
+
+/// **An answer that never comes must not be the last word.**
+///
+/// One request is held until its answer arrives, which is what stops the screen's retry from
+/// superseding itself. But the answer can be lost outright — the transaction runs out of attempts,
+/// or the host restarts mid-answer — and the transaction layer is the only part that knows that.
+/// Without it freeing the flag, the launcher's one way to ask was spent on the first loss and the
+/// screen never asked again for the life of the session.
+#[test]
+fn a_lost_list_answer_frees_the_next_ask() {
+    let mut link = Link::new(41, 1, 0.0);
+    link.connect();
+
+    // The request reaches the host, and nothing comes back.
+    link.mute_host = true;
+    let now = link.now;
+    link.client.list(now).expect("a list request is accepted");
+    assert_eq!(link.client.stats().lists_sent, 1);
+    link.run_until(120_000, 250, |link| link.client.stats().lists_sent == 1);
+    // The transaction gives up, which is the fact the flag has to follow.
+    link.run_until(600_000, 250, |link| link.client.stats().timed_out > 0);
+    assert!(
+        link.client.stats().timed_out > 0,
+        "no transaction timed out, so the test never reached the case it is about"
+    );
+
+    // With the air back, the same ask is accepted again and this time lands.
+    link.mute_host = false;
+    let now = link.now;
+    link.client.list(now).expect("the ask is accepted again");
+    assert_eq!(
+        link.client.stats().lists_sent,
+        2,
+        "the list request was still held after its transaction had given up"
+    );
+    link.run_until(300_000, 250, |link| {
+        link.events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::Sessions { last: true, .. }))
+    });
+    assert!(
+        link.events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::Sessions { last: true, .. })),
+        "the second ask never produced an answer: {:?}",
+        link.client.stats()
+    );
+}
 
 /// **The screen asks every few seconds while it waits, and each ask used to begin a new
 /// transaction.** Measured in the field on 2026-11-13: forty-eight list requests in two minutes, each
