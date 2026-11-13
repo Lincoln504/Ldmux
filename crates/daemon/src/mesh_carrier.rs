@@ -729,6 +729,14 @@ fn harvest<L: ByteLink>(
                 ) {
                     let _ = companion.send_packet(&reply);
                     radio.route_replies = radio.route_replies.saturating_add(1);
+                    // **The mechanism is invisible without this line.** A request answered and a
+                    // request never heard look identical from `mesh status`, and at range the
+                    // difference is the whole of whether a path can ever exist.
+                    eprintln!(
+                        "ldmuxd: host answered a route request ({} hop(s) back, {} answered so far)",
+                        request.path.len(),
+                        radio.route_replies
+                    );
                 }
                 continue;
             }
@@ -737,6 +745,11 @@ fn harvest<L: ByteLink>(
                 &radio.settings.peer_key,
             ) {
                 radio.learned_route = Some((reply.path.clone(), reply.hash_size));
+                eprintln!(
+                    "ldmuxd: host learned a route ({} hop(s), width {}B)",
+                    reply.path.len() / usize::from(reply.hash_size.clamp(1, 3)),
+                    reply.hash_size
+                );
                 if events
                     .blocking_send(Ok(Event::Route {
                         path: reply.path,

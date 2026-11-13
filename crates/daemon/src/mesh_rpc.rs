@@ -596,11 +596,14 @@ impl MeshRpc {
 
     /// `List`: the running shells and the marks that are true now, in one reply.
     async fn list<H: MeshHost>(&mut self, host: &mut H) -> Outcome {
-        let Some(listing) = host.listing().await else {
-            // An empty page means "no shells are running", which is a fact; a failed call is not
-            // that fact (`mesh_bridge.rs`, `Bridge::handle`, the `Message::List` arm).
-            return Outcome::Pending;
-        };
+        // **A failed listing must still answer.** Pending sends nothing at all, and the phone cannot
+        // tell "the host did not answer" from "there is nothing to answer with": it waits on a
+        // request the host heard and dropped. Decided by the field on 2026-11-13 — a phone that had
+        // established, whose List the host acknowledged with a bare 34-byte header and then answered
+        // with nothing, sat on "connecting" with no way to learn that the host's own listing had
+        // failed. An empty table is the honest answer: it says "no shells", which the operator can
+        // act on, where silence says nothing.
+        let listing = host.listing().await.unwrap_or_default();
         // **Every field, unconditionally.** `cwd`, `origin`, `owner` and `shell` were version
         // flags only because one path served version 5, 6, 7 and 10 phones at once
         // (`mesh_bridge.rs`, the `Message::List` arm); a version-15 phone reads all four.
@@ -2059,11 +2062,22 @@ mod tests {
     /// (`mesh_bridge.rs`, `Bridge::handle`, the `Message::List` arm), so the service says nothing and
     /// the phone asks again.
     #[tokio::test]
-    async fn a_list_the_host_could_not_answer_says_nothing() {
+    async fn a_list_the_host_could_not_answer_answers_with_no_shells() {
+        // **It used to say nothing, and the field showed what that costs.** A `List` the host
+        // acknowledged and never answered left the phone waiting for ever, because silence and "no
+        // shells" are the same bytes on the air. An empty table is an answer the operator can act on.
         let mut host = FakeHost::with(vec![]);
         host.runs = None;
         let mut rpc = MeshRpc::new();
-        assert_eq!(rpc.list(&mut host).await, Outcome::Pending);
+        let Outcome::Answer(messages) = rpc.list(&mut host).await else {
+            panic!("a failed listing is still an answer");
+        };
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, Message::Sessions { entries, .. } if entries.is_empty())),
+            "the answer does not say there are no shells: {messages:?}"
+        );
     }
 
     /// **A shell another device holds is not this phone's to end.** Without the holder rule the
