@@ -26,9 +26,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::Duration;
 
-use ldmux_companion::codec::{
-    build_raw_direct, build_record_flood_in_scope, parse_packet, AdvertPath,
-};
+use ldmux_companion::codec::{build_raw_direct, build_record_flood_in_scope};
 use ldmux_companion::{ByteLink, Companion, FloodScope, SessionError};
 use ldmux_mesh::carrier::{Bound, Budget, Carrier, Event, Signal};
 use ldmux_mesh::constants::{
@@ -62,9 +60,6 @@ const STATS_POLL: Duration = Duration::from_secs(15);
 /// command; a refused send is reported as a `SendResult` and the endpoint's ladder decides what to
 /// do, so nothing here retries.
 const SEND_WAIT: Duration = Duration::from_secs(10);
-
-/// The payload-type byte of a `RAW_CUSTOM` packet: the firmware's own numbering.
-const PAYLOAD_RAW_CUSTOM: u8 = 0x0F;
 
 /// What the carrier needs to compose a packet, fixed for the life of a link.
 #[derive(Clone)]
@@ -122,62 +117,45 @@ pub fn build_packet(
 /// session record — a route request, an advert, a stranger's channel traffic — which is the
 /// carrier's business to ignore and nobody else's.
 ///
-/// The log frame is `[0x88][snr × 4][rssi][packet]` (`MyMesh.cpp:286-296`), and the record is
-/// either a `RAW_CUSTOM` packet's payload or the tail of an `LDMR` flood after its six bytes of
-/// `[dest][source][magic][nonce]`.
+/// **One classifier, both ends.** This function used to be a host-only second copy: it accepted only
+/// the `0x88` receive log, only `RAW_CUSTOM` bare payloads, and nothing else. The phone has always
+/// read its pushes through [`ldmux_mesh::companion::push::classify`], so the two ends disagreed
+/// about what a session record even is, and only one of them was ever tested against the other. A
+/// contract with two owners and no cross-boundary test is the defect pattern the radio audit records
+/// as P4; measured 2026-11-13, the host's radio handed this thread 28 pushes in 45 s and every one
+/// was refused while `mesh status` reported `received 0 bytes`.
 #[must_use]
 pub fn classify_push(
     frame: &[u8],
     settings: &CarrierSettings,
 ) -> Option<(Vec<u8>, Vec<Event>, Option<u8>)> {
-    let (snr_quarter, rssi) = match frame {
-        [0x88, snr, rssi, ..] => (*snr, *rssi),
-        _ => return None,
-    };
-    let packet = frame.get(3..)?;
-    let view = parse_packet(packet)?;
-    // **The wrapper's magic decides, not the payload type.** A direct session record is a
-    // `RAW_CUSTOM` packet; a flooded one rides `REQ` with the `LDMR` wrapper inside it (the firmware
-    // flood-routes `REQ` and never `RAW_CUSTOM`). Reading only the payload type would therefore
-    // ignore every flood — which is exactly the class of silent loss this module exists to end.
-    let body = view.payload;
-    // **A flood names its sender, and that is the only way a host learns the phone's radio key.**
-    // The wrapper is `[dest][source][magic][nonce][record]`, one byte of each key, so the second
-    // byte is the sender's hash. Without it a host with no route floods to hash zero and the phone
-    // ignores the answer — the asymmetric-link case the teaching flood exists for.
-    let (record, sender): (&[u8], Option<u8>) = match body.get(2..6) {
-        Some(magic) if magic == ldmux_companion::codec::RECORD_FLOOD_MAGIC => {
-            (body.get(10..)?, body.get(1).copied())
-        }
-        _ if view.payload_type == PAYLOAD_RAW_CUSTOM => (body, None),
-        _ => return None,
-    };
-    if record.is_empty() {
-        return None;
-    }
-    let hops = view.path.hops;
+    let arrival = ldmux_mesh::companion::push::classify(frame)?;
+    // A direct arrival states no path and says nothing about the way back; a flood's chain is the
+    // way back and is what the reply's budget has to carry. `hops` is what the ceiling is priced in,
+    // and it is measured the same way on both ends.
+    let hops = arrival.hops();
     let events = vec![
         Event::Recv {
-            record: record.to_vec(),
-            path: view.path.bytes.clone(),
-            flood: view.is_flood(),
-            snr_db: f32::from(snr_quarter) / 4.0,
+            record: arrival.record.clone(),
+            path: arrival.path.clone(),
+            flood: arrival.flood,
+            snr_db: arrival.snr_db(),
         },
         Event::Signal(Signal {
             noise_floor_dbm: 0,
-            rssi_dbm: Some(rssi as i8),
+            rssi_dbm: Some(arrival.rssi_dbm),
             // The firmware reports quarters of a dB, which is the unit `Signal` keeps.
-            snr_quarter_db: snr_quarter as i8,
+            snr_quarter_db: arrival.snr_quarter_db,
             tx_air_secs: 0,
             rx_air_secs: 0,
             from_peer: true,
         }),
         Event::Limit {
-            record_max: record_ceiling(settings, view.path.clone()),
+            record_max: record_ceiling(settings, hops),
             hops,
         },
     ];
-    Some((record.to_vec(), events, sender))
+    Some((arrival.record, events, arrival.sender))
 }
 
 /// The largest record this arrival's path allows, from the one budget the whole tree uses.
@@ -185,11 +163,11 @@ pub fn classify_push(
 /// A direct arrival has had its path consumed, so it says nothing about the outbound path and the
 /// outbound limit stays what the endpoint learned; a flood's chain *is* the way back, so its length
 /// is what the sender may assume.
-fn record_ceiling(settings: &CarrierSettings, path: AdvertPath) -> u8 {
+fn record_ceiling(settings: &CarrierSettings, hops: u8) -> u8 {
     // A reply follows the reverse of the chain this record arrived by, so the chain is what the
     // outbound packet must carry. The receive ceiling caps it from above: a record larger than 171
     // bytes is never reported upward at all, whatever the path (`MyMesh::logRxRaw`).
-    let path_bytes = usize::from(path.hops) * usize::from(settings.hash_size.clamp(1, 3));
+    let path_bytes = usize::from(hops) * usize::from(settings.hash_size.clamp(1, 3));
     let limit = RECORD_MAX.saturating_sub(path_bytes).min(RECORD_RECEIVED_MAX);
     u8::try_from(limit).unwrap_or(u8::try_from(RECORD_RECEIVED_MAX).unwrap_or(171))
 }
@@ -226,6 +204,21 @@ struct Radio {
     learned_route: Option<(Vec<u8>, u8)>,
     /// Route requests answered, so the log can say the mechanism ran.
     route_replies: u32,
+    /// **What the port handed over, and what this end could not turn into a record.** A radio that
+    /// hears the air and a link that receives nothing are the same picture from `mesh status`, and
+    /// they are not the same fault: one is the peer never transmitting, the other is the port or the
+    /// classifier dropping it. `refused_code` is the first byte of the last frame `classify_push`
+    /// would not take, so the shape of what arrived is visible without a packet log.
+    pushed: u32,
+    refused: u32,
+    refused_code: u8,
+    refused_len: u16,
+    /// Frames whose bytes contain the `LDMR` marker anywhere: a flooded session record, whether or
+    /// not this end can decode the frame around it. `ldmr > 0` with `bytes_received == 0` means the
+    /// peer's records are arriving and being lost here; `ldmr == 0` means the air never brought one.
+    ldmr: u32,
+    /// Frames the packet header calls `RAW_CUSTOM` (`0x0F`): the direct carrier.
+    raw_custom: u32,
     /// When to ask the peer for a route again, while none is held.
     next_route: std::time::Instant,
     /// The radio's own last measurement, from `GET_STATS radio`.
@@ -371,6 +364,12 @@ impl RadioCarrier {
             peer_record: radio.peer_record,
             learned_route: None,
             route_replies: 0,
+            pushed: 0,
+            refused: 0,
+            refused_code: 0,
+            refused_len: 0,
+            ldmr: 0,
+            raw_custom: 0,
             next_route: std::time::Instant::now(),
         };
         std::thread::Builder::new()
@@ -547,6 +546,19 @@ fn serve<L: ByteLink>(
                 }
             }
             let _ = events.blocking_send(Ok(Event::Status(radio.status())));
+            // **What the port delivered, against what the radio heard.** `rx_air_secs` climbing
+            // while `pushed` stands still is a port fault; both standing still is a radio that is
+            // not demodulating. Without the pair, "the peer never sent" is an assumption.
+            eprintln!(
+                "ldmuxd: radio harvest pushed={} refused={} ldmr={} rawCustom={} (last 0x{:02x} {}B) rx_air={}s",
+                radio.pushed,
+                radio.refused,
+                radio.ldmr,
+                radio.raw_custom,
+                radio.refused_code,
+                radio.refused_len,
+                radio.measured.map_or(0, |m| m.rx_air_secs),
+            );
             // **The road, asked for while there is none.** The advert cache lives in the radio, and
             // the host has no session-side copy of it, so this is the only way a host learns a
             // durable path to the phone: without it the host's route table held only what a flood
@@ -711,6 +723,7 @@ fn harvest<L: ByteLink>(
                 return Ok(());
             }
         };
+        radio.pushed = radio.pushed.saturating_add(1);
         // **A route request is answered before it is anything else.** It is a flood carrying the
         // asker's key, so the reply goes back along the chain it crossed; a reply is the road this
         // end was asking for. Both are `REQ` floods, so they arrive here through the receive log
@@ -763,6 +776,15 @@ fn harvest<L: ByteLink>(
             }
         }
         let Some((_record, classified, sender)) = classify_push(&pushed, &radio.settings) else {
+            radio.refused = radio.refused.saturating_add(1);
+            radio.refused_code = pushed.first().copied().unwrap_or(0);
+            radio.refused_len = u16::try_from(pushed.len()).unwrap_or(u16::MAX);
+            if pushed.windows(4).any(|w| w == b"LDMR") {
+                radio.ldmr = radio.ldmr.saturating_add(1);
+            }
+            if pushed.get(3).is_some_and(|h| (h >> 2) & 0x0F == 0x0F) {
+                radio.raw_custom = radio.raw_custom.saturating_add(1);
+            }
             continue;
         };
         // **A flood names its sender, and that is how a host with no route learns the phone's radio
@@ -954,8 +976,8 @@ mod tests {
             &[0; 4],
         )
         .expect("a direct packet fits");
-        let view = parse_packet(&packet).expect("the packet parses");
-        assert_eq!(view.payload_type, PAYLOAD_RAW_CUSTOM);
+        let view = ldmux_companion::codec::parse_packet(&packet).expect("the packet parses");
+        assert_eq!(view.payload_type, 0x0F, "a direct carriage is PAYLOAD_TYPE_RAW_CUSTOM");
         assert_eq!(view.path.bytes, path, "the path the endpoint chose is the path sent");
         assert_eq!(view.path.hops, 3);
         assert_eq!(view.payload, record);
@@ -971,7 +993,7 @@ mod tests {
         let second = build_packet(&settings(), &Carriage::Flood, record, &[5, 6, 7, 8])
             .expect("a flood fits");
         assert_ne!(first, second, "a retry reused its bytes and would be dropped");
-        let view = parse_packet(&first).expect("the packet parses");
+        let view = ldmux_companion::codec::parse_packet(&first).expect("the packet parses");
         assert_eq!(
             view.route, 1,
             "a flood must take the flood route, or no repeater forwards it"

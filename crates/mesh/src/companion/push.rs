@@ -250,7 +250,16 @@ pub fn classify(frame: &[u8]) -> Option<PushArrival> {
 fn flood_or_raw(body: &[u8], payload_type: u8) -> Option<(&[u8], Option<u8>)> {
     let (record, sender): (&[u8], Option<u8>) = match body.get(2..6) {
         Some(magic) if magic == RECORD_FLOOD_MAGIC => (body.get(FLOOD_WRAPPER..)?, body.get(1).copied()),
-        _ if payload_type == PAYLOAD_TYPE_RAW_CUSTOM || payload_type == PAYLOAD_TYPE_REQ => (body, None),
+        // A bare payload is a record **only when the packet says `RAW_CUSTOM`**.
+        //
+        // **`REQ` is not this protocol's name for its record; the wrapper is.** `PAYLOAD_TYPE_REQ`
+        // is MeshCore's own request payload, and the public mesh carries other operators' `REQ`
+        // floods continuously: path requests (our own `LDRQ` included), adverts, strangers' traffic.
+        // Taking every `REQ` as a session record feeds all of it to the transaction layer, which
+        // counts each one as received and then drops it with no verdict at all: measured
+        // 2026-11-13 on the phone, `received=25 admitted=0` with every refusal counter still zero,
+        // and the frames were `LDRQ` route requests with a decoded path.
+        _ if payload_type == PAYLOAD_TYPE_RAW_CUSTOM => (body, None),
         _ => return None,
     };
     if record.is_empty() { None } else { Some((record, sender)) }
@@ -407,6 +416,25 @@ mod tests {
     fn a_channel_message_is_not_a_session_record() {
         let packet = vec![0x01 | (0x05 << 2), 0, 0xAA, 0xBB];
         assert_eq!(classify(&push(&packet)), None);
+    }
+
+    #[test]
+    fn another_operators_route_request_is_not_a_session_record() {
+        // **The public mesh's own traffic, taken as ours.** A `REQ` flood is MeshCore's request
+        // payload, and the air is full of them: every ldmux node's `LDRQ`, every advert, every
+        // stranger's request. The wrapper's magic is the only thing that says a `REQ` is carrying a
+        // session record, so a plain `REQ` must be refused rather than handed up as one.
+        //
+        // Measured 2026-11-13 on the phone: `received=25 admitted=0`, with `bad`, `dup`,
+        // `wrongIdx`, `noSess` and `refusal` all zero. The frames were `LDRQ` floods.
+        let mut packet = vec![0x01u8, 0x03, 0xE5, 0x20, 0x10];
+        packet.extend_from_slice(b"EaLDRQa_C\x1f");
+        assert_eq!(classify(&push(&packet)), None);
+        // **A `0x84` push is different and must stay accepted.** The firmware only emits it for a
+        // `RAW_CUSTOM` packet addressed to this client (`onRawDataRecv`), so the payload of one is a
+        // record by construction: a foreign `REQ` flood is forwarded, never handed up this way.
+        let raw = [0x84u8, 0x13, 0xAA, 0xFF, 0xE5, 0x20, b'L', b'D', b'R', b'Q', 0x01];
+        assert_eq!(classify(&raw).map(|a| a.record), Some(raw[4..].to_vec()));
     }
 
     #[test]
