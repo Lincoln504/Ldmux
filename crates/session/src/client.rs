@@ -510,6 +510,15 @@ pub struct ClientStats {
     ///
     /// Cleared when the link is rebuilt, because the question it answers is about *this* attempt.
     pub route_answered: bool,
+    /// **Every push the radio handed up, and the code of the last one.**
+    ///
+    /// `records_received` counts only the pushes that classify as session records, so a radio that
+    /// hears the whole public mesh and a radio that hears nothing both read zero there. This is the
+    /// pair that separates them: `pushes` climbing with `records_received` still zero is a radio
+    /// hearing other operators, and `pushes` standing still is a radio hearing nothing at all.
+    pub pushes: u64,
+    /// The code of the last push (`0x84`, `0x88`, `0x8E`, …), 0 when none has arrived.
+    pub last_push_code: u8,
 }
 
 impl ClientStats {
@@ -1046,6 +1055,14 @@ impl Client {
     ///
     /// Returns what the push or the answer did, so a caller can log it.
     pub fn on_frame(&mut self, payload: &[u8], now_ms: u64, wall_ms: u64) -> FrameOutcome {
+        // **Counted before anything decides what it is.** A push this end cannot use is still
+        // evidence that the radio is hearing the air, and that is the fact a field log needs first.
+        if let Some(code) = payload.first().copied()
+            && code >= 0x80
+        {
+            self.stats.pushes = self.stats.pushes.saturating_add(1);
+            self.stats.last_push_code = code;
+        }
         // **Every push is classified, not only the receive log.** A record delivered to this end
         // arrives as `PUSH_CODE_RAW_DATA` (`0x84`, `MyMesh.cpp:832-853`) — the log's `0x88` is a
         // debug tap. This checked for `0x88` alone, so a real direct record fell through to the

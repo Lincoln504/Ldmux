@@ -223,6 +223,12 @@ typedef struct {
      * transmitted": a record the radio would not send and one the air swallowed are the same
      * silence at the far end. */
     uint64_t records_refused;
+    /* Every push the radio handed up, and the code of the last one.
+     *
+     * `records_received` counts only the pushes that classify as session records, so a radio
+     * hearing the whole public mesh and a radio hearing nothing both read zero there. */
+    uint64_t pushes;
+    uint8_t last_push_code;
 } LdmuxClientStats;
 
 /*

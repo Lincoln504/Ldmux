@@ -526,6 +526,9 @@ data class ClientStats(
     val lastAdmittedLen: Long = 0,
     /** Records the radio refused to transmit, which is not the same as records the air lost. */
     val recordsRefused: Long = 0,
+    /** Every push the radio handed up, and the code of the last one. */
+    val pushes: Long = 0,
+    val lastPushCode: Long = 0,
 ) {
     companion object {
         internal fun of(v: LongArray): ClientStats = ClientStats(
@@ -572,6 +575,8 @@ data class ClientStats(
             lastAdmittedKind = v[40],
             lastAdmittedLen = v[41],
             recordsRefused = v[42],
+            pushes = v[43],
+            lastPushCode = v[44],
         )
     }
 }

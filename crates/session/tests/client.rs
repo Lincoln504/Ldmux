@@ -1089,6 +1089,32 @@ fn a_path_learned_from_an_advert_is_used_but_never_proven() {
 // Asking for the list again must not replace the request already in flight.
 // ---------------------------------------------------------------------------------------------
 
+/// **A radio hearing other operators is not a radio hearing nothing.**
+///
+/// `records_received` counts only the pushes that classify as session records, so both read zero
+/// when the air is full of somebody else's traffic. The push counter is what separates them, and on
+/// 2026-11-13 that was the first question a field log had to answer.
+#[test]
+fn a_push_that_is_not_ours_still_proves_the_radio_is_hearing() {
+    let mut link = Link::new(47, 1, 0.0);
+    link.connect();
+    let before = link.client.stats().pushes;
+    let records_before = link.client.link_stats().records_received;
+    // A neighbour's advert in the receive log: a real push, not a session record.
+    let advert = [0x88u8, 0xF4, 0xA6, 0x11, 0x00, 0x00, 0xAA];
+    let now = link.now;
+    let wall = link.wall();
+    link.client.on_frame(&advert, now, wall);
+    let stats = link.client.stats();
+    assert_eq!(stats.pushes, before + 1, "the push was not counted");
+    assert_eq!(stats.last_push_code, 0x88);
+    assert_eq!(
+        link.client.link_stats().records_received,
+        records_before,
+        "an advert was taken as a session record"
+    );
+}
+
 /// **A radio that will not send is counted, not inferred.**
 ///
 /// The firmware refuses a send while it is retuning or its store is busy, and from the far end that

@@ -236,6 +236,9 @@ pub struct LdmuxClientStats {
     pub local_index: u8,
     /// Records the radio refused to put on the air, against the ones it took.
     pub records_refused: u64,
+    /// Every push the radio handed up, and the code of the last one.
+    pub pushes: u64,
+    pub last_push_code: u8,
 }
 
 /// What the phone's radio last said about itself.
@@ -1265,6 +1268,8 @@ pub unsafe extern "C" fn ldmux_client_stats(c: *mut LdmuxClient, out: *mut Ldmux
                 last_refusal_counter: link.last_refusal_counter,
                 local_index: link.local_index,
                 records_refused: radio.sends_refused,
+                pushes: stats.pushes,
+                last_push_code: stats.last_push_code,
             };
             // SAFETY: `out` is non-null and writable; the struct is plain data.
             unsafe { *out = filled };
