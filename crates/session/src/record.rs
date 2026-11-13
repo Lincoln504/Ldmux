@@ -72,6 +72,40 @@ pub enum RecordError {
     SealFailed,
 }
 
+impl RecordError {
+    /// A stable code for a log line, so a field failure names its reason instead of "bad record".
+    ///
+    /// Append-only: a code that changes meaning makes an old log lie.
+    #[must_use]
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::Malformed => 1,
+            Self::WrongIndex => 2,
+            Self::Duplicate => 3,
+            Self::TooOld => 4,
+            Self::BadTag => 5,
+            Self::TooLong => 6,
+            Self::CounterExhausted => 7,
+            Self::SealFailed => 8,
+        }
+    }
+
+    /// The reason in words, for a status line.
+    #[must_use]
+    pub const fn meaning(self) -> &'static str {
+        match self {
+            Self::Malformed => "malformed",
+            Self::WrongIndex => "another session's index",
+            Self::Duplicate => "a counter already seen",
+            Self::TooOld => "a counter older than the window",
+            Self::BadTag => "the tag did not verify",
+            Self::TooLong => "longer than the record limit",
+            Self::CounterExhausted => "the counter is used up",
+            Self::SealFailed => "the transport could not seal it",
+        }
+    }
+}
+
 /// A sliding replay window over a 32-bit counter, 64 records wide (ADR-0020: judgement call,
 /// tens of seconds of history at the planned rate).
 ///

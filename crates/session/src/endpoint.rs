@@ -323,6 +323,8 @@ pub struct Stats {
     pub answers_ignored: u64,
     /// Parts sealed with no path while a real chain was fresh: a record delivered to nobody.
     pub parts_without_a_road: u64,
+    /// The last record refused by the record layer, as a stable code (`RecordError::code`).
+    pub last_record_refusal: u8,
     /// Paths learned from a flood's reversed chain.
     pub routes_learned: u64,
     /// Paths proven by an authenticated direct arrival.
@@ -557,6 +559,15 @@ pub struct RadioEndpoint {
     last_ask_ms: Option<u64>,
     /// When `connect` was called, so the first initiation can wait for a path.
     connected_at_ms: Option<u64>,
+    /// The road the last record from the peer arrived by, reversed: the one road with evidence.
+    ///
+    /// A flood's chain is the road it crossed, so its reverse is the road back, and the answer is
+    /// already sent along it. The transaction parts must follow the same road: the advert cache can
+    /// name a different one — the peer's advert may have been heard through a repeater while the peer
+    /// itself is audible directly — and a part sent down the wrong road is delivered to nobody.
+    /// Measured 2026-11-13: the host sent `34B carriage=direct path=[e5]` while the phone heard it
+    /// directly, and the phone admitted nothing.
+    arrival_road: Option<Vec<u8>>,
     /// Whether the last attempt was spent by a failed answer and a fresh one is owed.
     ///
     /// **Replacement, never creation.** `connect` is the only thing that starts a first attempt:
@@ -676,6 +687,7 @@ impl RadioEndpoint {
             attempt_spent: false,
             last_ask_ms: None,
             connected_at_ms: None,
+            arrival_road: None,
             session: None,
             replay: ReplayWindow::default(),
             counter: 0,
@@ -873,6 +885,19 @@ impl RadioEndpoint {
 
     fn carriage_for(&mut self, attempt: u8, now_ms: u64) -> Carriage {
         self.route.prune(now_ms);
+        // **The road the peer's own record arrived by outranks the advert cache.** It is the only road
+        // with evidence behind it: the peer's record crossed it a moment ago. The advert cache can name
+        // a different one, because the peer's advert may have been heard through a repeater while the
+        // peer itself is audible directly, and a part sent down the wrong road is delivered to nobody.
+        if let Some(road) = self.arrival_road.clone()
+            && self
+                .route
+                .candidates()
+                .iter()
+                .any(|held| held.path() == road.as_slice() && held.is_fresh(now_ms))
+        {
+            return Carriage::Direct { path: road };
+        }
         self.route.carrier_for(attempt, now_ms, self.config.sf)
     }
 
@@ -1349,6 +1374,7 @@ impl RadioEndpoint {
         // carriage=direct path=[]` beside `52B carriage=direct path=[10, 0c, 21, 86, e5]`).
         let back = advice_path(info, width);
         if !back.is_empty() {
+            self.arrival_road = Some(back.clone());
             self.route.observe(Candidate::learned(
                 back.clone(),
                 self.config.path_width,
@@ -1497,6 +1523,7 @@ impl RadioEndpoint {
             Ok(opened) => opened,
             Err(e) => {
                 self.stats.rejected_record += 1;
+                self.stats.last_record_refusal = e.code();
                 // **One unopenable record is not proof the session is dead.** A record sealed for the
                 // session this end just replaced is exactly what a peer's queue delivers after a
                 // handshake, and it is the only kind that fails while everything else works.

@@ -506,6 +506,8 @@ data class ClientStats(
     val answersRepeated: Long = 0,
     /** Answers ignored because they were for another initiation. */
     val answersIgnored: Long = 0,
+    /** The last record refused by the record layer, as a stable code; 0 when none has been. */
+    val lastRecordRefusal: Long = 0,
 ) {
     companion object {
         internal fun of(v: LongArray): ClientStats = ClientStats(
@@ -541,6 +543,7 @@ data class ClientStats(
             answersFinished = v[29],
             answersRepeated = v[30],
             answersIgnored = v[31],
+            lastRecordRefusal = v[32],
         )
     }
 }

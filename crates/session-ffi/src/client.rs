@@ -217,6 +217,8 @@ pub struct LdmuxClientStats {
     pub answers_finished: u64,
     pub answers_repeated: u64,
     pub answers_ignored: u64,
+    /// The last record refused by the record layer, as a stable code; 0 when none has been.
+    pub last_record_refusal: u8,
 }
 
 /// What the phone's radio last said about itself.
@@ -1235,6 +1237,7 @@ pub unsafe extern "C" fn ldmux_client_stats(c: *mut LdmuxClient, out: *mut Ldmux
                 answers_finished: link.answers_finished,
                 answers_repeated: link.answers_repeated,
                 answers_ignored: link.answers_ignored,
+                last_record_refusal: link.last_record_refusal,
             };
             // SAFETY: `out` is non-null and writable; the struct is plain data.
             unsafe { *out = filled };
