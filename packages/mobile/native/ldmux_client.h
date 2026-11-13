@@ -187,6 +187,8 @@ typedef struct {
     uint64_t rejected_handshake;
     uint64_t unknown_downlink;
     uint64_t lists_sent;
+    uint64_t rejected_unknown_kind;
+    uint64_t rejected_record;
 } LdmuxClientStats;
 
 /*

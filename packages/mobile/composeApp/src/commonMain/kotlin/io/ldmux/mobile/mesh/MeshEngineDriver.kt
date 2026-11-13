@@ -415,8 +415,15 @@ class MeshEngineDriver(
             engine.closePage(page)
             page = ""
         }
-        _view.value = MeshTermView.Listing
-        return engine.list(clock()) == ClientCode.OK
+        // **The view is what the caller retries on.** Setting it to `Listing` before knowing whether
+        // the request was accepted made `needList` false, which cancelled the retry loop's own
+        // `LaunchedEffect` key — the screen asked twice, in the seconds before a session existed, and
+        // then stopped for ever. It moves only when the host has been asked successfully.
+        val accepted = engine.list(clock()) == ClientCode.OK
+        if (accepted) {
+            _view.value = MeshTermView.Listing
+        }
+        return accepted
     }
 
     suspend fun listShells() {

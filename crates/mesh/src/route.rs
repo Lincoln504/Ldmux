@@ -278,12 +278,21 @@ impl RouteTable {
     /// A path is identified by its bytes alone, so a fresher measurement of the same road replaces
     /// the older one whether it is better or worse: the SNR is a reading of *now*, and keeping an
     /// old reading because it was kinder is how a dead path stays selected.
-    pub fn observe(&mut self, candidate: Candidate) {
+    pub fn observe(&mut self, mut candidate: Candidate) {
         if let Some(existing) = self
             .candidates
             .iter_mut()
             .find(|held| held.path == candidate.path)
         {
+            // **Being mentioned again does not un-prove a road.** Proof is evidence that this end's
+            // own authenticated record came back along the path with every hop consumed, and a later
+            // flood carrying the same chain says nothing against it. Replacing the held candidate
+            // wholesale reset the proof, so a route proven a moment ago went back to a guess and the
+            // next send went back to flooding: measured 2026-11-13, a host that held its adjacent
+            // route only as a candidate while the phone was a metre away.
+            if existing.proof == Proof::Proven {
+                candidate.proof = Proof::Proven;
+            }
             *existing = candidate;
         } else {
             self.candidates.push(candidate);
@@ -572,5 +581,72 @@ mod tests {
         let best = table.best(1_000, 7).expect("a path");
         assert!((best.snr_db() - 0.5).abs() < f32::EPSILON);
         assert_eq!(best.heard_at_ms(), 200);
+    }
+}
+
+#[cfg(test)]
+mod adjacency_ranking {
+    //! **The adjacent route is refreshed by the proof, and being mentioned again never un-proves it.**
+    //!
+    //! Field case, 2026-11-13: two radios a metre apart and the host sending along three repeaters,
+    //! because the adjacent candidate expired while a looping flood kept a long chain fresh, and
+    //! `observe` reset a proof back to a guess whenever the same chain was mentioned again. The
+    //! ranking itself is not the defect — a *marginal* short road does lose to a confident long one
+    //! by design (`a_confident_copy_beats_a_marginal_one_with_fewer_hops`) — so what is pinned here
+    //! is the refresh and the proof, which is what actually kept the two ends apart.
+
+    use super::*;
+
+    #[test]
+    fn a_re_observed_chain_keeps_its_proof() {
+        let now = 1_000_000;
+        let mut route = RouteTable::new();
+        route.observe(Candidate::learned(vec![9, 8, 7], 1, 6.0, now));
+        let witness = ProofWitness::authenticated_direct(&[9, 8, 7], 0).expect("a finished path");
+        route.adopt_proven(&witness);
+        assert!(route.candidates()[0].is_proven(), "the witness did not prove it");
+
+        // The same chain heard again a moment later, as a flood reports it.
+        route.observe(Candidate::learned(vec![9, 8, 7], 1, 6.0, now + 1_000));
+        assert!(
+            route.candidates()[0].is_proven(),
+            "a second mention of a proven road turned it back into a guess: {:?}",
+            route.candidates()
+        );
+    }
+
+    #[test]
+    fn a_re_observation_refreshes_the_hearing_time() {
+        let now = 1_000_000;
+        let mut route = RouteTable::new();
+        route.observe(Candidate::learned(Vec::new(), 1, 12.0, now));
+        assert_eq!(route.best(now, 7).map(|c| c.path().to_vec()), Some(Vec::new()));
+
+        // The proof refreshes it far beyond the freshness window, so it is still the choice later.
+        let later = now + ROUTE_FRESH_MS + 1;
+        route.observe(Candidate::learned(Vec::new(), 1, 12.0, later));
+        assert!(
+            route.best(later, 7).is_some_and(|c| c.path().is_empty()),
+            "the adjacent route was not refreshed by its own evidence: {:?}",
+            route.candidates()
+        );
+    }
+
+    #[test]
+    fn two_fresh_adjacent_routes_are_the_same_route_held_once() {
+        let now = 1_000_000;
+        let mut route = RouteTable::new();
+        route.observe(Candidate::learned(Vec::new(), 1, 12.0, now));
+        route.observe(Candidate::learned(Vec::new(), 1, 4.0, now + 500));
+        assert_eq!(
+            route.candidates().len(),
+            1,
+            "the adjacent route was held twice: {:?}",
+            route.candidates()
+        );
+        assert!(
+            route.candidates()[0].snr_db() == 4.0,
+            "the newest reading did not replace the older one"
+        );
     }
 }

@@ -112,6 +112,12 @@ internal const val SYNC_ANSWER_TIMEOUT_MS = 20_000L
 internal const val LAUNCHER_TRIES = 300
 internal const val LAUNCHER_RETRY_MS = 400L
 
+/// How often a screen with nothing on it asks the host for the list.
+///
+/// Four seconds is a message the radio can afford and far shorter than a person's patience; asking
+/// once was the defect, and asking every 400 ms would spend the band on a question already in flight.
+internal const val LIST_ASK_REPEAT_MS = 4_000L
+
 /**
  * The shell a rebuilt or resumed connection should come back to.
  *
@@ -940,9 +946,25 @@ fun MeshTerminalScreen(
     val needList = !terminalLive && !holding && !conn.driver.attaching
     LaunchedEffect(needList, AppLifecycle.foreground, attemptNo) {
         if (!needList || !AppLifecycle.foreground) return@LaunchedEffect
-        repeat(LAUNCHER_TRIES) {
-            if (conn.driver.launcher()) return@LaunchedEffect
-            delay(LAUNCHER_RETRY_MS)
+        // **Ask again until the answer arrives, not until the request is accepted.** The request is
+        // queued against the session that exists when it is made, and a bootstrap that retries clears
+        // that queue — so an accepted ask can still never reach the host. Measured on the phone
+        // 2026-11-13: `lists=2`, `commands=0`, the screen waiting for ever on "asking host for
+        // shells", because the loop returned on the first success and nothing ever asked again.
+        // The loop stops when the host's list actually lands (the view leaves `Listing`) and is
+        // cancelled by its own keys when the screen no longer needs one.
+        var asked = 0
+        while (true) {
+            val view = conn.driver.view.value
+            if (view !is MeshTermView.Listing && view !is MeshTermView.Idle &&
+                view !is MeshTermView.Handshaking && view !is MeshTermView.LinkDown &&
+                asked > 0
+            ) {
+                return@LaunchedEffect
+            }
+            conn.driver.launcher()
+            asked += 1
+            delay(LIST_ASK_REPEAT_MS)
         }
     }
     // **A link that stays down returns to the shell list.** The held screen above is the right

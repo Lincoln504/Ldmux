@@ -192,6 +192,10 @@ pub struct LdmuxClientStats {
     pub unknown_downlink: u64,
     /// Lists this end asked for.
     pub lists_sent: u64,
+    /// Records whose kind this end does not know.
+    pub rejected_unknown_kind: u64,
+    /// Records that decrypted to nothing usable.
+    pub rejected_record: u64,
 }
 
 /// What the phone's radio last said about itself.
@@ -1188,6 +1192,8 @@ pub unsafe extern "C" fn ldmux_client_stats(c: *mut LdmuxClient, out: *mut Ldmux
                 rejected_handshake: link.rejected_handshake,
                 unknown_downlink: stats.unknown_downlink,
                 lists_sent: stats.lists_sent,
+                rejected_unknown_kind: link.rejected_unknown_kind,
+                rejected_record: link.rejected_record,
             };
             // SAFETY: `out` is non-null and writable; the struct is plain data.
             unsafe { *out = filled };

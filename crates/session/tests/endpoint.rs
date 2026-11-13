@@ -1189,3 +1189,117 @@ fn a_bad_answer_spends_the_attempt_and_the_ladder_replaces_it() {
         run.phone.stats()
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// Adjacency is a route, and a direct arrival proves it.
+// ---------------------------------------------------------------------------------------------
+
+/// **A direct arrival with no path left proves the peer is adjacent, and that route must win over
+/// a long chain learned from a flood that went the long way round.**
+///
+/// Measured against two radios a metre apart on 2026-11-13: the host reported
+/// `route 20 repeaters in the path` and `capacity 152 B`, because the only fresh candidates left
+/// were chains from floods that had looped round a public mesh, while the phone's own direct records
+/// — proof of adjacency — taught nothing. Every direct send followed the 20-hop loop and never
+/// landed.
+#[test]
+fn a_direct_arrival_with_no_path_left_proves_the_peer_is_adjacent() {
+    let mut run = Run::new(9, 0, 0.0, 1);
+    run.phone
+        .connect(run.now, run.wall())
+        .expect("the phone can start an attempt");
+    run.run_until(60_000, 250, |run| run.phone.established() && run.host.established());
+    assert!(run.phone.established(), "the phone did not establish");
+    assert!(
+        run.host.stats().sessions_established >= 1,
+        "the host did not establish: {:?}",
+        run.host.stats()
+    );
+
+    // **The phone holds an adjacent route, as an advert gives it in the field**, so its records go
+    // out direct with nothing in the path. A flood would teach this end a chain and prove nothing.
+    run.phone.observe_path(ldmux_mesh::route::Candidate::learned(
+        Vec::new(),
+        1,
+        0.0,
+        run.now,
+    ));
+
+    // **A record from the phone, after the session, is the arrival that proves the road.** Nothing
+    // before it is evidence: a flood teaches a chain and nothing more.
+    let request = message(0x10, &[0x33; 24]);
+    run.phone
+        .submit(&request, run.now)
+        .expect("a 25-byte message is one part");
+    run.run_until(120_000, 250, |run| run.host.stats().messages_delivered >= 1);
+    assert!(
+        run.host.stats().messages_delivered >= 1,
+        "the phone's message never reached the host: {:?}",
+        run.host.stats()
+    );
+
+    // The host holds the phone as adjacent, and it is a proof rather than a guess: the phone's
+    // direct record arrived with nothing left in its path.
+    let host_route = run.host.route();
+    let adjacent = host_route
+        .candidates()
+        .iter()
+        .find(|candidate| candidate.path().is_empty())
+        .expect("the host holds no adjacent route at all");
+    assert!(
+        adjacent.is_proven(),
+        "the host holds the phone as adjacent but not as proven: {:?}",
+        host_route.candidates()
+    );
+    assert_eq!(
+        host_route.best(run.now, 7).map(|c| c.path().to_vec()),
+        Some(Vec::new()),
+        "the host would not send by the adjacent route: {:?}",
+        host_route.candidates()
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// A session that cannot open the peer's records is replaced, not kept.
+// ---------------------------------------------------------------------------------------------
+
+/// **A record that will not open is evidence the session is dead, and the phone must say so.**
+///
+/// Measured on the phone 2026-11-13: `admitted=4` beside `bad=3`, a live session in the client's
+/// counters, and a screen waiting for a list the host was already answering. The phone kept the
+/// session, so every later record was refused the same way and nothing could end it — only the host
+/// could ask for a new handshake, and it had no reason to.
+#[test]
+fn a_record_that_will_not_open_drops_the_session_and_asks_again() {
+    let mut run = Run::new(9, 1, 0.0, 1);
+    run.phone
+        .connect(run.now, run.wall())
+        .expect("the phone can start an attempt");
+    run.run_until(60_000, 250, |run| run.phone.established());
+    assert!(run.phone.established(), "the phone did not establish");
+
+    // A record of the shape the host sends, addressed to a session this end does not hold: the
+    // header is right, the tag is not.
+    let mut stale = vec![0x16u8];
+    stale.extend_from_slice(&[0x5A; 33]);
+    run.phone
+        .on_record(&stale, &ArrivalInfo::direct(0.0), run.now, run.wall());
+    assert!(
+        run.phone.stats().rejected_record >= 1,
+        "the stale record was not refused: {:?}",
+        run.phone.stats()
+    );
+    assert!(
+        !run.phone.established(),
+        "the phone kept a session it can no longer read: {:?}",
+        run.phone.stats()
+    );
+
+    // And it recovers: a new attempt, a new answer, a working session.
+    run.run_until(300_000, 500, |run| run.phone.established());
+    assert!(
+        run.phone.established(),
+        "the phone never recovered from a stale session: {:?}",
+        run.phone.stats()
+    );
+}

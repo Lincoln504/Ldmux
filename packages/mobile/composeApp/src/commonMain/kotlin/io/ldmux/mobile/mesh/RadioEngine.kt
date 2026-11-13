@@ -480,6 +480,10 @@ data class ClientStats(
     val unknownDownlink: Long = 0,
     /** Lists this end asked for. */
     val listsSent: Long = 0,
+    /** Records whose kind this end does not know. */
+    val unknownKind: Long = 0,
+    /** Records that decrypted to nothing usable. */
+    val badRecord: Long = 0,
 ) {
     companion object {
         internal fun of(v: LongArray): ClientStats = ClientStats(
@@ -502,6 +506,8 @@ data class ClientStats(
             handshakeRefused = v[16],
             unknownDownlink = v[17],
             listsSent = v[18],
+            unknownKind = v[19],
+            badRecord = v[20],
         )
     }
 }

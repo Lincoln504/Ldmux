@@ -64,6 +64,13 @@ use crate::transaction::{Action, BeginError, PeerId, Received, TransactionLayer}
 /// while the filter thought it was a phone would be exactly the confusion `RC-3` came from.
 pub use crate::direction::Side as Role;
 
+/// How long after sending along a path a direct arrival still counts as evidence about it.
+///
+/// A direct send is answered inside a rung, and the rung's floor is 12 s, so ten seconds covers any
+/// neighbour's round trip while staying far short of the minute a stale send would need to be
+/// mistaken for this one.
+const PROVE_WINDOW_MS: u64 = 10_000;
+
 /// How long after the flooded answer its direct copy follows.
 ///
 /// Behind the flood on purpose: the flood is the copy that teaches a far end the chain, and two
@@ -537,6 +544,13 @@ pub struct RadioEndpoint {
     /// The path our last direct record travelled out, which is the witness a zero-hop direct arrival
     /// speaks for.
     last_direct_path: Vec<u8>,
+    /// When this end last sent a direct record with **no path at all**, which is the send that says
+    /// the peer is adjacent.
+    ///
+    /// Kept apart from `last_direct_path` because that field is only filled by a path with hops in
+    /// it: the empty send used to leave no trace, so a direct arrival could never prove adjacency and
+    /// the only fresh candidates left were chains from floods that had taken the long way round.
+    last_adjacent_send_ms: Option<u64>,
     /// How many records the carrier says may still be sent this hour.
     records_left: u8,
     /// The next `send_record` correlation number.
@@ -614,6 +628,7 @@ impl RadioEndpoint {
             inbound: Vec::new(),
             pending_pin: None,
             last_direct_path: Vec::new(),
+            last_adjacent_send_ms: None,
             records_left: CREDIT_WINDOW,
             seq: 0,
             stats: Stats::default(),
@@ -994,10 +1009,12 @@ impl RadioEndpoint {
 
     /// Queue one already-built record.
     fn push(&mut self, record: Vec<u8>, carriage: Carriage, at_ms: u64, purpose: Purpose) {
-        if let Carriage::Direct { path } = &carriage
-            && !path.is_empty()
-        {
-            self.last_direct_path = path.clone();
+        if let Carriage::Direct { path } = &carriage {
+            if path.is_empty() {
+                self.last_adjacent_send_ms = Some(at_ms);
+            } else {
+                self.last_direct_path = path.clone();
+            }
         }
         self.queue.push_back(Pending {
             record,
@@ -1270,8 +1287,16 @@ impl RadioEndpoint {
         }
         self.stats.need_handshake_heard += 1;
         self.learn(&info.arrival, &info.path, info.snr_db, now_ms);
-        if self.start_attempt(now_ms, wall_ms).is_err() {
-            return Admitted::Ignored(Rejected::BadHandshakeRequest);
+        // **Only the phone initiates.** A host that starts an attempt builds a Noise initiation it
+        // will never send — `stage_bootstrap` runs for the phone alone — so the attempt only sits
+        // there pretending to be a session in progress. The host's own recovery is to stop trusting
+        // the session it holds and wait for the peer's new one, so that is all it does.
+        if self.config.role == Side::Phone {
+            if self.start_attempt(now_ms, wall_ms).is_err() {
+                return Admitted::Ignored(Rejected::BadHandshakeRequest);
+            }
+        } else {
+            self.session = None;
         }
         Admitted::HandshakeRequested
     }
@@ -1297,13 +1322,26 @@ impl RadioEndpoint {
             Ok(opened) => opened,
             Err(e) => {
                 self.stats.rejected_record += 1;
+                // **A record this end cannot open means the session is not useful, so it is dropped
+                // and the other end is asked to handshake again.** Keeping it produced the same
+                // refusal for every later record with nothing to end it: measured on the phone
+                // 2026-11-13, `admitted=4` beside `bad=3` while the screen waited for a list the host
+                // was already answering. The host asks in the same situation; this is the phone's
+                // half of the same recovery, and without it only the host can break the deadlock.
+                self.session = None;
+                // The attempt behind that session is spent, so it has to be replaced by the ladder
+                // for a new session to exist at all: without this the phone dropped the session and
+                // then sat silent, which is the state the field log shows as a live `sessions` count
+                // and nothing else.
+                self.attempt_spent = true;
+                self.request_handshake(now_ms, wall_ms);
                 return Admitted::Ignored(Rejected::Record(e));
             }
         };
         self.stats.records_admitted += 1;
         // Only now, with the tag verified, may a route be called proven. A direct arrival that
         // finished its path is the one shape that proves anything.
-        self.prove(&info.arrival, now_ms);
+        self.prove(info, now_ms);
         // A flood from the peer is authenticated and carries the chain it crossed, which is the same
         // evidence a bootstrap flood gives: a **candidate**, never a proof. Learning it here is what
         // keeps the candidate fresh while the peer is talking. Without it a learned path expires
@@ -1379,17 +1417,39 @@ impl RadioEndpoint {
     }
 
     /// Mark this end's last direct path proven, when a direct arrival finished its path.
-    fn prove(&mut self, arrival: &Arrival, _now_ms: u64) {
-        let Arrival::Direct { hops } = *arrival else {
+    fn prove(&mut self, info: &ArrivalInfo, now_ms: u64) {
+        let Arrival::Direct { hops } = info.arrival else {
             return;
         };
         let path = self.last_direct_path.clone();
-        if path.is_empty() {
-            return;
-        }
         let Some(witness) = ProofWitness::authenticated_direct(&path, hops) else {
             return;
         };
+        // **A direct arrival that finished its path proves the road it was sent by.** When that road
+        // was empty the peer is adjacent, which is the strongest fact a route table can hold and the
+        // one that must outrank any long chain a looping flood taught. It used to be ignored twice
+        // over: `last_direct_path` was only filled for a non-empty path, and an empty chain returned
+        // early here — measured 2026-11-13, the host held `route 20 repeaters in the path` and
+        // `capacity 152 B` for a phone a metre away, and every direct send followed that loop and
+        // never landed. `adopt_proven` only upgrades a candidate already held, so the chain has to be
+        // stated before it can be proven.
+        let adjacent = path.is_empty()
+            && self
+                .last_adjacent_send_ms
+                .is_some_and(|sent| now_ms.saturating_sub(sent) <= PROVE_WINDOW_MS);
+        if path.is_empty() && !adjacent {
+            // A two-hop arrival is not evidence about a road this end did not just use.
+            return;
+        }
+        // **Observed every time, not only the first.** `observe` refreshes the hearing time, and a
+        // proven route that is never refreshed expires after two minutes and hands the send back to
+        // whichever long chain a looping flood taught most recently.
+        self.route.observe(Candidate::learned(
+            path.clone(),
+            self.config.path_width,
+            info.snr_db,
+            now_ms,
+        ));
         let already = self
             .route
             .candidates()

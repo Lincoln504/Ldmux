@@ -39,7 +39,7 @@
  * partly written. */
 #define MIRROR_FIELDS 12
 #define EVENT_FIELDS 8
-#define STATS_FIELDS 19
+#define STATS_FIELDS 21
 #define RADIO_FIELDS 23
 /* name at [0, name_len), firmware at [NAME_MAX, NAME_MAX + firmware_len). */
 #define NAME_MAX 32
@@ -539,5 +539,7 @@ JNIEXPORT jint JNICALL JNI(stats)(JNIEnv *env, jclass cls, jlong handle, jlongAr
   put_i64(env, out, 16, (jlong)s.rejected_handshake);
   put_i64(env, out, 17, (jlong)s.unknown_downlink);
   put_i64(env, out, 18, (jlong)s.lists_sent);
+  put_i64(env, out, 19, (jlong)s.rejected_unknown_kind);
+  put_i64(env, out, 20, (jlong)s.rejected_record);
   return (*env)->ExceptionCheck(env) ? LDMUX_ERR_ARG : LDMUX_OK;
 }

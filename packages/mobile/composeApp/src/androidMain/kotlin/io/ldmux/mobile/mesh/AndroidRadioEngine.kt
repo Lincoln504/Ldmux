@@ -392,6 +392,7 @@ class AndroidRadioEngine(
                         "commands=${s.commandsSent} lists=${s.listsSent} " +
                         "admitted=${s.admitted} echo=${s.selfEcho} transit=${s.inTransit} " +
                         "hs=${s.handshakeRefused} unknown=${s.unknownDownlink} " +
+                        "kind=${s.unknownKind} bad=${s.badRecord} " +
                         "snapshots=${s.snapshotsApplied}",
                 )
             }
