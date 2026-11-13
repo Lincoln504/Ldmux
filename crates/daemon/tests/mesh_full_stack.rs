@@ -417,6 +417,47 @@ async fn a_phone_and_the_daemons_loop_handshake_and_paint_a_shell() {
     );
 }
 
+/// **A `List` names no shell, and it is the first request a phone makes.**
+///
+/// Nothing in the message is a shell id, so the link loop's slot resolver had no key for it and its
+/// catch-all dropped the message before the service ever saw it. Measured 2026-11-13 on the real
+/// radios: the host acknowledged the phone's list request and never answered it, while the desk
+/// showed seventeen shells. The phone then held its one outstanding request, by design, so the
+/// screen sat on `asking host for shells` for ever.
+#[tokio::test]
+async fn a_list_request_that_names_no_shell_is_answered() {
+    let dir = Scratch::dir("ldmux-b8-list");
+    let (arc, _fk, shell) = daemon_with_shell(&dir).await;
+    let setup = SessionSetup::new(&dir, [0x5au8; 32]).expect("a session setup");
+    let host = DaemonHost(Arc::clone(&arc));
+
+    let mut stack = Stack::new(11, 2, 0.15, &setup, host);
+    stack.connect().await;
+    let now = stack.now;
+    stack.client.list(now).expect("a list is submitted");
+    stack
+        .run_until(300_000, 250, |s| {
+            s.events
+                .iter()
+                .any(|e| matches!(e, ClientEvent::Sessions { last: true, .. }))
+        })
+        .await;
+
+    let listed: Vec<String> = stack
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            ClientEvent::Sessions { entries, .. } => Some(entries.iter().map(|x| x.id.clone())),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert!(
+        listed.contains(&shell.id),
+        "the list answer never arrived or did not name the running shell: {listed:?}"
+    );
+}
+
 /// **A command runs once and its settled answer comes back.**
 ///
 /// The at-most-once rule is the one a lossy link makes load-bearing: a retransmitted `Send` must not

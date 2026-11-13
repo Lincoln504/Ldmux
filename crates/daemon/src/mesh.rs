@@ -1279,20 +1279,36 @@ async fn dispatch<H: crate::mesh_rpc::MeshHost>(
         // **Which slot this message belongs to.** `Attach` and `Takeover` name a selector rather
         // than a shell, so they take a fresh slot and the service says which shell it resolved to;
         // every other message names its shell, and an unknown one is a phone that is not attached.
+        //
+        // **A request that names no shell in a field is not a request to drop.** `WantHistory`,
+        // `Detach`, `Close` and `MakeLive` carry a selector the service resolves itself, so they
+        // apply to the shell this link attached most recently — unambiguous for the one-page case
+        // the radio route ships with. `List` and `Create` name nothing at all: `List` asks before
+        // the phone knows any shell, and `Create` is how it gets one, so both take a fresh channel.
         let slot = match &message {
             Message::Attach { .. } | Message::Takeover { .. } => None,
             Message::Send { shell, .. } | Message::Fetch { shell, .. } => channels.get(shell),
-            // **`WantHistory` and `Detach` name no shell.** The version-15 message set has no field
-            // for it (`crates/session/src/client.rs::close` says why: adding one would be a wire
-            // change), so they apply to the shell this link attached most recently — which is
-            // unambiguous for the one-page case the radio route ships with.
-            Message::WantHistory { .. } | Message::Detach => channels.by_id.values().copied().max(),
+            Message::WantHistory { .. }
+            | Message::Detach
+            | Message::Close { .. }
+            | Message::MakeLive { .. } => channels.by_id.values().copied().max(),
             _ => None,
         };
         let slot = match slot {
             Some(slot) => slot,
             None => match &message {
-                Message::Attach { .. } | Message::Takeover { .. } => channels.slot(),
+                Message::Attach { .. }
+                | Message::Takeover { .. }
+                | Message::Create { .. }
+                // **`List` names no shell, and it is the first thing a phone asks.** It used to
+                // fall through this resolver's catch-all and be dropped with no answer: measured
+                // 2026-11-13 on the real radios, the host acknowledged the phone's list request and
+                // never answered it while the desk showed seventeen shells. `on_message` ignores
+                // the slot for a `List`, but it is still a slot rather than a fabricated value, so
+                // a shell bound to it later cannot collide with a constant.
+                | Message::List
+                | Message::Close { .. }
+                | Message::MakeLive { .. } => channels.slot(),
                 // A command for a shell this link never attached: the phone is told so rather than
                 // left waiting for a screen that belongs to no pane.
                 Message::Send {
