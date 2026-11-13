@@ -347,6 +347,14 @@ pub struct Stats {
     pub duplicate_records: u64,
     /// Records for another session index: the peer re-handshook and this end followed.
     pub wrong_index_records: u64,
+    /// Cached answers withheld, because the peer had already shown it held one.
+    pub answers_suppressed: u64,
+    /// Acknowledgements the transaction layer staged, before anything tried to send them.
+    pub acks_staged: u64,
+    /// Transport records that arrived while this end held no session.
+    pub records_without_a_session: u64,
+    /// Parts that arrived again, which is routine on a mesh that forwards every copy.
+    pub duplicate_parts: u64,
     /// The last record refused by the record layer, as a stable code (`RecordError::code`).
     pub last_record_refusal: u8,
     /// The index and counter that record carried, and the index this end holds.
@@ -590,6 +598,8 @@ pub struct RadioEndpoint {
     last_ask_ms: Option<u64>,
     /// When `connect` was called, so the first initiation can wait for a path.
     connected_at_ms: Option<u64>,
+    /// When a record on the live session was last admitted, so a repeat answer can be withheld.
+    last_admitted_ms: Option<u64>,
     /// The road the last record from the peer arrived by, reversed: the one road with evidence.
     ///
     /// A flood's chain is the road it crossed, so its reverse is the road back, and the answer is
@@ -720,6 +730,7 @@ impl RadioEndpoint {
             attempt_spent: false,
             last_ask_ms: None,
             connected_at_ms: None,
+            last_admitted_ms: None,
             arrival_road: None,
             session: None,
             replay: ReplayWindow::default(),
@@ -1105,6 +1116,11 @@ impl RadioEndpoint {
         let actions = self
             .tx
             .poll_all(now_ms, budget, self.records_left);
+        // **Staged, not sent.** An ack the layer produced and one the carrier received are different
+        // facts, and `acks=0` in the field could be either.
+        let tx = self.tx.stats();
+        self.stats.acks_staged = tx.standalone_acks;
+        self.stats.duplicate_parts = tx.duplicate_parts;
         let pace = self.tx.pace_ms();
         for (ord, action) in actions.into_iter().enumerate() {
             let at = now_ms.saturating_add(pace.saturating_mul(ord as u64));
@@ -1395,11 +1411,17 @@ impl RadioEndpoint {
                 Admitted::Answered { cached: false }
             }
             Ok(Answered::Cached { reply }) => {
-                if std::env::var_os("LDMUX_LOG_SESSION").is_some() {
-                    eprintln!(
-                        "ldmux: answered from the cache (a live session holds index {:?})",
-                        self.session.as_ref().map(|session| session.index)
-                    );
+                // **A repeat is answered only while it is still an open question.**
+                //
+                // Every repeater forwards the same initiation, so the host hears one `msg1` several
+                // times and the cache answers each copy. Measured 2026-11-13: `rep=7` on the phone
+                // in forty seconds for a single initiation, while the host's own transaction parts
+                // queued behind those answers and the phone acknowledged nothing. Once a record has
+                // been admitted on the session, the peer clearly holds the answer, so further copies
+                // of the question cost the airtime the answer is trying to spend.
+                if self.session.is_some() && self.last_admitted_ms.is_some() {
+                    self.stats.answers_suppressed += 1;
+                    return Admitted::Ignored(Rejected::NotForUs);
                 }
                 self.stats.records_admitted += 1;
                 self.stats.answers_from_cache += 1;
@@ -1583,6 +1605,12 @@ impl RadioEndpoint {
                 // phone whose daemon restarted re-handshakes at once instead of spending its own
                 // silence ladder. The phone says nothing: its bootstrap is already running.
                 self.request_handshake(now_ms, wall_ms);
+                // **Counted, because it was the one verdict nothing counted.** A transport record
+                // that arrives while this end holds no session is neither a bad tag nor a wrong
+                // index, and leaving it uncounted made three delivered parts invisible: measured
+                // 2026-11-13, the phone logged three `0x84 kind=0x16` pushes and every counter read
+                // zero except `received`.
+                self.stats.records_without_a_session += 1;
                 return Admitted::Ignored(Rejected::NoSession);
             }
         };
@@ -1640,6 +1668,7 @@ impl RadioEndpoint {
             }
         };
         self.stats.records_admitted += 1;
+        self.last_admitted_ms = Some(now_ms);
         // Only now, with the tag verified, may a route be called proven. A direct arrival that
         // finished its path is the one shape that proves anything.
         self.prove(info, now_ms);

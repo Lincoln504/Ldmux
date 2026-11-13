@@ -517,6 +517,10 @@ data class ClientStats(
     val duplicateRecords: Long = 0,
     /** Records for another session index: the peer re-handshook and this end followed. */
     val wrongIndexRecords: Long = 0,
+    /** Acknowledgements staged by the transaction layer. */
+    val acksStaged: Long = 0,
+    /** Transport records that arrived while this end held no session. */
+    val recordsWithoutSession: Long = 0,
 ) {
     companion object {
         internal fun of(v: LongArray): ClientStats = ClientStats(
@@ -558,6 +562,8 @@ data class ClientStats(
             localIndex = v[35],
             duplicateRecords = v[36],
             wrongIndexRecords = v[37],
+            acksStaged = v[38],
+            recordsWithoutSession = v[39],
         )
     }
 }

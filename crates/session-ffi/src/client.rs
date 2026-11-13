@@ -221,6 +221,10 @@ pub struct LdmuxClientStats {
     pub duplicate_records: u64,
     /// Records for another session index: the peer re-handshook and this end followed.
     pub wrong_index_records: u64,
+    /// Acknowledgements the transaction layer staged, before anything tried to send them.
+    pub acks_staged: u64,
+    /// Transport records that arrived while this end held no session.
+    pub records_without_a_session: u64,
     /// The last record refused by the record layer, as a stable code; 0 when none has been.
     pub last_record_refusal: u8,
     /// The index and counter that record carried, and the index this end holds.
@@ -1247,6 +1251,8 @@ pub unsafe extern "C" fn ldmux_client_stats(c: *mut LdmuxClient, out: *mut Ldmux
                 answers_ignored: link.answers_ignored,
                 duplicate_records: link.duplicate_records,
                 wrong_index_records: link.wrong_index_records,
+                acks_staged: link.acks_staged,
+                records_without_a_session: link.records_without_a_session,
                 last_record_refusal: link.last_record_refusal,
                 last_refusal_index: link.last_refusal_index,
                 last_refusal_counter: link.last_refusal_counter,

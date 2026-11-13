@@ -1368,3 +1368,61 @@ mod tests {
         bytes
     }
 }
+
+#[cfg(test)]
+mod acks_are_produced {
+    //! **The ack path had no test, and the field reported `staged=0`.** A delivery that sets
+    //! `ack_owed` must produce an acknowledgement on the next poll, whether the message was whole or
+    //! still arriving: the peer retransmits until it hears one.
+
+    use super::*;
+
+    fn config() -> Config {
+        Config {
+            side: Side::Host,
+            airtime_ms: 402.0,
+            direct_record_limit: 171,
+            flood_record_limit: 93,
+            max_attempts: 5,
+            rto_ms: 2_400,
+        }
+    }
+
+    /// The bytes one whole part of `message` puts on the air from a phone to this end.
+    fn a_part(message: &[u8], tx_id: u16) -> Vec<u8> {
+        let mut sender = TransactionLayer::new(Config {
+            side: Side::Phone,
+            ..config()
+        });
+        sender
+            .begin(PeerId(1), message, 0)
+            .expect("the message is accepted");
+        sender
+            .poll_all(0, RecordBudget::direct(0), u8::MAX)
+            .into_iter()
+            .find_map(|action| match action {
+                Action::Send { bytes, tx_id: id, .. } if id == tx_id => Some(bytes),
+                _ => None,
+            })
+            .expect("the part goes out")
+    }
+
+    #[test]
+    fn a_whole_message_is_acknowledged() {
+        let mut rx = TransactionLayer::new(config());
+        let bytes = a_part(b"hello", 1);
+        let received = rx.on_app(PeerId(1), &bytes, 0);
+        assert!(
+            matches!(received, Received::Message { .. }),
+            "a single part is a whole message: {received:?}"
+        );
+        let actions = rx.poll_all(1_000, RecordBudget::direct(0), u8::MAX);
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::StandaloneAck { .. })),
+            "a delivered message produced no acknowledgement: {actions:?}"
+        );
+        assert_eq!(rx.stats().standalone_acks, 1);
+    }
+}

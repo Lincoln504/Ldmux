@@ -1801,3 +1801,42 @@ fn measure_why_a_long_flood_fails() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// A repeat of the initiation is not answered once the peer has shown it holds the answer.
+// ---------------------------------------------------------------------------------------------
+
+/// **Every repeater forwards the same initiation**, so the host hears one `msg1` several times and
+/// the answer cache used to answer each copy. Measured 2026-11-13: `rep=7` on the phone in forty
+/// seconds for one initiation, while the host's own transaction parts queued behind those answers.
+#[test]
+fn a_repeated_initiation_is_not_answered_once_the_peer_is_using_the_session() {
+    let mut run = Run::new(9, 1, 0.0, 1);
+    run.phone
+        .connect(run.now, run.wall())
+        .expect("the phone can start an attempt");
+    run.run_until(60_000, 250, |run| {
+        run.phone.established() && run.host.established()
+    });
+    assert!(run.phone.established(), "the phone did not establish");
+
+    // The phone uses the session, which proves it holds the answer.
+    let request = message(0x0E, &[0x00; 8]);
+    run.phone
+        .submit(&request, run.now)
+        .expect("a list request is one part");
+    run.run_until(120_000, 250, |run| run.host.stats().records_admitted > 1);
+
+    // Now the same initiation arrives again, as a repeater's copy of it would.
+    let before = run.host.stats().answers_from_cache + run.host.stats().answers_sent;
+    run.phone
+        .connect(run.now, run.wall())
+        .expect("the phone can start a second attempt");
+    run.run_until(30_000, 250, |_| false);
+    let answers = run.host.stats().answers_from_cache + run.host.stats().answers_sent;
+    assert!(
+        answers <= before + 1,
+        "the host answered a repeat while the peer was using the session: {} before, {answers} after",
+        before
+    );
+}
