@@ -515,10 +515,30 @@ fn text(bytes: &[u8]) -> String {
         .to_string()
 }
 
+/// The longest app name `APP_START` carries. The firmware null-terminates the frame in place
+/// (`MyMesh.cpp:1078`), so a name that leaves the frame room to grow is the name that is read.
+pub const APP_NAME_MAX: usize = 31;
+
 /// `CMD_APP_START`: say hello, and be answered with [`SelfInfo`].
+///
+/// **The frame is `0x01`, seven reserved bytes, then the app name, and the name is not
+/// decoration.** The firmware handles this command only under `len >= 8`
+/// (`examples/companion_radio/MyMesh.cpp:1076-1080`: `cmd_frame[0] == CMD_APP_START && len >= 8`,
+/// with the name read from `cmd_frame[8]`), so a bare `0x01` is **silently ignored**: the radio
+/// accepts the write and answers nothing, `SELF_INFO` never arrives, and the link looks like a
+/// radio that is present and mute. Measured on the phone 2026-11-12: `ble send 1B` and `ble send
+/// ok 1B` in a loop, zero notifications, and the settings screen reading "not read" for ever.
+///
+/// The reserved bytes stay zero because the firmware latches the protocol version from
+/// [`device_query`], not from this frame.
 #[must_use]
-pub fn app_start() -> Vec<u8> {
-    vec![commands::APP_START]
+pub fn app_start(app_name: &str) -> Vec<u8> {
+    let name = &app_name.as_bytes()[..app_name.len().min(APP_NAME_MAX)];
+    let mut out = Vec::with_capacity(8 + name.len());
+    out.push(commands::APP_START);
+    out.extend_from_slice(&[0u8; 7]);
+    out.extend_from_slice(name);
+    out
 }
 
 /// `CMD_DEVICE_QUERY`: ask what the firmware can do, latching [`APP_TARGET_VERSION`].
@@ -643,7 +663,12 @@ mod tests {
 
     #[test]
     fn the_queries_are_one_command_and_its_argument() {
-        assert_eq!(app_start(), vec![0x01]);
+        // **The name is load-bearing**, not decoration: the firmware gates the whole command on
+        // `len >= 8` (`MyMesh.cpp:1076`), so a bare `0x01` is a command the radio ignores while
+        // accepting the write.
+        assert_eq!(app_start("ldmux"), b"\x01\0\0\0\0\0\0\0ldmux".to_vec());
+        assert!(app_start("").len() >= 8, "the firmware needs eight bytes before it answers");
+        assert_eq!(app_start(&"n".repeat(64)).len(), 8 + APP_NAME_MAX);
         assert_eq!(device_query(), vec![0x16, APP_TARGET_VERSION]);
         assert_eq!(get_radio_stats(), vec![0x38, 1]);
         assert_eq!(get_battery_and_storage(), vec![0x14]);

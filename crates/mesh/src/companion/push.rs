@@ -1,12 +1,24 @@
-//! What one `0x88` receive-log frame means, for either end.
+//! What a pushed packet means, for either end.
 //!
-//! The companion reports every packet it hears as `[0x88][snr × 4][rssi][packet]`
-//! (`MyMesh::logRxRaw`, `examples/companion_radio/MyMesh.cpp:286-296`), and most of what a busy mesh
-//! carries is none of our business: adverts, route requests, other people's channel traffic. What
-//! this module does is decide, once, whether a push carries a session record — and if it does, hand
-//! up the record **and the shape it arrived in**, because the endpoint's rules are about the shape:
-//! a direct packet with hops left is in transit to somebody else, a flood's chain is the way back,
-//! and only a direct arrival that finished its path proves anything (`RC-3`).
+//! **A record arrives as one of two pushes, and `0x88` is not one of them.** The firmware reports a
+//! packet addressed to this client as `PUSH_CODE_RAW_DATA` (`0x84`) when it is a direct
+//! `RAW_CUSTOM` and as `PUSH_CODE_CONTROL_DATA` (`0x8E`) when it is a `REQ` (which is how a flood
+//! travels): `MyMesh::onRawDataRecv` (`examples/companion_radio/MyMesh.cpp:832-853`) and
+//! `MyMesh::onControlDataRecv` (`:810-830`). `PUSH_CODE_LOG_RX_DATA` (`0x88`) is a **debug tap** —
+//! `MyMesh::logRxRaw` (`:291-301`) writes every packet the radio demodulates, neighbours included,
+//! and only when the radio's receive log is switched on.
+//!
+//! This module was built on `0x88` alone. Measured in the field 2026-11-12, with both radios on
+//! 910.525/62.5/SF7/CR5 in one room: the phone transmitted a 137-byte record, its radio answered
+//! `OK`, the host's radio pushed what it heard, and the host reported **0 bytes received and 0
+//! handshakes** for as long as it ran, because every real arrival came as `0x84` and the classifier
+//! returned `None`. The 0x88 frames either end did see were other operators' adverts on the public
+//! channel.
+//!
+//! What this module does is decide, once, whether a push carries a session record — and if it does,
+//! hand up the record **and the shape it arrived in**, because the endpoint's rules are about the
+//! shape: a direct packet with hops left is in transit to somebody else, a flood's chain is the way
+//! back, and only a direct arrival that finished its path proves anything (`RC-3`).
 //!
 //! **The wrapper's magic decides, not the payload type.** A direct session record is a `RAW_CUSTOM`
 //! packet; a flooded one rides `REQ` with the `LDMR` wrapper inside it, because the firmware
@@ -21,13 +33,32 @@ use crate::budget::{FLOOD_WRAPPER, MAX_PATH_BYTES};
 
 /// `PAYLOAD_TYPE_RAW_CUSTOM` (`src/Packet.h:32`) — the vehicle a direct session record rides.
 pub const PAYLOAD_TYPE_RAW_CUSTOM: u8 = 0x0F;
+/// `PAYLOAD_TYPE_REQ` (`src/Packet.h:23`) — the vehicle the flood carrier rides.
+///
+/// **The firmware never delivers it to the companion.** `REQ` is in the decrypt-only family
+/// (`Mesh.cpp:131-147`: `dest_hash`, `src_hash`, then a MAC per peer), so a plaintext `LDMR` wrapper
+/// inside it fails every peer's MAC and the packet is forwarded as a flood instead of being handed
+/// up. It is readable only through the receive log's debug tap, which is what this module calls the
+/// third push code.
+pub const PAYLOAD_TYPE_REQ: u8 = 0x00;
+/// `PAYLOAD_TYPE_CONTROL` (`src/Packet.h:30`) — the only payload type the `0x8E` push reports.
+pub const PAYLOAD_TYPE_CONTROL: u8 = 0x0B;
 
 /// The four bytes that mark a flooded session record, inside the packet's payload.
 ///
 /// Re-exported from the builder that writes it, so the reader and the writer cannot disagree.
 pub use crate::companion::build::RECORD_FLOOD_MAGIC;
 
-/// The push code of a receive-log frame (`PUSH_CODE_LOG_RX_DATA`).
+/// The push code of a received direct packet (`PUSH_CODE_RAW_DATA`, `MyMesh.cpp:121`).
+pub const PUSH_RAW_DATA: u8 = 0x84;
+/// The push code of a received **control** packet (`PUSH_CODE_CONTROL_DATA`, v8+, `MyMesh.cpp:131`).
+///
+/// **This is not how a flood arrives.** The firmware pushes it from `onControlDataRecv`
+/// (`Mesh.cpp:70-76`), which runs only for `PAYLOAD_TYPE_CONTROL` with `payload[0] & 0x80` on a
+/// route-**direct** packet: it is a zero-hop control message, not a `REQ`.
+pub const PUSH_CONTROL_DATA: u8 = 0x8E;
+/// The push code of the receive **log** (`PUSH_CODE_LOG_RX_DATA`, `MyMesh.cpp:125`). A debug tap:
+/// it reports every packet the radio demodulates, not the ones addressed to this client.
 pub const PUSH_LOG_RX_DATA: u8 = 0x88;
 
 /// `ROUTE_TYPE_FLOOD`: a flood whose path is built up as it travels.
@@ -52,6 +83,19 @@ pub struct PushArrival {
     pub snr_quarter_db: i8,
     /// The last link's RSSI in dBm.
     pub rssi_dbm: i8,
+    /// The wrapper's sender byte, when the record arrived wrapped: one byte of the sender's key.
+    ///
+    /// **The only way a host with no route learns the phone's radio key.** Without it the answer
+    /// goes to hash zero and the phone ignores it, which is the asymmetric-link case the teaching
+    /// flood exists for (`docs/RADIO-PLAN.md` §12.7b).
+    pub sender: Option<u8>,
+    /// The path's length in bytes as the push stated it, when the push does not carry the bytes.
+    ///
+    /// `0x84` states none (a direct packet that reached us has consumed its path) and `0x8E` states
+    /// a length but not the hashes (`onControlDataRecv` writes `packet->path_len` and then the
+    /// payload). The length is still the number a reply's budget has to respect, so it is kept even
+    /// when the chain itself is unknown — a reply to a flood is a flood, and needs no chain.
+    pub path_bytes: u16,
 }
 
 impl PushArrival {
@@ -59,6 +103,10 @@ impl PushArrival {
     #[must_use]
     pub fn hops(&self) -> u8 {
         let width = usize::from(self.path_width.clamp(1, 3));
+        if self.path.is_empty() {
+            // No hashes, only a length: `0x8E`. Divided by the width the packet was encoded with.
+            return u8::try_from(usize::from(self.path_bytes) / width).unwrap_or(u8::MAX);
+        }
         u8::try_from(self.path.len() / width).unwrap_or(u8::MAX)
     }
 
@@ -78,7 +126,7 @@ impl PushArrival {
         if !self.flood {
             return None;
         }
-        let limit = crate::budget::RecordBudget::flood_scoped(self.path.len())
+        let limit = crate::budget::RecordBudget::flood_scoped(usize::from(self.path_bytes))
             .limit()
             .min(crate::constants::RECORD_RECEIVED_MAX);
         u8::try_from(limit).ok()
@@ -131,34 +179,77 @@ fn wire(packet: &[u8]) -> Option<Wire<'_>> {
     })
 }
 
-/// One `0x88` push, classified.
+/// One push, classified.
 ///
 /// `None` means the push is not a session record — a route request, an advert, a stranger's channel
 /// traffic — which the caller ignores. The record is returned with the readings that arrived with
 /// it, so route state can be updated from an authenticated arrival and nothing else (`RC-3`).
+///
+/// # The three shapes
+///
+/// | push | frame | what the payload is |
+/// |---|---|---|
+/// | `0x84` RAW_DATA | `[0x84][snr×4][rssi][0xFF][payload]` | a `RAW_CUSTOM` payload, so a direct record |
+/// | `0x8E` CONTROL_DATA | `[0x8E][snr×4][rssi][path_len][payload]` | a `REQ` payload, so a flood's wrapped record |
+/// | `0x88` LOG_RX_DATA | `[0x88][snr×4][rssi][whole packet]` | the packet with its header, a debug tap |
+///
+/// The first two are how data actually arrives; the third is kept because it is the only view that
+/// shows the packet's own header, which is what a field diagnosis needs.
 #[must_use]
 pub fn classify(frame: &[u8]) -> Option<PushArrival> {
-    let [PUSH_LOG_RX_DATA, snr, rssi, ..] = *frame else {
-        return None;
-    };
-    let view = wire(frame.get(3..)?)?;
-    let body = view.payload;
-    let record: &[u8] = match body.get(2..6) {
-        Some(magic) if magic == RECORD_FLOOD_MAGIC => body.get(FLOOD_WRAPPER..)?,
-        _ if view.payload_type == PAYLOAD_TYPE_RAW_CUSTOM => body,
+    match *frame.first()? {
+        PUSH_RAW_DATA => {
+            let [_, snr, rssi, _reserved, ref payload @ ..] = *frame else {
+                return None;
+            };
+            // `onRawDataRecv` writes a reserved byte and then the payload alone: no header, no path.
+            let (record, sender) = flood_or_raw(payload, PAYLOAD_TYPE_RAW_CUSTOM)?;
+            Some(PushArrival {
+                record: record.to_vec(),
+                sender,
+                flood: false,
+                path: Vec::new(),
+                path_width: 1,
+                path_bytes: 0,
+                snr_quarter_db: snr as i8,
+                rssi_dbm: rssi as i8,
+            })
+        }
+        // **A control push is not a record carrier.** `onControlDataRecv` runs for
+        // `PAYLOAD_TYPE_CONTROL` with `payload[0] & 0x80` on a route-direct packet only
+        // (`Mesh.cpp:70-76`), so it is a zero-hop control message, and a record placed there would
+        // have to spend its first byte on a flag and could never travel past one hop.
+        PUSH_CONTROL_DATA => None,
+        PUSH_LOG_RX_DATA => {
+            let view = wire(frame.get(3..)?)?;
+            let (record, sender) = flood_or_raw(view.payload, view.payload_type)?;
+            Some(PushArrival {
+                record: record.to_vec(),
+                sender,
+                flood: view.flood,
+                path: view.path.to_vec(),
+                path_width: view.path_width,
+                path_bytes: u16::try_from(view.path.len()).unwrap_or(u16::MAX),
+                snr_quarter_db: frame[1] as i8,
+                rssi_dbm: frame[2] as i8,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The record inside a payload, by the wrapper's magic first and the payload type second.
+///
+/// **The magic decides, not the payload type.** A flood's `REQ` carries the `LDMR` wrapper; a
+/// direct `RAW_CUSTOM` carries the record alone. A classifier keyed on the payload type alone would
+/// accept every direct arrival and silently ignore every flood — `AR-10`.
+fn flood_or_raw(body: &[u8], payload_type: u8) -> Option<(&[u8], Option<u8>)> {
+    let (record, sender): (&[u8], Option<u8>) = match body.get(2..6) {
+        Some(magic) if magic == RECORD_FLOOD_MAGIC => (body.get(FLOOD_WRAPPER..)?, body.get(1).copied()),
+        _ if payload_type == PAYLOAD_TYPE_RAW_CUSTOM || payload_type == PAYLOAD_TYPE_REQ => (body, None),
         _ => return None,
     };
-    if record.is_empty() {
-        return None;
-    }
-    Some(PushArrival {
-        record: record.to_vec(),
-        flood: view.flood,
-        path: view.path.to_vec(),
-        path_width: view.path_width,
-        snr_quarter_db: snr as i8,
-        rssi_dbm: rssi as i8,
-    })
+    if record.is_empty() { None } else { Some((record, sender)) }
 }
 
 #[cfg(test)]
@@ -171,6 +262,82 @@ mod tests {
         let mut out = vec![PUSH_LOG_RX_DATA, 0xF4, 0xA6]; // -3 dB SNR, -90 dBm
         out.extend_from_slice(packet);
         out
+    }
+
+    /// The frame the firmware pushes for a packet addressed to this client.
+    ///
+    /// `onRawDataRecv` (`MyMesh.cpp:832-853`): `[0x84][snr×4][rssi][0xFF reserved][payload]`. The
+    /// payload is the `RAW_CUSTOM` payload alone, so there is no header and no path.
+    fn raw_push(payload: &[u8]) -> Vec<u8> {
+        let mut out = vec![PUSH_RAW_DATA, 0xF4, 0xA6, 0xFF];
+        out.extend_from_slice(payload);
+        out
+    }
+
+    /// `onControlDataRecv` (`MyMesh.cpp:810-830`): `[0x8E][snr×4][rssi][path_len][payload]`.
+    fn control_push(payload: &[u8], path_len: u8) -> Vec<u8> {
+        let mut out = vec![PUSH_CONTROL_DATA, 0xF4, 0xA6, path_len];
+        out.extend_from_slice(payload);
+        out
+    }
+
+    #[test]
+    fn a_direct_record_arrives_as_raw_data_and_not_as_the_debug_log() {
+        // **The field failure of 2026-11-12, as a test.** Both ends classified `0x88` only, which is
+        // `logRxRaw`'s debug tap, so a real `0x84` arrival was dropped and the host reported "0 bytes
+        // received" while a phone transmitted successfully beside it.
+        let arrival = classify(&raw_push(b"sealed")).expect("a 0x84 push is a session record");
+        assert_eq!(arrival.record, b"sealed");
+        assert!(!arrival.flood);
+        assert_eq!(arrival.hops(), 0);
+        assert_eq!(arrival.snr_db(), -3.0);
+        assert_eq!(arrival.rssi_dbm, -90);
+        assert_eq!(arrival.sender, None, "a direct record carries no sender byte");
+    }
+
+    #[test]
+    fn a_control_push_is_not_a_record_carrier() {
+        // `onControlDataRecv` is for `PAYLOAD_TYPE_CONTROL` with the top payload bit set, on a
+        // route-direct packet only (`Mesh.cpp:70-76`) — a zero-hop control message, not a record.
+        // A record put there would spend a byte on the flag and could never pass one hop.
+        let mut peer = [0u8; 32];
+        peer[0] = 0x11;
+        let mut own = [0u8; 32];
+        own[0] = 0x22;
+        let packet = record_flood(1, &peer, &own, None, &[0, 0, 0, 0], b"sealed").unwrap();
+        let payload = &packet[2..];
+        assert_eq!(
+            classify(&control_push(payload, 3)),
+            None,
+            "0x8E carries control messages, never a session record"
+        );
+    }
+
+    #[test]
+    fn a_flood_is_read_from_the_receive_log_and_keeps_its_sender() {
+        // **A flood has no delivery path of its own.** The firmware never hands a plaintext `REQ`
+        // to the application (`Mesh.cpp:131-147`), so the only view of one is the receive log's
+        // debug tap — which is why this module still reads `0x88` at all, and why the flood carrier
+        // depends on a radio feature we do not own.
+        let mut peer = [0u8; 32];
+        peer[0] = 0x11;
+        let mut own = [0u8; 32];
+        own[0] = 0x22;
+        let packet = record_flood(1, &peer, &own, None, &[0, 0, 0, 0], b"sealed").unwrap();
+        let arrival = classify(&push(&packet)).expect("a flooded record is visible in the log");
+        assert_eq!(arrival.record, b"sealed");
+        assert!(arrival.flood);
+        assert_eq!(arrival.sender, Some(0x22), "the wrapper's sender byte is the phone's key hash");
+        assert_eq!(arrival.path_bytes, 0, "measured from the packet's own path, which is empty here");
+        assert!(arrival.outbound_record_max().is_some(), "a flood prices the reply");
+    }
+
+    #[test]
+    fn a_neighbours_advert_in_the_debug_log_is_not_a_record() {
+        // 0x88 is still understood, because it is the only view with the packet's own header — but
+        // it only yields a record when the wrapper or the payload type says so.
+        let advert = [0x11u8, 0x00, 0x00, 0xAA];
+        assert_eq!(classify(&push(&advert)), None);
     }
 
     #[test]

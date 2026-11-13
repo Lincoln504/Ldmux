@@ -449,6 +449,23 @@ tree or a command that was run; nothing is a plan.
 | **S5** | **Done** | The screen runs on the engine and Kotlin holds no protocol on the radio path. App fixes: the claim wedge (`CLAIM_RELEASE_MS` gone, `resumeShell` by one rule), the IME-gated grid and cursor-aware placement, multiline paste as one paste operation on both routes, the provisional draft drawn with `⏎`/`⇥` and windowed by display width, and the flood bucket actually metered. **S5a** the values-only ABI (`ldmux_client_jni.c`, `NativeRadioClient.kt`, `AndroidBlePipe.kt`); the capability survey then added the six features the engine could not express. **S5b-0** radio management moved into the engine (`ldmux_client_radio`/`_route`/`_set_scope`/`_set_preset`, sentinels rather than zeros, `RadioLease` on the pipe). **S5b-1a** `RadioEngine` + `AndroidRadioEngine` (one loop on a single-thread dispatcher, one timer from `nextDeadline`) and `MeshEngineDriver`, the translator that speaks the screen's existing `MeshTermView` from engine values. **S5b-1b** the source and the screen on the engine: `MeshTermDriver` (2,552), `MeshInput` (538), `PublicChannelBar` (277), `PublicChannelHold` (318) and `RouteHint` (41) deleted, the bar rebuilt as `Send`/`Refresh` from `ClientEvent.Settled`, and `LDMUX_ITEM_STREAM` on `ldmux_client_send` so a draft's text and its Enter are **one** record (`RC-8` closed at the ABI, not moved down a layer). **S5b-1c** the settings screens on the engine behind one refcounted factory, so a second screen cannot open a second GATT; the four facts the settings screen shows came back through a length-prefixed ABI; metering restored and pinned by `no_allowance_means_no_record_starts`; `AndroidRadioLink` and `RadioRoute` deleted; `vendor/libmeshcore` gone, its 479 surviving lines of GATT plumbing renamed to `:ble` (`io.ldmux.mobile.ble`). |
 | **S6** | **Done** | **B8** is now a real gate (`crates/daemon/tests/mesh_full_stack.rs`, seven scenarios over `VirtualMesh`), which is the join `AR-15` showed was missing. **S6a**: `MeshRpc::on_message` dispatches every message the app sends and `MeshHost` grew the nine calls it needed, each chosen so a rule has one owner (the host decides whether a holder is in use; `release` reports a refusal as a state). **S6b**: the link task drives a `RadioEndpoint` over the `RadioCarrier` and hands every delivered message to the service — **12,281 lines removed, 1,717 added** — with `mesh_bridge.rs` down to `BridgeStats` + `DaemonHost`, `mesh_serial.rs`'s route policy gone, and `mesh_session.rs` deleted. A version-14 claim gets one `Closed { reason: VERSION }`. Paste reads the bracketed-paste mode at send time, because bash sets it with its first prompt. **S6c**: the v14 C ABI deleted (`arq.rs`, `session.rs`, their tests, `ldmux_session_jni.c`, the old `session-ffi` entry points) — **4,846 lines removed** — with the one remaining call, a keypair for a fresh pairing, added as `ldmux_client_keypair`; `LDMUX_ERR_*` re-derived from the header's own numbers, which the Android tests caught. Old stack deleted in this work: **≈31,000 lines**; new: ≈26,000 including ≈9,000 of tests. |
 
+- **`CMD_APP_START` carries an app name, and the firmware ignores it without one.**
+  `MyMesh.cpp:1076-1080` handles the command only under `cmd_frame[0] == CMD_APP_START && len >= 8`,
+  reading the name from `cmd_frame[8]`; the shared builder sent a single `0x01`. Measured on the
+  phone 2026-11-12: the radio accepted every write (`ble send 1B` / `ble send ok 1B`, in a loop) and
+  answered nothing, so `SELF_INFO` never arrived, the settings screen read "not read" for ever, and
+  the link could not start. `command::app_start(app_name)` now emits `0x01`, seven reserved bytes and
+  the name, and both ends call it.
+- **A session record cannot ride a flood on stock firmware.** See AR-10's corrected disposition:
+  `REQ` is decrypted per peer before delivery, so the plaintext `LDMR` wrapper inside one is
+  dropped, and the flood carrier is visible only through the receive log's debug tap. The direct
+  carrier is the delivered one, and a direct arrival is delivered with no destination check
+  (`Mesh.cpp:292-298`), so an empty path reaches every companion in range.
+- **A retransmission is already new bytes.** The transaction header's `tx_nonce` is sealed fresh on
+  every transmission (`endpoint.rs`), so the receiver's `wasSeen` hash differs and the "identical
+  bytes are dropped" worry applies to the bootstrap's first form, not to transactions. No wrapper is
+  owed on the direct carrier, which is why its budget stays `172 − path`.
+
 ### Corrections the implementation forced on this document
 
 Each was found by building the thing and is now reflected in the sections above:
@@ -642,7 +659,7 @@ mean.
 Pinned by `a_version_15_phone_keeps_receiving_rows_until_it_asks_for_its_screen`: rows before the
 first request, none after it.
 
-### 12.7b AR-10 — a flooded record does not arrive as the payload type its name suggests
+### 12.7b AR-10 — a flooded record does not arrive as the payload type its name suggests, and it has no delivery path of its own
 
 **Found while writing the carrier's receive classifier, by a test rather than by reading.** The
 firmware flood-routes `PAYLOAD_TYPE_REQ`; a session record's flood wrapper (`LDMR`) sits **inside**
@@ -652,10 +669,38 @@ accepts every direct arrival and **silently ignores every flood arrival**. That 
 the original field failure: the record crosses the mesh, is heard, and never reaches the
 application, with no error on either end.
 
-*Disposition:* classification is by the wrapper magic inside the packet payload, not by the payload
-type (`crates/daemon/src/mesh_carrier.rs::classify_push`), pinned by
-`a_flooded_record_arriving_by_flood_is_classified_as_a_record`. Recorded here because the next
-reader of the direct/flood split will reach for the payload type again.
+*Disposition, corrected 2026-11-12 after reading the delivery path:* classification is by the
+**push code first and the wrapper magic second**, and the correction matters more than the original
+finding. The firmware reports a received packet as one of three pushes and they do not share a
+layout (`examples/companion_radio/MyMesh.cpp`):
+
+| push | frame | what it is |
+|---|---|---|
+| `0x84` `PUSH_CODE_RAW_DATA` | `[0x84][snr×4][rssi][0xFF][payload]` | a **direct** `RAW_CUSTOM`, handed to the application (`:832-853`) |
+| `0x8E` `PUSH_CODE_CONTROL_DATA` | `[0x8E][snr×4][rssi][path_len][payload]` | a **control** packet, zero-hop and `payload[0] & 0x80` only (`Mesh.cpp:70-76`) — never a record |
+| `0x88` `PUSH_CODE_LOG_RX_DATA` | `[0x88][snr×4][rssi][whole packet]` | the receive **log**, a debug tap over every packet the radio demodulates (`:291-301`) |
+
+**A flood has no delivery path at all.** `REQ` is in the firmware's decrypt-only family
+(`Mesh.cpp:131-147`: `dest_hash`, `src_hash`, then a MAC per peer), so a plaintext `LDMR` wrapper
+inside a `REQ` fails every peer's MAC and is forwarded rather than handed up. The flood carrier
+therefore works **only through the receive log's tap**, which is a radio feature we do not own: a
+firmware with the log off, or with its `Dispatcher` hook left as the no-op it is upstream, carries
+no flood at all. The direct carrier is the only one the firmware delivers, and only while the packet
+is route-direct (`Mesh.cpp:292-298`).
+
+The classifier was written against `0x88` alone. Measured in the field on 2026-11-12, with both
+radios reading `910.525 / 62.5 / SF7 / CR5 / path 1` in one room and the phone's radio answering
+`OK` to every send: the host reported **0 bytes received and 0 handshakes** for its whole run,
+because a real arrival comes as `0x84` and the classifier returned `None`. `crates/mesh/src/
+companion/push.rs` now reads all three codes with their own layouts, pinned by
+`a_direct_record_arrives_as_raw_data_and_not_as_the_debug_log`,
+`a_control_push_is_not_a_record_carrier` and
+`a_flood_is_read_from_the_receive_log_and_keeps_its_sender`.
+
+*The remaining consequence, recorded here as open work:* reaching past one hop needs a **path**, and
+the firmware can give one without any custom protocol — `CMD_SEND_SELF_ADVERT` (mode 1, flood) and
+`CMD_GET_ADVERT_PATH`, whose chain is appended per hop and must be reversed for the outbound
+direction.
 
 ### 12.7c AR-12 — the engine shipped without six features the route already had, and reintroduced a fixed defect
 
@@ -759,7 +804,7 @@ prevent and it happened anyway, in the two commits between the app moving and th
 | AR-7 | `sha2` in `ldmux-mesh` without an ADR line | **process** | **fixed:** ADR-0039 gained a Dependencies section naming the crate and why the simulator must hash as the firmware does |
 | AR-8 | the client's command table is an input, not a derivation | **doc** | **fixed:** §8.1 says each side supplies its own answer table, so the S4 client engine gets the phone's rather than inheriting the host's |
 | AR-9 | a version claim stopped the frame loop for an app that cannot yet ask for its screen | **defect (would brick the app)** | **fixed:** the host keeps streaming until the phone has actually sent a `Send` or a `Fetch` |
-| AR-10 | a flood arrival is a `REQ` carrying `LDMR`, not a `RAW_CUSTOM`; a payload-type classifier drops every flooded record | **defect (silent loss)** | **fixed:** classify by the `LDMR` magic inside the packet payload |
+| AR-10 | a flood arrival is a `REQ` carrying `LDMR`, not a `RAW_CUSTOM`; a payload-type classifier drops every flooded record. **Corrected 2026-11-12:** records arrive as `0x84` (direct) or through the `0x88` receive log (flood), never as `0x8E`, and a flood has no delivery path of its own | **defect (silent loss)** | **fixed:** all three push codes are classified with their own layouts (`crates/mesh/src/companion/push.rs`); the flood carrier's dependence on the debug tap is recorded, and advert-learned paths are the open work |
 | AR-11 | the transport swap cannot precede the phone, and has no `Link` to preserve | **plan correction** | **fixed in the plan:** S6, after S4 and S5 |
 | AR-12 | the client engine lacked six shipped features, and `open` sent a zero grid (a fixed defect reintroduced) | **defect (silent regression)** | **fixed:** the six are implemented and tested; capability surveys are now part of a stage's definition of done |
 | AR-13 | the BLE pipe still owned radio management, so `AndroidRadioLink` could not die and one GATT link would have had two owners | **architecture** | **S5b-0:** radio management moves into the engine, through the same command FIFO, with the lease on the pipe |

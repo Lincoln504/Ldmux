@@ -34,6 +34,10 @@ use ldmux_mesh::companion::command::{
 use ldmux_mesh::companion::fifo::{Answer, CommandId, CompanionFifo, Enqueue};
 use ldmux_mesh::companion::framing;
 
+/// The name this client reports in `APP_START`. The firmware prints it and nothing else depends on
+/// it; what matters is that the frame carries *a* name (see `command::app_start`).
+pub const APP_NAME: &str = "ldmux";
+
 /// How long the radio's own readings are kept before they are asked for again.
 ///
 /// A local command, so this costs no airtime — it costs the **command window**, which is why it is
@@ -237,7 +241,7 @@ impl Radio {
             return;
         }
         self.started = true;
-        self.ask(command::app_start(), 5_000);
+        self.ask(command::app_start(APP_NAME), 5_000);
         self.ask(command::device_query(), 0);
         self.ask(command::get_battery_and_storage(), 0);
         self.ask(command::get_radio_stats(), 0);

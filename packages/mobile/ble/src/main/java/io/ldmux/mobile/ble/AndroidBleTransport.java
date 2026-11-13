@@ -5,6 +5,7 @@ package io.ldmux.mobile.ble;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
 import android.bluetooth.BluetoothGattCharacteristic;
+import android.bluetooth.BluetoothGattDescriptor;
 import android.bluetooth.BluetoothGattService;
 import android.content.Context;
 import android.os.Handler;
@@ -48,6 +49,31 @@ import no.nordicsemi.android.ble.observer.ConnectionObserver;
  * <p>All callbacks are dispatched on the Android main thread.</p>
  */
 public final class AndroidBleTransport implements BleTransport {
+
+    /** The descriptor that carries a characteristic's subscription bit. */
+    private static final UUID CCCD_UUID =
+            UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
+
+    private static String hex(byte[] b) {
+        if (b == null) return "null";
+        StringBuilder sb = new StringBuilder();
+        for (byte x : b) sb.append(String.format("%02x", x));
+        return sb.toString();
+    }
+
+    private static String hex(byte[] b, int n) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < Math.min(n, b.length); i++) sb.append(String.format("%02x", b[i]));
+        return sb.toString();
+    }
+
+    /** Whether the payload carries this protocol's wrapper, the same test the host classifies by. */
+    private static boolean hasLdmr(byte[] b) {
+        for (int i = 0; i + 4 <= b.length; i++) {
+            if (b[i] == 'L' && b[i + 1] == 'D' && b[i + 2] == 'M' && b[i + 3] == 'R') return true;
+        }
+        return false;
+    }
 
     /** Logcat tag for the link's own events, which is where a silent stall is found. */
     private static final String TAG = "ldmux-ble";
@@ -226,7 +252,13 @@ public final class AndroidBleTransport implements BleTransport {
             // fires, and the engine's frame is gone with no trace. Measured 2026-11-12: the engine
             // logged "radio first frame: 1 bytes", this method returned normally, and logcat showed
             // no `writeCharacteristic` at all.
+            // **The packet's own header, for a send.** `CMD_SEND_RAW_PACKET` (0x41) is followed by a
+            // priority byte and then the packet, so byte 2 is the packet header: route type in the
+            // low two bits and the payload type above it. A direct `RAW_CUSTOM` is `0x3E`; a flood
+            // is `0x01`/`0x03`. Which one the client chooses is invisible everywhere else.
             Log.d(TAG, "ble send " + frame.length + "B type=" + writeType
+                    + " op=0x" + Integer.toHexString(frame.length > 0 ? frame[0] & 0xFF : 0)
+                    + " pkt=" + (frame.length > 2 ? hex(frame, 6) : "-")
                     + " to=" + rxCharacteristic.getUuid());
             writeCharacteristic(rxCharacteristic, frame, writeType)
                     .done((device) -> Log.d(TAG, "ble send ok " + frame.length + "B"))
@@ -352,6 +384,16 @@ public final class AndroidBleTransport implements BleTransport {
                     .with((device, data) -> {
                         byte[] raw = data.getValue();
                         if (raw == null || raw.length == 0) return;
+                        // **Every notification the radio sends.** The last side that had no trace:
+                        // a companion that accepts writes and never answers looks identical to one
+                        // whose answers are dropped here, and only this line separates them.
+                        int op = raw[0] & 0xFF;
+                        // **Is that packet ldmux's, or a neighbour's advert?** `LOG_RX_DATA` (0x88)
+                        // is the radio reporting anything it heard on the channel, and on the public
+                        // tuple most of it is other operators. The `LDMR` wrapper is the only thing
+                        // that says a packet is this protocol, so it is what the line reports.
+                        Log.d(TAG, "ble recv " + raw.length + "B op=0x" + Integer.toHexString(op)
+                                + (op == 0x88 ? " ldmr=" + hasLdmr(raw) + " head=" + hex(raw, 12) : ""));
                         Listener l = frameListener;
                         if (l != null) l.onFrame(raw.clone());
                     });
@@ -362,6 +404,19 @@ public final class AndroidBleTransport implements BleTransport {
             enableNotifications(txCharacteristic)
                     .done((device) -> {
                         Log.d(TAG, "ble subscribed");
+                        // **Read the subscription back.** `enableNotifications` resolving proves the
+                        // request was accepted, not that the radio has the bit set: a CCCD left at
+                        // zero is exactly a link that accepts every write and never notifies, which
+                        // is the state measured on this radio. The value is the only witness.
+                        BluetoothGattDescriptor cccd = txCharacteristic.getDescriptor(CCCD_UUID);
+                        if (cccd != null) {
+                            readDescriptor(cccd)
+                                    .done((d) -> Log.d(TAG, "ble cccd read ok"))
+                                    .fail((d, status) -> Log.d(TAG, "ble cccd read failed " + status))
+                                    .enqueue();
+                        } else {
+                            Log.d(TAG, "ble cccd missing on notify characteristic");
+                        }
                         notifyConnectionChanged(true);
                     })
                     .fail((device, status) -> {
