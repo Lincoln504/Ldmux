@@ -428,7 +428,9 @@ class AndroidRadioEngine(
                         "readyFrames=${s.radioReady} malformed=${s.radioMalformed} " +
                         "window=${s.radioOutstanding} pumps=${s.radioPumps} " +
                         "fin=${s.answersFinished} rep=${s.answersRepeated} ign=${s.answersIgnored} " +
-                        "refusal=${s.lastRecordRefusal}",
+                        "refusal=${s.lastRecordRefusal} " +
+                        "refusedIdx=${s.lastRefusalIndex} refusedCtr=${s.lastRefusalCounter} " +
+                        "localIdx=${s.localIndex} dup=${s.duplicateRecords}",
                 )
             }
         }

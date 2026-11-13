@@ -204,6 +204,8 @@ pub enum Rejected {
     SelfEcho,
     /// A direct packet with hops left, on its way to another node.
     InTransit,
+    /// The same record, heard again: the receive log reports every copy the radio demodulated.
+    Duplicate,
     /// A kind this protocol does not define.
     UnknownKind,
     /// A record of a kind that belongs to this side but no state can use: an answer with no
@@ -334,8 +336,17 @@ pub struct Stats {
     pub answers_ignored: u64,
     /// Parts sealed with no path while a real chain was fresh: a record delivered to nobody.
     pub parts_without_a_road: u64,
+    /// Records that arrived twice, which the receive log makes routine and which are not failures.
+    pub duplicate_records: u64,
     /// The last record refused by the record layer, as a stable code (`RecordError::code`).
     pub last_record_refusal: u8,
+    /// The index and counter that record carried, and the index this end holds.
+    ///
+    /// **A duplicate is only diagnosable with the numbers.** "Counter already seen" says nothing about
+    /// which counter, which session, or whether the two ends agree on the index at all.
+    pub last_refusal_index: u8,
+    pub last_refusal_counter: u32,
+    pub local_index: u8,
     /// Paths learned from a flood's reversed chain.
     pub routes_learned: u64,
     /// Paths proven by an authenticated direct arrival.
@@ -1548,8 +1559,28 @@ impl RadioEndpoint {
         let opened = match opened {
             Ok(opened) => opened,
             Err(e) => {
+                // **A duplicate is not a failure: it is the same record arriving twice.**
+                //
+                // The firmware calls `logRxRaw` for every demodulated packet *before* its own
+                // duplicate check (`src/Dispatcher.cpp:199` runs before `tryParsePacket`), so the
+                // receive log hands this end every copy the radio heard — the direct one and each
+                // repeater's. The record layer's replay window then sees the same counter twice, and
+                // counting that as a refused record made a healthy link look broken: measured
+                // 2026-11-13, `bad=5` with `refusal=3` (duplicate) on a session whose parts were all
+                // arriving. The first copy was accepted and acknowledged; the second is dropped here
+                // and nothing else happens.
+                if e == record::RecordError::Duplicate {
+                    self.stats.duplicate_records += 1;
+                    return Admitted::Ignored(Rejected::Duplicate);
+                }
                 self.stats.rejected_record += 1;
                 self.stats.last_record_refusal = e.code();
+                self.stats.last_refusal_index = record.get(1).copied().unwrap_or(0);
+                self.stats.last_refusal_counter = record
+                    .get(2..6)
+                    .and_then(|b| <[u8; 4]>::try_from(b).ok())
+                    .map_or(0, u32::from_le_bytes);
+                self.stats.local_index = self.session.as_ref().map_or(0, |s| s.index);
                 // **One unopenable record is not proof the session is dead.** A record sealed for the
                 // session this end just replaced is exactly what a peer's queue delivers after a
                 // handshake, and it is the only kind that fails while everything else works.

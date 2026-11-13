@@ -508,6 +508,13 @@ data class ClientStats(
     val answersIgnored: Long = 0,
     /** The last record refused by the record layer, as a stable code; 0 when none has been. */
     val lastRecordRefusal: Long = 0,
+    /** The index the refused record carried, and the counter it carried. */
+    val lastRefusalIndex: Long = 0,
+    val lastRefusalCounter: Long = 0,
+    /** The index this end holds. */
+    val localIndex: Long = 0,
+    /** Records that arrived twice, which the receive log makes routine. */
+    val duplicateRecords: Long = 0,
 ) {
     companion object {
         internal fun of(v: LongArray): ClientStats = ClientStats(
@@ -544,6 +551,10 @@ data class ClientStats(
             answersRepeated = v[30],
             answersIgnored = v[31],
             lastRecordRefusal = v[32],
+            lastRefusalIndex = v[33],
+            lastRefusalCounter = v[34],
+            localIndex = v[35],
+            duplicateRecords = v[36],
         )
     }
 }

@@ -571,8 +571,15 @@ fn serve<L: ByteLink>(
                 // **What went on the air, and by which road.** The host's half of a link that never
                 // comes up is invisible from `mesh status` alone: a reply sent along a stale path and
                 // a reply never sent look identical there, and this line is the difference.
+                // **The record's own index and counter, because a duplicate is only diagnosable with
+                // the numbers.** The layout is `[kind][index][counter 4]`, so both are in the clear.
+                let index = record.get(1).copied().unwrap_or(0);
+                let counter = record
+                    .get(2..6)
+                    .and_then(|b| <[u8; 4]>::try_from(b).ok())
+                    .map_or(0, u32::from_le_bytes);
                 eprintln!(
-                    "ldmuxd: host radio send {seq} {}B carriage={}",
+                    "ldmuxd: host radio send {seq} {}B carriage={} idx={index} ctr={counter}",
                     record.len(),
                     match &carriage {
                         Carriage::Direct { path } => format!("direct path={path:02x?}"),

@@ -314,6 +314,36 @@ impl Run {
         }
     }
 
+    /// Hand the phone the last record it was given, a second time.
+    ///
+    /// **This is what the receive log does.** The firmware calls `logRxRaw` for every demodulated
+    /// packet before its own duplicate check (`src/Dispatcher.cpp:199`), so the app is handed the
+    /// direct copy and each repeater's copy of the same record.
+    /// Whether the phone has been handed a record of `kind` at all.
+    fn phone_was_given(&self, kind: u8) -> bool {
+        self.mesh
+            .deliveries()
+            .iter()
+            .any(|d| d.to == self.phone_node && d.payload.first() == Some(&kind))
+    }
+
+    fn redeliver_last_to_phone(&mut self, kind: u8) -> bool {
+        let Some(delivery) = self
+            .mesh
+            .deliveries()
+            .iter()
+            .rev()
+            .find(|d| d.to == self.phone_node && d.payload.first() == Some(&kind))
+            .cloned()
+        else {
+            return false;
+        };
+        let info = info_of(&delivery);
+        self.phone
+            .on_record(&delivery.payload, &info, self.now, self.wall());
+        true
+    }
+
     fn dispatch(&mut self) {
         let deliveries: Vec<Delivery> = self.mesh.deliveries().to_vec();
         let batch = deliveries
@@ -1618,5 +1648,51 @@ fn a_restarted_host_does_not_reuse_the_session_index() {
     assert_ne!(
         first, second,
         "the restarted host reused index {first}, so the phone's replay window refuses its records"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// A duplicate is not a failure: the receive log reports every copy the radio demodulated.
+// ---------------------------------------------------------------------------------------------
+
+/// **The firmware logs a packet before it deduplicates it**, so the app is handed every copy the
+/// radio heard — the direct one and each repeater's. The record layer's replay window then sees the
+/// same counter twice, and counting that as a refused record made a healthy link look broken:
+/// measured 2026-11-13, `bad=5` with `refusal=3` (duplicate) on a session whose parts were arriving.
+#[test]
+fn a_record_heard_twice_is_counted_as_a_duplicate_and_not_as_a_failure() {
+    let mut run = Run::new(9, 1, 0.0, 1);
+    run.phone
+        .connect(run.now, run.wall())
+        .expect("the phone can start an attempt");
+    run.run_until(60_000, 250, |run| run.phone.established() && run.host.established());
+    assert!(run.phone.established(), "the phone did not establish");
+
+    // The host sends a message, so the phone is handed a downlink record to duplicate.
+    let reply = message(0x16, &[0x71; 24]);
+    run.host
+        .submit(&reply, run.now)
+        .expect("a 25-byte message is one part");
+    run.run_until(120_000, 250, |run| run.phone_was_given(0x16));
+    assert!(
+        run.phone_was_given(0x16),
+        "the host never got a downlink record to the phone: {:?}",
+        run.host.stats()
+    );
+    let before = run.phone.stats().rejected_record;
+    assert!(
+        run.redeliver_last_to_phone(0x16),
+        "the phone was never given a downlink record, so this test proves nothing"
+    );
+    assert!(
+        run.phone.stats().duplicate_records > 0,
+        "a second copy of a record was not counted as a duplicate: {:?}",
+        run.phone.stats()
+    );
+    assert_eq!(
+        run.phone.stats().rejected_record,
+        before,
+        "a duplicate was counted as a refused record: {:?}",
+        run.phone.stats()
     );
 }
