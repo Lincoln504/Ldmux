@@ -1185,6 +1185,13 @@ fn on_event(
                 s.peer_hops = Some(hops);
             });
         }
+        // **The host adopts the road its own radio learned, exactly as the phone does.** The advert
+        // chain is refreshed by the peer's adverts, so it is the durable route; a flood is the
+        // fallback. Without this the host's table held only what a flood had taught, and once that
+        // expired it sealed its transaction parts with a guessed empty path that no repeater forwards.
+        Event::Route { path, width } => {
+            endpoint.observe_path(ldmux_mesh::route::Candidate::learned(path, width, 0.0, now_ms));
+        }
         Event::Scope(scope) => set(snapshot, |s| s.flood_scope = scope),
         Event::Status(status) => {
             // **The carrier is the accountant, and its figure replaces ours.** It counts what it
@@ -1374,6 +1381,8 @@ async fn idle<C: ldmux_session::endpoint::CarriageSink>(
                 s.radio_tx_secs = Some(reading.tx_air_secs);
                 s.radio_rx_secs = Some(reading.rx_air_secs);
             }),
+            // A radio with no session has no route table to teach: the road is reported and dropped.
+            Event::Route { .. } => {}
             Event::Scope(scope) => set(snapshot, |s| s.flood_scope = scope),
             Event::Limit { record_max, hops } => set(snapshot, |s| {
                 s.uplink_record_max = Some(record_max);

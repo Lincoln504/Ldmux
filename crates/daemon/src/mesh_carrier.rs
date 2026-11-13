@@ -520,6 +520,8 @@ fn serve<L: ByteLink>(
     // `ldmux mesh status` reports the receiver's own numbers: a deaf radio shows its noise floor
     // and "no reading yet" honestly, instead of the zeros the status used to print for everything.
     let mut next_poll = std::time::Instant::now();
+    // The road the radio's advert cache holds, so a change is reported once rather than every poll.
+    let mut last_route: Option<(Vec<u8>, u8)> = None;
     loop {
         // **The air first.** A received frame already queued on the port would otherwise wait
         // behind this thread's own send, which is the defect that made a stats poll cost a packet.
@@ -536,6 +538,29 @@ fn serve<L: ByteLink>(
                 }
             }
             let _ = events.blocking_send(Ok(Event::Status(radio.status())));
+            // **The road, asked for while there is none.** The advert cache lives in the radio, and
+            // the host has no session-side copy of it, so this is the only way a host learns a
+            // durable path to the phone: without it the host's route table held only what a flood
+            // had taught, and once that expired it sealed its transaction parts with a guessed empty
+            // path that no repeater forwards (measured 2026-11-13: `34B carriage=direct path=[]`
+            // beside `route 2 repeaters`). The ask is a local cache read, not a transmission.
+            if last_route.is_none()
+                && radio.settings.peer_key.iter().any(|b| *b != 0)
+                && let Ok(learned) = companion.get_advert_path(&radio.settings.peer_key)
+            {
+                    let outbound = learned.outbound();
+                    let width = learned.hash_size;
+                    last_route = Some((outbound.clone(), width));
+                if events
+                    .blocking_send(Ok(Event::Route {
+                        path: outbound,
+                        width,
+                    }))
+                    .is_err()
+                {
+                    return;
+                }
+            }
         }
         match commands.recv_timeout(COMMAND_WAIT) {
             Ok(Command::Send {

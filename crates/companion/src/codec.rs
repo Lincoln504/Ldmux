@@ -799,6 +799,32 @@ pub struct AdvertPath {
     pub bytes: Vec<u8>,
 }
 
+impl AdvertPath {
+    /// The chain reversed hop group by hop group: the path a packet must carry to reach the peer.
+    #[must_use]
+    pub fn outbound(&self) -> Vec<u8> {
+        reverse_by_hop(&self.bytes, self.hash_size)
+    }
+}
+
+/// The chain reversed hop group by hop group, which is the path a packet must carry to reach the
+/// node that advertised.
+///
+/// **Reversed by hop, not by byte.** A flood appends each hop's hash at the end as it travels
+/// (`Mesh.cpp:344-357`) while a direct packet pops from the front (`removeSelfFromPath`), so the
+/// outbound path is the arrival chain with its groups in the opposite order. Reversing bytes instead
+/// produces a path no receiver recognises. This is the one implementation: `ldmux_mesh`'s
+/// `AdvertPath::outbound` calls it too, so the two cannot drift.
+#[must_use]
+pub fn reverse_by_hop(bytes: &[u8], hash_size: u8) -> Vec<u8> {
+    let width = usize::from(hash_size.clamp(1, 3));
+    let mut out = Vec::with_capacity(bytes.len());
+    for hop in bytes.chunks(width).rev() {
+        out.extend_from_slice(hop);
+    }
+    out
+}
+
 /// Parse a `RESP_CODE_ADVERT_PATH` frame, code included.
 ///
 /// The length byte is the firmware's own encoding (`((hash_size - 1) << 6) | hops`), not a count of

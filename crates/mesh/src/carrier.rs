@@ -54,6 +54,19 @@ pub enum Event {
     /// bytes", and a status that printed only the size left the operator guessing whether the route
     /// was a metre or a county away.
     Limit { record_max: u8, hops: u8 },
+    /// **The road this carrier's radio learned from the peer's advert**, and its hash width.
+    ///
+    /// The advert cache lives in the radio, not in the session, so the session cannot ask for it: a
+    /// carrier that owns the radio is the only thing that can say what road exists. Without this the
+    /// host had no durable route at all — its table held only what a flood had taught, and once that
+    /// expired it sealed its transaction parts with a guessed empty path, which no repeater forwards
+    /// (measured 2026-11-13: `34B carriage=direct path=[]` beside `route 2 repeaters`).
+    Route {
+        /// The path, in the order a packet must carry it.
+        path: Vec<u8>,
+        /// The hash width the path is encoded with, in bytes.
+        width: u8,
+    },
     /// The **flood scope** this node's broadcasts are scoped to, or `None` when they are unscoped.
     ///
     /// Sent at open and whenever it changes — which on this carrier happens once, when a radio with

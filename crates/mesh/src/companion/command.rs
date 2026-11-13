@@ -222,6 +222,10 @@ impl AdvertPath {
     /// instead produces a path no receiver recognises.
     #[must_use]
     pub fn outbound(&self) -> Vec<u8> {
+        // **The same rule as `ldmux_companion::codec::reverse_by_hop`, and it must stay the same.**
+        // The two crates are siblings, so neither can own the function without a layering change;
+        // both are pinned by the same vectors (`a_path_is_reversed_by_hop_and_not_by_byte` here and
+        // in the companion crate), which is what keeps them from drifting.
         let width = usize::from(self.hash_size.clamp(1, 3));
         let mut out = Vec::with_capacity(self.bytes.len());
         for hop in self.bytes.chunks(width).rev() {
