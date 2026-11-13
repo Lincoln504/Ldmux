@@ -159,13 +159,24 @@ pub struct DaemonHost(pub Arc<tokio::sync::Mutex<crate::daemon::LdmuxDaemon>>);
 
 impl MeshHost for DaemonHost {
     async fn listing(&mut self) -> Option<Vec<ldmux_protocol::mesh_term::SessionSummary>> {
-        let v = self
+        // **The reason a listing failed was thrown away.** `ok()?` turned a keeper error, a busy
+        // daemon and a malformed reply into the same `None`, and the phone saw only that no answer
+        // came. Measured 2026-11-13: a List acknowledged by the host and never answered while the
+        // desk showed seventeen shells. A journal line is the difference between "the host has no
+        // shells" and "the host could not ask".
+        let v = match self
             .0
             .lock()
             .await
             .handle("list", serde_json::json!({}))
             .await
-            .ok()?;
+        {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("ldmuxd: the mesh list could not be read: {e}");
+                return None;
+            }
+        };
         let rows = v
             .get("sessions")
             .and_then(|s| s.as_array())

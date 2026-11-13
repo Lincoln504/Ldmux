@@ -896,6 +896,11 @@ where
         // **Deliver what arrived.** One message is one command: the transaction layer reassembled
         // it, so a partial command never reaches a pty.
         for bytes in self.endpoint.take_inbound() {
+            eprintln!(
+                "ldmuxd: inbound {}B kind=0x{:02x}",
+                bytes.len(),
+                bytes.first().copied().unwrap_or(0)
+            );
             dispatch(
                 &bytes,
                 &mut self.rpc,
@@ -1353,7 +1358,17 @@ fn submit(
             continue;
         };
         match endpoint.submit(&bytes, now_ms) {
-            Ok(_) => stats.messages_sent = stats.messages_sent.saturating_add(1),
+            Ok(_) => {
+                stats.messages_sent = stats.messages_sent.saturating_add(1);
+                // **What the host handed the air, and how big.** A List answered and a List never
+                // answered look identical from `mesh status`; at range this line is the difference
+                // between a protocol fault and a radio one.
+                eprintln!(
+                    "ldmuxd: answer queued {}B kind=0x{:02x}",
+                    bytes.len(),
+                    bytes.first().copied().unwrap_or(0)
+                );
+            }
             Err(e) => set(snapshot, |s| {
                 s.last_error = Some(format!("the answer could not be queued: {e}"));
             }),
