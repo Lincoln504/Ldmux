@@ -1548,9 +1548,12 @@ impl RadioEndpoint {
             .last_ask_ms
             .is_none_or(|at| now_ms.saturating_sub(at) >= HANDSHAKE_ASK_MIN_MS)
         {
-            // The attempt is live: send its content again now rather than starting a new one.
+            // **The attempt is live, so there is nothing to do but let the ladder run.** Pulling the
+            // rung deadline forward looked like "ask again now" and was a second ladder: on a public
+            // mesh a foreign record arrives every few seconds, so the phone re-sent its initiation on
+            // that traffic instead of on its own rungs — ten rungs in forty-five seconds, measured
+            // 2026-11-13, while the host answered two and refused seven.
             self.last_ask_ms = Some(now_ms);
-            self.rung_deadline_ms = Some(now_ms);
         }
         if self.config.role != Side::Host {
             return;

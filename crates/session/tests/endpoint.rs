@@ -1458,3 +1458,64 @@ fn the_first_initiation_waits_for_a_path_before_it_floods() {
         "the phone never fell back to a flood, so a peer with no advert could never be reached"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// Foreign traffic does not drive the ladder, and a fresh initiation is not rate-limited.
+// ---------------------------------------------------------------------------------------------
+
+/// **The ladder is the phone's own clock, not the mesh's traffic.**
+///
+/// Pulling the rung deadline forward on every handshake request made a second ladder: on a public
+/// mesh a foreign record arrives every few seconds, so the phone re-sent its initiation on that
+/// traffic instead of on its rungs — ten rungs in forty-five seconds, measured 2026-11-13, while the
+/// host answered two and refused seven.
+#[test]
+fn foreign_traffic_does_not_pull_the_ladder_forward() {
+    let mut run = Run::new(9, 1, 0.0, 1);
+    run.phone
+        .connect(run.now, run.wall())
+        .expect("the phone can start an attempt");
+
+    // A foreign record every 200 ms for four seconds: far more than the mesh would ever deliver.
+    for step in 0..20 {
+        let mut record = vec![0x15u8];
+        record.extend_from_slice(&[0x66; 33]);
+        run.phone.on_record(
+            &record,
+            &ArrivalInfo::direct(0.0),
+            run.now + step * 200,
+            run.wall(),
+        );
+    }
+    run.run_until(4_000, 100, |_| false);
+    assert!(
+        run.phone.stats().rungs_used <= 2,
+        "foreign traffic spent {} rungs in four seconds: {:?}",
+        run.phone.stats().rungs_used,
+        run.phone.stats()
+    );
+}
+
+/// **A fresh initiation is a new session request, not a replay.** Refusing it makes the peer's ladder
+/// outrun this end's answers, which is what kept the phone from ever establishing.
+#[test]
+fn a_fresh_initiation_is_answered_even_when_another_was_just_answered() {
+    let mut run = Run::new(9, 1, 0.0, 1);
+    run.phone
+        .connect(run.now, run.wall())
+        .expect("the phone can start an attempt");
+    run.run_until(60_000, 250, |run| run.phone.established());
+    assert!(run.phone.established(), "the phone did not establish");
+
+    // A second, genuinely new initiation inside the answer rate window: it must be answered.
+    let before = run.host.stats().sessions_established;
+    run.phone
+        .connect(run.now, run.wall())
+        .expect("the phone can start a second attempt");
+    run.run_until(60_000, 250, |run| run.host.stats().sessions_established > before);
+    assert!(
+        run.host.stats().sessions_established > before,
+        "a fresh initiation was refused as if it were a replay: {:?}",
+        run.host.stats()
+    );
+}

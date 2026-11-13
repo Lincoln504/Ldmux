@@ -672,9 +672,12 @@ impl AnswerCache {
             .accept(pairings, wall_ms, &content, index)
             .map_err(Refusal::from)?;
         let peer = accepted.remote_static;
-        if let Some(retry_after_ms) = self.rate_limited(now_ms, &peer) {
-            return Err(Refusal::RateLimited { retry_after_ms });
-        }
+        // **A fresh initiation is not rate-limited.** The limit exists so a captured initiation
+        // cannot be replayed to make this end answer for ever, and a replay is a *repeat* — the same
+        // 121 bytes, which the cache branch above already throttles. A new initiation is a new
+        // session request, and refusing it makes the peer's ladder outrun this end's answers: measured
+        // 2026-11-13, the host refused seven of nine fresh initiations and the phone never
+        // established while it kept retrying.
         if self.entries.len() >= self.capacity && !self.evict_one() {
             return Err(Refusal::CacheFull);
         }
