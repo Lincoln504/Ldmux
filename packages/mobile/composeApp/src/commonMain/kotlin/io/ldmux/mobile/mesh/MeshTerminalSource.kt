@@ -498,6 +498,9 @@ class MeshTerminalSource(
     fun close() {
         engine?.close()
         engine = null
+        // **A page that is gone owes nothing.** The flag is global to the app, so a page dropped
+        // mid-command would otherwise hold every later release open for its full deferral.
+        BackgroundSession.setOwed(false)
     }
 
     // ── selection: the engine's, exactly as the tailnet route's ─────────────────────────────
