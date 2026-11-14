@@ -911,8 +911,9 @@ None of these are defects. Each is a decision that changes what ships.
   so, and nothing here can change it.
 - Multi-hop is implemented in both directions and tested against a simulated mesh, and has never run
   on air. A route is learned from the path a flooded record arrived on, after it authenticates
-  (`crates/session/src/endpoint.rs`), and `carrier_for` starts using it once it is fresh; the
-  `LDRQ`/`LDRR` path query that preceded this is deleted. The `B8` gate
+  (`crates/session/src/endpoint.rs`), and `carrier_for` starts using it once it is fresh. The
+  `LDRQ`/`LDRR` path query is **answer-only** since 2026-11-13: neither end originates one
+  (ADR-0040), and the road comes from the flooded arrival instead. The `B8` gate
   (`crates/daemon/tests/mesh_full_stack.rs`) now proves the whole stack over two repeaters with
   two-byte hashes and 15 % loss, which is not the same as two radios out of earshot:
   `ARCHITECTURE.md` section 11 says so, and a first on-air run with a repeater between them is what

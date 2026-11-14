@@ -12,6 +12,27 @@ transports. **Tailnet** (WebSocket over Tailscale) works and is not in question.
 LoRa, a companion radio on each end) is the project's reason for existing and has never worked at
 range.
 
+## The story so far
+
+The short version, because it is easy to lose in the row-by-row audit.
+
+- **Before the refactor, the radio route worked with both radios in one room.** Batch mode, a shell,
+  a command, its output. It never worked over public repeaters at range, and that was the whole
+  reason for the audit.
+- **The audit round (2026-11-11) rewrote the radio path.** The route request was deleted on a false
+  premise, the byte-stream ARQ became message transactions, and the app moved onto the Rust engine.
+- **After the refactor the operator has not seen a working shell on the phone.** The in-room case is
+  proven by tests and by the host's journal — a version-15 session established at 1–2 hops on
+  2026-11-13 and the phone's list request was acknowledged — but the screen never left "asking host
+  for shells", because the daemon dropped the `List` before its own service saw it
+  (`RELEASE-AUDIT.md` 6.235, fixed the same day). That is the regression the operator felt, and it
+  was one line of slot resolution, not the transport.
+- **At range it has never worked, before or after.** The bootstrap does not cross a long chain. The
+  route request does cross one, which is why the two facts sit side by side in this file.
+
+So the honest summary is: **in one room it worked, the refactor did not break it, a dropped `List`
+did, and that is fixed but not yet seen working on the phone; at range it has never worked.**
+
 ## What works today
 
 - **Tailnet route**: shells, attach, scrollback, ownership, marks, notifications, the desk window.
@@ -150,6 +171,43 @@ direct conflict and that is a decision for the operator, not a footnote.
 3. **Is live mode gone for good?** It was removed for the public channel, where a keystroke is a
    broadcast. On a private tuple the argument does not apply, and the decision is now "one rule
    everywhere", so it stays gone unless that is revisited.
+
+## Known issues, in one place
+
+Everything open, at the level it matters, with where the detail is. Nothing here is a surprise to
+`RELEASE-AUDIT.md`; this is the index to it.
+
+**Blocking the product**
+
+1. **A session at range has never worked.** The bootstrap does not cross a long chain. The counters
+   that will say why exist (`sentRefused`, `ldmr`, `pushes`, `routeReplies`); the measurement does
+   not. *This file, What does not work.*
+2. **The per-hop loss is unmeasured**, so every ladder, timeout and retry is sized from a guess.
+   *This file, Feasibility.*
+
+**Open defects and limitations**
+
+| Issue | State | Where |
+|---|---|---|
+| The host's USB companion can answer its own pushes and nothing else, and only a hard power cycle clears it | OPEN — the link loop re-opens with backoff, which is right; what is missing is a status line that says which commands went unanswered | `RELEASE-AUDIT.md` 6.11 |
+| Upgrading loses the pairing: the package id changed for 0.1, so the previous install is a different app | OPEN by design | `RELEASE-AUDIT.md` 2.4 |
+| A reviewer with no host, no tailnet and no radio cannot get past first run | OPEN by design — the listing says what it needs | `RELEASE-AUDIT.md` 2.5 |
+| A pairing code is on screen while someone photographs it | OPEN — inherent; the token is bearer | `RELEASE-AUDIT.md` 4.4 |
+| No release tag has ever been cut | OPEN | `RELEASE-AUDIT.md` 14.4 |
+| Dictation depends on the device's speech recogniser, which may be cloud-based | accepted; the app says so | `RELEASE-AUDIT.md` Appendix C |
+| RTL and split screen are unverified; dark mode is the only mode | accepted | `RELEASE-AUDIT.md` Appendix C |
+| Nothing outside this machine builds the Android artifact | accepted | `RELEASE-AUDIT.md` 1.7 |
+| The workspace-placement adapter (i3/sway/hyprland) is carried, not used | accepted — nothing asks for a workspace from a phone | `RELEASE-AUDIT.md` Appendix C |
+
+**Process gaps**
+
+- **The app's own suite is not in the gate.** `scripts/android.sh test` is a separate command and CI
+  builds Rust only, so two failures sat in it unnoticed until 2026-11-13.
+- **The gate measures the code, not the air.** Every field failure of 2026-11-12/13 was an
+  assumption the simulator shared, which is why the tree was green while the product never worked at
+  range (`RADIO-PLAN.md` §12.7b-3).
+- **A contract with two owners has no cross-boundary test.** Three instances on 2026-11-13 alone
+  (`AR-20`).
 
 ## Where the detail lives
 

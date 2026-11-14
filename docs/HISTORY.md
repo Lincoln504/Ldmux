@@ -30,6 +30,23 @@ current state is `STATE.md`. This file is the *why it changed*, phase by phase.
 | **Session index** | stable per peer → per session | `cc00fbe` | a stable index removes the only signal that the peer restarted (`AR-19`) |
 | **Acknowledgement** | a standalone ack per part → piggybacked, suppressed to the burst tail | `5940078` | a mid-burst ack collides at the first repeater (`AR-18`) |
 
+## The regression the operator felt
+
+**Before the refactor the radio route worked with both radios in one room** — batch mode, a shell, a
+command, its output — and never over public repeaters at range. After the audit round and the
+refactor the operator had not seen a working shell on the phone at all, and said so on 2026-11-11:
+*"it's something that we have not gotten back to that was working before."*
+
+The cause was not the transport. On 2026-11-13 the host's journal shows a version-15 session
+establishing at 1–2 hops, `msg2` going out direct and flooded, and the phone's list request being
+acknowledged three times — and the screen still sat on "asking host for shells", because the link
+loop dropped the `List` before its own service saw it (`RELEASE-AUDIT.md` 6.235). One line of slot
+resolution, fixed the same day, and the reason the in-room case looked dead.
+
+**At range it has never worked, before or after.** The bootstrap does not cross a long chain, while
+the route request does — the two facts that make the range problem a measurement rather than a
+mystery.
+
 ## Moments worth remembering
 
 - **2026-11-10 — the connect burst deafened itself.** The old stack flooded `SELF_ADVERT`, three
