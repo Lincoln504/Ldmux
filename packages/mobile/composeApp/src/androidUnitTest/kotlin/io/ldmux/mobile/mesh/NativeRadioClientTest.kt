@@ -192,7 +192,10 @@ class NativeRadioClientTest {
         val c = assertNotNull(client(), "the client could not be created")
         try {
             assertEquals(ClientCode.OK, c.connect(now, now))
-            assertNotNull(c.poll(now), "connect produced nothing to write")
+            // **Past the discovery grace.** The first rung waits up to three seconds for the
+            // radio's advert cache to name a path, so a poll at the same instant legitimately
+            // produces nothing; the counter this test is about only moves once a rung is sent.
+            assertNotNull(c.poll(now + 5_000), "connect produced nothing to write")
             val s = assertNotNull(c.stats(), "the engine would not report its counters")
             assertTrue(
                 s.recordsSent + s.rungsUsed > 0,

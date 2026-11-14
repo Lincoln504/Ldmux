@@ -193,13 +193,18 @@ class MeshTerminalSource(
     fun refresh() {
         val ask = onRefresh ?: return
         refreshed()
+        // **A refusal is a fact, and the bar has a line for it.** `ask()` reports whether the
+        // engine took the request; discarding that answer left `refreshRefused` permanently false
+        // and its line in the bar unreachable, so a press with no session looked like a press that
+        // worked. What settles a wait that *was* accepted is the answer arriving, which
+        // `answered()` handles for a screen and the driver handles for a list.
+        if (!ask()) {
+            state = BatchState.Idle
+            refreshRefused = true
+            return
+        }
         state = BatchState.Waiting
         sentAt = now()
-        // **The bar settles on the answer, not on the request.** `ask()` reports whether an action
-        // was fired, and both branches fire one, so a refusal could never be true here: the field
-        // and its line in the bar were unreachable code. What settles the wait is the answer
-        // arriving, which `answered()` handles for a screen and the driver now handles for a list.
-        ask()
         refreshRefused = false
     }
 
