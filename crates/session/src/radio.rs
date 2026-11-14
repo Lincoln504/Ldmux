@@ -692,3 +692,43 @@ mod no_spin {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **Bringing the radio up transmits nothing.**
+    ///
+    /// It used to queue a self-advert, on the reasoning that the radio's advert cache was the only
+    /// place a path could come from. `AR-10` disproved that — a flooded arrival carries the chain
+    /// home — and an advert is a broadcast every repeater in range forwards, so it was the last
+    /// transmission that contradicted `docs/adr/0040-nothing-unsolicited-on-the-air.md`.
+    ///
+    /// The endpoint's own `an_idle_end_transmits_nothing` could not catch it: that test drives a
+    /// fake carrier, and this command is queued below the carrier, in the radio's own window.
+    #[test]
+    fn bringing_the_radio_up_queues_no_transmission() {
+        let mut radio = Radio::new();
+        radio.bring_up(0);
+        // **The queue, not the frames.** `pump` hands over one command and then holds the window
+        // until its answer arrives, so a test that drained frames would see only the first one and
+        // pass whatever was queued behind it.
+        let queued: Vec<u8> = radio.queue.iter().map(|q| q.opcode).collect();
+        assert!(
+            !queued.is_empty(),
+            "bring_up queued nothing at all, so the test proves nothing"
+        );
+        for opcode in queued {
+            assert_ne!(
+                opcode,
+                command::commands::SEND_SELF_ADVERT,
+                "bring_up queued a self-advert, which is a flood nobody asked for"
+            );
+            assert_ne!(
+                opcode,
+                command::commands::SEND_RAW_PACKET,
+                "bring_up queued a raw packet, which is a transmission nobody asked for"
+            );
+        }
+    }
+}
