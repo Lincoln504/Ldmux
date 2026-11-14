@@ -25,12 +25,16 @@ tailnet, or a pair of LoRa radios when there is no internet at all.
   addressed to the peer radio's key — `RAW_CUSTOM` when the route is direct, a `REQ` flood carrying
   the sealed record when it is not — and the radio's own channel encryption is never used.
   [`docs/SECURITY.md`](docs/SECURITY.md).
-- **The radio path is under rework, and its published size is not yet truthful.** A full-size flooded
-  record is bigger than the receive interface will report, and the handshake does not fit a long
-  route. [`docs/RADIO-PLAN.md`](docs/RADIO-PLAN.md) is the plan of record;
+- **The radio path works in one room and has never worked at range.** A version-15 session
+  establishes, lists, attaches and answers at one or two hops; at fourteen repeaters the phone's
+  bootstrap has not yet crossed. [`docs/STATE.md`](docs/STATE.md) is the one-page state of the
+  project, [`docs/RADIO-PLAN.md`](docs/RADIO-PLAN.md) is the plan of record,
   [`docs/RADIO-AUDIT-REVIEW.md`](docs/RADIO-AUDIT-REVIEW.md) is the evidence behind it, and
   [`docs/adr/0039-batch-transaction-radio-architecture.md`](docs/adr/0039-batch-transaction-radio-architecture.md)
   is the decision.
+- **Nothing is transmitted that a person or a peer did not ask for.** No route requests on a timer,
+  no adverts by default, and a bootstrap ladder that stops when it is spent and waits for the
+  operator's Refresh. A phone left on the connect screen is silent, not a flood.
 - **One owner per shell.** A second device is told who holds it and offered a takeover, never
   displaced silently.
 - **LoRa stays affordable.** Batch mode sends forty keystrokes as one transmission on `sync`, so a

@@ -1803,31 +1803,40 @@ fn an_idle_end_transmits_nothing() {
     );
 }
 
-/// What a flood's crossing probability actually is in the model, per hop count and loss./// What a flood's crossing probability actually is in the model, per hop count and loss.
+/// What a flood's crossing probability actually is in the model, per hop count and loss./// **A flood crosses a lossless mesh at every hop count the model is asked about.**
 ///
-/// Printed rather than asserted: the number is the input to every ladder decision, and guessing it
-/// is how a ladder gets sized for a room.
+/// This used to print the crossing rate and assert nothing, which is a test that cannot fail. The
+/// printed table is still the input to every ladder decision, so it is still printed; what is
+/// asserted is the one property the ladder depends on: with no loss, a flood arrives however many
+/// repeaters it crosses. A regression that broke the flood carrier would show here as a hop count
+/// that never delivers.
 #[test]
-fn measure_the_flood_crossing_rate() {
-    for loss in [0.0, 0.1, 0.2] {
-        for repeaters in [1usize, 4, 8, 12] {
-            let mut run = Run::new(23, repeaters, loss, 1);
-            run.phone
-                .connect(run.now, run.wall())
-                .expect("the phone can start an attempt");
-            run.run_until(30_000, 500, |run| run.host.stats().records_received > 0);
-            eprintln!(
-                "loss {loss:.2} hops {repeaters:2}: host received {} record(s) after {} initiation(s)",
-                run.host.stats().records_received,
-                run.phone.stats().initiations_sent
-            );
-        }
+fn a_flood_crosses_a_lossless_mesh_at_every_hop_count() {
+    for repeaters in [1usize, 4, 8, 12] {
+        let mut run = Run::new(23, repeaters, 0.0, 1);
+        run.phone
+            .connect(run.now, run.wall())
+            .expect("the phone can start an attempt");
+        run.run_until(30_000, 500, |run| run.host.stats().records_received > 0);
+        eprintln!(
+            "lossless hops {repeaters:2}: host received {} record(s) after {} initiation(s)",
+            run.host.stats().records_received,
+            run.phone.stats().initiations_sent
+        );
+        assert!(
+            run.host.stats().records_received > 0,
+            "a lossless flood never reached the host across {repeaters} repeater(s)"
+        );
     }
 }
 
-/// Why a long flood fails: the outcome histogram, not a guess.
+/// **A long lossy flood ends in a verdict, never in a spin.**
+///
+/// The histogram is printed because it is the evidence for how a long flood fails; what is asserted
+/// is that the run terminates with the mesh having done something, rather than the loop turning
+/// without a record or a refusal. This used to print and assert nothing.
 #[test]
-fn measure_why_a_long_flood_fails() {
+fn a_long_lossy_flood_ends_in_a_verdict() {
     for seed in [17u64, 23] {
         let mut run = Run::new(seed, 12, 0.2, 1);
         run.phone
@@ -1842,6 +1851,14 @@ fn measure_why_a_long_flood_fails() {
             "seed {seed}: host received {} after {} initiations; outcomes {counts:?}",
             run.host.stats().records_received,
             run.phone.stats().initiations_sent
+        );
+        assert!(
+            !counts.is_empty(),
+            "seed {seed}: the mesh recorded no outcome at all, so nothing was ever transmitted"
+        );
+        assert!(
+            run.phone.stats().initiations_sent > 0,
+            "seed {seed}: the phone never transmitted, so the run proves nothing"
         );
     }
 }

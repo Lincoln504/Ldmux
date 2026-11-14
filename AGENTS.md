@@ -28,6 +28,8 @@ documents consolidated away at `731970f`, and are readable at `c3d7c56`).
 `packages/mobile` is the KMP/Compose client and the JNI shim; it is not part of
 the port and is kept.
 
+`docs/STATE.md` is the one-page state of the project: what works, what does not, the
+public-mesh rule, the feasibility arithmetic, and the open questions. Read it first.
 `docs/ARCHITECTURE.md` is the authoritative design: layers, wire, invariants,
 security, failure modes, platform support. `docs/RADIO-PLAN.md` is the architectural
 redesign and plan of record for the radio path, paired with `docs/RADIO-AUDIT-REVIEW.md`
