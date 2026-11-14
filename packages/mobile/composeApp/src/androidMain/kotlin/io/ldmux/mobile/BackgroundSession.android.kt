@@ -28,7 +28,7 @@ import android.util.Log
  * true here: the user tapped a shell open.
  *
  * **It is not a promise that the shell stays attached.** The app lets go of every
- * shell once it has been off screen for [BackgroundSession.releaseGraceMs] (45 s),
+ * shell once it has been off screen for [BackgroundSession.releaseGraceMs] (five minutes),
  * which stops this service. The shell itself lives in the keeper on the host and is
  * unaffected either way; what ends is this phone's *view* and its claim.
  *

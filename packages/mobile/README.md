@@ -132,7 +132,7 @@ adb reverse tcp:7629 tcp:7629
 ## Backgrounding and the network
 
 - **The shell survives; the attachment does not.** The shell lives in the keeper on the
-  host. Off screen, a foreground service keeps the sockets up for a 45 s grace
+  host. Off screen, a foreground service keeps the sockets up for a five-minute grace
   (`BackgroundSession.releaseGraceMs`, ADR-0012); after that the app drops its pages,
   closes the sockets, releases its claims, stops the service and the wake lock (which
   also has a 10-minute timeout as a backstop) and lands on the launcher. The release is

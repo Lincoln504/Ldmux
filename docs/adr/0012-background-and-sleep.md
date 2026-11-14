@@ -1,6 +1,6 @@
 # ADR-0012: A shell outlives the app, a claim does not
 
-**Status:** Accepted (2026-09-18); the shell half is now the keeper's
+**Status:** Accepted (2026-09-18); the shell half is now the keeper's. **Amended 2026-11-13:** the grace is five minutes, not 45 s, and the release is held for up to a minute while an operation is owed (`RADIO-PLAN.md` §2, `RELEASE-AUDIT.md` 6.237). Forty-five seconds is right for the tailnet, where a return costs a reconnect; at range a return costs a handshake, a route and a list.
 
 > **Amended (2026-10-04, D4).** The tmux session layer this ADR assumed is gone: `crates/keeper` owns the PTYs and runs one libghostty-vt per session, and the daemon is Rust. Kept for *why*, not as current design. See ADR-0018.
 
@@ -35,7 +35,7 @@ that reconnects is given a full snapshot of the terminal *state* by construction
 
 - `AppLifecycle` states the fact (set from `onStart`/`onStop`, not `onPause`: a
   dialog and a keyboard are not the user leaving).
-- Off screen for `BACKGROUND_GRACE_MS` (45 s) and the app drops its pages, which
+- Off screen for `BACKGROUND_GRACE_MS` and the app drops its pages, which
   stops the service, releases the wake lock, closes the sockets and releases the
   claims. Coming back inside the window changes nothing.
 - Letting go is the **same mechanism** as the launcher button — dropping the pages

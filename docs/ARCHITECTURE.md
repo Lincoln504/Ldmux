@@ -442,11 +442,14 @@ by the host radio, by the app before it retunes, and by every budget below.
   turns one on (3600 keeps the node in other operators' contact lists for about 0.07 % of a
   ten-percent allowance at 62.5 kHz). The community's
   guidance is far longer still — repeaters are told 47 hours — because an advert is airtime every
-  node in range pays for. A route is requested on demand instead: a flooded `REQ` of ≈40 bytes and
-  a direct reply of ≈40 bytes plus the path, once per attempt rather than once per interval.
-- **Every broadcast is charged to the meter.** An advert and a route request are each counted as one
-  record; an advert is smaller than a record at every tuple, so this over-counts rather than
-  under-counts.
+  node in range pays for.
+- **Nothing is transmitted that a person or a peer did not ask for** (ADR-0040). Neither end
+  originates a route request: a path is learned from the peer's own records, because a flooded
+  arrival carries the chain home, and from the advert-cache read, which is a local command. The
+  bootstrap ladder is spent and then goes quiet, and the operator's Refresh is the next ask. A
+  request that *arrives* is still answered, on both ends.
+- **Every broadcast is charged to the meter.** An advert is counted as one record; it is smaller
+  than a record at every tuple, so this over-counts rather than under-counts.
 - **The host gates on the countdown it computed, not on the firmware's limiter.** MeshCore's
   `Dispatcher` charges measured airtime against a budget, but its factor is 1.0, which is a 50 %
   duty cycle (`getAirtimeBudgetFactor()`, `meshcore/src/Dispatcher.cpp`). So the serial carrier

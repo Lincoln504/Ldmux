@@ -301,7 +301,7 @@ fun MeshTerminalScreen(
     // the radio on a screen nobody is looking at.
     var ended by remember(conn) { mutableStateOf(false) }
     // The platform's release closed this connection. Not a failure, so it must not pay the failure
-    // backoff - and the timer can fire late: Android freezes the process, so the 45-second grace
+    // backoff - and the timer can fire late: Android freezes the process, so the five-minute grace
     // often expires only when the app is unfrozen on return, by which time it is foreground again.
     var released by remember(conn) { mutableStateOf(false) }
     LaunchedEffect(conn) {
