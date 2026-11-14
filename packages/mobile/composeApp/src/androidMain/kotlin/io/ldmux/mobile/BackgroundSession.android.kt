@@ -229,7 +229,21 @@ class LdmuxService : Service() {
  * that the only thing crossing the seam is a boolean: "the link is up".
  */
 actual object BackgroundSession {
-    actual val releaseGraceMs: Long = 45_000L
+    /**
+     * **Five minutes, which is the frozen rule** (`RADIO-PLAN.md` §2). Forty-five seconds is right
+     * for the tailnet, where a return costs a reconnect; at range a return costs a handshake, a
+     * route and a list, which is a minute of airtime, so the window is the one the plan states.
+     */
+    actual val releaseGraceMs: Long = 300_000L
+
+    @Volatile
+    private var owedNow = false
+
+    actual fun setOwed(owed: Boolean) {
+        owedNow = owed
+    }
+
+    actual val owed: Boolean get() = owedNow
 
     private const val TAG = "ldmux"
     private var running = false

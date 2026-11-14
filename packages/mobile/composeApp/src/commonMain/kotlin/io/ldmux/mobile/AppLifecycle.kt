@@ -64,7 +64,7 @@ object AppLifecycle {
         timer: ReleaseTimer = CoroutineReleaseTimer,
         handler: () -> Unit,
     ): () -> Unit {
-        val mine = BackgroundRelease(graceMs, timer, handler)
+        val mine = BackgroundRelease(graceMs, timer, handler) { BackgroundSession.owed }
         release = mine
         return {
             mine.onForeground()

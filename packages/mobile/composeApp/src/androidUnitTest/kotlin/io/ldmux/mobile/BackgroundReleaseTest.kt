@@ -23,7 +23,18 @@ class BackgroundReleaseTest {
             return Cancellation { p.cancelled = true }
         }
 
-        fun fire() = scheduled.filter { !it.cancelled }.forEach { it.action() }
+        /**
+         * Fire everything due, once.
+         *
+         * **A fired entry is spent.** Leaving it in the list made a second `fire()` re-run every
+         * earlier action, which is invisible in a test that fires once and wrong in one that fires
+         * a deferral window at a time.
+         */
+        fun fire() {
+            val due = scheduled.filter { !it.cancelled }
+            scheduled.clear()
+            due.forEach { it.action() }
+        }
     }
 
     @AfterTest
@@ -35,7 +46,7 @@ class BackgroundReleaseTest {
     fun `a zero grace releases synchronously inside the background call, with no timer`() {
         val timer = FakeTimer()
         var released = 0
-        BackgroundRelease(0, timer) { released++ }.also { it.onBackground() }
+        BackgroundRelease(0, timer, { released++ }).also { it.onBackground() }
         assertEquals(1, released)
         assertTrue(timer.scheduled.isEmpty())
     }
@@ -44,11 +55,11 @@ class BackgroundReleaseTest {
     fun `a grace schedules the release and coming back cancels it`() {
         val timer = FakeTimer()
         var released = 0
-        val r = BackgroundRelease(45_000, timer) { released++ }
+        val r = BackgroundRelease(300_000, timer, { released++ })
         r.onBackground()
         assertEquals(0, released)
         assertTrue(r.waiting)
-        assertEquals(45_000L, timer.scheduled.single().ms)
+        assertEquals(300_000L, timer.scheduled.single().ms)
         r.onForeground()
         assertFalse(r.waiting)
         timer.fire()
@@ -59,18 +70,57 @@ class BackgroundReleaseTest {
     fun `an uncancelled grace releases once`() {
         val timer = FakeTimer()
         var released = 0
-        val r = BackgroundRelease(1000, timer) { released++ }
+        val r = BackgroundRelease(1000, timer, { released++ })
         r.onBackground()
         timer.fire()
         assertEquals(1, released)
         assertFalse(r.waiting)
     }
 
+    /**
+     * **An owed operation holds the release, and only for a minute.**
+     *
+     * Dropping a page mid-command throws away the answer the operator is waiting for, and at range
+     * the whole bootstrap that produced it. The deferral is bounded because an operation that never
+     * answers must not keep a phone awake.
+     */
+    @Test
+    fun `an owed operation defers the release, up to the budget`() {
+        val timer = FakeTimer()
+        var released = 0
+        var owed = true
+        val r = BackgroundRelease(1_000, timer, { released++ }) { owed }
+        r.onBackground()
+        // Each fire is one deferral window; the budget is a minute of them.
+        repeat(3) {
+            timer.fire()
+            assertEquals(0, released, "the release fired while an operation was owed")
+        }
+        // Spend the rest of the budget.
+        repeat(20) { timer.fire() }
+        assertEquals(1, released, "the deferral never ended")
+        assertFalse(r.waiting)
+    }
+
+    @Test
+    fun `an operation that finishes inside the deferral releases at once`() {
+        val timer = FakeTimer()
+        var released = 0
+        var owed = true
+        val r = BackgroundRelease(1_000, timer, { released++ }) { owed }
+        r.onBackground()
+        timer.fire()
+        assertEquals(0, released)
+        owed = false
+        timer.fire()
+        assertEquals(1, released)
+    }
+
     @Test
     fun `backgrounding twice does not leave a stale timer behind`() {
         val timer = FakeTimer()
         var released = 0
-        val r = BackgroundRelease(1000, timer) { released++ }
+        val r = BackgroundRelease(1000, timer, { released++ })
         r.onBackground()
         r.onBackground()
         assertEquals(2, timer.scheduled.size)

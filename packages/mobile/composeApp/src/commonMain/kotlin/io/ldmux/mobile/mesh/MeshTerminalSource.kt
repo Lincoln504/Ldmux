@@ -4,6 +4,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import io.ldmux.mobile.AltScroll
+import io.ldmux.mobile.BackgroundSession
 import io.ldmux.mobile.ClipboardRequest
 import io.ldmux.mobile.TapAction
 import io.ldmux.mobile.TerminalHandle
@@ -167,6 +168,7 @@ class MeshTerminalSource(
         refreshed()
         if (!send(items)) {
             state = BatchState.Idle
+            BackgroundSession.setOwed(false)
             return false
         }
         // **Taken only after the engine accepted it.** A send that throws or refuses leaves the
@@ -175,6 +177,9 @@ class MeshTerminalSource(
         input.refreshPending()
         sentAt = now()
         state = BatchState.Waiting
+        // **The release waits for this.** Dropping the page mid-command throws away the answer and,
+        // at range, the bootstrap that produced it.
+        BackgroundSession.setOwed(true)
         return true
     }
 
@@ -201,11 +206,13 @@ class MeshTerminalSource(
         if (!ask()) {
             state = BatchState.Idle
             refreshRefused = true
+            BackgroundSession.setOwed(false)
             return
         }
         state = BatchState.Waiting
         sentAt = now()
         refreshRefused = false
+        BackgroundSession.setOwed(true)
     }
 
     /**
@@ -229,6 +236,8 @@ class MeshTerminalSource(
             state = BatchState.Settled
             settledUntil = now() + SETTLED_SHOW_MS
         }
+        // The answer arrived, so nothing is owed any more.
+        BackgroundSession.setOwed(false)
     }
 
     /**
@@ -241,7 +250,12 @@ class MeshTerminalSource(
         val t = now()
         when (state) {
             BatchState.Waiting -> {
-                if (t - sentAt > answerDeadlineMs(ANSWER_WAIT_MS, hops())) state = BatchState.NoAnswer
+                if (t - sentAt > answerDeadlineMs(ANSWER_WAIT_MS, hops())) {
+                    state = BatchState.NoAnswer
+                    // A wait that has run out is not an operation any more: the release must not
+                    // be held open by an answer that is not coming.
+                    BackgroundSession.setOwed(false)
+                }
             }
             BatchState.Settled -> {
                 if (t > settledUntil) state = BatchState.Idle

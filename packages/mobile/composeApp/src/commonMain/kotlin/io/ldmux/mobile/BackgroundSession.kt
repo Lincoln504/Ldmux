@@ -42,6 +42,18 @@ expect object BackgroundSession {
     fun setActive(active: Boolean, text: String)
 
     /**
+     * An operation is owed: a command or a fetch is in flight and its answer has not arrived.
+     *
+     * The release waits for it, up to [MAX_DEFER_MS], because dropping the page mid-operation
+     * throws away the answer the operator is waiting for and, at range, the whole bootstrap that
+     * produced it.
+     */
+    fun setOwed(owed: Boolean)
+
+    /** Whether an operation is owed right now. */
+    val owed: Boolean
+
+    /**
      * Ask to be told when the usable networks change (one appears, or the one in use is
      * lost), so the clients can retry at once rather than wait out a backoff, and
      * check that a socket that looks open still is.
