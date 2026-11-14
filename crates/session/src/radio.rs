@@ -48,22 +48,6 @@ use ldmux_mesh::companion::framing;
 /// (`src/Dispatcher.cpp:199`), a setting on the *other* radio that ldmux neither sets nor reports.
 pub const PATH_ASK_MS: u64 = 5_000;
 
-/// How often this end asks the peer itself for a route, while it holds none.
-///
-/// Slower than the advert cache read beside it, because this one costs the mesh: a flood is forwarded
-/// by every repeater in range. Twenty seconds is a request a minute with the ladder on top, which is
-/// the airtime a discovery may spend without competing with the data it is finding a road for.
-pub const ROUTE_ASK_MS: u64 = 20_000;
-
-/// The longest gap between route asks, and the reason the gap grows at all.
-///
-/// **A phone left on the connect screen is a phone flooding a public mesh for ever.** The ask is a
-/// small unscoped flood that every repeater in range forwards, and a host that is off never answers
-/// it: measured 2026-11-13, the operator's neighbours reported the testing as breaking the mesh. The
-/// gap doubles after each unanswered ask up to this ceiling, so an absent host costs six floods an
-/// hour instead of a hundred and eighty, and a path learned or a record heard resets it.
-pub const ROUTE_ASK_MAX_MS: u64 = 600_000;
-
 /// The name this client reports in `APP_START`. The firmware prints it and nothing else depends on
 /// it; what matters is that the frame carries *a* name (see `command::app_start`).
 pub const APP_NAME: &str = "ldmux";
@@ -230,9 +214,6 @@ pub struct Radio {
     /// When to read the radio's advert cache again, while no path is held.
     next_path_ms: Option<u64>,
     /// When to ask the peer itself for a route, while no path is held.
-    next_route_ms: Option<u64>,
-    /// The current gap between route asks, doubled after each unanswered one.
-    route_ask_gap_ms: u64,
     /// This radio's own key, which a route request carries so the peer can address its answer.
     own_key: [u8; 32],
     /// The path hash width this radio is set to, which a request and a reply must both encode with.
@@ -264,8 +245,6 @@ impl Radio {
             status: RadioStatus::default(),
             next_poll_ms: None,
             next_path_ms: None,
-            next_route_ms: None,
-            route_ask_gap_ms: ROUTE_ASK_MS,
             own_key: [0; 32],
             hash_size: 1,
             peer_key: [0u8; 32],
@@ -369,21 +348,6 @@ impl Radio {
         self.counters.commands += 1;
     }
 
-    /// Ask the peer for a route, as a flooded request carrying this end's key.
-    fn send_route_request(&mut self, now_ms: u64) {
-        let nonce = u32::try_from(now_ms).unwrap_or(u32::MAX).to_le_bytes();
-        let Ok(packet) = ldmux_mesh::companion::route::build_request(
-            self.hash_size,
-            &self.peer_key,
-            &self.own_key,
-            &nonce,
-        ) else {
-            return;
-        };
-        self.send_record(&packet);
-        self.counters.route_asks += 1;
-    }
-
     /// Answer a route request with the chain it crossed, reversed.
     pub fn answer_route(
         &mut self,
@@ -436,18 +400,11 @@ impl Radio {
         {
             self.next_path_ms = Some(now_ms.saturating_add(PATH_ASK_MS));
             self.ask(command::get_advert_path(&self.peer_key), 0);
-            // **And ask the peer directly, because an advert cannot cross this mesh.**
-            //
-            // A repeater drops an advert at `flood_max_advert`, eight hops by default, while a `REQ`
-            // flood travels sixty-four (`examples/simple_repeater/MyMesh.cpp:972`,
-            // `src/helpers/RoutingPolicy.h:16-22`). On a longer mesh the cache read above can never
-            // answer, so this end would flood every record for ever. The request is a flood too, but
-            // a small one, and the reply carries the chain home.
-            if self.next_route_ms.is_none_or(|due| now_ms >= due) {
-                self.next_route_ms = Some(now_ms.saturating_add(self.route_ask_gap_ms));
-                self.route_ask_gap_ms = self.route_ask_gap_ms.saturating_mul(2).min(ROUTE_ASK_MAX_MS);
-                self.send_route_request(now_ms);
-            }
+            // **This end does not ask for a route on its own.** The ask is a flood, and a flood is
+            // somebody else's airtime: measured 2026-11-13, the operator's neighbours reported the
+            // testing as breaking the mesh. A path is learned from the peer's own records (a
+            // flooded arrival carries the chain home) and from the advert cache read above, which
+            // is a local command and costs no airtime. The peer's requests are still answered.
         }
         // The readings come due again.
         if self.started && self.next_poll_ms.is_some_and(|due| now_ms >= due) {
@@ -632,8 +589,6 @@ impl Radio {
         self.peer_key = peer_key;
         if self.learned.is_none() {
             self.next_path_ms = Some(now_ms);
-            self.next_route_ms = Some(now_ms);
-            self.route_ask_gap_ms = ROUTE_ASK_MS;
         }
     }
 

@@ -240,6 +240,14 @@ class MeshEngineDriver(
                 _view.value = MeshTermView.HostClosed(event.reason)
             }
 
+            is ClientEvent.Unanswered -> {
+                // **The verdict, from the engine's own mouth.** The ladder is spent and nothing
+                // will be transmitted until the operator asks, so the screen says that instead of
+                // counting seconds for ever.
+                _attempt.value = event.rungs
+                _view.value = MeshTermView.NoAnswer
+            }
+
             is ClientEvent.Created -> {
                 // The answer to a create is this link's to act on, whatever the list was showing:
                 // backing out of a failed list must not silently swallow the new shell's id.
@@ -442,7 +450,22 @@ class MeshEngineDriver(
         engine.list(clock())
     }
 
-    suspend fun refresh() = listShells()
+    /**
+     * The operator's one way to ask again.
+     *
+     * **Nothing retries on its own.** The engine's bootstrap ladder is spent and it has gone quiet,
+     * so a press while the link is down starts a fresh attempt; a press on a live link asks for the
+     * list, which is what the button has always meant there.
+     */
+    suspend fun refresh() {
+        if (!engine.established()) {
+            _attempt.value = 0
+            _view.value = MeshTermView.Handshaking
+            engine.connect(clock(), wall())
+            return
+        }
+        listShells()
+    }
 
     suspend fun createShell(cwd: String): Boolean =
         engine.createShell(cwd, clock()) == ClientCode.OK

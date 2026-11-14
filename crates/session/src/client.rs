@@ -285,6 +285,15 @@ pub enum ClientEvent {
         /// Which shell.
         shell: String,
     },
+    /// **The bootstrap ladder is spent and this end has gone quiet.**
+    ///
+    /// Nothing retries on its own: the next transmission is the operator's, and the screen says so
+    /// rather than counting seconds for ever. `rungs` is how many attempts were made, so the
+    /// sentence can be honest about the cost.
+    Unanswered {
+        /// How many initiations were sent before the ladder was spent.
+        rungs: u8,
+    },
     /// The host ended this client's view of the shell, and why (`mesh_term::closed`).
     Closed {
         /// The reason, from `mesh_term::closed`.
@@ -1472,7 +1481,10 @@ impl Client {
                 self.stats.superseded += 1;
                 self.list_finished(*tx_id);
             }
-            Outbound::BootstrapFailed { .. } => self.stats.bootstrap_failures += 1,
+            Outbound::BootstrapFailed { rungs } => {
+                self.stats.bootstrap_failures += 1;
+                self.events.push(ClientEvent::Unanswered { rungs: *rungs });
+            }
         }
     }
 }

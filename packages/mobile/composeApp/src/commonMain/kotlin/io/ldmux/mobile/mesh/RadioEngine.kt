@@ -440,6 +440,18 @@ sealed interface ClientEvent {
     /** The host let the shell go, or refused it; [reason] is `mesh_term`'s `closed` byte. */
     data class Closed(override val shell: String, val reason: Int, val message: TermMessage.Closed) : ClientEvent
 
+    /**
+     * **The bootstrap ladder is spent and the engine has gone quiet.**
+     *
+     * Nothing retries on its own: the next transmission is the operator's, so the screen says
+     * "no answer · refresh" rather than counting seconds for ever. [rungs] is how many initiations
+     * were sent, so the sentence can be honest about the cost.
+     */
+    data class Unanswered(val rungs: Int) : ClientEvent {
+        /** No shell is involved: the link never came up. */
+        override val shell: String get() = ""
+    }
+
     /** The host made the shell a [RadioClient.createShell] asked for; [id] is what to open. */
     data class Created(val id: String) : ClientEvent {
         /** A created shell is not a page yet, so it has no shell id of its own. */

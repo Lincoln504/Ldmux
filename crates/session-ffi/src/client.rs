@@ -352,6 +352,8 @@ pub const LDMUX_EV_HISTORY: u8 = 7;
 /// The host made a shell this client asked for. `text` carries its id as UTF-8 — **not** a wire
 /// message, because a `Create`'s answer is a name, not something the app draws.
 pub const LDMUX_EV_CREATED: u8 = 8;
+/// The bootstrap ladder is spent and the engine has gone quiet; `value` is the rungs it sent.
+pub const LDMUX_EV_UNANSWERED: u8 = 9;
 
 /// The most bytes a shell id may be, which is `mesh_term::MAX_SELECTOR`.
 pub const LDMUX_SHELL_MAX: usize = 40;
@@ -507,6 +509,10 @@ fn encode_event(event: &ClientEvent) -> Ready {
             ready.text = id.as_bytes().to_vec();
             None
         }
+        ClientEvent::Unanswered { rungs } => {
+            ready.value = u32::from(*rungs);
+            None
+        }
         ClientEvent::Attached { .. } | ClientEvent::Settled { .. } | ClientEvent::Held { .. } => None,
     };
     if let Some(message) = message {
@@ -561,6 +567,10 @@ fn fill(ready: &Ready, text_len: u32) -> LdmuxClientEvent {
         ClientEvent::Sessions { .. } => out.kind = LDMUX_EV_SESSIONS,
         ClientEvent::Marks { .. } => out.kind = LDMUX_EV_MARKS,
         ClientEvent::History { .. } => out.kind = LDMUX_EV_HISTORY,
+        ClientEvent::Unanswered { rungs } => {
+            out.kind = LDMUX_EV_UNANSWERED;
+            out.value = u32::from(*rungs);
+        }
         ClientEvent::Created { id } => {
             out.kind = LDMUX_EV_CREATED;
             // A created id is a name, so it goes in the text buffer; a caller that asked for one

@@ -75,22 +75,15 @@ fn index_from_wall(wall_ms: u64) -> u8 {
     u8::try_from((wall_ms >> 4) & 0xFF).unwrap_or(1).max(1)
 }
 
-/// How long a bootstrap waits between attempts once its fast ladder is spent.
-///
-/// **A range link needs many attempts, and the cost of waiting is one record a minute.** The fast
-/// ladder exists to catch a neighbour in seconds; this exists so a twelve-repeater route at the
-/// field's loss, where one attempt in fourteen crosses, still converges instead of stopping.
-const SLOW_RUNG_MS: u64 = 60_000;
-
-/// The longest the slow rung may grow to, and the reason it grows at all.
-///
-/// **A phone left on the connect screen is a phone flooding a public mesh for ever.** One record a
-/// minute is a neighbour's whole allowance on a busy repeater, and a phone that never gives up is
-/// indistinguishable from a jammer to the people who run the mesh: measured 2026-11-13, the
-/// operator's own neighbours reported the testing as breaking the mesh. The rung doubles after each
-/// spent ladder up to this ceiling, so a link that cannot come up costs six records an hour instead
-/// of sixty, and the operator's own Refresh starts a fresh ladder at once.
-const SLOW_RUNG_MAX_MS: u64 = 600_000;
+// **There is no slow rung, and that is the invariant.**
+//
+// A bootstrap used to fall back to one initiation a minute for ever, and then to a doubling gap up
+// to ten minutes. Both are still unsolicited transmissions on a shared band: measured 2026-11-13,
+// the operator's own neighbours reported the testing as breaking the mesh, and they were right.
+//
+// The rule now is absolute: **this end transmits only what a person or a peer asked for.** A
+// bootstrap is a person's act (opening the screen, pressing Refresh), so it gets the fast ladder and
+// then stops, and the screen says so. Nothing here retries on its own.
 
 /// How long the first initiation waits for a path before falling back to a flood.
 ///
@@ -603,10 +596,6 @@ pub struct RadioEndpoint {
     rung: u8,
     /// When the current rung expires, or `None` when no attempt is running.
     rung_deadline_ms: Option<u64>,
-    /// The current slow-rung interval, doubled after each spent ladder up to [`SLOW_RUNG_MAX_MS`].
-    ///
-    /// Reset by [`RadioEndpoint::start_attempt`], which is what the operator's Refresh calls.
-    slow_rung_ms: u64,
     /// The next transmission nonce. Any change makes bytes new to the mesh's duplicate ring.
     nonce: u16,
     /// The last wall-clock time this end was told, so an attempt started from the poll loop (after a
@@ -743,7 +732,6 @@ impl RadioEndpoint {
             cache: None,
             rung: 0,
             rung_deadline_ms: None,
-            slow_rung_ms: SLOW_RUNG_MS,
             nonce: ENDPOINT_NONCE_BASE,
             last_wall_ms: 0,
             attempt_spent: false,
@@ -804,8 +792,6 @@ impl RadioEndpoint {
         self.session = None;
         self.replay = ReplayWindow::default();
         self.counter = 0;
-        // A fresh attempt is the operator asking again, so the slow rung starts over.
-        self.slow_rung_ms = SLOW_RUNG_MS;
         // Anything queued was built for a session that no longer exists; the route-teaching copy
         // especially, which is a record the far end would reject as belonging to a dead index.
         self.queue.clear();
@@ -1083,14 +1069,11 @@ impl RadioEndpoint {
             //
             // The attempt is kept and the next rung is a slow one, so a link that needs forty
             // attempts gets them, while the airtime cost of waiting is one record a minute.
+            // **The ladder is spent, so this end goes quiet.** No slow rung, no doubling gap: the
+            // next transmission is the operator's, and the screen says so. A link that needs more
+            // attempts than the ladder allows is a link the operator asks for again.
             self.stats.bootstrap_failures += 1;
-            // **One record per slow gap, not a fresh ladder.** Restarting at rung 1 sent the whole
-            // fast ladder again after every wait, so a "one a minute" retry was three records a
-            // minute: measured 2026-11-13, forty-eight initiations in thirty minutes. The next send
-            // is the last rung, and the gap after it doubles.
-            self.rung = self.config.max_rungs;
-            self.slow_rung_ms = self.slow_rung_ms.saturating_mul(2).min(SLOW_RUNG_MAX_MS);
-            self.rung_deadline_ms = Some(now_ms.saturating_add(self.slow_rung_ms));
+            self.rung_deadline_ms = None;
             report.push(Outbound::BootstrapFailed {
                 rungs: self.config.max_rungs,
             });

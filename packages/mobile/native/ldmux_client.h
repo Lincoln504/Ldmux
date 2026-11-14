@@ -88,6 +88,11 @@ typedef struct LdmuxClient LdmuxClient;
 /* The host made the shell a Create asked for. `text` carries its id as UTF-8 — not a wire message,
  * because a Create's answer is a name rather than something the app draws. */
 #define LDMUX_EV_CREATED 8
+/* The bootstrap ladder is spent and the engine has gone quiet. `value` is the rungs it sent.
+ *
+ * Nothing retries on its own: the next transmission is the operator's, so the screen says "no
+ * answer · refresh" rather than counting seconds for ever. */
+#define LDMUX_EV_UNANSWERED 9
 
 /*
  * What the client needs to start. Every field is a fact the caller already has: the pairing's keys
@@ -139,6 +144,7 @@ typedef struct {
  *   LDMUX_EV_MARKS       value = 1 when it is the last page             a Marks message
  *   LDMUX_EV_HISTORY     value = 1 when it is the last page             a HistoryPage message
  *   LDMUX_EV_CREATED     -                                             the new shell's id, UTF-8
+ *   LDMUX_EV_UNANSWERED  value = the rungs the ladder sent               -
  *
  * The four message kinds are the wire bytes of the message the host sent, so the caller decodes them
  * with the decoder it already has. A second encoding for one fact would be a second thing to be

@@ -505,6 +505,7 @@ class RadioClient private constructor(private val slot: LongArray) {
                 }
                 // Not a message: the id is the text, so nothing is decoded.
                 EV_CREATED -> ClientEvent.Created(body.decodeToString())
+                EV_UNANSWERED -> ClientEvent.Unanswered(value)
                 else -> null
             }
         }
@@ -523,5 +524,6 @@ class RadioClient private constructor(private val slot: LongArray) {
         const val EV_MARKS = 6
         const val EV_HISTORY = 7
         const val EV_CREATED = 8
+        const val EV_UNANSWERED = 9
     }
 }

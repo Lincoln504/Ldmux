@@ -1759,12 +1759,13 @@ fn a_list_crosses_twelve_repeaters_with_no_advert_path() {
     );
 }
 
-/// **A phone that cannot reach its host must stop flooding the mesh.**
+/// **A phone that cannot reach its host stops, and stays stopped.**
 ///
-/// The ladder used to fall back to one initiation a minute for ever. On a public mesh that is a
-/// neighbour's whole allowance, and on 2026-11-13 the operator's own neighbours reported the testing
-/// as breaking the mesh. The slow rung now doubles to a ten-minute ceiling, so thirty minutes of a
-/// link that cannot come up costs a handful of records instead of thirty.
+/// The ladder used to fall back to one initiation a minute for ever, then to a doubling gap. Both
+/// are still unsolicited transmissions on a shared band, and on 2026-11-13 the operator's own
+/// neighbours reported the testing as breaking the mesh. The rule is now absolute: this end
+/// transmits only what a person or a peer asked for, so a spent ladder goes quiet and the screen
+/// says "no answer · refresh".
 #[test]
 fn a_phone_that_cannot_reach_its_host_stops_flooding_the_mesh() {
     // Every transmission is lost, so no answer can ever arrive. The ladder is the one that ships,
@@ -1775,17 +1776,34 @@ fn a_phone_that_cannot_reach_its_host_stops_flooding_the_mesh() {
         .expect("the phone can start an attempt");
     run.run_until(30 * 60_000, 1_000, |_| false);
     let sent = run.phone.stats().initiations_sent;
-    assert!(
-        sent <= 12,
-        "the phone sent {sent} initiations in thirty minutes; the slow rung is not backing off"
+    assert_eq!(
+        sent, 3,
+        "the phone sent {sent} initiations in thirty minutes; a spent ladder must go quiet"
     );
     assert!(
-        sent >= 3,
-        "the phone gave up after {sent} initiations, so a link that could come up never would"
+        run.phone.stats().bootstrap_failures >= 1,
+        "the ladder was spent and nothing said so"
     );
 }
 
-/// What a flood's crossing probability actually is in the model, per hop count and loss.
+/// **Nothing is transmitted that a person or a peer did not ask for.**
+///
+/// The invariant the whole public-mesh rule rests on: with no operator action and no peer record,
+/// an hour passes with zero records on the air. A route ask, an advert or a retry that fires on its
+/// own breaks it, and this is the test that says so.
+#[test]
+fn an_idle_end_transmits_nothing() {
+    let mut run = Run::shipped(31, 2, 0.0, 1);
+    // No `connect`: nobody has asked for anything.
+    run.run_until(60 * 60_000, 1_000, |_| false);
+    let sent = run.sent_by(run.phone_node).len() + run.sent_by(run.host_node).len();
+    assert_eq!(
+        sent, 0,
+        "an idle link put {sent} record(s) on the air with nobody asking"
+    );
+}
+
+/// What a flood's crossing probability actually is in the model, per hop count and loss./// What a flood's crossing probability actually is in the model, per hop count and loss.
 ///
 /// Printed rather than asserted: the number is the input to every ladder decision, and guessing it
 /// is how a ladder gets sized for a room.
