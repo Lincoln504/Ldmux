@@ -33,8 +33,10 @@ import android.util.Log
  * unaffected either way; what ends is this phone's *view* and its claim.
  *
  * It holds a **partial** wake lock rather than a screen lock — the CPU may nap, the
- * network does not — with a timeout, so a bug anywhere else cannot keep a phone awake
- * indefinitely; the lock is also released when the service stops.
+ * network does not — with a timeout that is taken again while the service runs, so a bug
+ * anywhere else cannot keep a phone awake indefinitely while the lock's lifetime is the
+ * service's and not the last intent's ([WakeLockHold]). The lock is released when the
+ * service stops.
  */
 class LdmuxService : Service() {
     companion object {
@@ -55,14 +57,6 @@ class LdmuxService : Service() {
         private const val NOTIFICATION_ID = 1
 
         /**
-         * The longest a wake lock may be held without being renewed. The app releases
-         * everything 45 s after leaving the screen, so this is a backstop for a release
-         * that never comes (a crashed collector, a lost message), not a working limit;
-         * every start command renews it.
-         */
-        private const val WAKE_LOCK_MAX_MS = 10 * 60 * 1000L
-
-        /**
          * Notifications are needed before the service can be told to run, and
          * only an activity can ask. Set from `MainActivity`, cleared on destroy,
          * so the ask happens while the user is looking at the app rather than
@@ -72,7 +66,36 @@ class LdmuxService : Service() {
         var activity: MainActivity? = null
     }
 
-    private var wakeLock: PowerManager.WakeLock? = null
+    /**
+     * The partial wake lock, held for as long as this service runs.
+     *
+     * **Not renewed by start intents.** Those arrive only when the notification's text changes,
+     * which on a stationary link never happens, so the ten-minute timeout used to expire in the
+     * middle of a session while the notification still claimed the link was open. See
+     * [WakeLockHold].
+     */
+    private val wakeLock = WakeLockHold(
+        lock = object : PartialWakeLock {
+            private var platform: PowerManager.WakeLock? = null
+
+            override fun acquire(timeoutMs: Long) {
+                val lock = platform ?: run {
+                    val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+                    pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ldmux:session")
+                        .apply { setReferenceCounted(false) }
+                        .also { platform = it }
+                }
+                runCatching { lock.acquire(timeoutMs) }
+                    .onFailure { Log.w(TAG, "wake lock refused", it) }
+            }
+
+            override fun release() {
+                runCatching { platform?.takeIf { it.isHeld }?.release() }
+                    .onFailure { Log.w(TAG, "wake lock release", it) }
+            }
+        },
+        timer = CoroutineReleaseTimer,
+    )
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -108,7 +131,7 @@ class LdmuxService : Service() {
             }
         }
         promote(intent?.getStringExtra(EXTRA_TEXT) ?: "link kept open")
-        acquireWakeLock()
+        wakeLock.hold()
         return START_NOT_STICKY
     }
 
@@ -132,24 +155,8 @@ class LdmuxService : Service() {
      * is worse than no notification.
      */
     override fun onDestroy() {
-        releaseWakeLock()
+        wakeLock.letGo()
         super.onDestroy()
-    }
-
-    /** Take the lock, or renew it: always with a timeout, never indefinitely. */
-    private fun acquireWakeLock() {
-        val lock = wakeLock ?: run {
-            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
-            pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ldmux:session")
-                .apply { setReferenceCounted(false) }
-                .also { wakeLock = it }
-        }
-        runCatching { lock.acquire(WAKE_LOCK_MAX_MS) }.onFailure { Log.w(TAG, "wake lock refused", it) }
-    }
-
-    private fun releaseWakeLock() {
-        wakeLock?.let { if (it.isHeld) runCatching { it.release() } }
-        wakeLock = null
     }
 
     /**
