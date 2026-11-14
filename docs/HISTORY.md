@@ -30,6 +30,24 @@ current state is `STATE.md`. This file is the *why it changed*, phase by phase.
 | **Session index** | stable per peer → per session | `cc00fbe` | a stable index removes the only signal that the peer restarted (`AR-19`) |
 | **Acknowledgement** | a standalone ack per part → piggybacked, suppressed to the burst tail | `5940078` | a mid-burst ack collides at the first repeater (`AR-18`) |
 
+## Moments worth remembering
+
+- **2026-11-10 — the connect burst deafened itself.** The old stack flooded `SELF_ADVERT`, three
+  `LDRQ` and three `LDRH` within 20 ms of the handshake. A repeater is half duplex, so the first-hop
+  repeaters were transmitting the precursor when `msg1` arrived and could not hear it. The journal
+  proved it (`route flooded record 40 B from a 3 hop chain`, `1 hop chain`, `14 hop chain`), and it
+  is why "the short record crosses and the long one does not" was ever true. `RADIO-PLAN.md` §5.1
+  made "no precursor before `msg1`" a rule, and the old stack's deletion removed the class.
+- **2026-11-13 — the host acknowledged a `List` and never answered it.** The link loop resolved a
+  channel slot before handing a message to the service, and `List` names no shell, so it fell
+  through the catch-all. The phone held one request outstanding by design, so the screen sat on
+  "asking host for shells" for ever. Three defects of the same shape were found the same day
+  (`AR-20`).
+- **2026-11-13 — the neighbours said the testing was breaking the mesh.** The host asked for a route
+  every 20 s and the phone's slow rung restarted its whole ladder every 60 s, both for ever. The
+  backoff was still unsolicited airtime; the rule became "nothing a person or a peer did not ask
+  for" (`da0ed7d`).
+
 ## Deleted, and never coming back
 
 - the 50 ms `Differ` loop, `Hold`, `Resync`, `owe_frame`, `Profile`/`Rows`/`Commit` (`0fe4cfd`, `cc5884b`);

@@ -61,6 +61,13 @@ pub struct RouteReply {
 /// `hash_size` is this radio's path width; the request's own path starts empty and grows as each
 /// repeater appends its hash, which is the chain the reply carries back.
 ///
+/// **No production path calls this since 2026-11-13** (`da0ed7d`). A request is a flood, and a flood
+/// is somebody else's airtime: the operator's neighbours reported the testing as breaking the mesh,
+/// so neither end originates one any more. A path is learned from the peer's own records — a flooded
+/// arrival carries the chain home — and from the advert-cache read, which is a local command. The
+/// **answer** side is still live on both ends, because a peer that asks must be answered, and this
+/// builder is kept for the tests and for an operator-initiated ask if one is ever added.
+///
 /// # Errors
 ///
 /// [`BuildError::BadHashSize`] when `hash_size` is outside 1..=3.

@@ -75,6 +75,15 @@ All product decisions are frozen from the operator's prompts and structured ques
 | **Path hash width** | Read and follow the radio's configured `path_hash_mode` (`1..=3` bytes) by default so public 1-byte meshes and regional 2-byte/3-byte meshes both work out of the box without silent mutation; allow explicit width selection in the radio preset panel. |
 | **Ownership & "take it back"** | The authenticated phone identity is the phone's own session static key (`device.id = hex(phone_static_pub[..8])`, §8.3), identical over tailnet and radio. Mesh claims survive re-handshakes (`max(2 × crossing, 180 s)` grace), require no periodic heartbeat, and are immediately displaceable by local desktop typing or `ldmux attach` (answering `Closed { reason: HELD }` on the phone's next `Send`/`Fetch`). `"in use on desktop / take it back"` is drawn **only** inside an open shell page when `Closed { HELD }` is returned — never on the launcher home screen and never simultaneously with `"waiting for shell screen"`. |
 
+### Decisions taken after this table (2026-11-13)
+
+| Aspect | Specification |
+|---|---|
+| **The air is not ours** | **Nothing is transmitted that a person or a peer did not ask for** (ADR-0040). No route requests on a timer, no adverts by default, and a bootstrap ladder that stops when it is spent. One rule on every channel, public or private. Gated by `an_idle_end_transmits_nothing` and `a_phone_that_cannot_reach_its_host_stops_flooding_the_mesh` |
+| **The product statement** | **Store-and-forward is not accepted.** The arithmetic in §12.7b-2 says interactive typing holds to ~12 hops at 10 % loss; the target stays an interactive terminal at range, and the per-hop loss measurement is the gate rather than a reason to lower the bar |
+| **Background** | Five minutes off screen, plus a hold while an operation is owed (up to a minute). The 45 s window was right for the tailnet and wrong at range, where a return costs a handshake, a route and a list |
+| **The desk window** | It asks for the shell's own history when the first snapshot arrives, so the terminal's scrollback holds the shell's history rather than repeated snapshots |
+
 ---
 
 ## 3. Layer 0: Companion Framing, Strict Command Serialization, and BLE/Serial Drivers

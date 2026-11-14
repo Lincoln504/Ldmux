@@ -77,9 +77,19 @@ The arithmetic is in `RADIO-PLAN.md` §12.7b-2. One transmission crosses `n` hop
 | 10 % | ~9 attempts, ~2 min | ~70 attempts, ~11 min |
 | 20 % | ~42 attempts, ~7 min | ~2500 attempts, hours |
 
-**The per-hop loss has never been measured.** Every ladder, timeout and retry in the tree is sized
-from a guess, and the field's SNR range (−6.75 to +5.5 dB against a −7.5 dB floor) implies anything
-from under 1 % to over 50 %. That measurement is the first thing a range trip should take.
+**The per-hop loss on this mesh has never been measured.** Every ladder, timeout and retry in the
+tree is sized from a guess. What exists is two anchors and one model:
+
+- **The field's SNR range** (−6.75 to +5.5 dB against a −7.5 dB floor) implies anything from under
+  1 % to over 50 % per hop. That is a range, not a number.
+- **A community figure, claimed and not reproduced here**: per-hop resend (`max.resend 2`) moved
+  delivery from 71 % to 95 % on a comparable topology (`RELEASE-AUDIT.md` R1). If 71 % is the
+  end-to-end figure for that topology, the per-hop loss is whatever makes `(1−p)^n = 0.71`.
+- **The model's own measurement**: a 12-hop flood at 20 % per-hop loss crosses about 7 % of the
+  time (`crates/session/tests/endpoint.rs`), which is the arithmetic above and not the air.
+
+The measurement is the first thing a range trip should take, and it is the one number every other
+number in this file depends on.
 
 **What the arithmetic forces.** Interactive typing is deliverable to roughly twelve hops at 10 %
 loss or better. At thirty hops the honest product is **store-and-forward**: send a command, read the
@@ -91,7 +101,13 @@ changes what the app is.
 1. **What is the per-hop loss on the operator's mesh?** It gates every number above, and it is the
    first thing a range trip should take.
 2. **What makes a bootstrap cross fourteen repeaters when a route request crosses twenty-two?** The
-   counters exist (`sentRefused`, `ldmr`, `pushes`, `routeReplies`); the measurement does not.
+   counters exist (`sentRefused`, `ldmr`, `pushes`, `routeReplies`); the measurement does not. One
+   mechanism is already known and already removed: on 2026-11-10 the old stack flooded
+   `SELF_ADVERT`, three `LDRQ` and three `LDRH` within 20 ms of the handshake, so the first-hop
+   repeaters were transmitting the precursor when `msg1` arrived and were deaf to it (half duplex;
+   `RC-1`, `RADIO-PLAN.md` §5.1). Nothing is sent ahead of an initiation now, so that class is
+   structurally gone, but it is the reason "the short one crosses and the long one does not" was
+   ever true.
 3. **Is live mode gone for good?** It was removed for the public channel, where a keystroke is a
    broadcast. On a private tuple the argument does not apply, and the decision is now "one rule
    everywhere", so it stays gone unless that is revisited.

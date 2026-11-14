@@ -451,21 +451,14 @@ class MeshEngineDriver(
     }
 
     /**
-     * The operator's one way to ask again.
+     * Ask the host for the shell list again.
      *
-     * **Nothing retries on its own.** The engine's bootstrap ladder is spent and it has gone quiet,
-     * so a press while the link is down starts a fresh attempt; a press on a live link asks for the
-     * list, which is what the button has always meant there.
+     * **A press while the link is down is a different action, and it lives in the screen.** The
+     * engine's bootstrap ladder is spent and it has gone quiet, so the screen's refresh rebuilds the
+     * connection (`attempt += 1`, which recreates the driver and calls `connect`); this function is
+     * only reached with a live link, where the button has always meant "ask for the list".
      */
-    suspend fun refresh() {
-        if (!engine.established()) {
-            _attempt.value = 0
-            _view.value = MeshTermView.Handshaking
-            engine.connect(clock(), wall())
-            return
-        }
-        listShells()
-    }
+    suspend fun refresh() = listShells()
 
     suspend fun createShell(cwd: String): Boolean =
         engine.createShell(cwd, clock()) == ClientCode.OK
