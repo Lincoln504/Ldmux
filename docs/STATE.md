@@ -29,15 +29,22 @@ range.
   heard none of them, while the same phone's route requests crossed 19–22 hops in the same hour.
   Whether the initiation is lost, sent down a stale direct path, or refused by the radio is not yet
   measured. The counters that answer it now exist (`sentRefused` on the phone, `ldmr` on the host).
-- **The desk window has no scrollback.** The daemon can serve it (`scrollback` request,
-  `SnapKind::History`) and the mobile tailnet client asks; `crates/attach` never does. Branch
-  `fix/desktop-attach-history` is an unfinished attempt (its autowrap half landed separately).
-- **The background rule is not the frozen one.** `RADIO-PLAN.md` §2 says a 5-minute idle grace plus
-  a hold while an operation is owed; the code has one flat 45 s window that closes the radio engine
-  (`RELEASE-AUDIT.md` 6.237). At range every return costs a full bootstrap.
+- **A session at range** (above) is the only functional gap left in the radio path.
 - **The app's own suite is not in the gate.** `scripts/android.sh test` is a separate command and
   CI builds Rust only, so two failures sat in it unnoticed until 2026-11-13 (both fixed in
   `8c772a0`). A suite nobody runs is a suite that is red.
+
+## Decided 2026-11-13
+
+- **Store-and-forward is not accepted as the product statement.** The arithmetic says interactive
+  typing holds to ~12 hops; the operator's answer is that the target stays an interactive terminal
+  at range, and the per-hop loss measurement is the gate rather than a reason to lower the bar.
+- **One rule on every channel.** A private tuple gets the same no-unsolicited-transmission rule as
+  a public one. Nothing floods a shared band by accident, and there is no second behaviour to test.
+- **The background window is five minutes**, plus a hold while an operation is owed
+  (`3bd3d17`). The 45 s window was right for the tailnet and wrong at range.
+- **The desk window has scrollback** (`d3d8bdd`). It asks for the shell's history when the first
+  snapshot arrives, because asking before the attach has a stream is refused.
 
 ## The public-mesh rule
 
@@ -81,19 +88,13 @@ changes what the app is.
 
 ## Open questions
 
-1. **Is the product interactive or store-and-forward at range?** The arithmetic says the second
-   beyond ~12 hops; the app is built for the first.
-2. **What is the per-hop loss on the operator's mesh?** It gates every number above.
-3. **Does a private mesh get different behaviour from a public one?** Today the distinction lives
-   only in the UI (`meshPublicChannel` forces batch mode). The radio layer behaves identically, so a
-   private tuple gets the same bounded ladder and the same no-route-ask rule. If a private mesh
-   should retry persistently, or stream live, that is a decision and the code has a clean place for
-   it.
-4. **Live mode is gone by decision** (`RADIO-PLAN.md` §2, removed in `0fe4cfd`). Is that permanent
-   for a private channel too, where a keystroke is not a broadcast?
-5. **What is the background contract?** 45 s and the radio engine closes, or the frozen 5-minute
-   grace? At range the difference is a full bootstrap on every return.
-6. **Does the desk window need scrollback?** The daemon can serve it; no client asks.
+1. **What is the per-hop loss on the operator's mesh?** It gates every number above, and it is the
+   first thing a range trip should take.
+2. **What makes a bootstrap cross fourteen repeaters when a route request crosses twenty-two?** The
+   counters exist (`sentRefused`, `ldmr`, `pushes`, `routeReplies`); the measurement does not.
+3. **Is live mode gone for good?** It was removed for the public channel, where a keystroke is a
+   broadcast. On a private tuple the argument does not apply, and the decision is now "one rule
+   everywhere", so it stays gone unless that is revisited.
 
 ## Where the detail lives
 
