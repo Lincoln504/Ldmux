@@ -39,7 +39,10 @@ phone is switched off, keeps transmitting indefinitely.
   says "no answer from host · check the host is on the same channel, then refresh", and Refresh is
   the ask.
 - Adverts stay off unless the operator sets `LDMUX_MESH_ADVERT_SECS`, which is the firmware's own
-  companion default.
+  companion default. **The advert on link open is gone too** (`RELEASE-AUDIT.md` 6.238): it was the
+  last unsolicited transmission left, and it survived the first version of this decision because
+  the reasoning behind it — that the radio's advert cache is the only place a path can come from —
+  had already been disproved by `AR-10`.
 
 The rule applies on **every** channel, public or private. A private tuple gets the same bounded
 ladder and the same no-ask rule, so there is no second behaviour to test and nothing can flood a

@@ -190,11 +190,13 @@ desktop radio's tuple, so the app compares it with its own radio and matches it 
 `ldmux mesh status` prints the tuple, the path width and the power; `ldmux mesh preset <MHz> <kHz>
 <SF> <CR> [--path N] [--power dBm]` sets them. Power is its own register on the radio, not part of
 the channel, so it is optional and left alone when unmentioned. Across
-repeaters the two radios **ask each other for a route**: a flooded request, answered with a direct
-reply carrying the path, so a link comes up in one round trip across whatever distance the mesh
-carries. An advert is a maintenance broadcast (hourly by default, `LDMUX_MESH_ADVERT_SECS`) rather
-than the way a peer is found, because a repeater drops one after eight hops. Every reply follows
-the path the request arrived by (`docs/ARCHITECTURE.md` §11, ADR-0032).
+repeaters a road is learned from the peer's own records: a flooded arrival carries the chain home,
+and the next record goes direct along it. **Neither end asks for a route on its own** — a request
+is a flood, and nothing is transmitted that a person or a peer did not ask for
+([`docs/adr/0040-nothing-unsolicited-on-the-air.md`](docs/adr/0040-nothing-unsolicited-on-the-air.md)).
+A request that arrives is still answered, along the path it arrived by. An advert is a maintenance
+broadcast, **off unless `LDMUX_MESH_ADVERT_SECS` is set**, because a repeater drops one after eight
+hops (`docs/ARCHITECTURE.md` §11, ADR-0032, ADR-0035).
 
 ## Build and test
 

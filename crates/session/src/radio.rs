@@ -310,11 +310,11 @@ impl Radio {
         self.ask(command::device_query(), 0);
         self.ask(command::get_battery_and_storage(), 0);
         self.ask(command::get_radio_stats(), 0);
-        // **An advert is how a path exists at all.** The firmware never delivers a flooded
-        // plaintext record (`companion::push`, AR-10), so a record reaches past one hop only along a
-        // path, and the mesh's own advert cache is where a path comes from. Asked once per link: the
-        // advert is a broadcast with no acknowledgement, and the cache fills a moment later.
-        self.ask(command::self_advert(true), 5_000);
+        // **No advert on bring-up.** It used to be sent once per link, on the reasoning that the
+        // radio's advert cache was the only place a path could come from. That is obsolete: a
+        // flooded arrival carries the chain home, so the bootstrap teaches the road, and an advert
+        // is a broadcast every repeater in range forwards. Nothing is transmitted that a person or a
+        // peer did not ask for (`docs/adr/0040-nothing-unsolicited-on-the-air.md`).
         self.next_path_ms = Some(now_ms.saturating_add(PATH_ASK_MS));
         self.next_poll_ms = Some(now_ms.saturating_add(STATUS_POLL_MS));
     }

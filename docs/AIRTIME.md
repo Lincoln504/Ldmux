@@ -57,9 +57,12 @@ of them was the operator's typing:
   acknowledgements counted. One command could be very nearly the whole 1 % hour.
 - **Reconnects**: every handshake is a record each way plus its acknowledgements, and an afternoon
   of daemon and app restarts is a dozen handshakes.
-- **Adverts**: one flood on open and one every five minutes. That cadence was ldmux's own, 564 times
-  the community's — a repeater is told to advertise every 47 hours — and it bought nothing, because
-  a repeater drops an advert after eight hops anyway (ADR-0032). The default is now one hour.
+- **Adverts**: none. ldmux used to flood one on open and one every five minutes, which was 564 times
+  the community's own cadence (a repeater is told to advertise every 47 hours) and bought nothing,
+  because a repeater drops an advert after eight hops anyway (ADR-0032). The periodic one went
+  first; the one on open went on 2026-11-13, because a flooded arrival already carries the chain
+  home and nothing may be transmitted that a person or a peer did not ask for (ADR-0040). An
+  operator who wants to be in other people's contact lists sets `LDMUX_MESH_ADVERT_SECS`.
 
 **The hour is a rolling hour from the daemon's first send, and it is written down.** The allowance
 starts when the radio is opened and the spend is recorded in `<state>/mesh-airtime`, so a restart

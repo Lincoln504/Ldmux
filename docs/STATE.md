@@ -88,7 +88,9 @@ measurement, a legal limit, or a model with its assumptions stated.
   advert cache read, which is a local command;
 - the bootstrap ladder is spent and then goes quiet, and the screen says
   "no answer from host · check the host is on the same channel, then refresh";
-- Refresh is the ask.
+- Refresh is the ask;
+- **no advert on link open**, on either end. An advert is a broadcast every repeater in range
+  forwards, and the road it was meant to teach now comes from the bootstrap's own flood.
 
 Gated by `an_idle_end_transmits_nothing` (an hour, no operator action, zero records) and
 `a_phone_that_cannot_reach_its_host_stops_flooding_the_mesh` (three rungs, then silence).
