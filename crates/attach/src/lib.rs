@@ -212,6 +212,12 @@ const FEATURES: [&str; 2] = ["inplaceResync", "buzz"];
 
 /// The first `attach` of a connection: the session, this window's size, and what it
 /// understands.
+/// How many rows of the shell's own history a desk window asks for on attach.
+///
+/// A few pages, not the keeper's whole buffer: the daemon clamps to 20,000 and paces a page, and a
+/// window that opens on a hundred thousand lines is a window that takes a second to appear.
+const HISTORY_LINES: u64 = 4_000;
+
 fn first_attach(session_id: &str, size: Option<(u64, u64)>) -> serde_json::Value {
     let mut m = serde_json::json!({
         "type": "attach", "sessionId": session_id, "features": FEATURES,
@@ -655,6 +661,15 @@ where
     }
     let announced = if cols == 0 || rows == 0 { None } else { Some((cols, rows)) };
     send(&mut sink, &first_attach(session_id, announced)).await?;
+    // **The history is asked for once the attach has answered, not before.**
+    //
+    // Without it the window is a screen mirror: `render_snapshot` clears and paints the current
+    // grid, so the terminal's scrollback holds repeated snapshots rather than the shell's history.
+    // The daemon has always been able to serve it (`scrollback`, `SnapKind::History`) and the
+    // mobile tailnet client asks; this client never did, which is the one visible gap in the
+    // tailnet route. Asking before the attach has produced a stream is refused (`not_attached`),
+    // so the first snapshot is the signal that the stream exists.
+    let mut asked_history = false;
 
     let mut inbuf = [0u8; 4096];
     // A multi-byte character can straddle two reads (a large paste): decoding
@@ -700,6 +715,17 @@ where
                             }
                             Some("snapshot") => {
                                 detached = false;
+                                if !asked_history {
+                                    asked_history = true;
+                                    send(
+                                        &mut sink,
+                                        &serde_json::json!({
+                                            "type": "scrollback",
+                                            "lines": HISTORY_LINES,
+                                        }),
+                                    )
+                                    .await?;
+                                }
                                 let snap = Snapshot::from_json(&v);
                                 // **Measure the window now rather than trusting the size cached
                                 // at startup.** That size is a reading taken before the window

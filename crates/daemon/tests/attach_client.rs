@@ -157,6 +157,128 @@ async fn attach_client_streams_and_types_against_a_daemon() {
     let _ = keeper.wait();
     let _ = std::fs::remove_dir_all(&dir);
 }
+/// **The desk window opens on the shell's own history, not on a blank screen.**
+///
+/// Without a `scrollback` request the window is a screen mirror: `render_snapshot` clears and
+/// paints the current grid, so the terminal's scrollback holds repeated snapshots rather than the
+/// shell's history. The daemon has always been able to serve it and the mobile tailnet client asks;
+/// the desk client never did. This prints a marker, pushes it off the visible screen, and requires
+/// the window to show it anyway.
+#[tokio::test]
+async fn the_desk_window_opens_on_the_shells_history() {
+    use tokio::io::AsyncReadExt;
+
+    let dir = scratch();
+    let keeper_sock = dir.join("keeper.sock");
+    let _reaper = common::Reaper::new(&dir, &keeper_sock);
+    let mut keeper = std::process::Command::new(keeper_bin())
+        .arg(keeper_sock.to_string_lossy().as_ref())
+        .spawn()
+        .unwrap();
+    wait_socket(&keeper_sock).await;
+
+    let token = "attach-token";
+    let d = LdmuxDaemon::new(dir.clone(), keeper_bin()).with_remote(
+        "127.0.0.1".to_string(),
+        0,
+        token.to_string(),
+    );
+    let daemon_sock = d.socket_path().to_string_lossy().into_owned();
+    let arc = Arc::new(tokio::sync::Mutex::new(d));
+    {
+        let mut d = arc.lock().await;
+        d.start(&arc).await.unwrap();
+    }
+    let cwd = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let id = arc
+        .lock()
+        .await
+        .create_session(&cwd, None, "local")
+        .await
+        .unwrap()
+        .id;
+
+    // A marker, then enough output to push it off a 24-row screen. Typed through a plain
+    // WebSocket, because the client under test is the one that must *read* the history.
+    let port = remote_port(&arc).await;
+    let mut ws = connect_authed(port, token).await;
+    // A writer says hello first; the daemon refuses input from a viewer that has not.
+    ws_send(
+        &mut ws,
+        &serde_json::json!({
+            "type": "hello",
+            "device": { "id": "test-desk", "name": "test", "kind": "desktop" }
+        }),
+    )
+    .await;
+    ws_send(
+        &mut ws,
+        &serde_json::json!({ "type": "attach", "sessionId": id, "cols": 80, "rows": 24 }),
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    ws_send(
+        &mut ws,
+        &serde_json::json!({ "type": "input", "data": "echo HISTORY_MARK_9\n" }),
+    )
+    .await;
+    for i in 0..120 {
+        ws_send(
+            &mut ws,
+            &serde_json::json!({ "type": "input", "data": format!("echo filler-{i}\n") }),
+        )
+        .await;
+    }
+    // Let the pane print and the keeper's history fill.
+    tokio::time::sleep(std::time::Duration::from_millis(2_000)).await;
+    drop(ws);
+
+    let (client_in, _test_write) = tokio::io::duplex(8192);
+    let (client_out, mut test_read) = tokio::io::duplex(1 << 20);
+    let task = tokio::spawn(async move {
+        attach::run_with(&daemon_sock, &id, false, client_in, client_out).await
+    });
+
+    let mut seen = Vec::new();
+    let mut buf = [0u8; 8192];
+    let mut found = false;
+    for _ in 0..400 {
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            test_read.read(&mut buf),
+        )
+        .await
+        {
+            Ok(Ok(0)) => break,
+            Ok(Ok(n)) => {
+                seen.extend_from_slice(&buf[..n]);
+                if String::from_utf8_lossy(&seen).contains("HISTORY_MARK_9") {
+                    found = true;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        found,
+        "the desk window never showed the shell's history; got {} bytes",
+        seen.len()
+    );
+
+    task.abort();
+    arc.lock().await.stop();
+    let _ = std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(keeper.id().to_string())
+        .output();
+    let _ = keeper.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The desk window must survive the daemon's idle sweep.
 ///
 /// The daemon closes a WebSocket that has said nothing for `idle_ms`
