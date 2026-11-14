@@ -425,11 +425,11 @@ pub struct EndpointConfig {
     ///
     /// A flood carries the path it *accumulates*, so its record ceiling shrinks with distance, and a
     /// sender that assumes the firmware's 64-byte worst case can never send a 123-byte initiation
-    /// whole — it would fragment every one of them for a mesh that crosses three repeaters. This is
-    /// the operator's own figure for the mesh they are on: `flood.max` is a per-site setting, and
-    /// the field sessions of 2026-11-10 crossed up to 29 hops, so 32 is the default. At one-byte
-    /// paths a whole initiation still fits at 38 hops; the figure only starts costing bytes where a
-    /// site's paths are wider than the default allows for.
+    /// whole — it would fragment every one of them for a mesh that crosses three repeaters.
+    /// `flood.max` is a per-site setting and nothing here can read it, so this is a **default, not
+    /// a measurement**: the field sessions of 2026-11-10 crossed up to 29 hops, so 32 is the
+    /// figure. At one-byte paths a whole initiation still fits at 38 hops; it only starts costing
+    /// bytes where a site's paths are wider than the default allows for.
     pub flood_reach_hops: u8,
     /// Who the transaction layer addresses. A Noise session is one peer, so this is a label.
     pub peer: PeerId,

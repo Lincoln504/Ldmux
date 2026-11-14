@@ -80,7 +80,7 @@ All product decisions are frozen from the operator's prompts and structured ques
 | Aspect | Specification |
 |---|---|
 | **The air is not ours** | **Nothing is transmitted that a person or a peer did not ask for** (ADR-0040). No route requests on a timer, no adverts by default, and a bootstrap ladder that stops when it is spent. One rule on every channel, public or private. Gated by `an_idle_end_transmits_nothing` and `a_phone_that_cannot_reach_its_host_stops_flooding_the_mesh` |
-| **The product statement** | **Store-and-forward is not accepted.** The arithmetic in §12.7b-2 says interactive typing holds to ~12 hops at 10 % loss; the target stays an interactive terminal at range, and the per-hop loss measurement is the gate rather than a reason to lower the bar |
+| **The product statement** | **Store-and-forward is not accepted.** The arithmetic in §12.7b-2 shows what a given per-hop loss costs at a given distance; the target stays an interactive terminal at range, and the per-hop loss measurement is the gate rather than a reason to lower the bar |
 | **Background** | Five minutes off screen, plus a hold while an operation is owed (up to a minute). The 45 s window was right for the tailnet and wrong at range, where a return costs a handshake, a route and a list |
 | **The desk window** | It asks for the shell's own history when the first snapshot arrives, so the terminal's scrollback holds the shell's history rather than repeated snapshots |
 
@@ -754,10 +754,13 @@ hour — so a 12-hop update at 10 % loss is about seven records, or one update e
 small records and delta screens are worth more than any retry tuning: the same hour carries 257 of
 them instead of 59.
 
-**The product statement this forces.** Interactive typing is deliverable up to roughly twelve hops at
-10 % per-hop loss or better, where a small-record update lands in one to two minutes. At 30 hops and
-10 % loss it is about eleven minutes even with small records, and at 20 % it is hours. Beyond that the
-honest product is **store-and-forward**: send a command, read the result minutes later.
+**What the table says, at the losses it assumes.** Interactive typing is deliverable while a
+small-record update lands in one to two minutes, which the table puts at roughly twelve hops at 10 %
+per-hop loss or better. At thirty hops and 10 % loss it is about eleven minutes even with small
+records, and at 20 % it is hours. Beyond that the arithmetic's honest product is
+**store-and-forward**: send a command, read the result minutes later. **The operator has rejected
+that as the product statement** (`STATE.md`, *Decided 2026-11-13*), so the table is a constraint to
+measure against, not a boundary to design to.
 
 **What is not yet measured, and gates every number above: the per-hop loss.** The field's SNR range
 (−6.75 to +5.5 dB against a −7.5 dB demodulation floor) implies anything from under 1 % to over 50 %.
@@ -779,7 +782,7 @@ and sent the session over that path with a byte-stream ARQ. In one room that gav
 reply, and a session on the first handshake (`RELEASE-AUDIT.md` 6.41), and a command's output came
 back (17.60). At range it never worked, and the reason is now visible: the route request was only
 ever exercised across one or two hops, the ARQ's ceiling was below its own first rung (6.177), and
-nothing in the design accounted for the loss product over 14–35 hops (AR-16).
+nothing in the design accounted for the loss product over a long chain (AR-16).
 
 **What the refactor intended.** Replace the byte-stream ARQ with a message-oriented transaction layer
 (ADR-0039), move the protocol out of Kotlin into Rust (A2 there), give the radio one carrier
@@ -794,7 +797,7 @@ abstraction, and route by advert path instead of by request (`ADR-0030`, `ADR-00
    could carry a route past the advert cap, and recorded the removal as a simplification.
 2. **The advert path was assumed sufficient without checking the cap.** A repeater drops an advert at
    `flood_max_advert`, 8 by default (`examples/simple_repeater/MyMesh.cpp:972`,
-   `src/helpers/RoutingPolicy.h:16-22`), against a 14–35 hop mesh. The replacement could not reach
+   `src/helpers/RoutingPolicy.h:16-22`), against a mesh the operator's own assumption says can be longer than twenty hops. The replacement could not reach
    the distance the requirement is about, and no audit checked the constant.
 3. **The airtime budget of the requirement was never stated**, so no decision was ever measured
    against it. AR-16 now says a 12-hop screen update at 10 % loss is about seven records and a 30-hop

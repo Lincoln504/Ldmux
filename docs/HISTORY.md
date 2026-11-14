@@ -22,7 +22,7 @@ current state is `STATE.md`. This file is the *why it changed*, phase by phase.
 
 | What | From → to | Commit | Why |
 |---|---|---|---|
-| **How a route is found** | adverts only (ADR-0030) → **asked for** with a flooded `LDRQ` (ADR-0032) → **deleted** by the plan → **restored** | `75b4fe6` → `8c85dac` → `9cf722e` → `7ac0650` | a repeater drops an advert at 8 hops (`MyMesh.cpp:972`) and the mesh is 14–35. The plan deleted the request believing a sender learned its route from its own initiation; a flood's chain teaches the *receiver*, so it does not. `AR-17` |
+| **How a route is found** | adverts only (ADR-0030) → **asked for** with a flooded `LDRQ` (ADR-0032) → **deleted** by the plan → **restored** | `75b4fe6` → `8c85dac` → `9cf722e` → `7ac0650` | a repeater drops an advert at 8 hops (`MyMesh.cpp:972`), and the operator's own assumption is that the mesh can be longer than twenty. The plan deleted the request believing a sender learned its route from its own initiation; a flood's chain teaches the *receiver*, so it does not. `AR-17` |
 | **Transport** | byte-stream ARQ + a 50 ms streaming bridge → message-oriented transactions | `23909aa` (ADR-0039), landed `cc5884b` | an ordered byte stream can only retransmit by number, so a record that no longer fitted was split mid-flight and delivered twice (`RC-7`) |
 | **Input model** | live character-at-a-time → batch `Send`/`Refresh` | `0fe4cfd` | on a public channel every keystroke is a broadcast; the frame loop also burned 34 records/min idle |
 | **Retry** | for ever, one a minute → doubling to 10 min → **never unsolicited** | `d5a3b09` → `da0ed7d` | the operator's neighbours reported the testing as breaking the mesh, and they were right |

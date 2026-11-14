@@ -128,6 +128,12 @@ impl CarriageSink for Port {
 struct OnAir {
     from: NodeId,
     bytes: Vec<u8>,
+    /// Which carrier the endpoint chose for this record.
+    ///
+    /// **Recorded because "it works" and "it works direct" are different claims.** A flood reaches
+    /// the peer by fan-out; a direct packet reaches it only if the path is right, and the path is
+    /// the thing the route table exists to get right.
+    carriage: Carriage,
 }
 
 /// Two endpoints, one mesh, and the loop that joins them.
@@ -303,6 +309,7 @@ impl Run {
         self.on_air.push(OnAir {
             from,
             bytes: bytes.clone(),
+            carriage: carriage.clone(),
         });
         match carriage {
             Carriage::Direct { path } => {
@@ -1714,13 +1721,13 @@ fn a_record_heard_twice_is_counted_as_a_duplicate_and_not_as_a_failure() {
 ///
 /// A repeater drops an advert at `flood_max_advert` (8 by default, `examples/simple_repeater/
 /// MyMesh.cpp:972`, `src/helpers/RoutingPolicy.h:16-22`) while a `REQ` flood travels `flood_max`
-/// (64). So on the operator's 14–35 hop mesh the advert path cannot exist, and the only way either
+/// (64). So on a mesh longer than eight hops the advert path cannot exist, and the only way either
 /// end learns a road is the chain a flood crossed. This test is that case: the phone establishes,
 /// asks for its shell list, and the host's answer comes back, with no advert anywhere.
 #[test]
 fn a_list_crosses_twelve_repeaters_with_no_advert_path() {
-    // **Ten per cent per hop, which is the loss the arithmetic says is survivable at this distance.**
-    // At twenty per cent a twelve-hop crossing is 6.9 % per attempt and needs about forty-two
+    // **Ten per cent per hop, an assumption rather than a measurement.** At twenty per cent a
+    // twelve-hop crossing is 6.9 % per attempt and needs about forty-two
     // attempts, which is minutes of airtime per record — the honest verdict is that the requirement
     // stops being met there, and `docs/RADIO-PLAN.md` records that rather than pretending otherwise.
     let mut run = Run::new(17, 12, 0.1, 1);
@@ -1756,6 +1763,75 @@ fn a_list_crosses_twelve_repeaters_with_no_advert_path() {
         "the host's answer never reached the phone over twelve repeaters: phone {:?} host {:?}",
         run.phone.stats(),
         run.host.stats()
+    );
+}
+
+/// **A direct packet carries a message over a real chain, and the chain is the one that was learned.**
+///
+/// The direct carrier is the cheap one and the one the product depends on: a flood costs every
+/// repeater in range a transmission, a direct packet costs one per hop. It has worked in one room
+/// (zero hops) and at five hops on the air, and it has never been asserted end to end over a
+/// multi-repeater chain — which is why "it works" and "it works direct" were the same sentence in
+/// the docs.
+///
+/// The bootstrap is a flood, so both ends learn the chain from the arrival. The message after it
+/// must go **direct along that chain** and arrive.
+#[test]
+fn a_message_after_the_bootstrap_goes_direct_along_the_learned_chain() {
+    let mut run = Run::new(37, 4, 0.0, 1);
+    run.phone
+        .connect(run.now, run.wall())
+        .expect("the phone can start an attempt");
+    run.run_until(900_000, 500, |run| {
+        run.host.established() && run.phone.established()
+    });
+    assert!(run.phone.established(), "the phone never established");
+
+    // **The road arrives with the flood copy, not with the direct answer.** A direct arrival has
+    // consumed its path, so it teaches nothing; the host's flooded copy of the same answer is what
+    // carries the chain home. Waiting for it is waiting for the route, and it is why the flood copy
+    // is not redundant.
+    run.run_until(120_000, 250, |run| {
+        !run.phone.route().candidates().is_empty()
+    });
+    assert!(
+        !run.phone.route().candidates().is_empty(),
+        "the phone never learned a road from the bootstrap: {:?}",
+        run.phone.stats()
+    );
+
+    // Everything the bootstrap put on the air was a flood: there was no path to use.
+    let bootstrap: Vec<&OnAir> = run.sent_by(run.phone_node).into_iter().collect();
+    assert!(
+        bootstrap
+            .iter()
+            .all(|r| matches!(r.carriage, Carriage::Flood)),
+        "the bootstrap used a direct carrier before any path existed"
+    );
+
+    let before = run.sent_by(run.phone_node).len();
+    let request = message(0x10, &[0x5A; 40]);
+    run.phone
+        .submit(&request, run.now)
+        .expect("a 41-byte message is one part");
+    run.run_until(900_000, 500, |run| {
+        run.host.stats().messages_delivered >= 1
+    });
+    assert!(
+        run.host.stats().messages_delivered >= 1,
+        "the message never reached the host: phone {:?} host {:?}",
+        run.phone.stats(),
+        run.host.stats()
+    );
+
+    let after: Vec<&OnAir> = run.sent_by(run.phone_node).into_iter().skip(before).collect();
+    let direct = after
+        .iter()
+        .find(|r| matches!(&r.carriage, Carriage::Direct { path } if !path.is_empty()));
+    assert!(
+        direct.is_some(),
+        "the message after the bootstrap did not go direct along a chain: {:?}",
+        after.iter().map(|r| &r.carriage).collect::<Vec<_>>()
     );
 }
 

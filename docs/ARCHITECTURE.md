@@ -319,9 +319,11 @@ ADR-0010 is the decision. The practice:
   by MeshCore's design), and no protection against a leaked pairing code, which carries the PSK
   and the bearer token together.
 - **A public channel changes nothing about confidentiality.** The channel is a
-  frequency and a preset, not a trust decision: records travel as direct
-  packets addressed to the peer's public key (`RAW_CUSTOM_DIRECT_HEADER = 0x3E`,
-  `crates/companion/src/codec.rs`), each one sealed afresh under the session
+  frequency and a preset, not a trust decision: a direct record travels as a
+  `RAW_CUSTOM` packet addressed to the peer's public key
+  (`RAW_CUSTOM_DIRECT_HEADER = 0x3E`, `crates/companion/src/codec.rs`), and a
+  flooded one rides a `REQ` with the `LDMR` wrapper inside it, each one sealed
+  afresh under the session
   (`crates/session/src/session.rs`, handshake `Noise_IKpsk2_25519_ChaChaPoly_SHA256`),
   and the radio only ever receives sealed bytes. Anyone in range on the public
   preset can record the ciphertext and count the traffic, and cannot read it or
@@ -531,9 +533,11 @@ stock firmware and not a fork):
   `UNSUPPORTED_CMD` instead — two different codes for two different mistakes.
 - `SEND_RAW_PACKET` (`0x41`) is a priority byte plus a whole MeshCore packet, and
   `RAW_CUSTOM` (payload type `0x0F`) is **processed only when it arrives by direct
-  routing**; it is not flood-routed. The session therefore rides a direct header and can
-  never be carried by a flood, which is why `RAW_CUSTOM_DIRECT_HEADER` is the only header
-  the codec will build for it.
+  routing**; it is not flood-routed. So a direct record rides `RAW_CUSTOM` and a flooded
+  one rides `REQ` with the `LDMR` wrapper inside it (`crates/mesh/src/companion/build.rs`),
+  and the two are told apart by the wrapper's magic rather than by the payload type
+  (`AR-10`). The earlier claim here — that the session "can never be carried by a flood" —
+  was false and is the reason the flood fallback was believed impossible for a day.
 - **No fragmentation exists in v1.17.** `PACKET_FRAME_FRAGMENT` (`0x91`) appears in a
   community document but in no firmware at that tag, so 176 bytes is the hard ceiling for
   one frame and our record size is chosen under it.

@@ -20,6 +20,12 @@ range.
   simulated multi-repeater mesh, and on the air at 1–2 hops.
 - **Route discovery crosses a real mesh**: the host answered `LDRQ` floods at 1, 2, 3, 4, 5, 6, 15,
   16, 19, 20, 21 and 22 hops in one session on 2026-11-13.
+- **Direct carriage works over a learned chain**, and it is now asserted rather than assumed:
+  `a_message_after_the_bootstrap_goes_direct_along_the_learned_chain` runs a bootstrap over four
+  repeaters and requires the next message to go **direct along the chain** and arrive. The road
+  comes from the **flooded copy** of the answer, not the direct one: a direct arrival has consumed
+  its path, so it teaches nothing, and the flood copy is what carries the chain home. That is why
+  the flood copy is not redundant.
 - **The gate**: `scripts/test-parallel.py` (60 binaries, ~90 s) and
   `cargo clippy --workspace --all-targets -- -D warnings`, both green.
 
@@ -33,11 +39,38 @@ range.
   CI builds Rust only, so two failures sat in it unnoticed until 2026-11-13 (both fixed in
   `8c772a0`). A suite nobody runs is a suite that is red.
 
+## Functional requirements, and where each one stands
+
+The operator's requirements and the decisions taken, at the level they were stated, against the
+implementation. A row that says MET names the test or the file; a row that says NOT MET names what
+is missing. Nothing here is a number the operator did not give: where a figure appears it is a
+measurement, a legal limit, or a model with its assumptions stated.
+
+| Requirement | Status | Where |
+|---|---|---|
+| A terminal over LoRa **at range** | **NOT MET** — never worked at range | this file; `RADIO-PLAN.md` §12.7b-2 |
+| Direct carriage normally, flood as the fallback | **MET in the model** (4 repeaters, asserted); unproven on the air | `a_message_after_the_bootstrap_goes_direct_along_the_learned_chain` |
+| A route past the eight-hop advert cap | **MET** (answer side); the ask is no longer originated | ADR-0032, ADR-0035, ADR-0040 |
+| Nothing unsolicited on the air | **MET** | ADR-0040; `an_idle_end_transmits_nothing` |
+| Batch input: `Send`/`Refresh`, draft, paste, 3.5 s settle | **MET** | `RADIO-PLAN.md` §2; `crates/daemon/src/mesh_rpc.rs` |
+| Five open shells, per-shell state | **MET** | `MAX_OPEN_PAGES`; `crates/session/tests/client.rs` |
+| Scrollback on the desk window | **MET** | `the_desk_window_opens_on_the_shells_history` |
+| Background: five minutes, plus a hold while owed | **MET** | `3bd3d17`; `BackgroundReleaseTest` |
+| Ownership and take-back | **MET** | `Closed { HELD }`; `crates/daemon/tests/mesh_full_stack.rs` |
+| Marks and notifications | **MET on the tailnet**; the radio replays them on `List`/`Attach` | `RADIO-PLAN.md` §2 |
+| The airtime law, per band | **MET** | `docs/AIRTIME.md`; `crates/companion/tests/airtime_agreement.rs` |
+| Path width follows the radio | **MET** | `RELEASE-AUDIT.md` 6.10, 6.14 |
+| Store-and-forward at range | **REJECTED as a product statement** | this file, *Decided 2026-11-13* |
+| Live character streaming on the radio | **REMOVED by decision** | ADR-0039; `0fe4cfd` |
+| The per-hop loss measured | **NOT DONE** | this file, *Feasibility* |
+| The app's own suite in the gate | **NOT DONE** | this file, *What does not work* |
+
 ## Decided 2026-11-13
 
-- **Store-and-forward is not accepted as the product statement.** The arithmetic says interactive
-  typing holds to ~12 hops; the operator's answer is that the target stays an interactive terminal
-  at range, and the per-hop loss measurement is the gate rather than a reason to lower the bar.
+- **Store-and-forward is not accepted as the product statement.** The arithmetic in *Feasibility*
+  shows what a given per-hop loss costs at a given distance; the target stays an interactive
+  terminal at range, and the per-hop loss measurement is the gate rather than a reason to lower the
+  bar.
 - **One rule on every channel.** A private tuple gets the same no-unsolicited-transmission rule as
   a public one. Nothing floods a shared band by accident, and there is no second behaviour to test.
 - **The background window is five minutes**, plus a hold while an operation is owed
@@ -68,9 +101,11 @@ testing as breaking the mesh, and they were right.
 
 The arithmetic is in `RADIO-PLAN.md` §12.7b-2. One transmission crosses `n` hops with probability
 `(1−p)^n`; a screen update is a request and a response, so it costs `2/q` records; a full record is
-602.6 ms at the shipped tuple.
+602.6 ms at the shipped tuple. The two distances below are **illustrations, not a requirement** —
+the operator has said only that the mesh can be longer than twenty hops and that repeaters cover
+the whole city.
 
-| per-hop loss | 12 hops | 30 hops |
+| per-hop loss | 12 hops (illustrative) | 30 hops (illustrative) |
 |---|---|---|
 | 5 % | ~5 attempts, one update in ~1 min | ~13 attempts, ~3 min |
 | 10 % | ~9 attempts, ~2 min | ~70 attempts, ~11 min |
@@ -79,20 +114,21 @@ The arithmetic is in `RADIO-PLAN.md` §12.7b-2. One transmission crosses `n` hop
 **The per-hop loss on this mesh has never been measured.** Every ladder, timeout and retry in the
 tree is sized from a guess. What exists is two anchors and one model:
 
-- **The field's SNR range** (−6.75 to +5.5 dB against a −7.5 dB floor) implies anything from under
-  1 % to over 50 % per hop. That is a range, not a number.
+- **The field's SNR range** (−6.75 to +5.5 dB against a −7.5 dB floor, from the 2026-11-09/10 logs)
+  implies anything from under 1 % to over 50 % per hop. That is a range, not a number.
 - **A community figure, claimed and not reproduced here**: per-hop resend (`max.resend 2`) moved
   delivery from 71 % to 95 % on a comparable topology (`RELEASE-AUDIT.md` R1). If 71 % is the
   end-to-end figure for that topology, the per-hop loss is whatever makes `(1−p)^n = 0.71`.
-- **The model's own measurement**: a 12-hop flood at 20 % per-hop loss crosses about 7 % of the
-  time (`crates/session/tests/endpoint.rs`), which is the arithmetic above and not the air.
+- **The model's own measurement**: a flood over twelve simulated repeaters at 20 % per-hop loss
+  crosses about 7 % of the time (`crates/session/tests/endpoint.rs`), which is the arithmetic above
+  and not the air.
 
 The measurement is the first thing a range trip should take, and it is the one number every other
 number in this file depends on.
 
-**What the arithmetic says, and what was decided about it.** Interactive typing is deliverable to
-roughly twelve hops at 10 % loss or better; at thirty hops the arithmetic's honest product is
-store-and-forward. **That is not accepted** (see *Decided 2026-11-13*): the target stays an
+**What the arithmetic says, and what was decided about it.** At the losses in the table, an
+interactive update is minutes at the far end of a long chain, and the arithmetic's honest product
+there is store-and-forward. **That is not accepted** (see *Decided 2026-11-13*): the target stays an
 interactive terminal at range, so the per-hop loss measurement is the gate rather than a reason to
 lower the bar. If the measurement comes back at 20 % per hop, the arithmetic and the target are in
 direct conflict and that is a decision for the operator, not a footnote.
