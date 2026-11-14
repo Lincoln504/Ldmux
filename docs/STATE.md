@@ -1,7 +1,7 @@
 # State of the project
 
-**Written 2026-11-13, at `da0ed7d` on `fix/public-mesh-batch`.** One page: what works, what does
-not, what is undecided, and where the detail lives. Everything here is a file in the tree or a
+**Written 2026-11-13, at the head of `fix/public-mesh-batch`.** One page: what works, what does
+not, what is decided, and where the detail lives. Everything here is a file in the tree or a
 command that was run; the long form is in `RELEASE-AUDIT.md` (open work, row by row) and
 `RADIO-PLAN.md` (the radio design and its audit).
 
@@ -29,7 +29,6 @@ range.
   heard none of them, while the same phone's route requests crossed 19–22 hops in the same hour.
   Whether the initiation is lost, sent down a stale direct path, or refused by the radio is not yet
   measured. The counters that answer it now exist (`sentRefused` on the phone, `ldmr` on the host).
-- **A session at range** (above) is the only functional gap left in the radio path.
 - **The app's own suite is not in the gate.** `scripts/android.sh test` is a separate command and
   CI builds Rust only, so two failures sat in it unnoticed until 2026-11-13 (both fixed in
   `8c772a0`). A suite nobody runs is a suite that is red.
@@ -91,10 +90,12 @@ tree is sized from a guess. What exists is two anchors and one model:
 The measurement is the first thing a range trip should take, and it is the one number every other
 number in this file depends on.
 
-**What the arithmetic forces.** Interactive typing is deliverable to roughly twelve hops at 10 %
-loss or better. At thirty hops the honest product is **store-and-forward**: send a command, read the
-result minutes later. That statement has not been accepted or rejected by the operator, and it
-changes what the app is.
+**What the arithmetic says, and what was decided about it.** Interactive typing is deliverable to
+roughly twelve hops at 10 % loss or better; at thirty hops the arithmetic's honest product is
+store-and-forward. **That is not accepted** (see *Decided 2026-11-13*): the target stays an
+interactive terminal at range, so the per-hop loss measurement is the gate rather than a reason to
+lower the bar. If the measurement comes back at 20 % per hop, the arithmetic and the target are in
+direct conflict and that is a decision for the operator, not a footnote.
 
 ## Open questions
 
