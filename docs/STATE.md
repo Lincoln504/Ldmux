@@ -38,7 +38,9 @@ did, and that is fixed but not yet seen working on the phone; at range it has ne
 - **Tailnet route**: shells, attach, scrollback, ownership, marks, notifications, the desk window.
 - **Radio route, in one room**: a version-15 session establishes, a shell lists, attaches, paints,
   takes a command and answers it. Proven by `crates/daemon/tests/mesh_full_stack.rs` over a
-  simulated multi-repeater mesh, and on the air at 1–2 hops.
+  simulated multi-repeater mesh. **On the air it is proven only as far as the session and the
+  acknowledged `List`** (1–2 hops, 2026-11-13); the phone's screen has not shown a shell since the
+  refactor, because of the dropped `List` described above.
 - **Route discovery crosses a real mesh**: the host answered `LDRQ` floods at 1, 2, 3, 4, 5, 6, 15,
   16, 19, 20, 21 and 22 hops in one session on 2026-11-13.
 - **Direct carriage works over a learned chain**, and it is now asserted rather than assumed:
